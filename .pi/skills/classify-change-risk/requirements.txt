@@ -1,0 +1,16 @@
+# Dependências opcionais para Classify Change Risk
+# O script funciona sem elas (usa apenas biblioteca padrão)
+
+# NLP mais avançado (opcional)
+# spacy>=3.7.0           # Análise linguística mais sofisticada
+# nltk>=3.8.0            # Toolkit de processamento de linguagem natural
+
+# Para melhor análise em português (se necessário):
+# pip install spacy
+# python -m spacy download pt_core_news_sm
+
+# Output colorido (opcional)
+# rich>=13.0.0
+
+# O script principal usa apenas biblioteca padrão Python
+# Estas dependências são para funcionalidades estendidas

@@ -1,0 +1,13 @@
+# Dependências opcionais para Quality Gate Executor
+# O script funciona sem elas, mas algumas funcionalidades extras requerem
+
+# Análise Python (opcional - usada se disponível)
+radon>=6.0.0          # Análise de complexidade ciclomática
+bandit>=1.7.5         # Análise de segurança
+safety>=2.3.5         # Verificação de vulnerabilidades em dependências
+
+# Formatação de output (opcional)
+rich>=13.0.0          # Output colorido no terminal (--format rich)
+
+# O script principal usa apenas biblioteca padrão Python
+# Estas dependências são para funcionalidades estendidas

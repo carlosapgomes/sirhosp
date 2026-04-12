@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "Erro: npx nao encontrado. Instale Node.js/npm para rodar markdown lint no pre-commit." >&2
+  exit 1
+fi
+
+mapfile -t staged_md < <(
+  git diff --cached --name-only --diff-filter=ACMR \
+    | grep -E '\\.md$' \
+    | grep -vE '^(\\.pi/|\\.codex/)' \
+    || true
+)
+
+if [ ${#staged_md[@]} -eq 0 ]; then
+  exit 0
+fi
+
+echo "[pre-commit] Formatando e validando markdown staged..."
+npx --yes prettier --write "${staged_md[@]}"
+npx --yes markdownlint-cli --fix "${staged_md[@]}"
+npx --yes markdownlint-cli "${staged_md[@]}"
+git add "${staged_md[@]}"
+
+echo "[pre-commit] Markdown OK."

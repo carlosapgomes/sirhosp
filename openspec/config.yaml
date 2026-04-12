@@ -1,0 +1,20 @@
+schema: spec-driven
+
+context: |
+  Projeto: SIRHOSP - Sistema Interno de Relatórios Hospitalares - Extração Inteligente de Dados Clínicos.
+  Stack base: Python 3.12, uv, Django 5.x, PostgreSQL, Playwright, PyMuPDF.
+  Arquitetura fase 1: monólito modular Django com jobs agendados por systemd/cron.
+  Não usar Celery/Redis na fase 1 sem ADR explícita.
+  Foco inicial: pacientes internados, evoluções médicas, prescrições e resumo de internação.
+  Regras críticas: não versionar dados reais, separar modo laboratório e produção, usar OpenSpec para changes relevantes.
+
+rules:
+  proposal:
+    - Explicar claramente valor operacional para diretoria, qualidade, jurídico ou gestão de prontuários.
+    - Declarar escopo, não-objetivos e riscos principais.
+  design:
+    - Descrever impacto em domínio clínico, scraping, banco e operação.
+    - Explicitar como a mudança preserva simplicidade operacional da fase 1.
+  tasks:
+    - Quebrar em slices pequenos e verificáveis.
+    - Incluir comandos com uv quando houver execução Python.
