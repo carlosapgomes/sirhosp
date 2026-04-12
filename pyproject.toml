@@ -1,0 +1,47 @@
+[project]
+name = "sirhosp"
+version = "0.1.0"
+description = "SIRHOSP - Sistema Interno de Relatórios Hospitalares - Extração Inteligente de Dados Clínicos"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "django>=5.2,<6.0",
+  "django-htmx>=1.23.0",
+  "playwright>=1.58.0",
+  "psycopg[binary]>=3.2.9",
+  "pymupdf>=1.26.0",
+  "python-dotenv>=1.1.1",
+]
+
+[dependency-groups]
+dev = [
+  "django-stubs>=5.2.0",
+  "mypy>=1.15.0",
+  "pytest>=8.3.5",
+  "pytest-django>=4.11.1",
+  "ruff>=0.11.5",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py", "*_test.py"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".git", ".venv", ".pi", ".codex", "openspec"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["mypy_django_plugin.main"]
+strict = false
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = ["(^|/)(\\.pi|\\.codex|openspec|\\.venv)(/|$)"]
+
+[tool.django-stubs]
+django_settings_module = "config.settings"
