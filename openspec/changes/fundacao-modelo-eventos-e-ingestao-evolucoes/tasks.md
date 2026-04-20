@@ -44,14 +44,14 @@ Limite: até 8 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S3.md`.
 
-- [ ] 3.1 (TDD) Criar testes para consulta FTS por relevância com filtros
+- [x] 3.1 (TDD) Criar testes para consulta FTS por relevância com filtros
   combinados.
-- [ ] 3.2 Implementar query/service de busca global em `content_text`.
-- [ ] 3.3 Implementar filtros por paciente, internação, período e tipo
+- [x] 3.2 Implementar query/service de busca global em `content_text`.
+- [x] 3.3 Implementar filtros por paciente, internação, período e tipo
   profissional.
-- [ ] 3.4 Expor endpoint/view inicial para busca global com payload de
+- [x] 3.4 Expor endpoint/view inicial para busca global com payload de
   rastreabilidade (event_id, patient_id, admission_id, happened_at).
-- [ ] 3.5 Executar validações do slice e gerar
+- [x] 3.5 Executar validações do slice e gerar
   `/tmp/sirhosp-slice-S3-report.md` com antes/depois dos arquivos alterados.
 
 ## 4. Slice S4 - Navegação de internação e timeline por cards
