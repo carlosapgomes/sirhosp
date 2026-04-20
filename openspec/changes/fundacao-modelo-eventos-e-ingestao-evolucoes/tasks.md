@@ -25,14 +25,14 @@ Limite: até 10 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S2.md`.
 
-- [ ] 2.1 (TDD) Criar testes para `event_identity_key`, `content_hash` e
+- [x] 2.1 (TDD) Criar testes para `event_identity_key`, `content_hash` e
   normalização de timezone.
-- [ ] 2.2 Implementar serviço de ingestão em memória com upsert de
+- [x] 2.2 Implementar serviço de ingestão em memória com upsert de
   paciente/internação e persistência de evento.
-- [ ] 2.3 Implementar deduplicação por `event_identity_key + content_hash`.
-- [ ] 2.4 Implementar registro operacional em `IngestionRun`.
-- [ ] 2.5 Expor comando mínimo de execução do fluxo on-demand.
-- [ ] 2.6 Executar validações do slice e gerar
+- [x] 2.3 Implementar deduplicação por `event_identity_key + content_hash`.
+- [x] 2.4 Implementar registro operacional em `IngestionRun`.
+- [x] 2.5 Expor comando mínimo de execução do fluxo on-demand.
+- [x] 2.6 Executar validações do slice e gerar
   `/tmp/sirhosp-slice-S2-report.md` com antes/depois dos arquivos alterados.
 
 ## 3. Slice S3 - Busca global FTS com filtros avançados (MVP)
