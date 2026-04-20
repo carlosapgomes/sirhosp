@@ -73,11 +73,13 @@ Como o sistema é interno, não missão crítica e orientado a rotinas programad
 ### Alternativa A — Django + PostgreSQL + Celery + Redis
 
 **Vantagens:**
+
 - ecossistema maduro para tarefas assíncronas
 - retries e chaining mais sofisticados
 - caminho natural para maior escala futura
 
 **Desvantagens:**
+
 - mais serviços para operar
 - maior complexidade de deploy
 - troubleshooting adicional
@@ -89,10 +91,12 @@ A solução é tecnicamente válida, mas está acima da necessidade real do proj
 ### Alternativa B — Microserviços separados para portal, scraper e scheduler
 
 **Vantagens:**
+
 - separação máxima entre responsabilidades
 - escalabilidade independente por componente
 
 **Desvantagens:**
+
 - alto custo arquitetural inicial
 - mais difícil de operar em equipe pequena
 - desproporcional ao estágio do produto
@@ -103,10 +107,12 @@ Complexidade excessiva para o momento atual.
 ### Alternativa C — Flask/FastAPI + scripts independentes + PostgreSQL
 
 **Vantagens:**
+
 - flexibilidade
 - estrutura potencialmente mais leve
 
 **Desvantagens:**
+
 - mais trabalho manual para auth, admin e área interna
 - menor vantagem estrutural para o tipo de sistema pretendido
 

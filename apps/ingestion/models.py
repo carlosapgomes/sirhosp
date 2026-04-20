@@ -1,0 +1,44 @@
+"""IngestionRun - operational tracking of ingestion executions."""
+
+from django.db import models
+
+
+class IngestionRun(models.Model):
+    """Tracks each ingestion execution for observability and audit.
+
+    Fields:
+        parameters_json: Run parameters (date range, filters, etc).
+    """
+
+    STATUS_CHOICES = [
+        ("running", "Running"),
+        ("completed", "Completed"),
+        ("failed", "Failed"),
+    ]
+
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default="running",
+    )
+
+    events_processed = models.PositiveIntegerField(default=0)
+    events_created = models.PositiveIntegerField(default=0)
+    events_skipped = models.PositiveIntegerField(default=0)
+    events_revised = models.PositiveIntegerField(default=0)
+
+    parameters_json = models.JSONField(
+        default=dict, blank=True,
+    )
+    error_message = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["-started_at"]
+
+    def __str__(self) -> str:
+        return (
+            f"IngestionRun #{self.pk} "
+            f"[{self.status}] {self.started_at}"
+        )

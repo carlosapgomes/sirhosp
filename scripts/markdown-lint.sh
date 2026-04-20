@@ -14,6 +14,10 @@ mapfile -d '' files < <(find . -type f -name '*.md' \
   -not -path './.pi/*' \
   -not -path './.codex/*' \
   -not -path './.git/*' \
+  -not -path './.venv/*' \
+  -not -path './.pytest_cache/*' \
+  -not -path './.mypy_cache/*' \
+  -not -path './.ruff_cache/*' \
   -print0)
 
 if [ ${#files[@]} -eq 0 ]; then
@@ -21,6 +25,12 @@ if [ ${#files[@]} -eq 0 ]; then
   exit 0
 fi
 
-npx --yes markdownlint-cli "${files[@]}"
+MARKDOWNLINT_CONFIG="${MARKDOWNLINT_CONFIG:-$HOME/.markdownlint.json}"
+
+if [ -f "$MARKDOWNLINT_CONFIG" ]; then
+  npx --yes markdownlint-cli2 --config "$MARKDOWNLINT_CONFIG" "${files[@]}"
+else
+  npx --yes markdownlint-cli2 "${files[@]}"
+fi
 
 echo "Markdown lint OK."

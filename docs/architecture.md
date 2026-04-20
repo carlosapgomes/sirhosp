@@ -55,6 +55,7 @@ A fase 1 deve permitir:
 ## 5. Stack proposta
 
 ### Aplicação principal
+
 - Python 3.12
 - Django
 - `uv` para gerenciamento de ambiente virtual, dependências e execução padronizada de comandos Python
@@ -62,22 +63,26 @@ A fase 1 deve permitir:
 - Django Templates + HTMX + Bootstrap para UI inicial
 
 ### Banco de dados
+
 - PostgreSQL
 - Full Text Search nativo para pesquisa clínica inicial
 - advisory locks e tabelas de controle para coordenação de jobs
 
 ### Automação
+
 - Playwright + Python
 - PyMuPDF quando a captura depender de relatórios PDF
 - parsers reutilizados do MVP, adaptados para componentes reaproveitáveis
 
 ### Execução programada
+
 - systemd timers preferencialmente
 - cron como alternativa aceitável
 - Django management commands para disparo de jobs
 - comandos Python executados preferencialmente via `uv run`
 
 ### Infraestrutura inicial
+
 - VM Linux única
 - PostgreSQL local ou no mesmo host
 - Nginx como reverse proxy
@@ -106,6 +111,7 @@ Diante disso, a combinação abaixo oferece melhor relação entre robustez e si
 ## 7. Componentes principais
 
 ## 7.1 Aplicação web principal
+
 Responsável por:
 
 - autenticação
@@ -118,6 +124,7 @@ Responsável por:
 - administração básica de jobs
 
 ## 7.2 Núcleo de domínio
+
 Responsável por modelar:
 
 - usuários
@@ -129,6 +136,7 @@ Responsável por modelar:
 - resumos de internação
 
 ## 7.3 Módulo de automação
+
 Responsável por:
 
 - login no sistema fonte
@@ -144,6 +152,7 @@ Esse módulo deverá ser dividido por conector, por exemplo:
 - `current_inpatients`
 
 ## 7.4 Modo laboratório
+
 Responsável por:
 
 - testar novos fluxos interativos
@@ -156,6 +165,7 @@ Não deve ser dependência direta do portal web.
 ## 8. Estratégia de jobs
 
 ## 8.1 Modelo de execução
+
 Os jobs do SIRHOSP serão executados por comandos do Django, disparados por systemd timers ou cron.
 
 Exemplos:
@@ -167,6 +177,7 @@ Exemplos:
 - `manage.py refresh_admission_summaries`
 
 ## 8.2 Coordenação pelo PostgreSQL
+
 O PostgreSQL será usado para:
 
 - armazenar a configuração dos jobs
@@ -183,6 +194,7 @@ Técnicas previstas:
 - eventualmente `SELECT ... FOR UPDATE SKIP LOCKED` se necessário
 
 ## 8.3 Concorrência
+
 O sistema deve suportar até 3 automações simultâneas na fase 1, respeitando o limite operacional já validado com a TI.
 
 A concorrência será controlada no próprio banco, por tipo de job e por quantidade máxima de execuções ativas.
@@ -192,22 +204,26 @@ A concorrência será controlada no próprio banco, por tipo de job e por quanti
 ### Entidades principais
 
 #### User
+
 - autenticação local
 - papel `admin` ou `user`
 
 #### Patient
+
 - registro do sistema fonte
 - nome
 - gênero
 - data de nascimento
 
 #### Admission
+
 - referência da internação
 - paciente
 - status
 - datas conhecidas
 
 #### ClinicalDocument
+
 - tipo do documento
 - categoria profissional
 - paciente
@@ -218,6 +234,7 @@ A concorrência será controlada no próprio banco, por tipo de job e por quanti
 - timestamps de captura e atualização
 
 #### ScheduledJob
+
 - nome
 - tipo
 - ativo/inativo
@@ -226,6 +243,7 @@ A concorrência será controlada no próprio banco, por tipo de job e por quanti
 - limite de concorrência
 
 #### IngestionRun
+
 - job associado
 - status
 - horário de início e fim
@@ -233,6 +251,7 @@ A concorrência será controlada no próprio banco, por tipo de job e por quanti
 - totais processados
 
 #### AdmissionSummary
+
 - internação
 - resumo atual
 - última atualização
@@ -252,6 +271,7 @@ Estratégia inicial:
 - substituir o resumo anterior pelo novo resultado
 
 Objetivo operacional:
+
 - manter o resumo dos internados atualizado pelo menos até o dia anterior
 
 ## 11. Busca clínica inicial
