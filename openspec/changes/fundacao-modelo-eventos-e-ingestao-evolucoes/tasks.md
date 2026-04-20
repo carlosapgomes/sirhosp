@@ -63,14 +63,14 @@ Limite: até 10 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S4.md`.
 
-- [ ] 4.1 (TDD) Criar testes de integração para listagem de internações e
+- [x] 4.1 (TDD) Criar testes de integração para listagem de internações e
   timeline filtrada.
-- [ ] 4.2 Implementar view de lista de internações por paciente.
-- [ ] 4.3 Implementar view da timeline da internação com filtros por tipo
+- [x] 4.2 Implementar view de lista de internações por paciente.
+- [x] 4.3 Implementar view da timeline da internação com filtros por tipo
   profissional.
-- [ ] 4.4 Implementar template inicial mobile friendly em lista vertical de
+- [x] 4.4 Implementar template inicial mobile friendly em lista vertical de
   cards.
-- [ ] 4.5 Executar validações do slice e gerar
+- [x] 4.5 Executar validações do slice e gerar
   `/tmp/sirhosp-slice-S4-report.md` com antes/depois dos arquivos alterados.
 
 ## 5. Slice S5 - Hardening, docs e evidências finais do change
