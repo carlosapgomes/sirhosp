@@ -1,0 +1,64 @@
+# =============================================================================
+# Docker Compose - Override para desenvolvimento
+# Subir: db (já em compose.yml) + web em modo dev
+# =============================================================================
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    container_name: sirhosp-web
+    volumes:
+      - .:/app
+    ports:
+      - "${DJANGO_PORT:-8000}:8000"
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-change-me}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-true}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - POSTGRES_DB=${POSTGRES_DB:-sirhosp}
+      - POSTGRES_USER=${POSTGRES_USER:-sirhosp}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      # uv: ambiente virtual fora do bind mount (/opt) para evitar problemas de permissão
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - UV_CACHE_DIR=/home/10001/.uv_cache
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    container_name: sirhosp-worker
+    volumes:
+      - .:/app
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-change-me}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-true}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - POSTGRES_DB=${POSTGRES_DB:-sirhosp}
+      - POSTGRES_USER=${POSTGRES_USER:-sirhosp}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      # uv: ambiente virtual fora do bind mount (/opt) para evitar problemas de permissão
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - UV_CACHE_DIR=/home/10001/.uv_cache
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["uv", "run", "--no-sync", "python", "manage.py", "process_ingestion_runs"]
+    restart: unless-stopped

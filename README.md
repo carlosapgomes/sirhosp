@@ -110,6 +110,7 @@ docker compose -f compose.yml -f compose.dev.yml down -v
 ```
 
 **Características do modo dev:**
+
 - Bind mount do código (`.:/app`) para hot-reload
 - Django runserver com DEBUG=1
 - Volumes para persistência de dados
@@ -137,6 +138,7 @@ docker compose -f compose.yml -f compose.prod.yml down -v
 ```
 
 **Características do modo prod:**
+
 - Imagem imutável com código baked-in
 - Gunicorn com 2 workers
 - `UV_NO_CACHE=1` para evitar escrita em runtime
@@ -151,6 +153,7 @@ Valida ambos os modos (dev e prod) de forma automatizada:
 ```
 
 O script executa:
+
 1. Build das imagens
 2. Startup da stack
 3. Migrações

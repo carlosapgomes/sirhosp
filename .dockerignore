@@ -1,0 +1,67 @@
+# Git
+.git
+.gitignore
+
+# Docs e specs OpenSpec (não necessário no container)
+*.md
+openspec/
+docs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+.eggs/
+*.egg-info/
+*.egg
+
+# Testes
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Artefatos locais
+.env
+.env.local
+.env.*.local
+*.log
+tmp/
+tmp/**
+/tmp
+
+# Node (se houver)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Builds
+dist/
+build/
+*.whl
+
+# Pi/Agent
+.pi/
+.codex/
+
+# Docker
+# (keep Dockerfile and .dockerignore available for build tooling)
+docker-compose*
+
+# Outros
+*.bak
+*.tmp
+.DS_Store
+Thumbs.db

@@ -1,0 +1,28 @@
+# =============================================================================
+# Docker Compose - Stack base do SIRHOSP
+# Inclui: db (PostgreSQL), web, worker
+# =============================================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: sirhosp-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sirhosp}
+      POSTGRES_USER: ${POSTGRES_USER:-sirhosp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - sirhosp_db_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sirhosp} -d ${POSTGRES_DB:-sirhosp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  sirhosp_db_data:
+    driver: local
