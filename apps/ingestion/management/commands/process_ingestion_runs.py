@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
+from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
 from apps.ingestion.extractors.errors import ExtractionError
@@ -110,8 +111,19 @@ class Command(BaseCommand):
         )
 
         while True:
-            runs = IngestionRun.objects.filter(status="queued")
-            count = runs.count()
+            try:
+                runs = IngestionRun.objects.filter(status="queued")
+                count = runs.count()
+            except (OperationalError, ProgrammingError) as exc:
+                self.stderr.write(
+                    self.style.WARNING(
+                        f"[{timezone.now():%H:%M:%S}] Worker startup check failed "
+                        f"({exc.__class__.__name__}): {exc}. "
+                        f"Retrying in {sleep_seconds}s..."
+                    )
+                )
+                time.sleep(sleep_seconds)
+                continue
 
             if count == 0:
                 self.stdout.write(
