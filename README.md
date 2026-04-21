@@ -54,3 +54,120 @@ Entregar uma primeira versão utilizável que permita:
 - tratar o projeto como sistema interno institucional, mas sem supercomplexidade desnecessária
 - privilegiar simplicidade operacional na fase 1
 - padronizar setup e execução local com `uv`
+
+## Execução containerizada
+
+### Requisitos
+
+- Docker 20.10+ ou Podman 4.0+
+- `docker compose` ou `docker compose plugin`
+- Variáveis de ambiente configuradas (ver [Configuração](#configuração))
+
+### Configuração
+
+```bash
+# Criar arquivo .env com suas configurações
+cp .env.example .env
+# Editar .env com valores apropriados
+```
+
+**Precedência de variáveis de ambiente:**
+
+O container usa a seguinte ordem de precedência (da mais alta para a mais baixa):
+
+1. Variáveis definidas pelo Docker Compose (`environment:` no compose)
+2. Variáveis exportadas pelo shell antes do container
+3. Variáveis definidas em `/app/.env` (apenas para vars ausentes)
+
+Isso permite que o Compose defina valores canônicos (ex: `DATABASE_URL`, `SECRET_KEY`) enquanto o `.env` local adiciona apenas o que faltar.
+
+**Variáveis obrigatórias para produção:**
+
+- `DJANGO_SECRET_KEY` - Chave secreta do Django (gerar com `python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`)
+- `DJANGO_ALLOWED_HOSTS` - Hosts permitidos (ex: `localhost,127.0.0.1,meu-servidor.local`)
+- `POSTGRES_PASSWORD` - Senha do banco PostgreSQL
+
+### Modo Desenvolvimento
+
+```bash
+# Construir imagens
+docker compose -f compose.yml -f compose.dev.yml build web worker
+
+# Subir stack (db + web + worker)
+docker compose -f compose.yml -f compose.dev.yml up -d db web worker
+
+# Aplicar migrações
+docker compose -f compose.yml -f compose.dev.yml exec -T web uv run --no-sync python manage.py migrate
+
+# Verificar health
+curl http://localhost:8000/health/
+
+# Ver logs
+docker compose -f compose.yml -f compose.dev.yml logs -f web
+
+# Encerrar
+docker compose -f compose.yml -f compose.dev.yml down -v
+```
+
+**Características do modo dev:**
+- Bind mount do código (`.:/app`) para hot-reload
+- Django runserver com DEBUG=1
+- Volumes para persistência de dados
+
+### Modo Produção
+
+```bash
+# Construir imagens (target prod)
+docker compose -f compose.yml -f compose.prod.yml build web worker
+
+# Subir stack (db + web + worker)
+docker compose -f compose.yml -f compose.prod.yml up -d db web worker
+
+# Aplicar migrações
+docker compose -f compose.yml -f compose.prod.yml exec -T web uv run --no-sync python manage.py migrate
+
+# Verificar health
+curl http://localhost:8000/health/
+
+# Ver logs (Gunicorn)
+docker compose -f compose.yml -f compose.prod.yml logs -f web
+
+# Encerrar
+docker compose -f compose.yml -f compose.prod.yml down -v
+```
+
+**Características do modo prod:**
+- Imagem imutável com código baked-in
+- Gunicorn com 2 workers
+- `UV_NO_CACHE=1` para evitar escrita em runtime
+- Health checks robustos
+
+### Smoke Test
+
+Valida ambos os modos (dev e prod) de forma automatizada:
+
+```bash
+./scripts/container-smoke.sh
+```
+
+O script executa:
+1. Build das imagens
+2. Startup da stack
+3. Migrações
+4. Health check
+5. Verificação de Gunicorn em prod
+6. Shutdown limpo
+
+### Notas sobre rootless (Docker/Podman)
+
+O projeto é compatível com execução rootless:
+
+- Usuário não-root (UID 10001) dentro dos containers
+- Diretórios de cache configurados para gravação pelo usuário do container
+- `GUNICORN_WORKER_TMP_DIR=/tmp/gunicorn` evita erros de permissão no socket
+
+Se encontrar erros `Permission denied` em ambiente rootless:
+
+1. Verifique que o usuário do container tem permissão nos volumes
+2. O volume `sirhosp_db_data` é gerenciado pelo Docker e deve funcionar
+3. Logs detalhados: `docker compose logs web --tail=200`
