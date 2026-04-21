@@ -9,6 +9,7 @@ transitions the run to 'succeeded' or 'failed'.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
@@ -23,8 +24,14 @@ from apps.ingestion.services import (
     _upsert_patient,
 )
 
-# Default path to path2.py inside the cloned external repository.
-DEFAULT_SCRIPT_PATH = "/tmp/resumo-evolucoes-clinicas/path2.py"
+# Default path to internalized legacy Playwright script (MVP path2).
+DEFAULT_SCRIPT_PATH = str(
+    Path(__file__).resolve().parents[4]
+    / "automation"
+    / "source_system"
+    / "medical_evolution"
+    / "path2.py"
+)
 
 
 class Command(BaseCommand):
@@ -35,7 +42,7 @@ class Command(BaseCommand):
             "--script-path",
             type=str,
             default=DEFAULT_SCRIPT_PATH,
-            help="Absolute path to path2.py in the cloned repository.",
+            help="Absolute path to integrated legacy connector script path2.py.",
         )
         parser.add_argument(
             "--headless",

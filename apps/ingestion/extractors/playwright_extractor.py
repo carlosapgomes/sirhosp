@@ -1,14 +1,14 @@
-"""Playwright evolution extractor — transitional adapter (Slice S1).
+"""Playwright evolution extractor adapter.
 
-Encapsulates subprocess execution of path2.py from the external repository
-https://github.com/carlosapgomes/resumo-evolucoes-clinicas, mapping its
-JSON output to the canonical ingestion format.
+Encapsulates subprocess execution of the integrated legacy ``path2.py``
+connector and maps its JSON output to the canonical ingestion format.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -66,7 +66,7 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
     """Transitional adapter that invokes path2.py via subprocess.
 
     Args:
-        script_path: Absolute path to path2.py in the cloned repository.
+        script_path: Absolute path to integrated path2.py script.
         headless: Whether to run Playwright in headless mode.
     """
 
@@ -98,18 +98,41 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
         br_start = _convert_to_br_date(start_date)
         br_end = _convert_to_br_date(end_date)
 
+        script = Path(self._script_path)
+        if not script.exists():
+            raise ExtractionError(f"Extractor script not found: {script}")
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            json_output_path = Path(tmpdir) / "evolutions.json"
+            tmpdir_path = Path(tmpdir)
+            json_output_path = tmpdir_path / "evolutions.json"
+            pdf_output_path = tmpdir_path / "evolutions.pdf"
+            debug_output_path = tmpdir_path / "evolutions.debug.html"
+            txt_output_path = tmpdir_path / "evolutions.txt"
+            normalized_txt_output_path = tmpdir_path / "evolutions.normalized.txt"
+            processed_output_path = tmpdir_path / "evolutions.processed.txt"
+            sorted_output_path = tmpdir_path / "evolutions.sorted.txt"
 
             cmd = [
-                "python",
-                self._script_path,
+                sys.executable,
+                str(script),
                 "--patient-record",
                 patient_record,
                 "--start-date",
                 br_start,
                 "--end-date",
                 br_end,
+                "--output",
+                str(pdf_output_path),
+                "--debug-output",
+                str(debug_output_path),
+                "--txt-output",
+                str(txt_output_path),
+                "--normalized-txt-output",
+                str(normalized_txt_output_path),
+                "--processed-output",
+                str(processed_output_path),
+                "--sorted-output",
+                str(sorted_output_path),
                 "--json-output",
                 str(json_output_path),
             ]

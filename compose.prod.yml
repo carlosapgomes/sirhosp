@@ -23,6 +23,10 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       - POSTGRES_HOST=db
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      # Credenciais do sistema legado (conector Playwright integrado)
+      - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
+      - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
+      - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
       # uv: ambiente virtual em /opt/venv (dentro da imagem)
       # UV_NO_CACHE: desabilita cache em runtime para evitar problemas de permissão
       # GUNICORN_WORKER_TMP_DIR: diretório gravável para socket de controle do worker
@@ -57,6 +61,10 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       - POSTGRES_HOST=db
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      # Credenciais do sistema legado (conector Playwright integrado)
+      - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
+      - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
+      - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
       # uv: ambiente virtual em /opt/venv (dentro da imagem)
       # UV_NO_CACHE: desabilita cache em runtime para evitar problemas de permissão
       - UV_PROJECT_ENVIRONMENT=/opt/venv

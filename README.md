@@ -86,6 +86,16 @@ Isso permite que o Compose defina valores canônicos (ex: `DATABASE_URL`, `SECRE
 - `DJANGO_SECRET_KEY` - Chave secreta do Django (gerar com `python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`)
 - `DJANGO_ALLOWED_HOSTS` - Hosts permitidos (ex: `localhost,127.0.0.1,meu-servidor.local`)
 - `POSTGRES_PASSWORD` - Senha do banco PostgreSQL
+- `SOURCE_SYSTEM_URL` - URL do sistema legado (fonte para scraping)
+- `SOURCE_SYSTEM_USERNAME` - Usuário do sistema legado
+- `SOURCE_SYSTEM_PASSWORD` - Senha do sistema legado
+
+**Conector legado integrado no próprio repositório:**
+
+- O script de scraping MVP foi internalizado em
+  `automation/source_system/medical_evolution/path2.py`.
+- O worker usa esse script por padrão no comando `process_ingestion_runs`.
+- Não é necessário clonar um repositório externo para executar o fluxo.
 
 ### Criar usuário admin
 
