@@ -87,6 +87,24 @@ Isso permite que o Compose defina valores canônicos (ex: `DATABASE_URL`, `SECRE
 - `DJANGO_ALLOWED_HOSTS` - Hosts permitidos (ex: `localhost,127.0.0.1,meu-servidor.local`)
 - `POSTGRES_PASSWORD` - Senha do banco PostgreSQL
 
+### Criar usuário admin
+
+Após aplicar as migrações, crie um superusuário para acessar o Django Admin:
+
+```bash
+# Opção 1: modo interativo (recommended)
+docker compose -f compose.yml -f compose.dev.yml exec web \
+  uv run --no-sync python manage.py createsuperuser
+
+# Opção 2: criar diretamente com senha definida
+docker compose -f compose.yml -f compose.dev.yml exec web \
+  uv run --no-sync python manage.py shell -c \
+  "from django.contrib.auth import get_user_model; User = get_user_model(); \
+  User.objects.create_superuser('admin', 'admin@local', 'SUA_SENHA')"
+```
+
+Após criado, acesse `http://localhost:8000/admin/`.
+
 ### Modo Desenvolvimento
 
 ```bash
