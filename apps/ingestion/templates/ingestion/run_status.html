@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Status da Extração #{{ run.pk }} - SIRHOSP</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <meta http-equiv="refresh" content="{% if run.status == 'queued' or run.status == 'running' %}5{% else %}0{% endif %}">
+  </head>
+  <body class="bg-light">
+    <nav class="navbar navbar-dark bg-primary mb-3">
+      <div class="container">
+        <a class="navbar-brand" href="/">SIRHOSP</a>
+      </div>
+    </nav>
+
+    <div class="container">
+      <div class="mb-3">
+        <a href="{% url 'ingestion:create_run' %}" class="text-decoration-none">&larr; Nova extração</a>
+      </div>
+
+      <h1 class="h4 mb-3">Status da Extração #{{ run.pk }}</h1>
+
+      <div class="card mb-3">
+        <div class="card-body">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <h5 class="card-title mb-0">Estado</h5>
+            <span class="badge {{ status_class }}">{{ status_label }}</span>
+          </div>
+
+          <dl class="row mb-0">
+            <dt class="col-sm-4">Registro</dt>
+            <dd class="col-sm-8">{{ patient_record }}</dd>
+
+            <dt class="col-sm-4">Período</dt>
+            <dd class="col-sm-8">{{ start_date }} a {{ end_date }}</dd>
+
+            <dt class="col-sm-4">Início</dt>
+            <dd class="col-sm-8">
+              {% if run.started_at %}
+                {{ run.started_at|date:"d/m/Y H:i:s" }}
+              {% else %}
+                —
+              {% endif %}
+            </dd>
+
+            <dt class="col-sm-4">Término</dt>
+            <dd class="col-sm-8">
+              {% if run.finished_at %}
+                {{ run.finished_at|date:"d/m/Y H:i:s" }}
+              {% else %}
+                —
+              {% endif %}
+            </dd>
+          </dl>
+        </div>
+      </div>
+
+      {% if run.status == 'succeeded' or run.status == 'failed' %}
+        <div class="card mb-3">
+          <div class="card-body">
+            <h5 class="card-title">Resultados</h5>
+            <div class="row text-center">
+              <div class="col-3">
+                <div class="h4 mb-0">{{ run.events_processed }}</div>
+                <small class="text-muted">Processados</small>
+              </div>
+              <div class="col-3">
+                <div class="h4 mb-0 text-success">{{ run.events_created }}</div>
+                <small class="text-muted">Criados</small>
+              </div>
+              <div class="col-3">
+                <div class="h4 mb-0 text-warning">{{ run.events_skipped }}</div>
+                <small class="text-muted">Duplicados</small>
+              </div>
+              <div class="col-3">
+                <div class="h4 mb-0 text-info">{{ run.events_revised }}</div>
+                <small class="text-muted">Revisados</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if run.status == 'queued' %}
+        <div class="alert alert-info" role="alert">
+          <strong>Na fila:</strong> a extração será processada em breve pelo worker.
+        </div>
+      {% elif run.status == 'running' %}
+        <div class="alert alert-warning" role="alert">
+          <strong>Em execução:</strong> a extração está em andamento. Esta página atualiza automaticamente.
+        </div>
+      {% elif run.status == 'succeeded' %}
+        <div class="alert alert-success" role="alert">
+          <strong>Concluído com sucesso!</strong> Os dados foram ingeridos no banco.
+        </div>
+      {% elif run.status == 'failed' %}
+        <div class="alert alert-danger" role="alert">
+          <strong>Falha na extração.</strong>
+          {% if run.error_message %}
+            <p class="mb-0 mt-2"><small><strong>Erro:</strong> {{ run.error_message }}</small></p>
+          {% endif %}
+        </div>
+      {% endif %}
+
+      {% if run.gaps_json %}
+        <div class="card mb-3">
+          <div class="card-body">
+            <h5 class="card-title">Janelas extraídas</h5>
+            <ul class="mb-0">
+              {% for gap in run.gaps_json %}
+                <li>{{ gap.start_date }} a {{ gap.end_date }}</li>
+              {% endfor %}
+            </ul>
+          </div>
+        </div>
+      {% endif %}
+
+      <a href="{% url 'ingestion:create_run' %}" class="btn btn-outline-primary btn-sm">Nova extração</a>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
