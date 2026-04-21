@@ -82,11 +82,12 @@ Limite: até 6 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S5.md`.
 
-- [ ] 5.1 (TDD de regressão) Cobrir casos de borda identificados nos slices
+- [x] 5.1 (TDD de regressão) Cobrir casos de borda identificados nos slices
   anteriores.
-- [ ] 5.2 Atualizar `design.md`, `proposal.md` e specs com o implementado.
-- [ ] 5.3 Registrar/atualizar ADR de modelagem canônica e reconciliação.
-- [ ] 5.4 Executar quality gate completo (check, pytest, ruff, mypy,
+- [x] 5.2 Verificar sincronia de `design.md`, `proposal.md` e specs com o
+  implementado; atualizar onde necessário.
+- [x] 5.3 Registrar/atualizar ADR de modelagem canônica e reconciliação.
+- [x] 5.4 Executar quality gate completo (check, pytest, ruff, mypy,
   markdown-lint).
-- [ ] 5.5 Gerar `/tmp/sirhosp-slice-S5-report.md` com antes/depois,
+- [x] 5.5 Gerar `/tmp/sirhosp-slice-S5-report.md` com antes/depois,
   evidências e checklist final para `/opsx:archive`.

@@ -162,3 +162,29 @@ Rollback (se necessário):
 
 - Qual será o fluxo operacional para casos minoritários em que não haja `CNS`,
   `CPF` e `nome_mae` disponíveis simultaneamente para reconciliação segura?
+
+## Implementation Status (S1–S4)
+
+As decisões de design acima foram implementadas integralmente nos slices S1–S4:
+
+### Artefatos implementados
+
+- **Modelos Django:** `Patient`, `Admission`, `PatientIdentifierHistory` (apps/patients); `ClinicalEvent` (apps/clinical_docs); `IngestionRun` (apps/ingestion).
+- **Constraints de unicidade:** `uq_patient_src`, `uq_adm_src`, `uq_evt_identity`.
+- **Serviço de ingestão:** `apps/ingestion/services.py` — ingestão em memória com upsert de paciente/internação, dedup por `event_identity_key` + `content_hash`, registro em `IngestionRun`.
+- **Serviço de busca FTS:** `apps/search/services.py` — FTS PostgreSQL (SearchVector/SearchRank) com fallback `icontains`; filtros por paciente, internação, período e tipo profissional.
+- **Views de navegação:** `apps/patients/views.py` — lista de internações por paciente (`/patients/<id>/admissions/`), timeline da internação com filtro por tipo profissional (`/admissions/<id>/timeline/`).
+- **Templates:** Bootstrap 5 mobile-friendly com cards para lista de internações e timeline.
+- **Management command:** `ingest_evolutions` para execução via CLI.
+- **Índice FTS GIN:** migração `0002_clinicalevent_fts_gin_index.py`.
+
+### Cobertura de testes
+
+- 96 testes unitários e de integração passando.
+- Cobertura inclui: modelos, constraints, dedup, timezone, upsert, IngestionRun, busca FTS com filtros, views de navegação, filtros de profissão e regressão de casos de borda.
+
+### Riscos mitigados
+
+- `source_admission_key`: adotada como chave externa principal com validação prática.
+- Timestamps sem offset: normalização para `America/Sao_Paulo` implementada.
+- Instabilidade de scraping: separação por domínio (connectors vs portal) preservada.

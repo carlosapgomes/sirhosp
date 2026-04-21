@@ -212,11 +212,13 @@ def ingest_evolution(
                 event, action = _persist_event(evo, patient, admission, run)
 
                 if action == "created":
+                    assert event is not None
                     events_created.append(event)
                     created += 1
                 elif action == "skipped":
                     skipped += 1
                 elif action == "revised":
+                    assert event is not None
                     events_created.append(event)
                     revised += 1
 
