@@ -181,6 +181,32 @@ def _persist_event(
 # ---------------------------------------------------------------------------
 
 
+def queue_ingestion_run(
+    *,
+    patient_record: str,
+    start_date: str,
+    end_date: str,
+) -> IngestionRun:
+    """Create an IngestionRun in queued state for async processing.
+
+    Args:
+        patient_record: Patient record identifier (prontuário).
+        start_date: Start date in YYYY-MM-DD format.
+        end_date: End date in YYYY-MM-DD format.
+
+    Returns:
+        IngestionRun instance with status=queued.
+    """
+    return IngestionRun.objects.create(
+        status="queued",
+        parameters_json={
+            "patient_record": patient_record,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+    )
+
+
 def ingest_evolution(
     evolutions: list[dict[str, Any]],
     parameters: dict[str, Any] | None = None,
@@ -226,7 +252,7 @@ def ingest_evolution(
         run.events_created = created
         run.events_skipped = skipped
         run.events_revised = revised
-        run.status = "completed"
+        run.status = "succeeded"
         run.finished_at = timezone.now()
         run.save()
 

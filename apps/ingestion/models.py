@@ -11,8 +11,9 @@ class IngestionRun(models.Model):
     """
 
     STATUS_CHOICES = [
+        ("queued", "Queued"),
         ("running", "Running"),
-        ("completed", "Completed"),
+        ("succeeded", "Succeeded"),
         ("failed", "Failed"),
     ]
 
@@ -31,6 +32,10 @@ class IngestionRun(models.Model):
 
     parameters_json = models.JSONField(
         default=dict, blank=True,
+    )
+    gaps_json = models.JSONField(
+        default=list, blank=True,
+        help_text="List of gap windows that were extracted in this run.",
     )
     error_message = models.TextField(blank=True, default="")
 

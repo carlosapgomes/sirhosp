@@ -229,10 +229,10 @@ class TestIngestionRunTracking:
         assert run is not None
         assert run.pk is not None
 
-    def test_run_status_completed(self):
+    def test_run_status_succeeded(self):
         evo = _make_evolution()
         result = ingest_evolution([evo])
-        assert result["run"].status == "completed"
+        assert result["run"].status == "succeeded"
 
     def test_run_metrics(self):
         evo = _make_evolution(content_text="Texto A")
