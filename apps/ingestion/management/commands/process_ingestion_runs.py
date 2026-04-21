@@ -8,6 +8,8 @@ transitions the run to 'succeeded' or 'failed'.
 
 from __future__ import annotations
 
+import time
+
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
@@ -47,11 +49,80 @@ class Command(BaseCommand):
             action="store_false",
             help="Run Playwright with a visible browser.",
         )
+        parser.add_argument(
+            "--loop",
+            action="store_true",
+            help="Run continuously, processing queued runs as they appear.",
+        )
+        parser.add_argument(
+            "--sleep-seconds",
+            type=int,
+            default=5,
+            help="Seconds to sleep when no queued runs are found (default: 5).",
+        )
 
     def handle(self, *args, **options):
         script_path: str = options["script_path"]
         headless: bool = options["headless"]
+        loop: bool = options["loop"]
+        sleep_seconds: int = options["sleep_seconds"]
 
+        if loop:
+            self._run_loop(
+                script_path=script_path,
+                headless=headless,
+                sleep_seconds=sleep_seconds,
+            )
+        else:
+            self._process_once(
+                script_path=script_path,
+                headless=headless,
+            )
+
+    def _run_loop(
+        self,
+        script_path: str,
+        headless: bool,
+        sleep_seconds: int,
+    ) -> None:
+        """Continuously poll and process queued runs until interrupted."""
+        import signal
+        import sys
+
+        def _signal_handler(signum, frame):
+            self.stdout.write("\nReceived signal, shutting down worker gracefully...")
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Worker started in continuous mode (sleep={sleep_seconds}s)."
+            )
+        )
+
+        while True:
+            runs = IngestionRun.objects.filter(status="queued")
+            count = runs.count()
+
+            if count == 0:
+                self.stdout.write(
+                    f"[{timezone.now():%H:%M:%S}] No queued runs, sleeping {sleep_seconds}s..."
+                )
+            else:
+                self.stdout.write(
+                    f"[{timezone.now():%H:%M:%S}] Found {count} queued run(s), processing..."
+                )
+                for run in runs.iterator():
+                    self._process_run(
+                        run, script_path=script_path, headless=headless
+                    )
+
+            time.sleep(sleep_seconds)
+
+    def _process_once(self, script_path: str, headless: bool) -> None:
+        """Process all queued runs once and exit (original behavior)."""
         runs = IngestionRun.objects.filter(status="queued")
         count = runs.count()
 

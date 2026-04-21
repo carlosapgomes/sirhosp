@@ -65,5 +65,5 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["uv", "run", "--no-sync", "python", "manage.py", "process_ingestion_runs"]
+    command: ["uv", "run", "--no-sync", "python", "manage.py", "process_ingestion_runs", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped
