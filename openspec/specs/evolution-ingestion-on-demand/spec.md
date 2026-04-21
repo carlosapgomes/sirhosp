@@ -1,8 +1,11 @@
 # evolution-ingestion-on-demand Specification
 
 ## Purpose
+
 TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: On-demand ingestion by patient and period
 
 The system SHALL provide an ingestion flow that can be triggered on demand for a selected patient and requested time interval.
@@ -38,4 +41,3 @@ The ingestion flow MUST normalize source timestamps without timezone offset acco
 
 - **WHEN** source fields `createdAt` and `signedAt` are provided without timezone offset
 - **THEN** the system persists timezone-aware datetimes normalized to the configured institutional timezone
-

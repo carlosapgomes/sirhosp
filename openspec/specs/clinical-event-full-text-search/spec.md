@@ -1,8 +1,11 @@
 # clinical-event-full-text-search Specification
 
 ## Purpose
+
 TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Full text search over clinical event content
 
 The system SHALL provide full text search over canonical clinical event content text.
@@ -29,4 +32,3 @@ The system MUST return identifiers necessary to open original event context.
 
 - **WHEN** a search result is displayed
 - **THEN** the result includes event identifier, patient identifier, admission identifier, and event datetime for timeline navigation
-

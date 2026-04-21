@@ -1,8 +1,11 @@
 # clinical-event-ledger Specification
 
 ## Purpose
+
 TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Canonical clinical event record
 
 The system SHALL persist clinical evolutions in a canonical event model containing standardized queryable columns and raw source payload for audit.
@@ -38,4 +41,3 @@ The system SHALL link each ingested event to its ingestion execution context.
 
 - **WHEN** an event is persisted during an ingestion execution
 - **THEN** the event references the corresponding `IngestionRun` identifier for operational traceability
-

@@ -1,8 +1,11 @@
 # patient-admission-mirror Specification
 
 ## Purpose
+
 TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Patient mirror with external identity
 
 The system SHALL maintain a read-only mirror of patient demographic data with an external source identifier and safe upsert behavior.
@@ -39,4 +42,3 @@ The system MUST persist reconciliation-support fields for admissions and patient
 
 - **WHEN** patient and admission data are ingested
 - **THEN** the system stores additional reference metadata (such as admission period and source patient reference) required for controlled reconciliation
-

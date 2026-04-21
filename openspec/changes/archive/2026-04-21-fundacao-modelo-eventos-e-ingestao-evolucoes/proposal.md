@@ -40,7 +40,7 @@ Riscos principais:
 
 ### Modified Capabilities
 
-- *(nenhuma nesta mudança inicial)*
+- _(nenhuma nesta mudança inicial)_
 
 ## Impact
 
