@@ -51,9 +51,84 @@ Entregar uma primeira versão utilizável que permita:
 - não usar dados reais no repositório
 - manter credenciais fora do Git
 - separar modo laboratório de automações do modo produção
-- tratar o projeto como sistema interno institucional, mas sem supercomplexidade desnecessária
+- tratar o projeto como sistema interno institucional, mas sem supercomplexidade
+  desnecessária
 - privilegiar simplicidade operacional na fase 1
 - padronizar setup e execução local com `uv`
+
+## Quality Gate oficial (container)
+
+O caminho oficial para validação do projeto é a suíte containerizada:
+
+```bash
+./scripts/test-in-container.sh check
+./scripts/test-in-container.sh unit
+./scripts/test-in-container.sh lint
+./scripts/test-in-container.sh typecheck
+# ou tudo de uma vez
+./scripts/test-in-container.sh quality-gate
+```
+
+### Por que esse é o caminho oficial?
+
+- O projeto usa PostgreSQL e o hostname `db` dentro da rede Compose.
+- Fora de container, `POSTGRES_HOST=db` pode falhar com:
+  `failed to resolve host 'db'`.
+- O script oficial já faz `up -> wait -> run -> down`, evitando gestão manual do
+  banco para cada execução.
+
+### Execução host-only (diagnóstico)
+
+`uv run pytest ...` pode ser usado para diagnóstico rápido local, mas não deve
+ser tratado como gate oficial para aprovação de slice.
+
+### Troubleshooting do quality gate containerizado
+
+#### 1) Docker indisponível
+
+Sintoma: erro `docker: command not found` ou daemon indisponível.
+
+Ação:
+
+```bash
+docker --version
+docker info
+```
+
+Inicie o Docker Desktop/daemon antes de rodar os gates.
+
+#### 2) Porta PostgreSQL ocupada
+
+O script usa `SIRHOSP_TEST_DB_PORT=55432` por padrão para evitar conflito com
+stacks locais.
+
+Se ainda houver conflito, execute com outra porta:
+
+```bash
+SIRHOSP_TEST_DB_PORT=55433 ./scripts/test-in-container.sh quality-gate
+```
+
+#### 3) Timeout de healthcheck do banco
+
+Sintoma: `db did not become healthy` no `test-in-container.sh`.
+
+Ações:
+
+```bash
+docker compose -p sirhosp-test -f compose.yml -f compose.test.yml logs db
+```
+
+Reexecute após estabilização do Docker/IO do host.
+
+#### 4) Cleanup de containers órfãos
+
+Se houver resíduos de execução anterior:
+
+```bash
+docker compose -p sirhosp-test -f compose.yml -f compose.test.yml down --remove-orphans
+```
+
+O script já executa teardown automático, mas este comando força limpeza manual.
 
 ## Execução containerizada
 

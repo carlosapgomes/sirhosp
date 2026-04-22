@@ -57,8 +57,9 @@ diretoria e gestão de prontuários.
 
 ## Quality bar
 
-- `uv run python manage.py check` deve passar
-- testes relevantes executam localmente antes de merge
+- quality gate oficial deve executar em container:
+  `./scripts/test-in-container.sh quality-gate`
+- sanity local adicional: `uv run python manage.py check` deve passar
 - cada slice deve provar ciclo TDD (teste inicial falhando e depois passando)
 - lint e type-check sem erros relevantes
 - todo `.md` novo/alterado deve passar no markdown lint (`markdownlint-cli2`)
