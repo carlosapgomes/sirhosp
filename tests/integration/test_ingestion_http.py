@@ -316,6 +316,38 @@ class TestRunStatusView:
         content = response.content.decode("utf-8").lower()
         assert "execução" in content or "processamento" in content or "running" in content
 
+    def test_status_queued_has_auto_refresh(self):
+        """Queued/running states should auto-refresh every 5 seconds."""
+        run = IngestionRun.objects.create(
+            status="queued",
+            parameters_json={
+                "patient_record": "12345",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-19",
+            },
+        )
+        client = Client()
+        self._login(client)
+        response = client.get(reverse("ingestion:run_status", args=[run.pk]))
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        assert 'http-equiv="refresh"' in content
+        assert 'content="5"' in content
+
+    def test_status_terminal_state_has_no_auto_refresh(self):
+        """Terminal states should not force immediate refresh loops."""
+        run = IngestionRun.objects.create(
+            status="failed",
+            error_message="Falha de teste",
+            parameters_json={"patient_record": "12345"},
+        )
+        client = Client()
+        self._login(client)
+        response = client.get(reverse("ingestion:run_status", args=[run.pk]))
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        assert 'http-equiv="refresh"' not in content
+
     def test_status_shows_patient_record(self):
         """Status page shows the patient record from parameters."""
         run = IngestionRun.objects.create(

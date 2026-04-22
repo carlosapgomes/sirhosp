@@ -616,8 +616,14 @@ def capture_evolution_text(
 
 def salvar_debug(page: Page) -> None:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    debug_dir = Path("debug")
-    debug_dir.mkdir(exist_ok=True)
+    # /tmp é gravável no container rootless; evita falha por permissão no bind mount /app
+    debug_dir = Path("/tmp/sirhosp-debug")
+
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as erro:
+        print(f"Aviso: falha ao criar diretório de debug: {erro}")
+        return
 
     screenshot_path = debug_dir / f"erro-{timestamp}.png"
     html_path = debug_dir / f"erro-{timestamp}.html"

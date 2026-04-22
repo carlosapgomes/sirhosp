@@ -40,15 +40,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 # Cache em diretório gravável pelo usuário não-root
 ENV UV_CACHE_DIR=/home/10001/.uv_cache
+# Playwright: caminho global de browsers + HOME explícito para evitar fallback em '/.cache'
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV HOME=/home/10001
 
 # Instala dependências via lockfile no ambiente virtual
 # --no-install-project: não instala o projeto em si (código vem do bind mount)
 # --no-dev: não instala dependências de desenvolvimento (opcional, manter para dev)
 RUN uv sync --frozen --no-install-project --no-dev
 
+# Instala Chromium do Playwright na imagem
+RUN uv run --no-sync playwright install --with-deps chromium
+
 # Usuário não-root para compatibilidade rootless
-# Cria diretório de cache antes de mudar owner
-RUN mkdir -p /home/10001/.uv_cache && chown -R 10001:10001 /home/10001
+# Cria diretórios de cache/home antes de mudar owner
+RUN mkdir -p /home/10001/.uv_cache /ms-playwright && chown -R 10001:10001 /home/10001 /ms-playwright
 USER 10001:10001
 
 # Portas e metadata
@@ -68,9 +74,12 @@ COPY . .
 # Ambiente virtual em /opt/venv para consistência
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv
 ENV UV_CACHE_DIR=/opt/.uv_cache
+# Playwright: caminho global de browsers + HOME explícito para evitar fallback em '/.cache'
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV HOME=/home/10001
 
-# Cria diretório de cache com permissões para usuário não-root
-RUN mkdir -p /opt/.uv_cache && chown -R 10001:10001 /opt/.uv_cache
+# Cria diretórios de cache com permissões para usuário não-root
+RUN mkdir -p /opt/.uv_cache /home/10001 /ms-playwright && chown -R 10001:10001 /opt/.uv_cache /home/10001 /ms-playwright
 
 # Cria diretório para socket de controle do Gunicorn (rootless compatible)
 RUN mkdir -p /tmp/gunicorn && chown -R 10001:10001 /tmp/gunicorn
@@ -82,6 +91,9 @@ RUN chmod +x /usr/local/bin/sirhosp-gunicorn-wrapper
 # Instala projeto com todas as dependências incluindo dev (para fixtures de test)
 # UV_NO_GIT: evita criar arquivos .git no cache
 RUN UV_NO_GIT=1 uv sync --frozen --all-extras
+
+# Instala Chromium do Playwright na imagem
+RUN uv run --no-sync playwright install --with-deps chromium
 
 # Coleta staticfiles para servir via Nginx/Gunicorn
 RUN uv run python manage.py collectstatic --noinput || true
