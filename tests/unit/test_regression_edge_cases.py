@@ -38,6 +38,16 @@ TZ = ZoneInfo("America/Sao_Paulo")
 
 
 @pytest.fixture
+def auth_client(client: Client, db: object) -> Client:
+    """Return a Client logged in as a standard user."""
+    from django.contrib.auth.models import User
+
+    User.objects.create_user(username="reguser", password="regpass123")
+    client.login(username="reguser", password="regpass123")
+    return client
+
+
+@pytest.fixture
 def ingestion_run(db: object) -> IngestionRun:
     return IngestionRun.objects.create(status="completed", parameters_json={})
 
@@ -97,7 +107,7 @@ class TestEventsWithoutSignedAt:
         admission: Admission,
         patient: Patient,
         ingestion_run: IngestionRun,
-        client: Client,
+        auth_client: Client,
     ) -> None:
         ClinicalEvent.objects.create(
             admission=admission,
@@ -111,7 +121,7 @@ class TestEventsWithoutSignedAt:
             content_text="Evolucao sem assinatura visivel.",
             signed_at=None,
         )
-        response = client.get(f"/admissions/{admission.pk}/timeline/")
+        response = auth_client.get(f"/admissions/{admission.pk}/timeline/")
         assert response.status_code == 200
         assert "Evolucao sem assinatura visivel" in response.content.decode()
 
@@ -209,15 +219,15 @@ class TestEmptyTimeline:
     """Timeline view must handle admissions with no events."""
 
     def test_empty_timeline_returns_200(
-        self, admission: Admission, client: Client,
+        self, admission: Admission, auth_client: Client,
     ) -> None:
-        response = client.get(f"/admissions/{admission.pk}/timeline/")
+        response = auth_client.get(f"/admissions/{admission.pk}/timeline/")
         assert response.status_code == 200
 
     def test_empty_timeline_shows_no_events_message(
-        self, admission: Admission, client: Client,
+        self, admission: Admission, auth_client: Client,
     ) -> None:
-        response = client.get(f"/admissions/{admission.pk}/timeline/")
+        response = auth_client.get(f"/admissions/{admission.pk}/timeline/")
         content = response.content.decode()
         # Should not crash; should render an empty or informative state
         assert "UTI" in content  # ward name still visible
@@ -232,15 +242,15 @@ class TestEmptyAdmissionList:
     """Admission list view must handle patients with no admissions."""
 
     def test_empty_admission_list_returns_200(
-        self, patient: Patient, client: Client,
+        self, patient: Patient, auth_client: Client,
     ) -> None:
-        response = client.get(f"/patients/{patient.pk}/admissions/")
+        response = auth_client.get(f"/patients/{patient.pk}/admissions/")
         assert response.status_code == 200
 
     def test_empty_admission_list_shows_patient_name(
-        self, patient: Patient, client: Client,
+        self, patient: Patient, auth_client: Client,
     ) -> None:
-        response = client.get(f"/patients/{patient.pk}/admissions/")
+        response = auth_client.get(f"/patients/{patient.pk}/admissions/")
         content = response.content.decode()
         assert "PACIENTE TESTE REGRESSAO" in content
 
@@ -309,7 +319,7 @@ class TestMultipleAdmissionsIndependentTimelines:
         self,
         patient: Patient,
         ingestion_run: IngestionRun,
-        client: Client,
+        auth_client: Client,
     ) -> None:
         adm1 = Admission.objects.create(
             patient=patient,
@@ -349,8 +359,8 @@ class TestMultipleAdmissionsIndependentTimelines:
             content_text="Evento da internacao 2.",
         )
 
-        resp1 = client.get(f"/admissions/{adm1.pk}/timeline/")
-        resp2 = client.get(f"/admissions/{adm2.pk}/timeline/")
+        resp1 = auth_client.get(f"/admissions/{adm1.pk}/timeline/")
+        resp2 = auth_client.get(f"/admissions/{adm2.pk}/timeline/")
 
         content1 = resp1.content.decode()
         content2 = resp2.content.decode()

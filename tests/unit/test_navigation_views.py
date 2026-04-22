@@ -159,29 +159,76 @@ def timeline_events(
 # =========================================================================
 
 
+# =========================================================================
+# Test: Anonymous redirect for operational pages
+# =========================================================================
+
+
+class TestAnonymousRedirect:
+    """Anonymous users must be redirected to login for operational pages."""
+
+    def test_anonymous_admission_list_redirects(
+        self,
+        client: Client,
+        patient_maria: Patient,
+    ) -> None:
+        response = client.get(f"/patients/{patient_maria.pk}/admissions/")
+        assert response.status_code == 302
+        assert response.url.startswith("/login/")  # type: ignore[attr-defined]
+
+    def test_anonymous_timeline_redirects(
+        self,
+        client: Client,
+        admission_maria_2: Admission,
+    ) -> None:
+        response = client.get(f"/admissions/{admission_maria_2.pk}/timeline/")
+        assert response.status_code == 302
+        assert response.url.startswith("/login/")  # type: ignore[attr-defined]
+
+
+# =========================================================================
+# Helper: authenticated client fixture for navigation tests
+# =========================================================================
+
+
+@pytest.fixture
+def auth_client(client: Client, db: object) -> Client:
+    """Return a Client logged in as a standard user."""
+    from django.contrib.auth.models import User
+
+    User.objects.create_user(username="navuser", password="navpass123")
+    client.login(username="navuser", password="navpass123")
+    return client
+
+
+# =========================================================================
+# Test: Admission list by patient
+# =========================================================================
+
+
 class TestAdmissionListView:
     """Test listing admissions for a given patient."""
 
     def test_list_admissions_returns_200(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_1: Admission,
         admission_maria_2: Admission,
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         assert response.status_code == 200
 
     def test_list_admissions_shows_patient_name(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_1: Admission,
         admission_maria_2: Admission,
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -189,12 +236,12 @@ class TestAdmissionListView:
 
     def test_list_admissions_shows_all_admissions(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_1: Admission,
         admission_maria_2: Admission,
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -203,11 +250,11 @@ class TestAdmissionListView:
 
     def test_list_admissions_shows_admission_date(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -216,12 +263,12 @@ class TestAdmissionListView:
 
     def test_list_admissions_shows_event_count(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -230,12 +277,12 @@ class TestAdmissionListView:
 
     def test_list_admissions_ordered_by_date_desc(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_1: Admission,
         admission_maria_2: Admission,
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -245,19 +292,20 @@ class TestAdmissionListView:
 
     def test_list_admissions_404_for_unknown_patient(
         self,
-        client: Client,
+        auth_client: Client,
         db: object,
     ) -> None:
-        response = client.get("/patients/99999/admissions/")
+        response = auth_client.get("/patients/99999/admissions/")
+        # With login_required, unknown patient returns 404 (not login redirect)
         assert response.status_code == 404
 
     def test_list_admissions_links_to_timeline(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -266,11 +314,11 @@ class TestAdmissionListView:
 
     def test_list_admissions_mobile_friendly(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -288,22 +336,22 @@ class TestTimelineView:
 
     def test_timeline_returns_200(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         assert response.status_code == 200
 
     def test_timeline_shows_patient_name(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -311,11 +359,11 @@ class TestTimelineView:
 
     def test_timeline_shows_all_events(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -326,11 +374,11 @@ class TestTimelineView:
 
     def test_timeline_shows_event_content(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -338,11 +386,11 @@ class TestTimelineView:
 
     def test_timeline_ordered_by_happened_at_desc(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -353,19 +401,19 @@ class TestTimelineView:
 
     def test_timeline_404_for_unknown_admission(
         self,
-        client: Client,
+        auth_client: Client,
         db: object,
     ) -> None:
-        response = client.get("/admissions/99999/timeline/")
+        response = auth_client.get("/admissions/99999/timeline/")
         assert response.status_code == 404
 
     def test_timeline_shows_admission_ward(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -373,11 +421,11 @@ class TestTimelineView:
 
     def test_timeline_mobile_friendly(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -394,11 +442,11 @@ class TestTimelineFilterByProfession:
 
     def test_filter_medica_only(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
             "?profession_type=medica"
         )
@@ -410,11 +458,11 @@ class TestTimelineFilterByProfession:
 
     def test_filter_enfermagem_only(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
             "?profession_type=enfermagem"
         )
@@ -424,11 +472,11 @@ class TestTimelineFilterByProfession:
 
     def test_filter_fisioterapia_only(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
             "?profession_type=fisioterapia"
         )
@@ -438,12 +486,12 @@ class TestTimelineFilterByProfession:
 
     def test_filter_shows_filter_options(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
         """Timeline should show available profession types as filter options."""
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -454,12 +502,12 @@ class TestTimelineFilterByProfession:
 
     def test_filter_preserves_selection(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
         """When filtered, the active filter should be visually indicated."""
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
             "?profession_type=medica"
         )
@@ -469,12 +517,12 @@ class TestTimelineFilterByProfession:
 
     def test_no_filter_shows_all(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
         """Without filter, all events should be shown."""
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -485,12 +533,12 @@ class TestTimelineFilterByProfession:
 
     def test_empty_filter_shows_all(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
         """Empty profession_type filter should show all events."""
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
             "?profession_type="
         )
@@ -514,12 +562,12 @@ class TestAdmissionListContextualActions:
 
     def test_admission_list_has_new_extraction_cta(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
         """Admission list shows 'Nova extração' CTA linked with patient record."""
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -528,12 +576,12 @@ class TestAdmissionListContextualActions:
 
     def test_admission_list_has_json_search_link(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
         """Admission list shows link to JSON search endpoint."""
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -541,12 +589,12 @@ class TestAdmissionListContextualActions:
 
     def test_admission_list_back_link_goes_to_patients(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
         """Admission list back link goes to patient list."""
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -558,13 +606,13 @@ class TestTimelineContextualActions:
 
     def test_timeline_has_new_extraction_cta(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         patient_maria: Patient,
         timeline_events: list[ClinicalEvent],
     ) -> None:
         """Timeline shows 'Nova extração' CTA linked with patient record."""
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -573,12 +621,12 @@ class TestTimelineContextualActions:
 
     def test_timeline_has_json_search_link(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
         """Timeline shows link to JSON search endpoint."""
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
@@ -590,12 +638,12 @@ class TestCardLayout:
 
     def test_admission_list_uses_cards(
         self,
-        client: Client,
+        auth_client: Client,
         patient_maria: Patient,
         admission_maria_1: Admission,
         admission_maria_2: Admission,
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
@@ -604,11 +652,11 @@ class TestCardLayout:
 
     def test_timeline_uses_cards(
         self,
-        client: Client,
+        auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        response = client.get(
+        response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()

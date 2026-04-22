@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from django.contrib.auth.decorators import login_required
 from django.http import HttpRequest, JsonResponse
 from django.utils.dateparse import parse_datetime
 
 from apps.search.services import SearchQueryParams, search_clinical_events
 
 
+@login_required
 def search_clinical_events_view(request: HttpRequest) -> JsonResponse:
     """Search clinical events with optional filters.
 

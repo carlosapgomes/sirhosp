@@ -33,6 +33,7 @@ def patient_list_view(request: HttpRequest) -> HttpResponse:
     return render(request, "patients/patient_list.html", context)
 
 
+@login_required
 def admission_list_view(
     request: HttpRequest,
     patient_id: int,
@@ -56,6 +57,7 @@ def admission_list_view(
     return render(request, "patients/admission_list.html", context)
 
 
+@login_required
 def timeline_view(
     request: HttpRequest,
     admission_id: int,
