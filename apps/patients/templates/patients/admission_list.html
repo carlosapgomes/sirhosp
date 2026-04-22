@@ -15,7 +15,7 @@
 
     <div class="container">
       <div class="mb-3">
-        <a href="/" class="text-decoration-none">&larr; Voltar</a>
+        <a href="/patients/" class="text-decoration-none">&larr; Lista de pacientes</a>
       </div>
 
       <h1 class="h4 mb-1">{{ patient.name }}</h1>
@@ -24,6 +24,14 @@
           Nascimento: {{ patient.date_of_birth|date:"d/m/Y" }}
         {% endif %}
       </p>
+
+      <!-- Ações contextuais -->
+      <div class="mb-3">
+        <a href="/ingestao/criar/?patient_record={{ patient.patient_source_key }}"
+           class="btn btn-success btn-sm me-2">Nova extração</a>
+        <a href="/search/clinical-events/"
+           class="btn btn-outline-secondary btn-sm">Busca JSON</a>
+      </div>
 
       <h2 class="h6 text-muted mb-3">Internações ({{ admissions|length }})</h2>
 

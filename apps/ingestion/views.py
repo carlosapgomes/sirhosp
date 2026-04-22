@@ -61,10 +61,13 @@ def create_run(request: HttpRequest) -> HttpResponse:
             )
             return redirect("ingestion:run_status", run_id=run.pk)
 
+    # Prefill from querystring (contextual navigation)
+    initial_patient_record = request.GET.get("patient_record", "")
+
     return render(
         request,
         "ingestion/create_run.html",
-        {"errors": errors},
+        {"errors": errors, "initial_patient_record": initial_patient_record},
     )
 
 

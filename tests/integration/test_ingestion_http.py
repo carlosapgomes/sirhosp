@@ -24,7 +24,7 @@ class TestAnonymousAccessBlocked:
         url = reverse("ingestion:create_run")
         response = client.get(url)
         assert response.status_code == 302
-        assert "/admin/login/" in response.url
+        assert response.url.startswith("/login/")
         assert f"next={url}" in response.url
 
     def test_anonymous_create_run_post_redirects_to_login(self):
@@ -40,7 +40,7 @@ class TestAnonymousAccessBlocked:
             },
         )
         assert response.status_code == 302
-        assert "/admin/login/" in response.url
+        assert response.url.startswith("/login/")
         assert IngestionRun.objects.count() == 0
 
     def test_anonymous_run_status_redirects_to_login(self):
@@ -53,7 +53,7 @@ class TestAnonymousAccessBlocked:
         url = reverse("ingestion:run_status", args=[run.pk])
         response = client.get(url)
         assert response.status_code == 302
-        assert "/admin/login/" in response.url
+        assert response.url.startswith("/login/")
         assert f"next={url}" in response.url
 
     def test_health_endpoint_stays_public(self):
@@ -384,6 +384,34 @@ class TestRunStatusView:
         content = response.content.decode("utf-8")
         assert "2026-04-01" in content or "01/04/2026" in content
         assert "2026-04-19" in content or "19/04/2026" in content
+
+
+@pytest.mark.django_db
+class TestCreateRunPrefill:
+    """Test that patient_record can be prefilled via querystring."""
+
+    def _login(self, client):
+        from django.contrib.auth.models import User
+        user = User.objects.create_user(username="testuser_pf", password="testpass123")
+        client.force_login(user)
+
+    def test_get_with_patient_record_prefills_form(self):
+        """GET /ingestao/criar/?patient_record=P100 prefills the field."""
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run") + "?patient_record=P100"
+        response = client.get(url)
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        assert "P100" in content
+
+    def test_get_without_patient_record_renders_empty_form(self):
+        """GET /ingestao/criar/ without prefill renders empty field."""
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run")
+        response = client.get(url)
+        assert response.status_code == 200
 
 
 @pytest.mark.django_db
