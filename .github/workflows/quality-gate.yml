@@ -1,0 +1,54 @@
+name: Quality Gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feature/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure test script is executable
+        run: chmod +x ./scripts/test-in-container.sh
+
+      - name: Run containerized quality gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          set -o pipefail
+          ./scripts/test-in-container.sh quality-gate 2>&1 | tee artifacts/quality-gate.log
+
+      - name: Collect Docker diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          docker ps -a > artifacts/docker-ps.txt || true
+          docker compose -p sirhosp-test -f compose.yml -f compose.test.yml logs --no-color > artifacts/compose-test.log || true
+
+      - name: Force cleanup test stack
+        if: always()
+        shell: bash
+        run: |
+          docker compose -p sirhosp-test -f compose.yml -f compose.test.yml down --remove-orphans || true
+
+      - name: Upload diagnostics artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-gate-diagnostics
+          path: artifacts/
+          if-no-files-found: ignore
