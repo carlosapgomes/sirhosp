@@ -1,0 +1,33 @@
+# =============================================================================
+# Docker Compose - Suite de testes (quality gates em container)
+# Uso com compose base: docker compose -f compose.yml -f compose.test.yml ...
+# =============================================================================
+
+services:
+  # Override do db da stack base para evitar conflitos com stack dev já ativa.
+  # O test-runner acessa o banco pela rede interna via host "db".
+  db:
+    container_name: sirhosp-test-db
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod
+    volumes:
+      - .:/app
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-change-me}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-true}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      POSTGRES_DB: ${POSTGRES_DB:-sirhosp}
+      POSTGRES_USER: ${POSTGRES_USER:-sirhosp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      UV_PROJECT_ENVIRONMENT: /opt/venv
+      UV_CACHE_DIR: /opt/.uv_cache
+      UV_NO_CACHE: "1"
+    depends_on:
+      db:
+        condition: service_healthy
