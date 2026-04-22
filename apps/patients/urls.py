@@ -8,6 +8,11 @@ app_name = "patients"
 
 urlpatterns = [
     path(
+        "patients/",
+        views.patient_list_view,
+        name="patient_list",
+    ),
+    path(
         "patients/<int:patient_id>/admissions/",
         views.admission_list_view,
         name="admission_list",

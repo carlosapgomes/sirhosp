@@ -4,12 +4,26 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from django.db.models import Count, QuerySet
+from django.db.models import Count, Q, QuerySet
 
 from apps.patients.models import Admission, Patient
 
 if TYPE_CHECKING:
     from apps.clinical_docs.models import ClinicalEvent
+
+
+def search_patients(query: str | None = None) -> QuerySet[Patient]:
+    """Search patients by name or patient_source_key.
+
+    If query is None or empty, returns all patients ordered by name.
+    Search is case-insensitive and uses partial matching (icontains).
+    """
+    qs = Patient.objects.all()
+    if query:
+        qs = qs.filter(
+            Q(name__icontains=query) | Q(patient_source_key__icontains=query)
+        )
+    return qs.order_by("name")
 
 
 def get_patient_or_404(patient_id: int) -> Patient:

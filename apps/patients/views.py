@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
+from django.contrib.auth.decorators import login_required
+from django.core.paginator import Paginator
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
 
 from apps.patients import services
 from apps.patients.models import Admission, Patient
+
+
+@login_required
+def patient_list_view(request: HttpRequest) -> HttpResponse:
+    """Hub page: list patients with optional search filter.
+
+    Supports query param `q` for filtering by name or patient_source_key.
+    Paginates results for manageable page size.
+    """
+    query = request.GET.get("q", "").strip() or None
+    page_number = request.GET.get("page", 1)
+
+    patients_qs = services.search_patients(query)
+    paginator = Paginator(patients_qs, 20)
+    page = paginator.get_page(page_number)
+
+    context = {
+        "page_obj": page,
+        "query": query or "",
+        "patients": page.object_list,
+    }
+    return render(request, "patients/patient_list.html", context)
 
 
 def admission_list_view(
