@@ -684,6 +684,8 @@ class TestTimelineContextualActions:
         content = response.content.decode()
         assert "Ver mais" in content
         assert 'data-bs-toggle="collapse"' in content
+        assert 'class="btn btn-outline-primary btn-sm js-toggle-expand"' in content
+        assert 'data-less-label="Ver menos"' in content
 
 
 class TestCardLayout:

@@ -77,12 +77,14 @@
                 <p class="card-text text-break">{{ event.content_text|linebreaksbr }}</p>
               </div>
               <button
-                class="btn btn-outline-primary btn-sm"
+                class="btn btn-outline-primary btn-sm js-toggle-expand"
                 type="button"
                 data-bs-toggle="collapse"
                 data-bs-target="#event-content-{{ event.pk }}"
                 aria-expanded="false"
                 aria-controls="event-content-{{ event.pk }}"
+                data-more-label="Ver mais"
+                data-less-label="Ver menos"
               >
                 Ver mais
               </button>
@@ -109,5 +111,31 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      (() => {
+        const buttons = document.querySelectorAll(".js-toggle-expand[data-bs-target]");
+
+        buttons.forEach((button) => {
+          const target = button.getAttribute("data-bs-target");
+          if (!target) return;
+
+          const collapseEl = document.querySelector(target);
+          if (!collapseEl) return;
+
+          const moreLabel = button.getAttribute("data-more-label") || "Ver mais";
+          const lessLabel = button.getAttribute("data-less-label") || "Ver menos";
+
+          collapseEl.addEventListener("shown.bs.collapse", () => {
+            button.textContent = lessLabel;
+            button.setAttribute("aria-expanded", "true");
+          });
+
+          collapseEl.addEventListener("hidden.bs.collapse", () => {
+            button.textContent = moreLabel;
+            button.setAttribute("aria-expanded", "false");
+          });
+        });
+      })();
+    </script>
   </body>
 </html>
