@@ -8,6 +8,7 @@ from django.contrib.auth.decorators import login_required
 from django.http import HttpRequest, JsonResponse
 from django.utils.dateparse import parse_datetime
 
+from apps.core.profession_types import to_display_label
 from apps.search.services import SearchQueryParams, search_clinical_events
 
 
@@ -51,7 +52,7 @@ def search_clinical_events_view(request: HttpRequest) -> JsonResponse:
             "admission_id": event.admission_id,
             "happened_at": event.happened_at.isoformat(),
             "author_name": event.author_name,
-            "profession_type": event.profession_type,
+            "profession_type": to_display_label(event.profession_type),
             "content_text": event.content_text[:300],
         }
         for event in events

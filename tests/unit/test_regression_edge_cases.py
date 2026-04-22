@@ -153,14 +153,14 @@ class TestEventsWithoutSignedAt:
 
 
 # =========================================================================
-# 2. Profession type compatibility (legacy tokens)
+# 2. Profession type normalization
 # =========================================================================
 
 
 class TestProfessionTypeCompatibility:
-    """Ingestion must accept and store legacy profession tokens."""
+    """Ingestion must normalize profession types to canonical values."""
 
-    def test_legacy_physiotherapy_token_ingests(
+    def test_legacy_physiotherapy_token_maps_to_canonical(
         self, admission: Admission, patient: Patient,
     ) -> None:
         evo = {
@@ -180,9 +180,9 @@ class TestProfessionTypeCompatibility:
         result = ingest_evolution([evo])
         assert result["created"] == 1
         evt = result["events_created"][0]
-        assert evt.profession_type == "phisiotherapy"
+        assert evt.profession_type == "fisioterapia"
 
-    def test_filter_by_legacy_profession_type(
+    def test_filter_by_canonical_profession_type(
         self,
         admission: Admission,
         patient: Patient,
@@ -196,14 +196,14 @@ class TestProfessionTypeCompatibility:
             content_hash="hash_lp1",
             happened_at=timezone.now(),
             author_name="FISIO TESTE",
-            profession_type="phisiotherapy",
+            profession_type="fisioterapia",
             content_text="Fisioterapia legada.",
         )
         results = list(
             search_clinical_events(
                 SearchQueryParams(
                     query="fisioterapia",
-                    profession_type="phisiotherapy",
+                    profession_type="fisioterapia",
                 )
             )
         )

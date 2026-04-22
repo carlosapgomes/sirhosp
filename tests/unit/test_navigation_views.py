@@ -632,6 +632,32 @@ class TestTimelineContextualActions:
         content = response.content.decode()
         assert "/search/clinical-events/" in content
 
+    def test_timeline_displays_fisioterapia_for_phisiotherapy(
+        self,
+        auth_client: Client,
+        admission_maria_2: Admission,
+        patient_maria: Patient,
+        ingestion_run: IngestionRun,
+    ) -> None:
+        """Legacy token should be rendered as fisioterapia in UI labels."""
+        ClinicalEvent.objects.create(
+            admission=admission_maria_2,
+            patient=patient_maria,
+            ingestion_run=ingestion_run,
+            event_identity_key="legacy_type_ui",
+            content_hash="legacy_type_ui_hash",
+            happened_at=timezone.now(),
+            author_name="FISIO UI",
+            profession_type="phisiotherapy",
+            content_text="Conteudo sem o termo para evitar falso-positivo.",
+        )
+
+        response = auth_client.get(
+            f"/admissions/{admission_maria_2.pk}/timeline/"
+        )
+        content = response.content.decode()
+        assert "fisioterapia" in content
+
     def test_timeline_long_content_has_expand_button(
         self,
         auth_client: Client,

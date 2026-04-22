@@ -55,7 +55,8 @@ def _convert_to_br_date(iso_date: str) -> str:
 _TYPE_MAP: dict[str, str] = {
     "medical": "medica",
     "nursing": "enfermagem",
-    "phisiotherapy": "phisiotherapy",  # legacy token preserved
+    "phisiotherapy": "fisioterapia",
+    "physiotherapy": "fisioterapia",
     "nutrition": "nutricao",
     "speech_therapy": "fonoaudiologia",
     "dentistry": "odontologia",

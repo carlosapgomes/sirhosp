@@ -153,11 +153,11 @@ class TestNormalizeEvolutionItem:
         result = extractor._normalize_item(item)
         assert result["signed_at"] is None
 
-    def test_legacy_phisiotherapy_type_preserved(self, tmp_path: Path):
-        """Legacy 'phisiotherapy' token must be kept as-is (not 'fisioterapia')."""
+    def test_legacy_phisiotherapy_type_maps_to_fisioterapia(self, tmp_path: Path):
+        """Legacy 'phisiotherapy' token must be normalized to 'fisioterapia'."""
         extractor = _build_extractor(tmp_path)
         result = extractor._normalize_item(SAMPLE_PATH2_ITEM_LEGACY_TYPE)
-        assert result["profession_type"] == "phisiotherapy"
+        assert result["profession_type"] == "fisioterapia"
 
     def test_type_medical_maps_to_medica(self, tmp_path: Path):
         """'medical' should map to 'medica'."""
@@ -219,7 +219,7 @@ class TestNormalizeCollection:
         result = extractor._normalize_collection(items)
         assert len(result) == 2
         assert result[0]["profession_type"] == "medica"
-        assert result[1]["profession_type"] == "phisiotherapy"
+        assert result[1]["profession_type"] == "fisioterapia"
 
     def test_ordering_preserved(self, tmp_path: Path):
         extractor = _build_extractor(tmp_path)

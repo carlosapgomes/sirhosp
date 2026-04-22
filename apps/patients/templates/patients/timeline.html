@@ -1,3 +1,4 @@
+{% load profession_labels %}
 <!doctype html>
 <html lang="pt-BR">
   <head>
@@ -49,7 +50,7 @@
             {% for pt in profession_types %}
               <a href="{% url 'patients:timeline' admission.pk %}?profession_type={{ pt }}"
                  class="btn btn-sm {% if active_filter == pt %}btn-primary{% else %}btn-outline-primary{% endif %}">
-                {{ pt }}
+                {{ pt|profession_label }}
               </a>
             {% endfor %}
           </div>
@@ -61,7 +62,7 @@
         <div class="card mb-3 shadow-sm border-0">
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-start mb-2 gap-2 flex-wrap">
-              <span class="badge bg-info text-dark">{{ event.profession_type }}</span>
+              <span class="badge bg-info text-dark">{{ event.profession_type|profession_label }}</span>
               <small class="text-muted">
                 {{ event.happened_at|date:"d/m/Y H:i" }}
               </small>
@@ -98,7 +99,7 @@
         <div class="card">
           <div class="card-body text-center text-muted">
             {% if active_filter %}
-              Nenhum evento encontrado para o filtro "{{ active_filter }}".
+              Nenhum evento encontrado para o filtro "{{ active_filter|profession_label }}".
             {% else %}
               Nenhum evento registrado nesta internação.
             {% endif %}

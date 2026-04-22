@@ -11,6 +11,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.clinical_docs.models import ClinicalEvent
+from apps.core.profession_types import to_canonical_profession_type
 from apps.ingestion.models import IngestionRun
 from apps.patients.models import Admission, Patient
 
@@ -132,6 +133,9 @@ def _persist_event(
 
     happened_at = _parse_naive_datetime(evolution.get("happened_at"))
     signed_at = _parse_naive_datetime(evolution.get("signed_at"))
+    profession_type = to_canonical_profession_type(
+        evolution.get("profession_type", "")
+    )
 
     # Check for existing event with same identity key
     existing = ClinicalEvent.objects.filter(event_identity_key=identity_key).first()
@@ -151,7 +155,7 @@ def _persist_event(
                 happened_at=happened_at or existing.happened_at,
                 signed_at=signed_at,
                 author_name=evolution.get("author_name", ""),
-                profession_type=evolution.get("profession_type", ""),
+                profession_type=profession_type,
                 content_text=content_text,
                 signature_line=evolution.get("signature_line", ""),
                 raw_payload_json=evolution,
@@ -168,7 +172,7 @@ def _persist_event(
         happened_at=happened_at or timezone.now(),
         signed_at=signed_at,
         author_name=evolution.get("author_name", ""),
-        profession_type=evolution.get("profession_type", ""),
+        profession_type=profession_type,
         content_text=content_text,
         signature_line=evolution.get("signature_line", ""),
         raw_payload_json=evolution,
