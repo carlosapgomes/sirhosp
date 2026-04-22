@@ -23,6 +23,16 @@ from apps.patients.models import Admission, Patient
 TZ_INST = ZoneInfo("America/Sao_Paulo")
 
 
+def _parse_naive_datetime(value: str | None) -> datetime | None:
+    """Parse a naive datetime string and localize to institutional TZ (test helper)."""
+    if value is None:
+        return None
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=TZ_INST)
+    return dt
+
+
 def _make_evolution(
     *,
     admission_key: str = "ADM001",
@@ -528,19 +538,18 @@ class TestResolveAdmissionDeterministicFallback:
         admission_end: str | None,
         patient: Patient | None = None,
     ) -> tuple[Admission, Patient]:
-        """Helper to create an admission with a patient.
-
-        Returns (admission, patient) tuple.
-        If patient is not provided, creates a new one.
-        """
+        """Helper to create an admission with a patient (timezone-aware)."""
         if patient is None:
             patient = self._make_patient()
+        # Parse and localize to institutional timezone to suppress Django warnings
+        adm_start = _parse_naive_datetime(admission_start)
+        adm_end = _parse_naive_datetime(admission_end) if admission_end else None
         adm = Admission.objects.create(
             patient=patient,
             source_admission_key=source_admission_key,
             source_system="tasy",
-            admission_date=datetime.fromisoformat(admission_start),
-            discharge_date=datetime.fromisoformat(admission_end) if admission_end else None,
+            admission_date=adm_start,
+            discharge_date=adm_end,
         )
         return adm, patient
 
@@ -549,7 +558,7 @@ class TestResolveAdmissionDeterministicFallback:
         adm, patient = self._make_adm("ADM_DIRECT", "2026-04-01T08:00:00", "2026-04-10T18:00:00")
         result = resolve_admission_for_event(
             admission_key="ADM_DIRECT",
-            happened_at=datetime(2026, 4, 5, 10, 0),
+            happened_at=datetime(2026, 4, 5, 10, 0, tzinfo=TZ_INST),
             patient=patient,
         )
         assert result.pk == adm.pk
@@ -559,7 +568,7 @@ class TestResolveAdmissionDeterministicFallback:
         adm, patient = self._make_adm("ADM_PERIOD", "2026-04-01T08:00:00", "2026-04-10T18:00:00")
         result = resolve_admission_for_event(
             admission_key="",  # invalid key
-            happened_at=datetime(2026, 4, 5, 10, 0),
+            happened_at=datetime(2026, 4, 5, 10, 0, tzinfo=TZ_INST),
             patient=patient,
         )
         assert result.pk == adm.pk
@@ -569,7 +578,7 @@ class TestResolveAdmissionDeterministicFallback:
         adm, patient = self._make_adm("ADM_ACTIVE", "2026-04-15T08:00:00", None)
         result = resolve_admission_for_event(
             admission_key="",
-            happened_at=datetime(2026, 4, 20, 10, 0),
+            happened_at=datetime(2026, 4, 20, 10, 0, tzinfo=TZ_INST),
             patient=patient,
         )
         assert result.pk == adm.pk
@@ -579,20 +588,17 @@ class TestResolveAdmissionDeterministicFallback:
     ) -> None:
         """When multiple admissions match the period, pick the one with latest admission_date."""
         patient = self._make_patient()
-        # Both periods contain Feb 1 (happened_at)
         adm_old, _ = self._make_adm(
             "ADM_OLD", "2026-01-01T08:00:00", "2026-01-10T18:00:00", patient=patient
         )
         adm_new, _ = self._make_adm(
             "ADM_NEW", "2026-01-15T08:00:00", "2026-02-10T18:00:00", patient=patient
         )
-        # Both periods contain Feb 1 (Jan 10 and Jan 15-Feb 10)
         result = resolve_admission_for_event(
             admission_key="",
-            happened_at=datetime(2026, 2, 1, 10, 0),  # within both periods
+            happened_at=datetime(2026, 2, 1, 10, 0, tzinfo=TZ_INST),
             patient=patient,
         )
-        # adm_new has more recent admission_date (Jan 15 > Jan 1), should be chosen
         assert result.pk == adm_new.pk
 
     def test_fallback_no_match_picks_nearest_previous(
@@ -600,18 +606,15 @@ class TestResolveAdmissionDeterministicFallback:
     ) -> None:
         """When no period match, pick the admission with nearest previous admission_date."""
         patient = self._make_patient()
-        # Neither admission contains Apr 20. Nearest previous = adm2 (Mar 1)
         adm1, _ = self._make_adm(
             "ADM_1", "2026-01-01T08:00:00", "2026-01-10T18:00:00", patient=patient
         )
         adm2, _ = self._make_adm(
             "ADM_2", "2026-03-01T08:00:00", "2026-04-20T08:00:00", patient=patient
         )
-        # Neither contains Apr 20 10:00 (adm1 ends Jan 10; adm2 ends Apr 20 08:00)
-        # Nearest previous = adm2 (Mar 1 is closer to Apr 20 than Jan 1)
         result = resolve_admission_for_event(
             admission_key="",
-            happened_at=datetime(2026, 4, 20, 10, 0),
+            happened_at=datetime(2026, 4, 20, 10, 0, tzinfo=TZ_INST),
             patient=patient,
         )
         assert result.pk == adm2.pk
@@ -623,10 +626,9 @@ class TestResolveAdmissionDeterministicFallback:
         adm_future, patient = self._make_adm(
             "ADM_FUTURE", "2026-05-01T08:00:00", "2026-05-10T18:00:00"
         )
-        # happened_at before all admissions
         result = resolve_admission_for_event(
             admission_key="",
-            happened_at=datetime(2026, 4, 1, 10, 0),
+            happened_at=datetime(2026, 4, 1, 10, 0, tzinfo=TZ_INST),
             patient=patient,
         )
         assert result.pk == adm_future.pk
@@ -644,34 +646,30 @@ class TestResolveAdmissionDeterministicFallback:
             patient=patient,
             source_admission_key="ADM_AAA",
             source_system="tasy",
-            admission_date=datetime(2026, 4, 1, 8, 0),
-            discharge_date=datetime(2026, 4, 10, 18, 0),
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
         )
         Admission.objects.create(
             patient=patient,
             source_admission_key="ADM_BBB",
             source_system="tasy",
-            admission_date=datetime(2026, 4, 1, 8, 0),
-            discharge_date=datetime(2026, 4, 10, 18, 0),
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
         )
-        # happened_at outside both -> no period match; tiebreak by source_admission_key ascending
         result = resolve_admission_for_event(
             admission_key="",
-            happened_at=datetime(2026, 6, 1, 10, 0),  # after both
+            happened_at=datetime(2026, 6, 1, 10, 0, tzinfo=TZ_INST),
             patient=patient,
         )
-        # ADM_AAA < ADM_BBB, so adm_a should be returned
         assert result.pk == Admission.objects.get(source_admission_key="ADM_AAA").pk
 
     def test_resolve_requires_patient_argument(self, db: object) -> None:
         """resolve_admission_for_event must receive a patient to scope the search."""
-        # Without a patient, the function should raise ValueError
-        # because the lookup must be scoped to a patient
         from pytest import raises
         with raises(ValueError, match="patient"):
             resolve_admission_for_event(
                 admission_key="",
-                happened_at=datetime(2026, 4, 5, 10, 0),
+                happened_at=datetime(2026, 4, 5, 10, 0, tzinfo=TZ_INST),
                 patient=None,
             )
 
@@ -688,6 +686,6 @@ class TestResolveAdmissionDeterministicFallback:
         with raises(Admission.DoesNotExist):
             resolve_admission_for_event(
                 admission_key="",
-                happened_at=datetime(2026, 4, 5, 10, 0),
+                happened_at=datetime(2026, 4, 5, 10, 0, tzinfo=TZ_INST),
                 patient=patient_no_adm,
             )
