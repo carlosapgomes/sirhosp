@@ -632,6 +632,33 @@ class TestTimelineContextualActions:
         content = response.content.decode()
         assert "/search/clinical-events/" in content
 
+    def test_timeline_long_content_has_expand_button(
+        self,
+        auth_client: Client,
+        admission_maria_2: Admission,
+        patient_maria: Patient,
+        ingestion_run: IngestionRun,
+    ) -> None:
+        """Long content should offer Bootstrap collapse expansion."""
+        ClinicalEvent.objects.create(
+            admission=admission_maria_2,
+            patient=patient_maria,
+            ingestion_run=ingestion_run,
+            event_identity_key="long_content_test",
+            content_hash="long_content_hash",
+            happened_at=timezone.now(),
+            author_name="DR. LONGO",
+            profession_type="medica",
+            content_text=("Linha 1 de evolução longa.\n" * 20),
+        )
+
+        response = auth_client.get(
+            f"/admissions/{admission_maria_2.pk}/timeline/"
+        )
+        content = response.content.decode()
+        assert "Ver mais" in content
+        assert 'data-bs-toggle="collapse"' in content
+
 
 class TestCardLayout:
     """Test that views use card-based layout."""

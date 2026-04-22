@@ -7,13 +7,9 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   </head>
   <body class="bg-light">
-    <nav class="navbar navbar-dark bg-primary mb-3">
-      <div class="container">
-        <a class="navbar-brand" href="/">SIRHOSP</a>
-      </div>
-    </nav>
+    {% include "includes/navbar.html" %}
 
-    <div class="container">
+    <div class="container pb-4">
       <div class="mb-3">
         <a href="{% url 'patients:admission_list' patient.pk %}" class="text-decoration-none">
           &larr; Internações de {{ patient.name }}
@@ -34,9 +30,9 @@
       </p>
 
       <!-- Ações contextuais -->
-      <div class="mb-3">
+      <div class="d-grid d-sm-flex gap-2 mb-3">
         <a href="/ingestao/criar/?patient_record={{ patient.patient_source_key }}"
-           class="btn btn-success btn-sm me-2">Nova extração</a>
+           class="btn btn-success btn-sm">Nova extração</a>
         <a href="/search/clinical-events/"
            class="btn btn-outline-secondary btn-sm">Busca JSON</a>
       </div>
@@ -44,25 +40,27 @@
       <!-- Profession type filter -->
       {% if profession_types %}
         <div class="mb-3">
-          <span class="text-muted me-2">Filtrar:</span>
-          <a href="{% url 'patients:timeline' admission.pk %}"
-             class="btn btn-sm {% if not active_filter %}btn-primary{% else %}btn-outline-primary{% endif %} me-1">
-            Todos
-          </a>
-          {% for pt in profession_types %}
-            <a href="{% url 'patients:timeline' admission.pk %}?profession_type={{ pt }}"
-               class="btn btn-sm {% if active_filter == pt %}btn-primary{% else %}btn-outline-primary{% endif %} me-1">
-              {{ pt }}
+          <p class="text-muted mb-2">Filtrar por profissão:</p>
+          <div class="d-flex flex-wrap gap-2">
+            <a href="{% url 'patients:timeline' admission.pk %}"
+               class="btn btn-sm {% if not active_filter %}btn-primary{% else %}btn-outline-primary{% endif %}">
+              Todos
             </a>
-          {% endfor %}
+            {% for pt in profession_types %}
+              <a href="{% url 'patients:timeline' admission.pk %}?profession_type={{ pt }}"
+                 class="btn btn-sm {% if active_filter == pt %}btn-primary{% else %}btn-outline-primary{% endif %}">
+                {{ pt }}
+              </a>
+            {% endfor %}
+          </div>
         </div>
       {% endif %}
 
       <!-- Timeline cards -->
       {% for event in events %}
-        <div class="card mb-3">
+        <div class="card mb-3 shadow-sm border-0">
           <div class="card-body">
-            <div class="d-flex justify-content-between align-items-start mb-2">
+            <div class="d-flex justify-content-between align-items-start mb-2 gap-2 flex-wrap">
               <span class="badge bg-info text-dark">{{ event.profession_type }}</span>
               <small class="text-muted">
                 {{ event.happened_at|date:"d/m/Y H:i" }}
@@ -71,9 +69,28 @@
             <h6 class="card-subtitle mb-2 text-muted">
               {{ event.author_name }}
             </h6>
-            <p class="card-text">{{ event.content_text }}</p>
+
+            {% if event.content_text|length > 260 %}
+              <p class="card-text text-break">{{ event.content_text|slice:":260"|linebreaksbr }}...</p>
+              <div class="collapse" id="event-content-{{ event.pk }}">
+                <p class="card-text text-break">{{ event.content_text|linebreaksbr }}</p>
+              </div>
+              <button
+                class="btn btn-outline-primary btn-sm"
+                type="button"
+                data-bs-toggle="collapse"
+                data-bs-target="#event-content-{{ event.pk }}"
+                aria-expanded="false"
+                aria-controls="event-content-{{ event.pk }}"
+              >
+                Ver mais
+              </button>
+            {% else %}
+              <p class="card-text text-break">{{ event.content_text|linebreaksbr }}</p>
+            {% endif %}
+
             {% if event.signature_line %}
-              <small class="text-muted fst-italic">{{ event.signature_line }}</small>
+              <small class="text-muted fst-italic d-block mt-2">{{ event.signature_line }}</small>
             {% endif %}
           </div>
         </div>
