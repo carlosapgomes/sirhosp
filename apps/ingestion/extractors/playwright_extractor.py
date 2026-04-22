@@ -13,6 +13,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from apps.ingestion.extractors.admission_snapshot_parser import (
+    AdmissionSnapshotParser,
+)
 from apps.ingestion.extractors.errors import (
     ExtractionError,
     ExtractionTimeoutError,
@@ -165,6 +168,87 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
 
             raw_items = self._parse_json_output(json_output_path)
             return self._normalize_collection(raw_items, patient_source_key=patient_record)
+
+    def get_admission_snapshot(
+        self,
+        *,
+        patient_record: str,
+        start_date: str,
+        end_date: str,
+        timeout: int = 120,
+    ) -> list[dict[str, Any]]:
+        """Extract patient admission snapshot from path2.py.
+
+        Runs path2.py with additional flag to capture the full list of patient
+        admissions (independent of the evolutions window) and returns normalised
+        admission data.
+
+        Args:
+            patient_record: Patient record identifier (prontuário).
+            start_date: Start date in YYYY-MM-DD format (converted to DD/MM/YYYY).
+            end_date: End date in YYYY-MM-DD format (converted to DD/MM/YYYY).
+            timeout: Maximum execution time in seconds.
+
+        Returns:
+            List of normalised admission dicts with canonical field names.
+
+        Raises:
+            ExtractionTimeoutError: When extraction exceeds timeout.
+            ExtractionError: On any other extraction failure (incl. missing snapshot).
+            InvalidJsonError: If JSON is invalid or not a list.
+        """
+        br_start = _convert_to_br_date(start_date)
+        br_end = _convert_to_br_date(end_date)
+
+        script = Path(self._script_path)
+        if not script.exists():
+            raise ExtractionError(f"Extractor script not found: {script}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+            admissions_output_path = tmpdir_path / "admissions.json"
+
+            cmd = [
+                sys.executable,
+                str(script),
+                "--patient-record",
+                patient_record,
+                "--start-date",
+                br_start,
+                "--end-date",
+                br_end,
+                "--admissions-output",
+                str(admissions_output_path),
+                "--admissions-only",
+                "--headless",
+            ]
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ExtractionTimeoutError(
+                    f"Admission snapshot extraction timed out after {exc.timeout}s "
+                    f"for patient_record={patient_record}"
+                ) from exc
+            except Exception as exc:
+                raise ExtractionError(
+                    f"Failed to execute extractor for admission snapshot: {exc}"
+                ) from exc
+
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                raise ExtractionError(
+                    f"Extractor exited with code {result.returncode} during admission "
+                    f"snapshot extraction: {stderr}"
+                )
+
+            parser = AdmissionSnapshotParser()
+            return parser.parse_file(admissions_output_path)
 
     # ------------------------------------------------------------------
     # Internal helpers

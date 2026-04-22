@@ -99,6 +99,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--processed-output", type=Path, default=DEFAULT_PROCESSED_TXT_OUTPUT_PATH)
     parser.add_argument("--sorted-output", type=Path, default=DEFAULT_SORTED_TXT_OUTPUT_PATH)
     parser.add_argument("--json-output", type=Path, default=DEFAULT_JSON_OUTPUT_PATH)
+    parser.add_argument(
+        "--admissions-output",
+        type=Path,
+        default=None,
+        help=(
+            "Path to write the full patient admission snapshot JSON. "
+            "Use together with --admissions-only to export the full admission list "
+            "without processing evolutions."
+        ),
+    )
+    parser.add_argument(
+        "--admissions-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Capture only the patient admission snapshot and exit immediately. "
+            "Must be used together with --admissions-output. "
+            "When set, path2 exports the snapshot and terminates without processing "
+            "evolutions, chunks, or PDFs."
+        ),
+    )
     parser.add_argument("--headless", action="store_true")
     return parser.parse_args()
 
@@ -321,6 +342,34 @@ def admission_overlaps_interval(
     admission_start = admission["admissionStart"]
     admission_end = admission["admissionEnd"] or date.today()
     return admission_start <= requested_end and admission_end >= requested_start
+
+
+def _build_admission_snapshot(
+    admissions: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Build canonical admission snapshot list from raw admission dicts.
+
+    Converts the internal snake_case admission structure to the canonical
+    format for consumption by the Django extractor.
+
+    Args:
+        admissions: List of admission dicts from read_internacoes_rows.
+
+    Returns:
+        List of admission dicts with canonical field names.
+    """
+    snapshot: list[dict[str, object]] = []
+    for admission in admissions:
+        snapshot.append(
+            {
+                "admissionKey": admission["admissionKey"],
+                "admissionStart": format_iso_date(admission["admissionStart"]),
+                "admissionEnd": format_iso_date(admission["admissionEnd"]),
+                "ward": admission.get("ward") or "",
+                "bed": admission.get("bed") or "",
+            }
+        )
+    return snapshot
 
 
 def choose_target_admissions(
@@ -822,6 +871,21 @@ def salvar_evolucoes_json(payload: list[dict[str, object]], output_path: Path) -
     )
 
 
+def salvar_admissions_json(admissions: list[dict[str, object]], output_path: Path) -> None:
+    """Save admission snapshot to JSON file.
+
+    Args:
+        admissions: List of admission dicts (with canonical snake_case keys).
+        output_path: Destination file path.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(admissions, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"Admission snapshot salvo em: {output_path}")
+
+
 def extrair_e_processar_pdf_pol(
     pdf_path: Path,
     txt_output_path: Path,
@@ -1197,7 +1261,9 @@ def run(
     processed_txt_output_path: Path,
     sorted_txt_output_path: Path,
     json_output_path: Path,
-    headless: bool,
+    admissions_output_path: Path | None = None,
+    admissions_only: bool = False,
+    headless: bool = False,
 ) -> None:
     patient_record = normalize_patient_record(patient_record)
     requested_start = parse_cli_date(start_date)
@@ -1206,6 +1272,13 @@ def run(
     if requested_end < requested_start:
         raise RuntimeError(
             f"Intervalo inválido: início {requested_start} é maior que fim {requested_end}."
+        )
+
+    # Validate admissions-only mode requirements
+    if admissions_only and admissions_output_path is None:
+        raise RuntimeError(
+            "--admissions-only requires --admissions-output to be set. "
+            "Provide a path to write the admission snapshot JSON."
         )
 
     with sync_playwright() as playwright:
@@ -1255,6 +1328,17 @@ def run(
             page.wait_for_timeout(1500)
 
             all_admissions = read_internacoes_rows(page)
+
+            # Export admission snapshot if requested
+            if admissions_output_path is not None:
+                admissions_snapshot = _build_admission_snapshot(all_admissions)
+                salvar_admissions_json(admissions_snapshot, admissions_output_path)
+
+            # Early exit for admissions-only mode
+            if admissions_only:
+                print("Modo admissions-only: snapshot exportado, encerrando.")
+                return
+
             target_admissions = choose_target_admissions(
                 all_admissions,
                 requested_start,
@@ -1463,6 +1547,8 @@ def main() -> None:
         processed_txt_output_path=args.processed_output,
         sorted_txt_output_path=args.sorted_output,
         json_output_path=args.json_output,
+        admissions_output_path=args.admissions_output,
+        admissions_only=args.admissions_only,
         headless=args.headless,
     )
 

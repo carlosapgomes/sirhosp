@@ -662,3 +662,355 @@ class TestCreatedByAndSignatureLineValidation:
 
         assert "signatureLine" in str(exc_info.value)
         assert "createdBy" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# 8. PlaywrightEvolutionExtractor — admission snapshot tests (Slice S1)
+
+
+# ---------------------------------------------------------------------------
+# 8. PlaywrightEvolutionExtractor — admission snapshot tests (Slice S1)
+# ---------------------------------------------------------------------------
+
+
+class TestGetAdmissionSnapshot:
+    """Test get_admission_snapshot method for explicit admission snapshot extraction."""
+
+    SAMPLE_ADMISSION_SNAPSHOT: list[dict[str, Any]] = [
+        {
+            "admissionKey": "ADM001",
+            "admissionStart": "2024-06-01",
+            "admissionEnd": "2024-06-15",
+            "ward": "UTI Adulto",
+            "bed": "12",
+        },
+        {
+            "admissionKey": "ADM002",
+            "admissionStart": "2024-07-01",
+            "admissionEnd": None,
+            "ward": "Clínica Médica",
+            "bed": "05",
+        },
+    ]
+
+    def test_returns_normalised_admission_list(self, tmp_path: Path):
+        """Successful snapshot extraction returns normalised admission list."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            # Simulate path2 writing admission snapshot to --admissions-output path
+            adm_idx = cmd.index("--admissions-output") + 1
+            target_path = Path(cmd[adm_idx])
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(json.dumps(self.SAMPLE_ADMISSION_SNAPSHOT, ensure_ascii=False))
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            results = extractor.get_admission_snapshot(
+                patient_record="8920415",
+                start_date="2024-06-01",
+                end_date="2024-07-31",
+            )
+
+        assert len(results) == 2
+        assert results[0]["admission_key"] == "ADM001"
+        assert results[0]["admission_start"] == "2024-06-01"
+        assert results[0]["admission_end"] == "2024-06-15"
+        assert results[0]["ward"] == "UTI Adulto"
+        assert results[0]["bed"] == "12"
+        assert results[1]["admission_end"] is None
+
+    def test_missing_admissions_file_raises_error(self, tmp_path: Path):
+        """Missing admission snapshot file should raise ExtractionError."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            # Do NOT write the --admissions-output file
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            with pytest.raises(ExtractionError, match="not found"):
+                extractor.get_admission_snapshot(
+                    patient_record="123",
+                    start_date="2024-06-01",
+                    end_date="2024-07-31",
+                )
+
+    def test_invalid_json_raises_invalid_json_error(self, tmp_path: Path):
+        """Invalid JSON in admission snapshot should raise InvalidJsonError."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            adm_idx = cmd.index("--admissions-output") + 1
+            target_path = Path(cmd[adm_idx])
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("NOT JSON {{{")
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            with pytest.raises(InvalidJsonError):
+                extractor.get_admission_snapshot(
+                    patient_record="123",
+                    start_date="2024-06-01",
+                    end_date="2024-07-31",
+                )
+
+    def test_nonzero_exit_raises_extraction_error(self, tmp_path: Path):
+        """Non-zero exit code should raise ExtractionError."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run"
+        ) as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 1
+            mock_result.stderr = "Playwright crash"
+            mock_run.return_value = mock_result
+
+            with pytest.raises(ExtractionError, match="code 1"):
+                extractor.get_admission_snapshot(
+                    patient_record="123",
+                    start_date="2024-06-01",
+                    end_date="2024-07-31",
+                )
+
+    def test_timeout_raises_extraction_timeout_error(self, tmp_path: Path):
+        """Subprocess timeout should raise ExtractionTimeoutError."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run"
+        ) as mock_run:
+            import subprocess
+
+            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["python"], timeout=120)
+
+            with pytest.raises(ExtractionTimeoutError):
+                extractor.get_admission_snapshot(
+                    patient_record="123",
+                    start_date="2024-06-01",
+                    end_date="2024-07-31",
+                )
+
+    def test_date_conversion_in_snapshot_extraction(self, tmp_path: Path):
+        """Dates should be converted to DD/MM/YYYY for path2."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        captured_cmd: list[str] = []
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            captured_cmd.extend(cmd)
+            adm_idx = cmd.index("--admissions-output") + 1
+            target_path = Path(cmd[adm_idx])
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(json.dumps(self.SAMPLE_ADMISSION_SNAPSHOT))
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            extractor.get_admission_snapshot(
+                patient_record="123",
+                start_date="2024-06-01",
+                end_date="2024-07-31",
+            )
+
+        start_idx = captured_cmd.index("--start-date") + 1
+        end_idx = captured_cmd.index("--end-date") + 1
+        assert captured_cmd[start_idx] == "01/06/2024"
+        assert captured_cmd[end_idx] == "31/07/2024"
+
+    def test_empty_snapshot_returns_empty_list(self, tmp_path: Path):
+        """Empty admission snapshot should return empty list."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            adm_idx = cmd.index("--admissions-output") + 1
+            target_path = Path(cmd[adm_idx])
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("[]")
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            results = extractor.get_admission_snapshot(
+                patient_record="123",
+                start_date="2024-06-01",
+                end_date="2024-07-31",
+            )
+
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# 9. Slice S1 Fix — admissions-only mode tests (TDD RED)
+# ---------------------------------------------------------------------------
+
+
+class TestAdmissionsOnlyMode:
+    """Verify get_admission_snapshot() passes --admissions-only flag."""
+
+    SAMPLE_ADMISSION_SNAPSHOT: list[dict[str, Any]] = [
+        {
+            "admissionKey": "ADM001",
+            "admissionStart": "2024-06-01",
+            "admissionEnd": "2024-06-15",
+            "ward": "UTI Adulto",
+            "bed": "12",
+        },
+    ]
+
+    def test_passes_admissions_only_flag(self, tmp_path: Path):
+        """Command must include --admissions-only flag."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        captured_cmd: list[str] = []
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            captured_cmd.extend(cmd)
+            # Simulate admissions-only mode writing file
+            try:
+                adm_idx = cmd.index("--admissions-output") + 1
+                target_path = Path(cmd[adm_idx])
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_text(
+                    json.dumps(self.SAMPLE_ADMISSION_SNAPSHOT, ensure_ascii=False)
+                )
+            except (ValueError, IndexError):
+                pass
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            extractor.get_admission_snapshot(
+                patient_record="123",
+                start_date="2024-06-01",
+                end_date="2024-06-15",
+            )
+
+        assert "--admissions-only" in captured_cmd, (
+            f"Expected --admissions-only in command, got: {captured_cmd}"
+        )
+
+    def test_admissions_only_mode_works_without_evolutions(self, tmp_path: Path):
+        """Snapshot extraction should succeed even if no evolutions exist.
+
+        This test verifies that --admissions-only mode allows extraction to
+        complete without requiring evolutions (i.e., no chunk/pdf/evolution flow).
+        """
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            # Verify admissions-only is used (no --json-output expected)
+            assert "--admissions-only" in cmd
+            # Write the snapshot file as if path2 completed in admissions-only mode
+            adm_idx = cmd.index("--admissions-output") + 1
+            target_path = Path(cmd[adm_idx])
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text(
+                json.dumps(self.SAMPLE_ADMISSION_SNAPSHOT, ensure_ascii=False)
+            )
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            results = extractor.get_admission_snapshot(
+                patient_record="123",
+                start_date="2024-06-01",
+                end_date="2024-06-15",
+            )
+
+        assert len(results) == 1
+        assert results[0]["admission_key"] == "ADM001"
+
+    def test_extract_evolutions_does_not_pass_admissions_only(self, tmp_path: Path):
+        """extract_evolutions() should NOT include --admissions-only flag."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        captured_cmd: list[str] = []
+
+        def fake_run(cmd: list[str], **_kwargs: Any) -> MagicMock:
+            captured_cmd.extend(cmd)
+            # Write empty evolutions file for extract_evolutions path
+            try:
+                json_idx = cmd.index("--json-output") + 1
+                target_path = Path(cmd[json_idx])
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                target_path.write_text("[]")
+            except (ValueError, IndexError):
+                pass
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            extractor.extract_evolutions(
+                patient_record="123",
+                start_date="2024-06-01",
+                end_date="2024-06-15",
+            )
+
+        assert "--admissions-only" not in captured_cmd, (
+            f"extract_evolutions() should NOT pass --admissions-only: {captured_cmd}"
+        )
