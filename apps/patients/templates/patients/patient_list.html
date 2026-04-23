@@ -67,7 +67,7 @@
                 Deseja buscar internações deste registro no sistema fonte?
               </p>
               <div class="d-flex flex-column flex-md-row justify-content-center gap-2">
-                <a href="{% url 'ingestion:create_run' %}?patient_record={{ query|urlencode }}"
+                <a href="{% url 'ingestion:create_admissions_only' %}?patient_record={{ query|urlencode }}"
                    class="btn btn-primary">
                   Buscar/sincronizar internações
                 </a>

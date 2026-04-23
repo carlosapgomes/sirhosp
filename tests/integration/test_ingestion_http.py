@@ -448,3 +448,99 @@ class TestIngestionFlowEndToEnd:
         content = response.content.decode("utf-8").lower()
         # Should show queued state
         assert "fila" in content or "processamento" in content or "queued" in content
+
+
+@pytest.mark.django_db
+class TestAdmissionsOnlyRunHTTP:
+    """HTTP tests for admissions-only run creation and status (AFMF-S2)."""
+
+    def _login(self, client):
+        from django.contrib.auth.models import User
+        user = User.objects.create_user(username="testuser_adm", password="testpass123")
+        client.force_login(user)
+
+    def test_create_admissions_only_run_success(self):
+        """POST to create admissions-only run with valid patient_record succeeds."""
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_admissions_only")
+        response = client.post(
+            url,
+            {"patient_record": "99999"},
+        )
+        assert response.status_code == 302
+        run = IngestionRun.objects.get()
+        assert run.status == "queued"
+        params = run.parameters_json
+        assert params["patient_record"] == "99999"
+        assert params["intent"] == "admissions_only"
+        assert str(run.pk) in response.url
+
+    def test_create_admissions_only_run_missing_record(self):
+        """POST without patient_record returns form with error."""
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_admissions_only")
+        response = client.post(url, {"patient_record": ""})
+        assert response.status_code == 200
+        assert IngestionRun.objects.count() == 0
+        body = response.content.decode("utf-8").lower()
+        assert "obrigat" in body or "required" in body
+
+    def test_create_admissions_only_get_renders_form(self):
+        """GET renders the admissions-only form with prefilled patient_record."""
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_admissions_only") + "?patient_record=P200"
+        response = client.get(url)
+        assert response.status_code == 200
+        body = response.content.decode("utf-8")
+        assert "P200" in body
+
+    def test_admissions_only_status_shows_intent(self):
+        """Status page for admissions-only run shows intent-specific info."""
+        run = IngestionRun.objects.create(
+            status="succeeded",
+            parameters_json={
+                "patient_record": "99999",
+                "intent": "admissions_only",
+            },
+            admissions_seen=3,
+            admissions_created=2,
+            admissions_updated=1,
+        )
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+        assert response.status_code == 200
+        body = response.content.decode("utf-8").lower()
+        assert "internação" in body or "internacoes" in body or "admiss" in body
+
+    def test_admissions_only_empty_snapshot_status(self):
+        """Status page for admissions-only run with empty snapshot shows no-admissions message."""
+        run = IngestionRun.objects.create(
+            status="succeeded",
+            parameters_json={
+                "patient_record": "99999",
+                "intent": "admissions_only",
+            },
+            admissions_seen=0,
+            admissions_created=0,
+            admissions_updated=0,
+        )
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+        assert response.status_code == 200
+        body = response.content.decode("utf-8").lower()
+        assert (
+            "sem internação" in body
+            or "sem internacoes" in body
+            or "nenhuma internação" in body
+            or "no admissions" in body
+            or "no_admissions" in body
+        )
+        assert "nova extração" not in body
+        assert "voltar para pacientes" in body

@@ -564,3 +564,124 @@ class TestWorkerAdmissionSemantics:
         assert run.admissions_seen == 0
         assert run.admissions_created == 0
         assert run.admissions_updated == 0
+
+
+@pytest.mark.django_db
+class TestAdmissionsOnlyWorker:
+    """Worker behaviour for admissions-only runs (AFMF-S2).
+
+    Admissions-only runs capture admissions snapshot without extracting evolutions.
+    """
+
+    def _queue_admissions_only_run(self, patient_record="12345"):
+        return IngestionRun.objects.create(
+            status="queued",
+            parameters_json={
+                "patient_record": patient_record,
+                "intent": "admissions_only",
+            },
+        )
+
+    def _make_extractor_mock(self, admissions_snapshot=None, admission_error=None):
+        mock_ext = MagicMock()
+        if admission_error:
+            mock_ext.get_admission_snapshot.side_effect = admission_error
+        elif admissions_snapshot is not None:
+            mock_ext.get_admission_snapshot.return_value = admissions_snapshot
+        else:
+            mock_ext.get_admission_snapshot.return_value = []
+        return mock_ext
+
+    def test_admissions_only_succeeds_with_admissions(self):
+        """Admissions-only run succeeds when admissions snapshot is captured."""
+        from apps.patients.models import Admission, Patient
+
+        run = self._queue_admissions_only_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            },
+        ]
+        mock_ext = self._make_extractor_mock(admissions_snapshot=admissions_snapshot)
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        assert run.admissions_seen == 1
+        assert run.admissions_created == 1
+        assert run.admissions_updated == 0
+        assert run.events_processed == 0
+        assert run.finished_at is not None
+        # No evolutions extracted
+        mock_ext.extract_evolutions.assert_not_called()
+        # Patient and admission created
+        patient = Patient.objects.get(patient_source_key="12345")
+        assert Admission.objects.filter(patient=patient).count() == 1
+
+    def test_admissions_only_succeeds_with_empty_snapshot(self):
+        """Admissions-only run succeeds with zero admissions (empty snapshot)."""
+        from apps.patients.models import Patient
+
+        run = self._queue_admissions_only_run(patient_record="77889")
+        mock_ext = self._make_extractor_mock(admissions_snapshot=[])
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        assert run.admissions_seen == 0
+        assert run.admissions_created == 0
+        assert run.events_processed == 0
+        # Patient still created for traceability
+        assert Patient.objects.filter(patient_source_key="77889").exists()
+
+    def test_admissions_only_fails_on_capture_error(self):
+        """Admissions-only run fails when snapshot capture raises error."""
+        from apps.ingestion.extractors.errors import ExtractionError
+
+        run = self._queue_admissions_only_run()
+        mock_ext = self._make_extractor_mock(
+            admission_error=ExtractionError("Source system unavailable"),
+        )
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert "unavailable" in run.error_message.lower() or "source" in run.error_message.lower()
+        assert run.finished_at is not None
+        mock_ext.extract_evolutions.assert_not_called()
+
+    def test_admissions_only_does_not_call_gap_planner(self):
+        """Admissions-only run skips gap planning entirely."""
+        run = self._queue_admissions_only_run()
+        mock_ext = self._make_extractor_mock(admissions_snapshot=[])
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.plan_extraction_windows",
+        ) as mock_plan:
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        mock_plan.assert_not_called()

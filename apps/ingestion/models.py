@@ -44,6 +44,14 @@ class IngestionRun(models.Model):
     )
     error_message = models.TextField(blank=True, default="")
 
+    # AFMF-S2: Run intent (e.g. 'admissions_only', 'full_sync', etc.)
+    intent = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        help_text="Operational intent of this run (e.g. admissions_only).",
+    )
+
     class Meta:
         ordering = ["-started_at"]
 

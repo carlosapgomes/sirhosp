@@ -211,6 +211,32 @@ def queue_ingestion_run(
     )
 
 
+def queue_admissions_only_run(
+    *,
+    patient_record: str,
+) -> IngestionRun:
+    """Create an IngestionRun for admissions-only synchronization.
+
+    The worker will capture the admissions snapshot without extracting
+    evolutions. Used as the first step for the admission-first flow
+    when a patient is not found locally.
+
+    Args:
+        patient_record: Patient record identifier (prontuário).
+
+    Returns:
+        IngestionRun instance with status=queued and intent='admissions_only'.
+    """
+    return IngestionRun.objects.create(
+        status="queued",
+        intent="admissions_only",
+        parameters_json={
+            "patient_record": patient_record,
+            "intent": "admissions_only",
+        },
+    )
+
+
 def ingest_evolution(
     evolutions: list[dict[str, Any]],
     parameters: dict[str, Any] | None = None,

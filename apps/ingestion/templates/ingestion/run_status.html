@@ -14,10 +14,14 @@
 
     <div class="container">
       <div class="mb-3">
-        <a href="{% url 'ingestion:create_run' %}" class="text-decoration-none">&larr; Nova extração</a>
+        {% if no_admissions %}
+          <a href="{% url 'patients:patient_list' %}" class="text-decoration-none">&larr; Voltar para pacientes</a>
+        {% else %}
+          <a href="{% url 'ingestion:create_run' %}" class="text-decoration-none">&larr; Nova extração</a>
+        {% endif %}
       </div>
 
-      <h1 class="h4 mb-3">Status da Extração #{{ run.pk }}</h1>
+      <h1 class="h4 mb-3">{% if intent == 'admissions_only' %}Status: Sincronização de Internações #{{ run.pk }}{% else %}Status da Extração #{{ run.pk }}{% endif %}</h1>
 
       <div class="card mb-3">
         <div class="card-body">
@@ -27,11 +31,16 @@
           </div>
 
           <dl class="row mb-0">
+            <dt class="col-sm-4">Tipo</dt>
+            <dd class="col-sm-8">{{ run_type_label }}</dd>
+
             <dt class="col-sm-4">Registro</dt>
             <dd class="col-sm-8">{{ patient_record }}</dd>
 
-            <dt class="col-sm-4">Período</dt>
-            <dd class="col-sm-8">{{ start_date }} a {{ end_date }}</dd>
+            {% if intent != 'admissions_only' %}
+              <dt class="col-sm-4">Período</dt>
+              <dd class="col-sm-8">{{ start_date }} a {{ end_date }}</dd>
+            {% endif %}
 
             <dt class="col-sm-4">Início</dt>
             <dd class="col-sm-8">
@@ -97,13 +106,24 @@
         </div>
       {% endif %}
 
-      {% if run.status == 'queued' %}
+      {% if no_admissions %}
+        <div class="alert alert-warning" role="alert">
+          <strong>Nenhuma internação encontrada.</strong>
+          O registro informado não possui internações no sistema fonte.
+          A extração de evoluções não está disponível sem internações conhecidas.
+        </div>
+      {% elif run.status == 'succeeded' and intent == 'admissions_only' %}
+        <div class="alert alert-success" role="alert">
+          <strong>Internações sincronizadas com sucesso!</strong>
+          {{ run.admissions_seen }} internação(ões) encontrada(s).
+        </div>
+      {% elif run.status == 'queued' %}
         <div class="alert alert-info" role="alert">
-          <strong>Na fila:</strong> a extração será processada em breve pelo worker.
+          <strong>Na fila:</strong> {% if intent == 'admissions_only' %}a sincronização de internações será processada em breve.{% else %}a extração será processada em breve pelo worker.{% endif %}
         </div>
       {% elif run.status == 'running' %}
         <div class="alert alert-warning" role="alert">
-          <strong>Em execução:</strong> a extração está em andamento. Esta página atualiza automaticamente.
+          <strong>Em execução:</strong> {% if intent == 'admissions_only' %}a sincronização de internações está em andamento.{% else %}a extração está em andamento.{% endif %} Esta página atualiza automaticamente.
         </div>
       {% elif run.status == 'succeeded' %}
         <div class="alert alert-success" role="alert">
@@ -111,7 +131,7 @@
         </div>
       {% elif run.status == 'failed' %}
         <div class="alert alert-danger" role="alert">
-          <strong>Falha na extração.</strong>
+          <strong>Falha na {% if intent == 'admissions_only' %}sincronização de internações{% else %}extração{% endif %}.</strong>
           {% if run.error_message %}
             <p class="mb-0 mt-2"><small><strong>Erro:</strong> {{ run.error_message }}</small></p>
           {% endif %}
@@ -131,7 +151,11 @@
         </div>
       {% endif %}
 
-      <a href="{% url 'ingestion:create_run' %}" class="btn btn-outline-primary btn-sm">Nova extração</a>
+      {% if no_admissions %}
+        <a href="{% url 'patients:patient_list' %}" class="btn btn-outline-secondary btn-sm">Voltar para pacientes</a>
+      {% else %}
+        <a href="{% url 'ingestion:create_run' %}" class="btn btn-outline-primary btn-sm">Nova extração</a>
+      {% endif %}
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

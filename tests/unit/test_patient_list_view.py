@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from django.contrib.auth.models import User
 from django.test import Client
+from django.urls import reverse
 
 from apps.patients.models import Patient
 
@@ -443,12 +444,16 @@ class TestPatientListMissingPatientCTA:
         content = resp.content.decode()
         assert "Buscar/sincronizar internações" not in content
 
-    def test_cta_primary_includes_patient_record_in_link(
+    def test_cta_primary_points_to_admissions_sync_with_patient_record(
         self,
         auth_client: Client,
         db: None,
     ) -> None:
-        """CTA links carry patient_record query param for ingestion prefill."""
+        """Primary CTA points to admissions-only route with patient_record context."""
         resp = auth_client.get("/patients/", {"q": "P999"})
         content = resp.content.decode()
-        assert "?patient_record=P999" in content
+        expected = (
+            reverse("ingestion:create_admissions_only")
+            + "?patient_record=P999"
+        )
+        assert expected in content

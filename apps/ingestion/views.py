@@ -9,7 +9,7 @@ from django.http import Http404, HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 
 from apps.ingestion.models import IngestionRun
-from apps.ingestion.services import queue_ingestion_run
+from apps.ingestion.services import queue_admissions_only_run, queue_ingestion_run
 
 
 @login_required
@@ -72,6 +72,38 @@ def create_run(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def create_admissions_only(request: HttpRequest) -> HttpResponse:
+    """Render form and process admissions-only run creation.
+
+    GET: renders the form with optional patient_record prefill.
+    POST: validates and creates a queued IngestionRun with
+         intent='admissions_only', then redirects to status.
+    """
+    errors: list[str] = []
+
+    if request.method == "POST":
+        patient_record = request.POST.get("patient_record", "").strip()
+
+        if not patient_record:
+            errors.append("Registro do paciente é obrigatório.")
+
+        if not errors:
+            run = queue_admissions_only_run(patient_record=patient_record)
+            return redirect("ingestion:run_status", run_id=run.pk)
+
+    initial_patient_record = request.GET.get("patient_record", "")
+
+    return render(
+        request,
+        "ingestion/create_admissions_only.html",
+        {
+            "errors": errors,
+            "initial_patient_record": initial_patient_record,
+        },
+    )
+
+
+@login_required
 def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
     """Display operational status for an ingestion run.
 
@@ -83,6 +115,7 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         raise Http404 from err
 
     params = run.parameters_json or {}
+    intent = params.get("intent", "") or run.intent
 
     # Build status label and CSS class
     status_labels = {
@@ -98,6 +131,19 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         "failed": "bg-danger",
     }
 
+    # Determine run type label
+    if intent == "admissions_only":
+        run_type_label = "Sincronização de internações"
+    else:
+        run_type_label = "Extração de evoluções"
+
+    # Determine if no admissions were found
+    no_admissions = (
+        intent == "admissions_only"
+        and run.status == "succeeded"
+        and run.admissions_seen == 0
+    )
+
     context = {
         "run": run,
         "status_label": status_labels.get(run.status, run.status),
@@ -105,6 +151,9 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         "patient_record": params.get("patient_record", "—"),
         "start_date": params.get("start_date", "—"),
         "end_date": params.get("end_date", "—"),
+        "intent": intent,
+        "run_type_label": run_type_label,
+        "no_admissions": no_admissions,
     }
 
     return render(request, "ingestion/run_status.html", context)

@@ -175,27 +175,108 @@ class Command(BaseCommand):
     ) -> None:
         """Process a single IngestionRun through its full lifecycle.
 
+        Dispatches to admissions-only or full-sync based on intent.
+        """
+        params = run.parameters_json or {}
+        intent = params.get("intent", "") or run.intent
+
+        # Step 0: Transition to running
+        run.status = "running"
+        run.save(update_fields=["status"])
+
+        if intent == "admissions_only":
+            self._process_admissions_only(
+                run=run,
+                script_path=script_path,
+                headless=headless,
+            )
+        else:
+            self._process_full_sync(
+                run=run,
+                script_path=script_path,
+                headless=headless,
+            )
+
+    # ------------------------------------------------------------------
+    # Admissions-only processing (AFMF-S2)
+    # ------------------------------------------------------------------
+
+    def _process_admissions_only(
+        self,
+        run: IngestionRun,
+        *,
+        script_path: str,
+        headless: bool,
+    ) -> None:
+        """Process admissions-only run: capture snapshot, no evolution extraction."""
+        params = run.parameters_json or {}
+        patient_record = params.get("patient_record", "")
+
+        extractor = PlaywrightEvolutionExtractor(
+            script_path=script_path,
+            headless=headless,
+        )
+
+        patient, adm_metrics = self._capture_admissions(
+            run=run,
+            extractor=extractor,
+            patient_record=patient_record,
+            start_date="",
+            end_date="",
+        )
+
+        # Run already failed in _capture_admissions
+        if run.status == "failed":
+            return
+
+        # Admissions-only: persist metrics and succeed, no gap planning
+        run.admissions_seen = adm_metrics["seen"]
+        run.admissions_created = adm_metrics["created"]
+        run.admissions_updated = adm_metrics["updated"]
+        run.events_processed = 0
+        run.events_created = 0
+        run.events_skipped = 0
+        run.events_revised = 0
+        run.status = "succeeded"
+        run.finished_at = timezone.now()
+        run.save()
+
+        self.stdout.write(
+            f"  Run #{run.pk} admissions-only succeeded "
+            f"(admissions_seen={adm_metrics['seen']}, "
+            f"admissions_created={adm_metrics['created']}, "
+            f"admissions_updated={adm_metrics['updated']})"
+        )
+
+    # ------------------------------------------------------------------
+    # Full-sync processing (legacy)
+    # ------------------------------------------------------------------
+
+    def _process_full_sync(
+        self,
+        run: IngestionRun,
+        *,
+        script_path: str,
+        headless: bool,
+    ) -> None:
+        """Process full-sync run: admissions + gap planning + evolution extraction.
+
         Uses cache-first gap planning: only extracts date-ranges where
         no events exist yet for the patient.
 
         Slice S3 worker lifecycle:
-        1. Transition to 'running'.
-        2. Capture admissions snapshot (fails run if error).
-        3. Plan extraction windows (cache-first).
-        4. If full coverage: succeed with zero events.
-        5. Extract evolutions for gap windows.
-        6. Ingest evolutions (deterministic admission resolution).
-        7. Transition to 'succeeded' with metrics.
-        8. On any failure after admissions: preserve admissions + fail run.
+        1. Capture admissions snapshot (fails run if error).
+        2. Plan extraction windows (cache-first).
+        3. If full coverage: succeed with zero events.
+        4. Extract evolutions for gap windows.
+        5. Ingest evolutions (deterministic admission resolution).
+        6. Transition to 'succeeded' with metrics.
+        7. On any failure after admissions: preserve admissions + fail run.
         """
         params = run.parameters_json or {}
         patient_record = params.get("patient_record", "")
         start_date = params.get("start_date", "")
         end_date = params.get("end_date", "")
-
-        # Step 0: Transition to running
-        run.status = "running"
-        run.save(update_fields=["status"])
 
         extractor = PlaywrightEvolutionExtractor(
             script_path=script_path,
@@ -330,10 +411,13 @@ class Command(BaseCommand):
         adm_metrics = {"seen": 0, "created": 0, "updated": 0}
 
         try:
+            # For admissions-only runs with no date range, use a wide default
+            snap_start = start_date or "2000-01-01"
+            snap_end = end_date or timezone.now().strftime("%Y-%m-%d")
             admissions_snapshot = extractor.get_admission_snapshot(
                 patient_record=patient_record,
-                start_date=start_date,
-                end_date=end_date,
+                start_date=snap_start,
+                end_date=snap_end,
                 timeout=120,
             )
         except Exception as exc:
