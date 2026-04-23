@@ -443,13 +443,12 @@ class TestPatientListMissingPatientCTA:
         content = resp.content.decode()
         assert "Buscar/sincronizar internações" not in content
 
-    def test_cta_primary_includes_registro_in_link(
+    def test_cta_primary_includes_patient_record_in_link(
         self,
         auth_client: Client,
         db: None,
     ) -> None:
-        """Primary CTA link/button carries the searched registro as context."""
+        """CTA links carry patient_record query param for ingestion prefill."""
         resp = auth_client.get("/patients/", {"q": "P999"})
         content = resp.content.decode()
-        # The registro should appear in the CTA area (form or link context)
-        assert "P999" in content
+        assert "?patient_record=P999" in content

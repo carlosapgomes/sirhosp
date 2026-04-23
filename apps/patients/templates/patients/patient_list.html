@@ -67,11 +67,11 @@
                 Deseja buscar internações deste registro no sistema fonte?
               </p>
               <div class="d-flex flex-column flex-md-row justify-content-center gap-2">
-                <a href="{% url 'ingestion:create_run' %}?registro={{ query }}"
+                <a href="{% url 'ingestion:create_run' %}?patient_record={{ query|urlencode }}"
                    class="btn btn-primary">
                   Buscar/sincronizar internações
                 </a>
-                <a href="{% url 'ingestion:create_run' %}?registro={{ query }}"
+                <a href="{% url 'ingestion:create_run' %}?patient_record={{ query|urlencode }}"
                    class="btn btn-outline-secondary btn-sm">
                   Extração por período (avançado)
                 </a>
