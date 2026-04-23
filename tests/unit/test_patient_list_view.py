@@ -1,4 +1,4 @@
-"""Tests for patient list view — hub /patients/ (Slice S2)."""
+"""Tests for patient list view — hub /patients/ (Slice S2, S1 AFMF)."""
 
 from __future__ import annotations
 
@@ -377,3 +377,79 @@ class TestPatientCoverageSummary:
         content = resp.content.decode()
         # Only 1 of 2 admissions has events
         assert "1" in content  # at least one admission with events
+
+
+# =========================================================================
+# Test: Admission-first recovery CTA when search has no results (S1 AFMF)
+# =========================================================================
+
+
+class TestPatientListMissingPatientCTA:
+    """When search returns no results, show admission-first CTA.
+
+    Spec (services-portal-navigation):
+    - Primary action "Buscar/sincronizar internações" for the searched registro
+    - Secondary action for period extraction as contextual/advanced option
+    """
+
+    def test_no_results_with_query_shows_primary_cta(
+        self,
+        auth_client: Client,
+        db: None,
+    ) -> None:
+        """Search with no match shows 'Buscar/sincronizar internações' CTA."""
+        resp = auth_client.get("/patients/", {"q": "99999"})
+        content = resp.content.decode()
+        assert resp.status_code == 200
+        assert "Buscar/sincronizar internações" in content
+
+    def test_no_results_with_query_shows_searched_registro(
+        self,
+        auth_client: Client,
+        db: None,
+    ) -> None:
+        """CTA area displays the searched registro for context."""
+        resp = auth_client.get("/patients/", {"q": "12345"})
+        content = resp.content.decode()
+        assert "12345" in content
+
+    def test_no_results_with_query_shows_secondary_cta_period(
+        self,
+        auth_client: Client,
+        db: None,
+    ) -> None:
+        """Secondary action for period extraction is shown as contextual option."""
+        resp = auth_client.get("/patients/", {"q": "99999"})
+        content = resp.content.decode().lower()
+        assert "extração por período" in content or "período de extração" in content
+
+    def test_empty_state_without_query_has_no_cta(
+        self,
+        auth_client: Client,
+        db: None,
+    ) -> None:
+        """Empty patient list without search query shows generic message, no CTA."""
+        resp = auth_client.get("/patients/")
+        content = resp.content.decode()
+        assert "Buscar/sincronizar internações" not in content
+
+    def test_results_found_no_cta(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+    ) -> None:
+        """When results are found, CTA is not shown."""
+        resp = auth_client.get("/patients/", {"q": "MARIA"})
+        content = resp.content.decode()
+        assert "Buscar/sincronizar internações" not in content
+
+    def test_cta_primary_includes_registro_in_link(
+        self,
+        auth_client: Client,
+        db: None,
+    ) -> None:
+        """Primary CTA link/button carries the searched registro as context."""
+        resp = auth_client.get("/patients/", {"q": "P999"})
+        content = resp.content.decode()
+        # The registro should appear in the CTA area (form or link context)
+        assert "P999" in content

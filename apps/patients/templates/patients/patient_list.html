@@ -57,11 +57,34 @@
           </div>
         </div>
       {% empty %}
-        <div class="card">
-          <div class="card-body text-center text-muted">
-            Nenhum paciente encontrado.
+        {% if query %}
+          <div class="card border-primary">
+            <div class="card-body text-center">
+              <p class="text-muted mb-2">
+                Nenhum paciente encontrado para&nbsp;"<strong>{{ query }}</strong>".
+              </p>
+              <p class="mb-3">
+                Deseja buscar internações deste registro no sistema fonte?
+              </p>
+              <div class="d-flex flex-column flex-md-row justify-content-center gap-2">
+                <a href="{% url 'ingestion:create_run' %}?registro={{ query }}"
+                   class="btn btn-primary">
+                  Buscar/sincronizar internações
+                </a>
+                <a href="{% url 'ingestion:create_run' %}?registro={{ query }}"
+                   class="btn btn-outline-secondary btn-sm">
+                  Extração por período (avançado)
+                </a>
+              </div>
+            </div>
           </div>
-        </div>
+        {% else %}
+          <div class="card">
+            <div class="card-body text-center text-muted">
+              Nenhum paciente encontrado.
+            </div>
+          </div>
+        {% endif %}
       {% endfor %}
 
       {% if page_obj.has_other_pages %}
