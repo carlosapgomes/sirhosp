@@ -19,8 +19,10 @@ venv/
 *.egg-info/
 *.egg
 
-# Testes
+# Testes / caches locais
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
 .tox/
