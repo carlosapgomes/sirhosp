@@ -41,8 +41,10 @@ FRAME_NAME: Final[str] = "frame_pol"
 REPORT_WAIT_TIMEOUT_MS: Final[int] = 180000
 REPORT_POLL_INTERVAL_MS: Final[int] = 5000
 REPORT_DOWNLOAD_TIMEOUT_MS: Final[int] = 600000
-MAX_CHUNK_DAYS: Final[int] = 15
-CHUNK_OVERLAP_DAYS: Final[int] = 1
+from chunking import MAX_CHUNK_DAYS, CHUNK_OVERLAP_DAYS, build_chunks_for_interval as _build_chunks_for_interval
+
+MAX_CHUNK_DAYS: Final[int] = MAX_CHUNK_DAYS
+CHUNK_OVERLAP_DAYS: Final[int] = CHUNK_OVERLAP_DAYS
 PAGE_HEADER_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
     r'(?ms)^(===== PÁGINA \d+ =====)\nEVOLUÇÃO\n(/\s*\d+)\n(\d+)\n'
 )
@@ -416,26 +418,11 @@ def choose_target_admissions(
 
 
 def build_chunks_for_interval(start: date, end: date) -> list[tuple[date, date]]:
-    if end < start:
-        return []
+    """Delegate to the canonical chunking module.
 
-    chunks: list[tuple[date, date]] = []
-    cursor = start
-
-    while cursor <= end:
-        chunk_end = min(cursor + timedelta(days=MAX_CHUNK_DAYS - 1), end)
-        chunks.append((cursor, chunk_end))
-
-        if chunk_end >= end:
-            break
-
-        next_cursor = chunk_end - timedelta(days=CHUNK_OVERLAP_DAYS - 1)
-        if next_cursor <= cursor:
-            next_cursor = cursor + timedelta(days=1)
-
-        cursor = next_cursor
-
-    return chunks
+    Kept as a thin wrapper for backward compatibility with existing callers.
+    """
+    return _build_chunks_for_interval(start, end)
 
 
 def click_menu_internacoes(page: Page) -> None:
