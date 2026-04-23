@@ -58,6 +58,23 @@
         <div class="card mb-3">
           <div class="card-body">
             <h5 class="card-title">Resultados</h5>
+            {% if run.admissions_seen > 0 %}
+              <div class="row text-center mb-3">
+                <div class="col-4">
+                  <div class="h5 mb-0">{{ run.admissions_seen }}</div>
+                  <small class="text-muted">Internações vistas</small>
+                </div>
+                <div class="col-4">
+                  <div class="h5 mb-0 text-success">{{ run.admissions_created }}</div>
+                  <small class="text-muted">Novas internações</small>
+                </div>
+                <div class="col-4">
+                  <div class="h5 mb-0 text-info">{{ run.admissions_updated }}</div>
+                  <small class="text-muted">Atualizadas</small>
+                </div>
+              </div>
+              <hr>
+            {% endif %}
             <div class="row text-center">
               <div class="col-3">
                 <div class="h4 mb-0">{{ run.events_processed }}</div>

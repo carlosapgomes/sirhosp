@@ -21,7 +21,7 @@ def patient_list_view(request: HttpRequest) -> HttpResponse:
     query = request.GET.get("q", "").strip() or None
     page_number = request.GET.get("page", 1)
 
-    patients_qs = services.search_patients(query)
+    patients_qs = services.search_patients_with_coverage(query)
     paginator = Paginator(patients_qs, 20)
     page = paginator.get_page(page_number)
 

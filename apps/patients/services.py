@@ -12,6 +12,39 @@ if TYPE_CHECKING:
     from apps.clinical_docs.models import ClinicalEvent
 
 
+def search_patients_with_coverage(
+    query: str | None = None,
+) -> QuerySet[Patient]:
+    """Search patients annotated with admission coverage metrics.
+
+    Returns patients ordered by name, each annotated with:
+      - admissions_total: count of all known admissions
+      - admissions_with_events: count of admissions that have at least 1 event
+
+    The "without events" count is computed in the template as
+    total - with_events to keep the SQL simple.
+    """
+    qs = Patient.objects.annotate(
+        admissions_total=Count("admissions"),
+        admissions_with_events=Count(
+            "admissions",
+            filter=Q(admissions__events__isnull=False),
+        ),
+        admissions_without_events=(
+            Count("admissions")
+            - Count(
+                "admissions",
+                filter=Q(admissions__events__isnull=False),
+            )
+        ),
+    )
+    if query:
+        qs = qs.filter(
+            Q(name__icontains=query) | Q(patient_source_key__icontains=query)
+        )
+    return qs.order_by("name")
+
+
 def search_patients(query: str | None = None) -> QuerySet[Patient]:
     """Search patients by name or patient_source_key.
 

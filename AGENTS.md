@@ -15,14 +15,28 @@
 
 ## 2. Comandos de validação (Quality Gate)
 
-- Instalar dependências: `uv sync`
-- Django check: `uv run python manage.py check`
-- Testes: `uv run pytest -q`
-- Lint: `uv run ruff check config apps tests manage.py`
-- Type check: `uv run mypy config apps tests manage.py`
+### Caminho oficial (obrigatório)
+
+- Django check: `./scripts/test-in-container.sh check`
+- Testes unitários: `./scripts/test-in-container.sh unit`
+- Testes integração: `./scripts/test-in-container.sh integration`
+- Lint: `./scripts/test-in-container.sh lint`
+- Type check: `./scripts/test-in-container.sh typecheck`
+- Gate completo: `./scripts/test-in-container.sh quality-gate`
+
+### Ferramentas auxiliares
+
+- Instalar dependências locais: `uv sync`
 - Markdown autofix: `./scripts/markdown-format.sh`
 - Markdown lint: `./scripts/markdown-lint.sh`
-- Regra de documentação: todo arquivo `.md` criado/alterado deve passar no lint (`npx markdownlint-cli2 "**/*.md"` ou script do projeto).
+
+### Regra operacional
+
+- Execução host-only (`uv run pytest ...`) é **diagnóstico local**, não gate
+  oficial.
+- Motivo: `POSTGRES_HOST=db` resolve apenas na rede Docker Compose; no host
+  pode falhar com `failed to resolve host 'db'`.
+- Regra de documentação: todo `.md` criado/alterado deve passar no lint.
 
 ## 3. Comandos essenciais (operação local)
 
@@ -42,6 +56,12 @@ uv run python manage.py runserver
 ```
 
 ### Testes rápidos
+
+```bash
+./scripts/test-in-container.sh unit
+```
+
+### Testes host-only (somente diagnóstico)
 
 ```bash
 uv run pytest -q tests/unit
@@ -95,10 +115,10 @@ git config core.hooksPath .githooks
 
 ## 7. Definition of Done (DoD)
 
-- [ ] `uv run python manage.py check` sem erro
-- [ ] testes relevantes passando
-- [ ] `uv run ruff check config apps tests manage.py` sem erro
-- [ ] `uv run mypy config apps tests manage.py` sem erro relevante ou com exceções justificadas
+- [ ] `./scripts/test-in-container.sh check` sem erro
+- [ ] testes relevantes passando (`./scripts/test-in-container.sh unit` ou `quality-gate`)
+- [ ] `./scripts/test-in-container.sh lint` sem erro
+- [ ] `./scripts/test-in-container.sh typecheck` sem erro relevante ou com exceções justificadas
 - [ ] markdown lint sem erro quando houver mudança em `.md` (preferencialmente validado com `markdownlint-cli2`)
 - [ ] artefatos OpenSpec atualizados quando aplicável
 - [ ] sem credenciais nem dados reais no diff
@@ -120,7 +140,7 @@ Read AGENTS.md and PROJECT_CONTEXT.md first.
 Review active OpenSpec changes before coding.
 Implement ONLY the next incomplete slice.
 Use TDD (red -> green -> refactor) for the slice.
-Use uv for Python commands.
+Use containerized quality-gate commands (scripts/test-in-container.sh).
 Generate /tmp/sirhosp-slice-<ID>-report.md with before/after code snippets.
 Run relevant validation commands, update artifacts, then STOP.
 ```

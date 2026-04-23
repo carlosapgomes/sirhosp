@@ -30,6 +30,11 @@ class IngestionRun(models.Model):
     events_skipped = models.PositiveIntegerField(default=0)
     events_revised = models.PositiveIntegerField(default=0)
 
+    # S3 - Admission metrics
+    admissions_seen = models.PositiveIntegerField(default=0)
+    admissions_created = models.PositiveIntegerField(default=0)
+    admissions_updated = models.PositiveIntegerField(default=0)
+
     parameters_json = models.JSONField(
         default=dict, blank=True,
     )
