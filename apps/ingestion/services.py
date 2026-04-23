@@ -190,6 +190,9 @@ def queue_ingestion_run(
     patient_record: str,
     start_date: str,
     end_date: str,
+    intent: str = "",
+    admission_id: str = "",
+    admission_source_key: str = "",
 ) -> IngestionRun:
     """Create an IngestionRun in queued state for async processing.
 
@@ -197,17 +200,30 @@ def queue_ingestion_run(
         patient_record: Patient record identifier (prontuário).
         start_date: Start date in YYYY-MM-DD format.
         end_date: End date in YYYY-MM-DD format.
+        intent: Operational intent metadata (optional).
+        admission_id: Local admission identifier (optional).
+        admission_source_key: Source admission identifier (optional).
 
     Returns:
         IngestionRun instance with status=queued.
     """
+    parameters = {
+        "patient_record": patient_record,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+    if intent:
+        parameters["intent"] = intent
+    if admission_id:
+        parameters["admission_id"] = admission_id
+    if admission_source_key:
+        parameters["admission_source_key"] = admission_source_key
+
     return IngestionRun.objects.create(
         status="queued",
-        parameters_json={
-            "patient_record": patient_record,
-            "start_date": start_date,
-            "end_date": end_date,
-        },
+        intent=intent,
+        parameters_json=parameters,
     )
 
 

@@ -25,6 +25,11 @@ def create_run(request: HttpRequest) -> HttpResponse:
         patient_record = request.POST.get("patient_record", "").strip()
         start_date = request.POST.get("start_date", "").strip()
         end_date = request.POST.get("end_date", "").strip()
+        intent = request.POST.get("intent", "").strip()
+        admission_id = request.POST.get("admission_id", "").strip()
+        admission_source_key = request.POST.get(
+            "admission_source_key", ""
+        ).strip()
 
         # Validation
         if not patient_record:
@@ -58,6 +63,9 @@ def create_run(request: HttpRequest) -> HttpResponse:
                 patient_record=patient_record,
                 start_date=start_date,
                 end_date=end_date,
+                intent=intent,
+                admission_id=admission_id,
+                admission_source_key=admission_source_key,
             )
             return redirect("ingestion:run_status", run_id=run.pk)
 
@@ -134,6 +142,8 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
     # Determine run type label
     if intent == "admissions_only":
         run_type_label = "Sincronização de internações"
+    elif intent == "full_admission_sync":
+        run_type_label = "Sincronização completa de internação"
     else:
         run_type_label = "Extração de evoluções"
 
@@ -144,6 +154,34 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         and run.admissions_seen == 0
     )
 
+    admission_id = params.get("admission_id", "")
+    admission_source_key = params.get("admission_source_key", "")
+
+    # S3: Build patient admissions URL for successful admissions-only sync
+    patient_admissions_url = ""
+    if (
+        intent == "admissions_only"
+        and run.status == "succeeded"
+        and run.admissions_seen > 0
+    ):
+        patient_record = params.get("patient_record", "")
+        if patient_record:
+            from apps.patients.models import Patient
+
+            patient = (
+                Patient.objects.filter(
+                    patient_source_key=patient_record
+                )
+                .order_by("pk")
+                .first()
+            )
+            if patient:
+                from django.urls import reverse
+
+                patient_admissions_url = reverse(
+                    "patients:admission_list", args=[patient.pk]
+                )
+
     context = {
         "run": run,
         "status_label": status_labels.get(run.status, run.status),
@@ -153,7 +191,10 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         "end_date": params.get("end_date", "—"),
         "intent": intent,
         "run_type_label": run_type_label,
+        "admission_id": admission_id,
+        "admission_source_key": admission_source_key,
         "no_admissions": no_admissions,
+        "patient_admissions_url": patient_admissions_url,
     }
 
     return render(request, "ingestion/run_status.html", context)

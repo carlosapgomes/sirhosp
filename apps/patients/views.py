@@ -50,9 +50,12 @@ def admission_list_view(
 
     admissions = services.list_admissions_for_patient(patient_id)
 
+    from datetime import date as date_mod
+
     context = {
         "patient": patient,
         "admissions": admissions,
+        "today": date_mod.today().isoformat(),
     }
     return render(request, "patients/admission_list.html", context)
 

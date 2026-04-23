@@ -28,6 +28,7 @@ services:
       UV_PROJECT_ENVIRONMENT: /opt/venv
       UV_CACHE_DIR: /opt/.uv_cache
       UV_NO_CACHE: "1"
+      RUFF_CACHE_DIR: /tmp/.ruff_cache
     depends_on:
       db:
         condition: service_healthy

@@ -21,7 +21,15 @@
         {% endif %}
       </div>
 
-      <h1 class="h4 mb-3">{% if intent == 'admissions_only' %}Status: Sincronização de Internações #{{ run.pk }}{% else %}Status da Extração #{{ run.pk }}{% endif %}</h1>
+      <h1 class="h4 mb-3">
+        {% if intent == 'admissions_only' %}
+          Status: Sincronização de Internações #{{ run.pk }}
+        {% elif intent == 'full_admission_sync' %}
+          Status: Sincronização Completa da Internação #{{ run.pk }}
+        {% else %}
+          Status da Extração #{{ run.pk }}
+        {% endif %}
+      </h1>
 
       <div class="card mb-3">
         <div class="card-body">
@@ -36,6 +44,17 @@
 
             <dt class="col-sm-4">Registro</dt>
             <dd class="col-sm-8">{{ patient_record }}</dd>
+
+            {% if admission_source_key or admission_id %}
+              <dt class="col-sm-4">Internação</dt>
+              <dd class="col-sm-8">
+                {% if admission_source_key %}
+                  {{ admission_source_key }}
+                {% else %}
+                  #{{ admission_id }}
+                {% endif %}
+              </dd>
+            {% endif %}
 
             {% if intent != 'admissions_only' %}
               <dt class="col-sm-4">Período</dt>
@@ -116,6 +135,11 @@
         <div class="alert alert-success" role="alert">
           <strong>Internações sincronizadas com sucesso!</strong>
           {{ run.admissions_seen }} internação(ões) encontrada(s).
+          {% if patient_admissions_url %}
+            <div class="mt-2">
+              <a href="{{ patient_admissions_url }}" class="btn btn-primary btn-sm">Selecionar internação</a>
+            </div>
+          {% endif %}
         </div>
       {% elif run.status == 'queued' %}
         <div class="alert alert-info" role="alert">

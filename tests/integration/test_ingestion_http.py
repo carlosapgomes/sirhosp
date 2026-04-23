@@ -544,3 +544,66 @@ class TestAdmissionsOnlyRunHTTP:
         )
         assert "nova extração" not in body
         assert "voltar para pacientes" in body
+
+
+@pytest.mark.django_db
+class TestFullAdmissionSyncRunHTTP:
+    """S3: HTTP tests for full-admission-sync run creation (from admission selection)."""
+
+    def _login(self, client):
+        from django.contrib.auth.models import User
+        user = User.objects.create_user(username="testuser_fullsync", password="testpass123")
+        client.force_login(user)
+
+    def test_create_run_with_admission_derived_dates_succeeds(self):
+        """POST from admission CTA persists full-sync intent and context."""
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run")
+        response = client.post(
+            url,
+            {
+                "patient_record": "12345",
+                "start_date": "2026-04-15",
+                "end_date": "2026-04-23",
+                "intent": "full_admission_sync",
+                "admission_id": "77",
+                "admission_source_key": "ADM-2026-77",
+            },
+        )
+        assert response.status_code == 302
+        run = IngestionRun.objects.get()
+        assert run.status == "queued"
+        assert run.intent == "full_admission_sync"
+        params = run.parameters_json
+        assert params["patient_record"] == "12345"
+        assert params["start_date"] == "2026-04-15"
+        assert params["end_date"] == "2026-04-23"
+        assert params["intent"] == "full_admission_sync"
+        assert params["admission_id"] == "77"
+        assert params["admission_source_key"] == "ADM-2026-77"
+
+    def test_run_status_shows_full_sync_date_range(self):
+        """Status page for full-sync run shows date range and admission context."""
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="full_admission_sync",
+            parameters_json={
+                "patient_record": "12345",
+                "start_date": "2026-04-15",
+                "end_date": "2026-04-23",
+                "intent": "full_admission_sync",
+                "admission_id": "77",
+                "admission_source_key": "ADM-2026-77",
+            },
+        )
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "Sincronização completa de internação" in content
+        assert "ADM-2026-77" in content
+        assert "2026-04-15" in content
+        assert "2026-04-23" in content

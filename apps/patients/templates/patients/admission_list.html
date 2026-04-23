@@ -62,9 +62,26 @@
               </small>
             </p>
 
-            <a href="{% url 'patients:timeline' admission.pk %}" class="btn btn-outline-primary btn-sm">
-              Ver timeline &rarr;
-            </a>
+            <div class="d-flex flex-wrap gap-2 align-items-center">
+              <a href="{% url 'patients:timeline' admission.pk %}" class="btn btn-outline-primary btn-sm">
+                Ver timeline &rarr;
+              </a>
+
+              {% if admission.admission_date %}
+                <form method="post" action="{% url 'ingestion:create_run' %}" class="d-inline">
+                  {% csrf_token %}
+                  <input type="hidden" name="patient_record" value="{{ patient.patient_source_key }}">
+                  <input type="hidden" name="start_date" value="{{ admission.admission_date|date:'Y-m-d' }}">
+                  <input type="hidden" name="end_date" value="{% if admission.discharge_date %}{{ admission.discharge_date|date:'Y-m-d' }}{% else %}{{ today }}{% endif %}">
+                  <input type="hidden" name="intent" value="full_admission_sync">
+                  <input type="hidden" name="admission_id" value="{{ admission.pk }}">
+                  <input type="hidden" name="admission_source_key" value="{{ admission.source_admission_key }}">
+                  <button type="submit" class="btn btn-primary btn-sm">
+                    Sincronizar internação completa
+                  </button>
+                </form>
+              {% endif %}
+            </div>
           </div>
         </div>
       {% empty %}

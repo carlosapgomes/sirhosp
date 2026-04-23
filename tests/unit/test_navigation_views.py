@@ -724,6 +724,126 @@ class TestCardLayout:
 # =========================================================================
 
 
+# =========================================================================
+# Test: S3 — Admission selection with full-sync CTA
+# =========================================================================
+
+
+class TestAdmissionListFullSyncCTA:
+    """S3: Each admission shows a CTA to 'Sincronizar internação completa'."""
+
+    def test_admission_card_has_full_sync_cta(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+    ) -> None:
+        """Each admission card has a 'Sincronizar internação completa' button."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Sincronizar internação completa" in content
+
+    def test_full_sync_cta_posts_to_ingestion_create(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+    ) -> None:
+        """Full-sync CTA posts intent and admission context to create_run."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "/ingestao/criar/" in content
+        assert 'name="intent" value="full_admission_sync"' in content
+        assert f'name="admission_id" value="{admission_maria_2.pk}"' in content
+        assert (
+            "name=\"admission_source_key\" "
+            f"value=\"{admission_maria_2.source_admission_key}\""
+        ) in content
+
+    def test_full_sync_cta_includes_admission_date_range(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+    ) -> None:
+        """Full-sync CTA includes start_date from admission_date."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        # Should include the admission date as start_date
+        assert "2026-04-15" in content
+
+    def test_full_sync_cta_with_discharge_uses_discharge_date(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_1: Admission,
+    ) -> None:
+        """Full-sync CTA for discharged admission uses discharge_date as end."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        # admission_maria_1 has discharge_date 2026-03-05
+        assert "2026-03-05" in content
+
+    def test_full_sync_cta_without_discharge_uses_today(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+    ) -> None:
+        """Full-sync CTA for ongoing admission uses today as end_date."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        # admission_maria_2 has no discharge_date, should use today
+        from datetime import date
+        today_str = date.today().isoformat()
+        assert today_str in content
+
+
+class TestAdmissionListPostSyncRedirection:
+    """S3: After admissions sync, user should be redirected to admission list."""
+
+    def test_run_status_admissions_only_success_links_to_patient_admissions(
+        self,
+        auth_client: Client,
+        db: object,
+    ) -> None:
+        """Successful admissions-only run status links to patient admission list."""
+        from apps.ingestion.models import IngestionRun
+
+        # Create a patient and admission first
+        patient = Patient.objects.create(
+            patient_source_key="P999",
+            source_system="tasy",
+            name="TEST PATIENT",
+        )
+        run = IngestionRun.objects.create(
+            status="succeeded",
+            parameters_json={
+                "patient_record": "P999",
+                "intent": "admissions_only",
+            },
+            admissions_seen=1,
+            admissions_created=1,
+            admissions_updated=0,
+        )
+        response = auth_client.get(
+            f"/ingestao/status/{run.pk}/"
+        )
+        content = response.content.decode()
+        # Should link to patient admissions page
+        assert f"/patients/{patient.pk}/admissions/" in content
+
+
 class TestAdmissionCoverageBadge:
     """Badge 'Sem eventos extraídos' when event_count == 0 (Slice S4).
 
