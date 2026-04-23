@@ -14,9 +14,9 @@
         <a href="/patients/" class="text-decoration-none">&larr; Lista de pacientes</a>
       </div>
 
-      <h1 class="h4 mb-3">Extração sob demanda</h1>
+      <h1 class="h4 mb-3">Extração por período (avançado)</h1>
       <p class="text-muted mb-4">
-        Informe o registro do paciente e o período para iniciar a extração de evoluções clínicas.
+        Ajuste o período de extração de evoluções clínicas para o paciente selecionado.
       </p>
 
       {% if errors %}
@@ -45,13 +45,22 @@
             <div class="row mb-3">
               <div class="col-md-6">
                 <label for="start_date" class="form-label">Data inicial</label>
-                <input type="date" class="form-control" id="start_date" name="start_date" required>
+                <input type="date" class="form-control" id="start_date" name="start_date" required
+                       value="{{ initial_start_date }}">
               </div>
               <div class="col-md-6">
                 <label for="end_date" class="form-label">Data final</label>
-                <input type="date" class="form-control" id="end_date" name="end_date" required>
+                <input type="date" class="form-control" id="end_date" name="end_date" required
+                       value="{{ initial_end_date }}">
               </div>
             </div>
+
+            {% if initial_admission_id %}
+            <input type="hidden" name="admission_id" value="{{ initial_admission_id }}">
+            {% endif %}
+            {% if initial_admission_source_key %}
+            <input type="hidden" name="admission_source_key" value="{{ initial_admission_source_key }}">
+            {% endif %}
 
             <div class="d-grid d-sm-flex gap-2">
               <button type="submit" class="btn btn-primary">Iniciar extração</button>

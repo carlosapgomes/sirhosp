@@ -10,14 +10,19 @@ from django.shortcuts import redirect, render
 
 from apps.ingestion.models import IngestionRun
 from apps.ingestion.services import queue_admissions_only_run, queue_ingestion_run
+from apps.patients.models import Admission
 
 
 @login_required
 def create_run(request: HttpRequest) -> HttpResponse:
     """Render form and process on-demand ingestion run creation.
 
-    GET: renders the form.
-    POST: validates and creates a queued IngestionRun, then redirects to status.
+    S4: This is now a contextual secondary route.
+    - GET without valid patient_record+admission_id redirects to /patients/.
+    - GET with valid context prefills patient_record, start_date, end_date
+      from the admission boundaries.
+    - POST preserves the run creation logic; validation errors re-render form
+      with POST data (not GET params).
     """
     errors: list[str] = []
 
@@ -58,6 +63,48 @@ def create_run(request: HttpRequest) -> HttpResponse:
         if parsed_start and parsed_end and parsed_end < parsed_start:
             errors.append("Data final não pode ser anterior à data inicial.")
 
+        # S4: contextual period must stay within selected admission bounds.
+        if admission_id and parsed_start and parsed_end:
+            try:
+                admission_obj = Admission.objects.select_related("patient").get(
+                    pk=int(admission_id)
+                )
+            except (Admission.DoesNotExist, ValueError, TypeError):
+                errors.append(
+                    "Contexto da internação inválido. Reabra pela lista de internações."
+                )
+            else:
+                if admission_obj.patient.patient_source_key != patient_record:
+                    errors.append(
+                        "A internação informada não pertence ao registro selecionado."
+                    )
+                elif (
+                    admission_source_key
+                    and admission_obj.source_admission_key != admission_source_key
+                ):
+                    errors.append(
+                        "A chave da internação não confere com o contexto selecionado."
+                    )
+                elif admission_obj.admission_date is None:
+                    errors.append(
+                        "Internação sem data de entrada válida para extrair período."
+                    )
+                else:
+                    admission_start = admission_obj.admission_date.date()
+                    admission_end = (
+                        admission_obj.discharge_date.date()
+                        if admission_obj.discharge_date
+                        else date.today()
+                    )
+                    if (
+                        parsed_start < admission_start
+                        or parsed_end > admission_end
+                    ):
+                        errors.append(
+                            "Período fora dos limites da internação selecionada "
+                            f"({admission_start.isoformat()} a {admission_end.isoformat()})."
+                        )
+
         if not errors:
             run = queue_ingestion_run(
                 patient_record=patient_record,
@@ -69,13 +116,64 @@ def create_run(request: HttpRequest) -> HttpResponse:
             )
             return redirect("ingestion:run_status", run_id=run.pk)
 
-    # Prefill from querystring (contextual navigation)
-    initial_patient_record = request.GET.get("patient_record", "")
+        # POST with errors: re-render with POST data
+        return render(
+            request,
+            "ingestion/create_run.html",
+            {
+                "errors": errors,
+                "initial_patient_record": patient_record,
+                "initial_start_date": start_date,
+                "initial_end_date": end_date,
+                "initial_admission_id": admission_id,
+                "initial_admission_source_key": admission_source_key,
+            },
+        )
+
+    # --- GET: Contextual access logic ---
+    initial_patient_record = request.GET.get("patient_record", "").strip()
+    admission_id_param = request.GET.get("admission_id", "").strip()
+
+    # Without both patient_record and admission_id, redirect to /patients/
+    if not initial_patient_record or not admission_id_param:
+        return redirect("/patients/")
+
+    # Validate admission exists and belongs to the patient
+    initial_start_date = ""
+    initial_end_date = ""
+
+    try:
+        admission_obj = Admission.objects.select_related("patient").get(
+            pk=int(admission_id_param)
+        )
+    except (Admission.DoesNotExist, ValueError, TypeError):
+        return redirect("/patients/")
+
+    # Verify patient_source_key matches
+    if admission_obj.patient.patient_source_key != initial_patient_record:
+        return redirect("/patients/")
+
+    # Prefill dates from admission boundaries
+    if admission_obj.admission_date:
+        initial_start_date = admission_obj.admission_date.strftime("%Y-%m-%d")
+    if admission_obj.discharge_date:
+        initial_end_date = admission_obj.discharge_date.strftime("%Y-%m-%d")
+    else:
+        initial_end_date = date.today().isoformat()
+
+    initial_admission_source_key = admission_obj.source_admission_key
 
     return render(
         request,
         "ingestion/create_run.html",
-        {"errors": errors, "initial_patient_record": initial_patient_record},
+        {
+            "errors": errors,
+            "initial_patient_record": initial_patient_record,
+            "initial_start_date": initial_start_date,
+            "initial_end_date": initial_end_date,
+            "initial_admission_id": admission_id_param,
+            "initial_admission_source_key": initial_admission_source_key,
+        },
     )
 
 

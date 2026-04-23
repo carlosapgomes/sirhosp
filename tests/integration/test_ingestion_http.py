@@ -7,11 +7,16 @@ Tests the user-facing endpoints:
 
 from __future__ import annotations
 
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 from django.test import Client
 from django.urls import reverse
 
 from apps.ingestion.models import IngestionRun
+
+TZ = ZoneInfo("America/Sao_Paulo")
 
 
 @pytest.mark.django_db
@@ -72,13 +77,14 @@ class TestCreateIngestionRunView:
         user = User.objects.create_user(username="testuser", password="testpass123")
         client.force_login(user)
 
-    def test_create_run_returns_200_on_get(self):
-        """GET to the create-run endpoint renders the form."""
+    def test_create_run_get_without_context_redirects_to_patients(self):
+        """GET to create-run without context redirects to /patients/."""
         client = Client()
         self._login(client)
         url = reverse("ingestion:create_run")
         response = client.get(url)
-        assert response.status_code == 200
+        assert response.status_code == 302
+        assert "/patients/" in response.url
 
     def test_create_run_post_success(self):
         """POST with valid data creates a queued IngestionRun and redirects."""
@@ -395,23 +401,194 @@ class TestCreateRunPrefill:
         user = User.objects.create_user(username="testuser_pf", password="testpass123")
         client.force_login(user)
 
-    def test_get_with_patient_record_prefills_form(self):
-        """GET /ingestao/criar/?patient_record=P100 prefills the field."""
+    def test_get_with_patient_record_and_admission_prefills_form(self):
+        """GET /ingestao/criar/?patient_record=P100&admission_id=X prefills fields."""
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            patient_source_key="P100",
+            source_system="tasy",
+            name="TEST PREFILL",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-PF",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 1, 10, 0, tzinfo=TZ),
+            discharge_date=datetime(2026, 4, 10, 14, 0, tzinfo=TZ),
+            ward="UTI",
+        )
+
         client = Client()
         self._login(client)
-        url = reverse("ingestion:create_run") + "?patient_record=P100"
+        url = reverse("ingestion:create_run") + f"?patient_record=P100&admission_id={admission.pk}"
         response = client.get(url)
         assert response.status_code == 200
         content = response.content.decode("utf-8")
         assert "P100" in content
+        assert "2026-04-01" in content
+        assert "2026-04-10" in content
 
-    def test_get_without_patient_record_renders_empty_form(self):
-        """GET /ingestao/criar/ without prefill renders empty field."""
+    def test_get_with_patient_record_and_admission_without_discharge_uses_today(self):
+        """GET with admission that has no discharge_date prefills end_date as today."""
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            patient_source_key="P101",
+            source_system="tasy",
+            name="TEST NO DISCHARGE",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-ND",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 1, 10, 0, tzinfo=TZ),
+            ward="UTI",
+        )
+
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run") + f"?patient_record=P101&admission_id={admission.pk}"
+        response = client.get(url)
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        today_str = date.today().isoformat()
+        assert "2026-04-01" in content
+        assert today_str in content
+
+    def test_get_without_context_redirects_to_patients(self):
+        """GET /ingestao/criar/ without patient_record redirects to /patients/."""
         client = Client()
         self._login(client)
         url = reverse("ingestion:create_run")
         response = client.get(url)
+        assert response.status_code == 302
+        assert "/patients/" in response.url
+
+    def test_get_with_patient_record_but_invalid_admission_redirects(self):
+        """GET with valid patient_record but nonexistent admission_id redirects."""
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run") + "?patient_record=P100&admission_id=99999"
+        response = client.get(url)
+        assert response.status_code == 302
+        assert "/patients/" in response.url
+
+    def test_post_with_admission_context_creates_run(self):
+        """POST from contextual flow creates a run with admission context."""
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            patient_source_key="P100",
+            source_system="tasy",
+            name="TEST POST CTX",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-CTX",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 1, 10, 0, tzinfo=TZ),
+            discharge_date=datetime(2026, 4, 10, 14, 0, tzinfo=TZ),
+            ward="UTI",
+        )
+
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run")
+        response = client.post(
+            url,
+            {
+                "patient_record": "P100",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-10",
+                "admission_id": str(admission.pk),
+                "admission_source_key": "ADM-CTX",
+            },
+        )
+        assert response.status_code == 302
+        run = IngestionRun.objects.get()
+        assert run.parameters_json["patient_record"] == "P100"
+        assert run.parameters_json["start_date"] == "2026-04-01"
+        assert run.parameters_json["end_date"] == "2026-04-10"
+        assert run.parameters_json["admission_id"] == str(admission.pk)
+        assert run.parameters_json["admission_source_key"] == "ADM-CTX"
+
+    def test_post_with_context_rejects_out_of_bounds_range(self):
+        """POST with range outside admission bounds returns validation error."""
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            patient_source_key="P100",
+            source_system="tasy",
+            name="TEST OOB",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-OOB",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 1, 10, 0, tzinfo=TZ),
+            discharge_date=datetime(2026, 4, 10, 14, 0, tzinfo=TZ),
+            ward="UTI",
+        )
+
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run")
+        response = client.post(
+            url,
+            {
+                "patient_record": "P100",
+                "start_date": "2026-03-31",
+                "end_date": "2026-04-10",
+                "admission_id": str(admission.pk),
+                "admission_source_key": "ADM-OOB",
+            },
+        )
+
         assert response.status_code == 200
+        assert IngestionRun.objects.count() == 0
+        assert "fora dos limites" in response.content.decode("utf-8").lower()
+
+    def test_post_with_context_rejects_patient_mismatch(self):
+        """POST with admission from another patient returns validation error."""
+        from apps.patients.models import Admission, Patient
+
+        owner = Patient.objects.create(
+            patient_source_key="P100",
+            source_system="tasy",
+            name="OWNER",
+        )
+        Patient.objects.create(
+            patient_source_key="P200",
+            source_system="tasy",
+            name="OTHER",
+        )
+        admission = Admission.objects.create(
+            patient=owner,
+            source_admission_key="ADM-OWN",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 1, 10, 0, tzinfo=TZ),
+            discharge_date=datetime(2026, 4, 10, 14, 0, tzinfo=TZ),
+            ward="UTI",
+        )
+
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run")
+        response = client.post(
+            url,
+            {
+                "patient_record": "P200",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-10",
+                "admission_id": str(admission.pk),
+                "admission_source_key": "ADM-OWN",
+            },
+        )
+
+        assert response.status_code == 200
+        assert IngestionRun.objects.count() == 0
+        assert "não pertence ao registro" in response.content.decode("utf-8").lower()
 
 
 @pytest.mark.django_db
@@ -557,6 +734,22 @@ class TestFullAdmissionSyncRunHTTP:
 
     def test_create_run_with_admission_derived_dates_succeeds(self):
         """POST from admission CTA persists full-sync intent and context."""
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            patient_source_key="12345",
+            source_system="tasy",
+            name="TEST FULLSYNC",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-2026-77",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 15, 8, 0, tzinfo=TZ),
+            discharge_date=datetime(2026, 4, 23, 10, 0, tzinfo=TZ),
+            ward="UTI",
+        )
+
         client = Client()
         self._login(client)
         url = reverse("ingestion:create_run")
@@ -567,7 +760,7 @@ class TestFullAdmissionSyncRunHTTP:
                 "start_date": "2026-04-15",
                 "end_date": "2026-04-23",
                 "intent": "full_admission_sync",
-                "admission_id": "77",
+                "admission_id": str(admission.pk),
                 "admission_source_key": "ADM-2026-77",
             },
         )
@@ -580,7 +773,7 @@ class TestFullAdmissionSyncRunHTTP:
         assert params["start_date"] == "2026-04-15"
         assert params["end_date"] == "2026-04-23"
         assert params["intent"] == "full_admission_sync"
-        assert params["admission_id"] == "77"
+        assert params["admission_id"] == str(admission.pk)
         assert params["admission_source_key"] == "ADM-2026-77"
 
     def test_run_status_shows_full_sync_date_range(self):

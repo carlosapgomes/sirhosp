@@ -900,3 +900,95 @@ class TestAdmissionCoverageBadge:
         # Both admissions should be visible
         assert "UTI" in content
         assert "CLINICA MEDICA" in content
+
+
+# =========================================================================
+# Test: S4 — /ingestao/criar/ contextual redirect and prefill
+# =========================================================================
+
+
+class TestIngestionCreateContextualAccess:
+    """S4: /ingestao/criar/ behaves as contextual secondary route."""
+
+    def test_direct_access_without_context_redirects_to_patients(
+        self,
+        auth_client: Client,
+        db: object,
+    ) -> None:
+        """Direct GET to /ingestao/criar/ without context redirects to /patients/."""
+        response = auth_client.get("/ingestao/criar/")
+        assert response.status_code == 302
+        assert "/patients/" in response.url  # type: ignore[attr-defined]
+
+    def test_access_with_only_patient_record_redirects_to_patients(
+        self,
+        auth_client: Client,
+        db: object,
+    ) -> None:
+        """GET with patient_record but no admission_id redirects to /patients/."""
+        response = auth_client.get("/ingestao/criar/?patient_record=P100")
+        assert response.status_code == 302
+        assert "/patients/" in response.url  # type: ignore[attr-defined]
+
+    def test_access_with_invalid_admission_id_redirects_to_patients(
+        self,
+        auth_client: Client,
+        db: object,
+    ) -> None:
+        """GET with invalid admission_id redirects to /patients/."""
+        response = auth_client.get(
+            "/ingestao/criar/?patient_record=P100&admission_id=99999"
+        )
+        assert response.status_code == 302
+        assert "/patients/" in response.url  # type: ignore[attr-defined]
+
+    def test_contextual_access_with_valid_admission_renders_200(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+    ) -> None:
+        """GET with valid patient_record+admission_id renders form with prefill."""
+        response = auth_client.get(
+            f"/ingestao/criar/?patient_record={patient_maria.patient_source_key}"
+            f"&admission_id={admission_maria_2.pk}"
+        )
+        assert response.status_code == 200
+        content = response.content.decode()
+        # Should show patient record prefilled
+        assert patient_maria.patient_source_key in content
+        # Should show admission date range prefilled
+        assert "2026-04-15" in content
+
+    def test_contextual_access_prefills_dates_from_admission(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_1: Admission,
+    ) -> None:
+        """GET with admission that has discharge_date prefills both dates."""
+        response = auth_client.get(
+            f"/ingestao/criar/?patient_record={patient_maria.patient_source_key}"
+            f"&admission_id={admission_maria_1.pk}"
+        )
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "2026-03-01" in content
+        assert "2026-03-05" in content
+
+    def test_contextual_access_ongoing_admission_prefills_today_as_end(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+    ) -> None:
+        """GET with admission that has no discharge uses today as end_date."""
+        response = auth_client.get(
+            f"/ingestao/criar/?patient_record={patient_maria.patient_source_key}"
+            f"&admission_id={admission_maria_2.pk}"
+        )
+        assert response.status_code == 200
+        content = response.content.decode()
+        from datetime import date as date_type
+        today_str = date_type.today().isoformat()
+        assert today_str in content
