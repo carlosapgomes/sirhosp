@@ -37,6 +37,19 @@
             <div>
               <h5 class="card-title mb-1">{{ patient.name }}</h5>
               <small class="text-muted">Registro: {{ patient.patient_source_key }}</small>
+              {% with total=patient.admissions_total with_ev=patient.admissions_with_events without_ev=patient.admissions_without_events %}
+                {% if total > 0 %}
+                    <div class="mt-1">
+                      <small class="text-muted">
+                        <span class="badge bg-secondary me-1">{{ total }} internação{{ total|pluralize }}</span>
+                        <span class="badge bg-success me-1" title="Com eventos extraídos">{{ with_ev }} c/ eventos</span>
+                        {% if without_ev > 0 %}
+                          <span class="badge bg-warning text-dark" title="Sem eventos extraídos">{{ without_ev }} s/ eventos</span>
+                        {% endif %}
+                      </small>
+                    </div>
+                  {% endif %}
+              {% endwith %}
             </div>
             <a href="{% url 'patients:admission_list' patient.pk %}" class="btn btn-outline-primary btn-sm align-self-start align-self-md-center">
               Internações &rarr;

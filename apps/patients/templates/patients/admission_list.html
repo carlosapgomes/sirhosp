@@ -46,6 +46,9 @@
               <span class="badge bg-primary rounded-pill">
                 {{ admission.event_count }} evento{{ admission.event_count|pluralize }}
               </span>
+              {% if admission.event_count == 0 %}
+                <span class="badge bg-warning text-dark">Sem eventos extraídos</span>
+              {% endif %}
             </div>
 
             <p class="card-text text-muted mb-2">

@@ -717,3 +717,66 @@ class TestCardLayout:
         content = response.content.decode()
         # Should have card-like structure
         assert "card" in content.lower()
+
+
+# =========================================================================
+# Test: Coverage badge in admission list (Slice S4)
+# =========================================================================
+
+
+class TestAdmissionCoverageBadge:
+    """Badge 'Sem eventos extraídos' when event_count == 0 (Slice S4).
+
+    Spec: admissions with zero extracted events are explicitly marked
+    as 'Sem eventos extraídos'.
+    """
+
+    def test_admission_without_events_shows_badge(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_1: Admission,
+        db: None,
+    ) -> None:
+        """Admission with no events shows 'Sem eventos extraídos' badge."""
+        # admission_maria_1 has no events (only admission_maria_2 has events)
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Sem eventos extraídos" in content
+
+    def test_admission_with_events_hides_no_events_badge(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        timeline_events: list[ClinicalEvent],
+        db: None,
+    ) -> None:
+        """Admission with events does NOT show 'Sem eventos extraídos' badge."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Sem eventos extraídos" not in content
+
+    def test_mixed_admissions_show_correct_badges(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_1: Admission,
+        admission_maria_2: Admission,
+        timeline_events: list[ClinicalEvent],
+        db: None,
+    ) -> None:
+        """Patient with mixed admissions (some with, some without events) shows both states."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        # The admission without events should show badge
+        assert "Sem eventos extraídos" in content
+        # Both admissions should be visible
+        assert "UTI" in content
+        assert "CLINICA MEDICA" in content

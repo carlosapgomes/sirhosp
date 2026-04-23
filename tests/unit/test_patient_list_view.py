@@ -224,7 +224,7 @@ class TestPatientListPagination:
         auth_client: Client,
         db: None,
     ) -> None:
-        """When there are few patients, page 1 shows all without pager."""
+        """"When there are few patients, page 1 shows all without pager."""
         Patient.objects.create(
             patient_source_key="P001",
             source_system="tasy",
@@ -240,7 +240,7 @@ class TestPatientListPagination:
         auth_client: Client,
         db: None,
     ) -> None:
-        """When patients exceed page size, pagination splits them."""
+        """"When patients exceed page size, pagination splits them."""
         # Create enough patients to trigger pagination (page_size is small)
         for i in range(30):
             Patient.objects.create(
@@ -253,3 +253,127 @@ class TestPatientListPagination:
         # Page 2 should also work
         resp2 = auth_client.get("/patients/", {"page": "2"})
         assert resp2.status_code == 200
+
+
+# =========================================================================
+# Test: Coverage summary per patient (Slice S4)
+# =========================================================================
+
+
+class TestPatientCoverageSummary:
+    """Coverage summary in patient list (Slice S4).
+
+
+    Spec: each listed patient includes coverage summary with:
+    - known admissions count,
+    - admissions with extracted events count,
+    - admissions without extracted events count
+    """
+
+    def test_patient_without_admissions_has_zero_coverage(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        db: None,
+    ) -> None:
+        """Patient with no admissions shows 0 for all coverage counters."""
+        resp = auth_client.get("/patients/")
+        content = resp.content.decode()
+        # Should still show the patient with zero coverage
+        assert "MARIA DA SILVA" in content
+        # Coverage summary should show 0 internations
+        assert "0" in content  # at least one zero visible
+
+    def test_patient_with_admissions_shows_total_count(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        db: None,
+    ) -> None:
+        """Patient with 2 admissions shows total admissions count."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from apps.patients.models import Admission
+
+        TZ = ZoneInfo("America/Sao_Paulo")
+        Admission.objects.create(
+            patient=patient_maria,
+            source_admission_key="ADM001",
+            source_system="tasy",
+            admission_date=datetime(2026, 3, 1, 10, 0, tzinfo=TZ),
+            discharge_date=datetime(2026, 3, 5, 14, 0, tzinfo=TZ),
+            ward="UTI",
+            bed="UTI-01",
+        )
+        Admission.objects.create(
+            patient=patient_maria,
+            source_admission_key="ADM002",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 15, 8, 0, tzinfo=TZ),
+            ward="CLINICA MEDICA",
+            bed="CM-12",
+        )
+        resp = auth_client.get("/patients/")
+        content = resp.content.decode()
+        # Should show the patient
+        assert "MARIA DA SILVA" in content
+        # Should show 2 internations known (badge or text)
+        assert "2" in content
+
+    def test_patient_with_some_admissions_with_events(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        db: None,
+    ) -> None:
+        """Patient shows known vs with-events vs without-events breakdown."""
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        from django.utils import timezone
+
+        from apps.clinical_docs.models import ClinicalEvent
+        from apps.ingestion.models import IngestionRun
+        from apps.patients.models import Admission
+
+        TZ = ZoneInfo("America/Sao_Paulo")
+        run = IngestionRun.objects.create(status="completed", parameters_json={})
+
+        # Admission without events
+        Admission.objects.create(
+            patient=patient_maria,
+            source_admission_key="ADM001",
+            source_system="tasy",
+            admission_date=datetime(2026, 3, 1, 10, 0, tzinfo=TZ),
+            discharge_date=datetime(2026, 3, 5, 14, 0, tzinfo=TZ),
+            ward="UTI",
+        )
+        # Admission with events
+        adm2 = Admission.objects.create(
+            patient=patient_maria,
+            source_admission_key="ADM002",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 15, 8, 0, tzinfo=TZ),
+            ward="CLINICA MEDICA",
+        )
+        now = timezone.now()
+        for i, (author, prof) in enumerate([
+            ("DR. CARLOS", "medica"),
+            ("ENF. ANA", "enfermagem"),
+        ]):
+            ClinicalEvent.objects.create(
+                admission=adm2,
+                patient=patient_maria,
+                ingestion_run=run,
+                event_identity_key=f"s4_ev{i}",
+                content_hash=f"s4_ch{i}",
+                happened_at=now - timedelta(hours=i + 1),
+                author_name=author,
+                profession_type=prof,
+                content_text=f"Evolucao {i} do paciente.",
+            )
+        resp = auth_client.get("/patients/")
+        content = resp.content.decode()
+        # Only 1 of 2 admissions has events
+        assert "1" in content  # at least one admission with events
