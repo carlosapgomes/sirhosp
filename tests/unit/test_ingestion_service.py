@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from apps.clinical_docs.models import ClinicalEvent
+from apps.ingestion.models import IngestionRun
 from apps.ingestion.services import (
     compute_content_hash,
     compute_event_identity_key,
@@ -792,3 +793,274 @@ class TestResolveAdmissionDeterministicFallback:
                 happened_at=datetime(2026, 4, 5, 10, 0, tzinfo=TZ_INST),
                 patient=patient_no_adm,
             )
+
+
+# ---------------------------------------------------------------------------
+# S2 - Consolidação de duplicatas pré-existentes (merge determinístico)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestDuplicateConsolidation:
+    """Test consolidation of pre-existing duplicate admissions during upsert.
+
+    Scenario: two admissions already exist for the same patient/period with
+    different source_admission_keys.  upsert_admission_snapshot must merge
+    them into one canonical admission, preserving all linked ClinicalEvents.
+    """
+
+    def _create_event(
+        self,
+        admission: Admission,
+        patient: Patient,
+        identity_key: str,
+    ) -> ClinicalEvent:
+        """Helper to create a ClinicalEvent linked to an admission."""
+        run = IngestionRun.objects.create(status="succeeded")
+        return ClinicalEvent.objects.create(
+            admission=admission,
+            patient=patient,
+            ingestion_run=run,
+            event_identity_key=identity_key,
+            content_hash=f"hash-{identity_key}",
+            happened_at=datetime(2026, 4, 5, 10, 0, tzinfo=TZ_INST),
+            author_name="DR. TEST",
+            profession_type="medica",
+            content_text=f"Conteúdo evento {identity_key}",
+        )
+
+    # --- Core merge scenario ---
+
+    def test_consolidates_duplicates_into_one(self, db: object) -> None:
+        """Two duplicate admissions for same patient/period must become one."""
+        patient = Patient.objects.create(
+            patient_source_key="P_MERGE1",
+            source_system="tasy",
+            name="PACIENTE MERGE1",
+        )
+        Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_DUP_A",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+        Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_DUP_B",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+        assert Admission.objects.filter(patient=patient).count() == 2
+
+        snapshot = [
+            {
+                "admission_key": "ADM_DUP_NEW",
+                "admission_start": "2026-04-01 08:00:00",
+                "admission_end": "2026-04-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot)
+
+        assert Admission.objects.filter(patient=patient).count() == 1
+
+    def test_events_reassigned_to_canonical(self, db: object) -> None:
+        """ClinicalEvents from duplicate admissions must be reassigned to the canonical one."""
+        patient = Patient.objects.create(
+            patient_source_key="P_MERGE2",
+            source_system="tasy",
+            name="PACIENTE MERGE2",
+        )
+        adm1 = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_EV_A",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+        adm2 = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_EV_B",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+
+        # Attach events to BOTH admissions
+        ev1 = self._create_event(adm1, patient, "EVT_001")
+        ev2 = self._create_event(adm2, patient, "EVT_002")
+        ev3 = self._create_event(adm2, patient, "EVT_003")
+
+        snapshot = [
+            {
+                "admission_key": "ADM_EV_NEW",
+                "admission_start": "2026-04-01 08:00:00",
+                "admission_end": "2026-04-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot)
+
+        # All 3 events must survive
+        assert ClinicalEvent.objects.filter(patient=patient).count() == 3
+
+        # All must point to the single remaining admission
+        canonical = Admission.objects.get(patient=patient)
+        for ev in [ev1, ev2, ev3]:
+            ev.refresh_from_db()
+            assert ev.admission_id == canonical.pk
+
+    def test_canonical_picks_highest_event_count(self, db: object) -> None:
+        """Canonical admission must be the one with the most events."""
+        patient = Patient.objects.create(
+            patient_source_key="P_MERGE3",
+            source_system="tasy",
+            name="PACIENTE MERGE3",
+        )
+        adm_few = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_FEW",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+        adm_many = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_MANY",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+
+        # adm_few gets 1 event, adm_many gets 3 events
+        self._create_event(adm_few, patient, "EVT_FEW_1")
+        self._create_event(adm_many, patient, "EVT_MANY_1")
+        self._create_event(adm_many, patient, "EVT_MANY_2")
+        self._create_event(adm_many, patient, "EVT_MANY_3")
+
+        snapshot = [
+            {
+                "admission_key": "ADM_CONSOLIDATE",
+                "admission_start": "2026-04-01 08:00:00",
+                "admission_end": "2026-04-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot)
+
+        canonical = Admission.objects.get(patient=patient)
+        # adm_many (with 3 events) should be canonical (survive)
+        assert canonical.pk == adm_many.pk
+
+    def test_canonical_tiebreak_lowest_id(self, db: object) -> None:
+        """When event_count is equal, the admission with lowest id wins."""
+        patient = Patient.objects.create(
+            patient_source_key="P_MERGE4",
+            source_system="tasy",
+            name="PACIENTE MERGE4",
+        )
+        adm_first = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_FIRST",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+        adm_second = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_SECOND",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+
+        # Same number of events on both (1 each)
+        self._create_event(adm_first, patient, "EVT_TIE_1")
+        self._create_event(adm_second, patient, "EVT_TIE_2")
+
+        snapshot = [
+            {
+                "admission_key": "ADM_TIE_NEW",
+                "admission_start": "2026-04-01 08:00:00",
+                "admission_end": "2026-04-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot)
+
+        canonical = Admission.objects.get(patient=patient)
+        assert canonical.pk == adm_first.pk  # lower id
+
+    def test_consolidates_no_events_on_either(self, db: object) -> None:
+        """Merge with no events on either duplicate — lower id wins."""
+        patient = Patient.objects.create(
+            patient_source_key="P_MERGE5",
+            source_system="tasy",
+            name="PACIENTE MERGE5",
+        )
+        adm1 = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_NE_1",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+        Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM_NE_2",
+            admission_date=datetime(2026, 4, 1, 8, 0, tzinfo=TZ_INST),
+            discharge_date=datetime(2026, 4, 10, 18, 0, tzinfo=TZ_INST),
+        )
+
+        snapshot = [
+            {
+                "admission_key": "ADM_NE_NEW",
+                "admission_start": "2026-04-01 08:00:00",
+                "admission_end": "2026-04-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot)
+
+        assert Admission.objects.filter(patient=patient).count() == 1
+        canonical = Admission.objects.get(patient=patient)
+        assert canonical.pk == adm1.pk  # lower id
+
+    def test_s1_no_regression_volatile_key(self, db: object) -> None:
+        """S1 rules still hold: volatile key scenario must not duplicate."""
+        patient = Patient.objects.create(
+            patient_source_key="P_REGRESS",
+            source_system="tasy",
+            name="PACIENTE REGRESS",
+        )
+        snapshot_v1 = [
+            {
+                "admission_key": "ADM_R_V1",
+                "admission_start": "2026-06-01 08:00:00",
+                "admission_end": "2026-06-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot_v1)
+
+        snapshot_v2 = [
+            {
+                "admission_key": "ADM_R_V2",
+                "admission_start": "2026-06-01 08:00:00",
+                "admission_end": "2026-06-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot_v2)
+
+        assert Admission.objects.filter(patient=patient).count() == 1

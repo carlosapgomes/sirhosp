@@ -322,6 +322,60 @@ def ingest_evolution(
 # ---------------------------------------------------------------------------
 
 
+def _consolidate_period_duplicates(
+    patient: Patient,
+    admission_date: datetime | None,
+    discharge_date: datetime | None,
+    source_system: str,
+) -> None:
+    """Merge duplicate admissions for the same patient+period into one canonical.
+
+    Canonical selection rules:
+      1. Highest event_count (via reverse FK relation).
+      2. Tie-break: lowest id.
+
+    Side effects:
+      - Re-points ClinicalEvent.admission from duplicates to canonical.
+      - Deletes non-canonical duplicate admissions.
+    """
+    if admission_date is None:
+        return
+
+    period_filter: dict[str, Any] = {
+        "patient": patient,
+        "source_system": source_system,
+        "admission_date": admission_date,
+    }
+    if discharge_date is not None:
+        period_filter["discharge_date"] = discharge_date
+    else:
+        period_filter["discharge_date__isnull"] = True
+
+    duplicates = list(Admission.objects.filter(**period_filter))
+    if len(duplicates) <= 1:
+        return
+
+    # Annotate event counts and pick canonical
+    event_counts = {
+        adm.id: ClinicalEvent.objects.filter(admission=adm).count()
+        for adm in duplicates
+    }
+    # Sort: highest event_count first, then lowest id
+    duplicates.sort(key=lambda a: (-event_counts[a.id], a.id))
+    canonical = duplicates[0]
+    non_canonical = duplicates[1:]
+
+    # Re-point events from non-canonical to canonical
+    non_canonical_ids = [a.id for a in non_canonical]
+    if non_canonical_ids:
+        ClinicalEvent.objects.filter(admission_id__in=non_canonical_ids).update(
+            admission_id=canonical.id
+        )
+
+    # Remove duplicate admissions
+    Admission.objects.filter(id__in=non_canonical_ids).delete()
+
+
 def upsert_admission_snapshot(
     patient: Patient,
     admissions_snapshot: list[dict[str, Any]],
@@ -373,7 +427,7 @@ def upsert_admission_snapshot(
 
         # 2) Fallback: match by patient + period (volatile key scenario)
         if admission is None and admission_date is not None:
-            period_filter = {
+            period_filter: dict[str, Any] = {
                 "patient": patient,
                 "source_system": source_system,
                 "admission_date": admission_date,
@@ -426,6 +480,11 @@ def upsert_admission_snapshot(
                     ]
                 )
                 updated += 1
+
+        # --- Consolidation (S2): merge duplicates for this period ---
+        _consolidate_period_duplicates(
+            patient, admission_date, discharge_date, source_system
+        )
 
     return {"created": created, "updated": updated}
 
