@@ -446,6 +446,109 @@ class TestUpsertAdmissionSnapshot:
         assert adm.ward == "Clinica Cirurgica"
         assert adm.bed == "CC-03"
 
+    # ---------------------------------------------------------------
+    # S1 - Reconciliação canônica por paciente+período
+    # ---------------------------------------------------------------
+
+    def test_volatile_key_same_period_does_not_duplicate(self, db: object) -> None:
+        """Second capture with same period but different admission_key must NOT create a new row."""
+        patient = Patient.objects.create(
+            patient_source_key="P_VOLATILE",
+            source_system="tasy",
+            name="PACIENTE VOLATILE",
+        )
+        # First capture: creates admission with key ADM_V1
+        snapshot_v1 = [
+            {
+                "admission_key": "ADM_V1",
+                "admission_start": "2026-04-01 08:00:00",
+                "admission_end": "2026-04-10 18:00:00",
+                "ward": "UTI",
+                "bed": "UTI-01",
+            },
+        ]
+        result1 = upsert_admission_snapshot(patient, snapshot_v1)
+        assert result1["created"] == 1
+
+        # Second capture: same period, different key (simulates volatile key)
+        snapshot_v2 = [
+            {
+                "admission_key": "ADM_V2_CHANGED",
+                "admission_start": "2026-04-01 08:00:00",
+                "admission_end": "2026-04-10 18:00:00",
+                "ward": "UTI",
+                "bed": "UTI-01",
+            },
+        ]
+        result2 = upsert_admission_snapshot(patient, snapshot_v2)
+
+        # Must NOT create a second admission
+        assert result2["created"] == 0
+        total = Admission.objects.filter(patient=patient).count()
+        assert total == 1
+
+    def test_volatile_key_reuses_existing_admission(self, db: object) -> None:
+        """Volatile key must reuse (update) the existing admission for the same period."""
+        patient = Patient.objects.create(
+            patient_source_key="P_VOLATILE2",
+            source_system="tasy",
+            name="PACIENTE VOLATILE2",
+        )
+        snapshot_v1 = [
+            {
+                "admission_key": "ADM_X",
+                "admission_start": "2026-05-01 08:00:00",
+                "admission_end": "2026-05-10 18:00:00",
+                "ward": "UTI",
+                "bed": "UTI-01",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot_v1)
+        original_adm = Admission.objects.get(patient=patient)
+
+        snapshot_v2 = [
+            {
+                "admission_key": "ADM_Y",
+                "admission_start": "2026-05-01 08:00:00",
+                "admission_end": "2026-05-10 18:00:00",
+                "ward": "Clinica Medica",
+                "bed": "CM-03",
+            },
+        ]
+        upsert_admission_snapshot(patient, snapshot_v2)
+
+        # Same admission row should be reused (same pk)
+        assert Admission.objects.filter(patient=patient).count() == 1
+        adm = Admission.objects.get(patient=patient)
+        assert adm.pk == original_adm.pk
+
+    def test_different_periods_still_create_distinct_admissions(self, db: object) -> None:
+        """Different periods for same patient must still create distinct admissions."""
+        patient = Patient.objects.create(
+            patient_source_key="P_DISTINCT",
+            source_system="tasy",
+            name="PACIENTE DISTINCT",
+        )
+        snapshot = [
+            {
+                "admission_key": "ADM_A",
+                "admission_start": "2026-01-01 08:00:00",
+                "admission_end": "2026-01-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+            {
+                "admission_key": "ADM_B",
+                "admission_start": "2026-03-01 08:00:00",
+                "admission_end": "2026-03-10 18:00:00",
+                "ward": "",
+                "bed": "",
+            },
+        ]
+        result = upsert_admission_snapshot(patient, snapshot)
+        assert result["created"] == 2
+        assert Admission.objects.filter(patient=patient).count() == 2
+
     def test_returns_correct_counts(self, db: object) -> None:
         """upsert_admission_snapshot should return correct created/updated counts."""
         patient = Patient.objects.create(

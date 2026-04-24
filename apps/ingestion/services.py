@@ -359,21 +359,43 @@ def upsert_admission_snapshot(
         ward = item.get("ward", "") or ""
         bed = item.get("bed", "") or ""
 
-        defaults: dict[str, Any] = {
-            "patient": patient,
-            "admission_date": admission_date,
-            "discharge_date": discharge_date,
-            "ward": ward,
-            "bed": bed,
-        }
+        # --- Reconciliation (S1): key first, period fallback ---
+        admission = None
 
-        admission, was_created = Admission.objects.get_or_create(
-            source_system=source_system,
-            source_admission_key=admission_key,
-            defaults=defaults,
-        )
+        # 1) Match by source admission key (stable key scenario)
+        try:
+            admission = Admission.objects.get(
+                source_system=source_system,
+                source_admission_key=admission_key,
+            )
+        except Admission.DoesNotExist:
+            pass
 
-        if was_created:
+        # 2) Fallback: match by patient + period (volatile key scenario)
+        if admission is None and admission_date is not None:
+            period_filter = {
+                "patient": patient,
+                "source_system": source_system,
+                "admission_date": admission_date,
+            }
+            # Only include discharge_date in the filter when both sides are non-null
+            if discharge_date is not None:
+                period_filter["discharge_date"] = discharge_date
+            else:
+                period_filter["discharge_date__isnull"] = True
+            admission = Admission.objects.filter(**period_filter).first()
+
+        # 3) Create only when no match found
+        if admission is None:
+            admission = Admission.objects.create(
+                patient=patient,
+                source_system=source_system,
+                source_admission_key=admission_key,
+                admission_date=admission_date,
+                discharge_date=discharge_date,
+                ward=ward,
+                bed=bed,
+            )
             created += 1
         else:
             # Update mutable fields only when new values are non-empty
