@@ -10,7 +10,6 @@ MENU_PATH_MAP = [
     ("/painel/", "dashboard"),
     ("/censo/", "censo"),
     ("/monitor/", "monitor"),
-    # /pacientes/ and /patients/ are separate URL patterns
 ]
 
 

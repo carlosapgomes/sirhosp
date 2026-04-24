@@ -84,7 +84,7 @@
 <!-- Quick actions -->
 <div class="row g-3">
   <div class="col-sm-6 col-lg-4">
-    <a href="/censo/" class="card border-0 shadow-sm text-decoration-none h-100">
+    <a href="{% url 'services_portal:censo' %}" class="card border-0 shadow-sm text-decoration-none h-100">
       <div class="card-body d-flex align-items-center gap-3">
         <i class="bi bi-hospital fs-3" style="color: var(--bs-primary);"></i>
         <div>
@@ -95,7 +95,7 @@
     </a>
   </div>
   <div class="col-sm-6 col-lg-4">
-    <a href="/pacientes/" class="card border-0 shadow-sm text-decoration-none h-100">
+    <a href="{% url 'patients:patient_list' %}" class="card border-0 shadow-sm text-decoration-none h-100">
       <div class="card-body d-flex align-items-center gap-3">
         <i class="bi bi-people fs-3" style="color: var(--bs-primary);"></i>
         <div>
@@ -106,7 +106,7 @@
     </a>
   </div>
   <div class="col-sm-6 col-lg-4">
-    <a href="/monitor/" class="card border-0 shadow-sm text-decoration-none h-100">
+    <a href="{% url 'services_portal:monitor_risco' %}" class="card border-0 shadow-sm text-decoration-none h-100">
       <div class="card-body d-flex align-items-center gap-3">
         <i class="bi bi-exclamation-triangle fs-3" style="color: var(--bs-primary);"></i>
         <div>
