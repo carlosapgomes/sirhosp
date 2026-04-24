@@ -567,6 +567,182 @@ class TestWorkerAdmissionSemantics:
 
 
 @pytest.mark.django_db
+class TestWorkerVolatileKeyRegression:
+    """Regression: reruns with volatile admission_key must not duplicate admissions (S3).
+
+    Validates the full worker lifecycle:
+    - Run 1 captures a snapshot with admission_key=A for period P.
+    - Run 2 captures a snapshot with admission_key=B for the same period P.
+    - Optionally includes extraction failure in one run and success in the other.
+    - Final assert: exactly 1 Admission for that patient+period.
+    """
+
+    def _queue_run(self, patient_record="VOLATILE_P1"):
+        return IngestionRun.objects.create(
+            status="queued",
+            parameters_json={
+                "patient_record": patient_record,
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-19",
+            },
+        )
+
+    def _make_extractor_mock(self, admissions_snapshot=None, evolutions=None):
+        mock_ext = MagicMock()
+        mock_ext.extract_evolutions.return_value = evolutions or []
+        if admissions_snapshot is not None:
+            mock_ext.get_admission_snapshot.return_value = admissions_snapshot
+        else:
+            mock_ext.get_admission_snapshot.return_value = []
+        return mock_ext
+
+    def _period_snapshot(
+        self,
+        admission_key,
+        start="2026-04-05T00:00:00",
+        end="2026-04-15T00:00:00",
+        ward="UTI",
+        bed="LEITO 01",
+    ):
+        """Helper to build a single-admission snapshot dict."""
+        return [
+            {
+                "admission_key": admission_key,
+                "admission_start": start,
+                "admission_end": end,
+                "ward": ward,
+                "bed": bed,
+            }
+        ]
+
+    def test_two_runs_volatile_key_single_admission(self):
+        """Two runs with different admission_keys for same period produce 1 Admission."""
+        from apps.patients.models import Admission, Patient
+
+        patient_record = "VOLATILE_P1"
+
+        # --- Run 1: admission_key=A ---
+        run1 = self._queue_run(patient_record)
+        snap1 = self._period_snapshot("VOLATILE_KEY_A")
+        mock_ext1 = self._make_extractor_mock(admissions_snapshot=snap1, evolutions=[])
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext1,
+        ):
+            call_command("process_ingestion_runs")
+
+        run1.refresh_from_db()
+        assert run1.status == "succeeded"
+
+        patient = Patient.objects.get(patient_source_key=patient_record)
+        assert Admission.objects.filter(patient=patient).count() == 1
+
+        # --- Run 2: admission_key=B, same period ---
+        run2 = self._queue_run(patient_record)
+        snap2 = self._period_snapshot("VOLATILE_KEY_B")
+        mock_ext2 = self._make_extractor_mock(admissions_snapshot=snap2, evolutions=[])
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext2,
+        ):
+            call_command("process_ingestion_runs")
+
+        run2.refresh_from_db()
+        assert run2.status == "succeeded"
+
+        # REGRESSION ASSERT: still exactly 1 Admission for this patient
+        assert Admission.objects.filter(patient=patient).count() == 1
+        adm = Admission.objects.get(patient=patient)
+        assert adm.admission_date is not None
+        assert adm.discharge_date is not None
+
+    def test_run1_fails_run2_succeeds_volatile_key_single_admission(self):
+        """Run 1 fails after admissions captured; run 2 converges to 1 Admission."""
+        from apps.ingestion.extractors.errors import ExtractionError
+        from apps.patients.models import Admission, Patient
+
+        patient_record = "VOLATILE_P2"
+
+        # --- Run 1: admissions captured OK, evolutions fail ---
+        run1 = self._queue_run(patient_record)
+        snap1 = self._period_snapshot("VOLATILE_KEY_X")
+        mock_ext1 = self._make_extractor_mock(admissions_snapshot=snap1)
+        mock_ext1.extract_evolutions.side_effect = ExtractionError("PDF extraction crashed")
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext1,
+        ):
+            call_command("process_ingestion_runs")
+
+        run1.refresh_from_db()
+        assert run1.status == "failed"
+
+        patient = Patient.objects.get(patient_source_key=patient_record)
+        # Admission persisted from the failed run
+        assert Admission.objects.filter(patient=patient).count() == 1
+
+        # --- Run 2: new volatile key, full success ---
+        run2 = self._queue_run(patient_record)
+        snap2 = self._period_snapshot("VOLATILE_KEY_Y")
+        evolutions = [
+            {
+                "happened_at": "2026-04-10T08:30:00",
+                "content_text": "Evolução OK.",
+                "author_name": "DR. RETRY",
+                "profession_type": "medica",
+                "signature_line": "Dr. Retry CRM 999",
+                "admission_key": "VOLATILE_KEY_Y",
+                "patient_source_key": patient_record,
+                "source_system": "tasy",
+                "patient_name": "PACIENTE VOLATIL",
+            },
+        ]
+        mock_ext2 = self._make_extractor_mock(admissions_snapshot=snap2, evolutions=evolutions)
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext2,
+        ):
+            call_command("process_ingestion_runs")
+
+        run2.refresh_from_db()
+        assert run2.status == "succeeded"
+        assert run2.events_created == 1
+
+        # REGRESSION ASSERT: still exactly 1 Admission
+        assert Admission.objects.filter(patient=patient).count() == 1
+        # Event is linked to the single canonical admission
+        adm = Admission.objects.get(patient=patient)
+        assert ClinicalEvent.objects.filter(admission=adm).count() == 1
+
+    def test_three_runs_volatile_keys_no_duplication(self):
+        """Three runs with different volatile keys for same period converge to 1 Admission."""
+        from apps.patients.models import Admission, Patient
+
+        patient_record = "VOLATILE_P3"
+
+        for i, key in enumerate(["KEY_ALPHA", "KEY_BETA", "KEY_GAMMA"]):
+            run = self._queue_run(patient_record)
+            snap = self._period_snapshot(key)
+            mock_ext = self._make_extractor_mock(admissions_snapshot=snap, evolutions=[])
+
+            with patch(
+                "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+                return_value=mock_ext,
+            ):
+                call_command("process_ingestion_runs")
+
+            run.refresh_from_db()
+            assert run.status == "succeeded", f"Run {i + 1} should succeed, got {run.status}"
+
+        patient = Patient.objects.get(patient_source_key=patient_record)
+        assert Admission.objects.filter(patient=patient).count() == 1
+
+
+@pytest.mark.django_db
 class TestAdmissionsOnlyWorker:
     """Worker behaviour for admissions-only runs (AFMF-S2).
 
