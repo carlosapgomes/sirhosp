@@ -1,0 +1,120 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Dashboard — SIRHOSP{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Painel de Controle</h2>
+    <p class="text-muted small mb-0">Resumo operacional de hoje</p>
+  </div>
+</div>
+
+<!-- Stat cards -->
+<div class="row g-3 mb-4">
+  <!-- Internados -->
+  <div class="col-12 col-md-6 col-lg-4">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: var(--bs-primary-lightest);">
+        <i class="bi bi-hospital" style="color: var(--bs-primary); font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ stats.internados }}</div>
+        <div class="sirhosp-stat-label">Internados</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Cadastrados -->
+  <div class="col-12 col-md-6 col-lg-4">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
+        <i class="bi bi-people" style="color: #0284C7; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ stats.cadastrados }}</div>
+        <div class="sirhosp-stat-label">Cadastrados</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Altas (24h) -->
+  <div class="col-12 col-md-6 col-lg-4">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
+        <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ stats.altas_24h }}</div>
+        <div class="sirhosp-stat-label">Altas (24h)</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Data Collection Status -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body">
+    <h3 class="h6 fw-semibold mb-3" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-database me-2 text-primary"></i> Status da Coleta de Dados
+    </h3>
+    <div class="row g-3">
+      <div class="col-sm-6">
+        <div class="d-flex align-items-center gap-3 p-3 border rounded-3 bg-body-tertiary">
+          <i class="bi bi-broadcast" style="font-size: 1.5rem; color: var(--bs-primary);"></i>
+          <div>
+            <div class="small text-muted">Setores monitorados</div>
+            <div class="fw-bold" style="color: var(--sirhosp-sidebar-bg);">{{ coleta.setores }} setores em tempo real</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-sm-6">
+        <div class="d-flex align-items-center gap-3 p-3 border rounded-3 bg-body-tertiary">
+          <i class="bi bi-clock-history" style="font-size: 1.5rem; color: var(--bs-primary);"></i>
+          <div>
+            <div class="small text-muted">Última varredura completa</div>
+            <div class="fw-bold" style="color: var(--sirhosp-sidebar-bg);">{{ coleta.ultima_varredura }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Quick actions -->
+<div class="row g-3">
+  <div class="col-sm-6 col-lg-4">
+    <a href="/censo/" class="card border-0 shadow-sm text-decoration-none h-100">
+      <div class="card-body d-flex align-items-center gap-3">
+        <i class="bi bi-hospital fs-3" style="color: var(--bs-primary);"></i>
+        <div>
+          <h4 class="h6 fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">Censo</h4>
+          <p class="small text-muted mb-0">Navegar por leitos e setores</p>
+        </div>
+      </div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-lg-4">
+    <a href="/pacientes/" class="card border-0 shadow-sm text-decoration-none h-100">
+      <div class="card-body d-flex align-items-center gap-3">
+        <i class="bi bi-people fs-3" style="color: var(--bs-primary);"></i>
+        <div>
+          <h4 class="h6 fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">Pacientes</h4>
+          <p class="small text-muted mb-0">Busca histórica de registros</p>
+        </div>
+      </div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-lg-4">
+    <a href="/monitor/" class="card border-0 shadow-sm text-decoration-none h-100">
+      <div class="card-body d-flex align-items-center gap-3">
+        <i class="bi bi-exclamation-triangle fs-3" style="color: var(--bs-primary);"></i>
+        <div>
+          <h4 class="h6 fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">Monitor de Risco</h4>
+          <p class="small text-muted mb-0">Vigilância de eventos adversos</p>
+        </div>
+      </div>
+    </a>
+  </div>
+</div>
+{% endblock %}

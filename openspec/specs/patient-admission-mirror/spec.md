@@ -3,7 +3,9 @@
 ## Purpose
 
 TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Patient mirror with external identity
 
 The system SHALL maintain a read-only mirror of patient demographic data with an external source identifier and safe upsert behavior.
@@ -78,4 +80,3 @@ The mirror layer MUST preserve the invariant that evolutions require at least on
 - **WHEN** source admissions snapshot is empty for the requested registro
 - **THEN** the system records an explicit no-admissions outcome
 - **AND** no admission extraction candidates are produced for follow-up actions
-

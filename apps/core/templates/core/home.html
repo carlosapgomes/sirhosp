@@ -1,62 +1,84 @@
-<!doctype html>
-<html lang="pt-BR">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>SIRHOSP</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  </head>
-  <body class="bg-light">
-    <nav class="navbar navbar-dark bg-primary">
-      <div class="container">
-        <span class="navbar-brand mb-0 h1">SIRHOSP</span>
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}SIRHOSP — Sistema de Relatórios Hospitalares{% endblock %}
+
+{% block body %}
+<div class="sirhosp-public-bg d-flex align-items-center justify-content-center min-vh-100 p-3">
+  <div class="card shadow-lg border-0" style="max-width: 580px; width: 100%; border-radius: 1rem;">
+    <div class="card-body text-center p-4 p-md-5">
+      <!-- Logo / Brand -->
+      <div class="mb-4">
+        <i class="bi bi-heart-pulse text-white d-inline-flex align-items-center justify-content-center rounded-3 mb-3"
+           style="font-size: 2.5rem; width: 72px; height: 72px; background: var(--bs-primary);"></i>
+        <h1 class="h3 fw-bold" style="color: var(--sirhosp-sidebar-bg);">EHR Mirror</h1>
+        <p class="text-muted small text-uppercase fw-semibold">Sistema de Relatórios Hospitalares</p>
       </div>
-    </nav>
 
-    <main class="container py-5">
-      <div class="row justify-content-center">
-        <div class="col-12 col-lg-10">
-          <div class="card shadow-sm border-0">
-            <div class="card-body p-4 p-md-5">
-              <p class="text-uppercase text-muted fw-semibold mb-2">Sistema interno</p>
-              <h1 class="display-6 fw-bold mb-3">Relatórios Hospitalares com navegação clínica</h1>
-              <p class="lead text-secondary mb-4">
-                Acesse o portal para consultar pacientes, internações, timelines clínicas e iniciar novas extrações por período.
-              </p>
+      <p class="text-secondary mb-4">
+        Extração inteligente de dados clínicos do sistema fonte hospitalar. Consulte
+        pacientes, visualize timelines, busque termos clínicos e acompanhe indicadores operacionais.
+      </p>
 
-              <div class="d-grid d-sm-flex gap-2 mb-4">
-                <a href="/login/" class="btn btn-primary btn-lg px-4">Entrar</a>
-                <a href="/health/" class="btn btn-outline-secondary btn-lg px-4">Healthcheck</a>
-              </div>
+      <div class="d-grid d-sm-flex gap-2 justify-content-center mb-4">
+        <a href="/login/" class="btn btn-primary btn-lg px-4">
+          <i class="bi bi-box-arrow-in-right me-2"></i> Entrar no portal
+        </a>
+      </div>
 
-              <div class="row g-3">
-                <div class="col-12 col-md-6">
-                  <div class="border rounded p-3 bg-body-tertiary h-100">
-                    <h2 class="h6 mb-2">Fluxo principal</h2>
-                    <ul class="mb-0 small text-secondary">
-                      <li>Login</li>
-                      <li>Lista de pacientes</li>
-                      <li>Admissões e timeline</li>
-                    </ul>
-                  </div>
-                </div>
-                <div class="col-12 col-md-6">
-                  <div class="border rounded p-3 bg-body-tertiary h-100">
-                    <h2 class="h6 mb-2">Operações</h2>
-                    <ul class="mb-0 small text-secondary">
-                      <li>Extração sob demanda</li>
-                      <li>Busca JSON de eventos clínicos</li>
-                      <li>Acompanhamento de status</li>
-                    </ul>
-                  </div>
-                </div>
-              </div>
+      <div class="row g-3 text-start">
+        <div class="col-sm-6">
+          <div class="border rounded-3 p-3 bg-body-tertiary h-100">
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <i class="bi bi-search text-primary fs-5"></i>
+              <h2 class="h6 mb-0">Busca clínica</h2>
             </div>
+            <p class="small text-secondary mb-0">
+              Pesquise por nome, registro ou palavras-chave em evoluções médicas.
+            </p>
+          </div>
+        </div>
+        <div class="col-sm-6">
+          <div class="border rounded-3 p-3 bg-body-tertiary h-100">
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <i class="bi bi-graph-up text-primary fs-5"></i>
+              <h2 class="h6 mb-0">Dashboard</h2>
+            </div>
+            <p class="small text-secondary mb-0">
+              Indicadores operacionais, censo de leitos e status de coleta.
+            </p>
+          </div>
+        </div>
+        <div class="col-sm-6">
+          <div class="border rounded-3 p-3 bg-body-tertiary h-100">
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <i class="bi bi-clock-history text-primary fs-5"></i>
+              <h2 class="h6 mb-0">Timeline</h2>
+            </div>
+            <p class="small text-secondary mb-0">
+              Navegue pela linha do tempo completa das internações.
+            </p>
+          </div>
+        </div>
+        <div class="col-sm-6">
+          <div class="border rounded-3 p-3 bg-body-tertiary h-100">
+            <div class="d-flex align-items-center gap-2 mb-2">
+              <i class="bi bi-shield-exclamation text-primary fs-5"></i>
+              <h2 class="h6 mb-0">Monitor de Risco</h2>
+            </div>
+            <p class="small text-secondary mb-0">
+              Vigilância de eventos adversos com busca por palavras-chave.
+            </p>
           </div>
         </div>
       </div>
-    </main>
+    </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  </body>
-</html>
+    <div class="card-footer bg-light text-center py-3 border-0" style="border-radius: 0 0 1rem 1rem;">
+      <small class="text-muted">
+        <i class="bi bi-lock me-1"></i> Acesso restrito a profissionais autorizados
+      </small>
+    </div>
+  </div>
+</div>
+{% endblock %}

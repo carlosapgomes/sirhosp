@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # SLICE-S2 — Run admissions-only para sincronização de internações
 
 ## Handoff de entrada (contexto zero)

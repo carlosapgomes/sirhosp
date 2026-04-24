@@ -3,7 +3,9 @@
 ## Purpose
 
 TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: On-demand ingestion by patient and period
 
 The system SHALL provide an ingestion flow that can be triggered on demand for a selected patient and requested time interval.
@@ -130,4 +132,3 @@ Extraction execution MUST split long windows into operational chunks compatible 
 - **WHEN** requested extraction window is longer than 15 days
 - **THEN** the connector splits execution into chunks of at most 15 days
 - **AND** chunk boundaries are deterministic and include configured overlap to avoid edge losses
-

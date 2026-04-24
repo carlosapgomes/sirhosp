@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # SLICE-S1 — Estado "não encontrado" com CTA admission-first
 
 ## Handoff de entrada (contexto zero)

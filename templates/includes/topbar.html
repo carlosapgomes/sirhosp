@@ -1,0 +1,10 @@
+<header class="sirhosp-topbar">
+  <button class="sirhosp-topbar-toggle" id="sidebarToggle" aria-label="Abrir menu" title="Menu">
+    <i class="bi bi-list"></i>
+  </button>
+  <h1 class="sirhosp-topbar-title">{{ page_title|default:"SIRHOSP" }}</h1>
+  <div class="sirhosp-topbar-sync">
+    <span class="dot"></span>
+    Sincronizado: {{ sync_time|default:"--:--" }}
+  </div>
+</header>

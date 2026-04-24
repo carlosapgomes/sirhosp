@@ -127,6 +127,7 @@ def create_run(request: HttpRequest) -> HttpResponse:
                 "initial_end_date": end_date,
                 "initial_admission_id": admission_id,
                 "initial_admission_source_key": admission_source_key,
+                "page_title": "Extração",
             },
         )
 
@@ -173,6 +174,7 @@ def create_run(request: HttpRequest) -> HttpResponse:
             "initial_end_date": initial_end_date,
             "initial_admission_id": admission_id_param,
             "initial_admission_source_key": initial_admission_source_key,
+            "page_title": "Extração",
         },
     )
 
@@ -205,6 +207,7 @@ def create_admissions_only(request: HttpRequest) -> HttpResponse:
         {
             "errors": errors,
             "initial_patient_record": initial_patient_record,
+            "page_title": "Sincronizar",
         },
     )
 
@@ -284,6 +287,7 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         "run": run,
         "status_label": status_labels.get(run.status, run.status),
         "status_class": status_classes.get(run.status, "bg-secondary"),
+        "page_title": f"Status #{run.pk}",
         "patient_record": params.get("patient_record", "—"),
         "start_date": params.get("start_date", "—"),
         "end_date": params.get("end_date", "—"),

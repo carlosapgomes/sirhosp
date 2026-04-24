@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # SLICE-S4 — `/ingestao/criar/` como rota secundária contextual
 
 ## Handoff de entrada (contexto zero)

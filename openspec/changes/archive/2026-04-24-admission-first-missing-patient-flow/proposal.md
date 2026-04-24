@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # Change Proposal: admission-first-missing-patient-flow
 
 ## Why
@@ -23,7 +24,7 @@ O fluxo operacional planejado para o SIRHOSP é orientado por internações conh
 
 ### New Capabilities
 
-- *(none)*
+- _(none)_
 
 ### Modified Capabilities
 

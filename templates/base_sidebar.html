@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block body %}
+<div class="sirhosp-layout">
+  <!-- Sidebar overlay (mobile) -->
+  <div class="sirhosp-sidebar-overlay" id="sidebarOverlay" aria-hidden="true"></div>
+
+  <!-- Sidebar -->
+  {% include "includes/sidebar.html" %}
+
+  <!-- Main area -->
+  <div class="sirhosp-main">
+    <!-- Topbar -->
+    {% include "includes/topbar.html" with page_title=page_title|default:"SIRHOSP" sync_time=sync_time|default:"--:--" %}
+
+    <!-- Page content -->
+    <main class="sirhosp-content">
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  (() => {
+    const sidebar = document.getElementById("sidebar");
+    const overlay = document.getElementById("sidebarOverlay");
+    const toggle = document.getElementById("sidebarToggle");
+
+    if (!sidebar || !overlay || !toggle) return;
+
+    const open = () => {
+      sidebar.classList.add("open");
+      overlay.classList.add("show");
+    };
+    const close = () => {
+      sidebar.classList.remove("open");
+      overlay.classList.remove("show");
+    };
+
+    toggle.addEventListener("click", () => {
+      sidebar.classList.contains("open") ? close() : open();
+    });
+    overlay.addEventListener("click", close);
+
+    // Close on Escape
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && sidebar.classList.contains("open")) close();
+    });
+  })();
+</script>
+{% endblock %}

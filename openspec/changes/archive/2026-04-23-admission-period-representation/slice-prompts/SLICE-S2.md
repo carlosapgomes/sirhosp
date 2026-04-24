@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # SLICE-S2 — Persistência de internações + fallback determinístico de associação
 
 ## Handoff de entrada (contexto zero)

@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # Tasks: admission-period-representation
 
 ## Fase 1 — Núcleo de ingestão e associação

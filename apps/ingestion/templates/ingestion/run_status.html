@@ -1,187 +1,198 @@
-<!doctype html>
-<html lang="pt-BR">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Status da Extração #{{ run.pk }} - SIRHOSP</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    {% if run.status == 'queued' or run.status == 'running' %}
-      <meta http-equiv="refresh" content="5">
+{% extends "base_sidebar.html" %}
+
+{% block title %}Status #{{ run.pk }} — SIRHOSP{% endblock %}
+
+{% block extra_head %}
+{% if run.status == 'queued' or run.status == 'running' %}
+  <meta http-equiv="refresh" content="5">
+{% endif %}
+{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="/painel/">Dashboard</a></li>
+    {% if no_admissions %}
+      <li class="breadcrumb-item"><a href="/pacientes/">Pacientes</a></li>
+    {% else %}
+      <li class="breadcrumb-item"><a href="/ingestao/criar/">Extração</a></li>
     {% endif %}
-  </head>
-  <body class="bg-light">
-    {% include "includes/navbar.html" %}
+    <li class="breadcrumb-item active" aria-current="page">Status</li>
+  </ol>
+</nav>
 
-    <div class="container">
-      <div class="mb-3">
-        {% if no_admissions %}
-          <a href="{% url 'patients:patient_list' %}" class="text-decoration-none">&larr; Voltar para pacientes</a>
-        {% else %}
-          <a href="{% url 'ingestion:create_run' %}" class="text-decoration-none">&larr; Nova extração</a>
-        {% endif %}
-      </div>
+<h2 class="h5 fw-bold mb-3" style="color: var(--sirhosp-sidebar-bg);">
+  {% if intent == 'admissions_only' %}
+    Status: Sincronização de Internações #{{ run.pk }}
+  {% elif intent == 'full_admission_sync' %}
+    Status: Sincronização Completa da Internação #{{ run.pk }}
+  {% else %}
+    Status da Extração #{{ run.pk }}
+  {% endif %}
+</h2>
 
-      <h1 class="h4 mb-3">
-        {% if intent == 'admissions_only' %}
-          Status: Sincronização de Internações #{{ run.pk }}
-        {% elif intent == 'full_admission_sync' %}
-          Status: Sincronização Completa da Internação #{{ run.pk }}
-        {% else %}
-          Status da Extração #{{ run.pk }}
-        {% endif %}
-      </h1>
-
-      <div class="card mb-3">
-        <div class="card-body">
-          <div class="d-flex justify-content-between align-items-center mb-3">
-            <h5 class="card-title mb-0">Estado</h5>
-            <span class="badge {{ status_class }}">{{ status_label }}</span>
-          </div>
-
-          <dl class="row mb-0">
-            <dt class="col-sm-4">Tipo</dt>
-            <dd class="col-sm-8">{{ run_type_label }}</dd>
-
-            <dt class="col-sm-4">Registro</dt>
-            <dd class="col-sm-8">{{ patient_record }}</dd>
-
-            {% if admission_source_key or admission_id %}
-              <dt class="col-sm-4">Internação</dt>
-              <dd class="col-sm-8">
-                {% if admission_source_key %}
-                  {{ admission_source_key }}
-                {% else %}
-                  #{{ admission_id }}
-                {% endif %}
-              </dd>
-            {% endif %}
-
-            {% if intent != 'admissions_only' %}
-              <dt class="col-sm-4">Período</dt>
-              <dd class="col-sm-8">{{ start_date }} a {{ end_date }}</dd>
-            {% endif %}
-
-            <dt class="col-sm-4">Início</dt>
-            <dd class="col-sm-8">
-              {% if run.started_at %}
-                {{ run.started_at|date:"d/m/Y H:i:s" }}
-              {% else %}
-                —
-              {% endif %}
-            </dd>
-
-            <dt class="col-sm-4">Término</dt>
-            <dd class="col-sm-8">
-              {% if run.finished_at %}
-                {{ run.finished_at|date:"d/m/Y H:i:s" }}
-              {% else %}
-                —
-              {% endif %}
-            </dd>
-          </dl>
-        </div>
-      </div>
-
-      {% if run.status == 'succeeded' or run.status == 'failed' %}
-        <div class="card mb-3">
-          <div class="card-body">
-            <h5 class="card-title">Resultados</h5>
-            {% if run.admissions_seen > 0 %}
-              <div class="row text-center mb-3">
-                <div class="col-4">
-                  <div class="h5 mb-0">{{ run.admissions_seen }}</div>
-                  <small class="text-muted">Internações vistas</small>
-                </div>
-                <div class="col-4">
-                  <div class="h5 mb-0 text-success">{{ run.admissions_created }}</div>
-                  <small class="text-muted">Novas internações</small>
-                </div>
-                <div class="col-4">
-                  <div class="h5 mb-0 text-info">{{ run.admissions_updated }}</div>
-                  <small class="text-muted">Atualizadas</small>
-                </div>
-              </div>
-              <hr>
-            {% endif %}
-            <div class="row text-center">
-              <div class="col-3">
-                <div class="h4 mb-0">{{ run.events_processed }}</div>
-                <small class="text-muted">Processados</small>
-              </div>
-              <div class="col-3">
-                <div class="h4 mb-0 text-success">{{ run.events_created }}</div>
-                <small class="text-muted">Criados</small>
-              </div>
-              <div class="col-3">
-                <div class="h4 mb-0 text-warning">{{ run.events_skipped }}</div>
-                <small class="text-muted">Duplicados</small>
-              </div>
-              <div class="col-3">
-                <div class="h4 mb-0 text-info">{{ run.events_revised }}</div>
-                <small class="text-muted">Revisados</small>
-              </div>
-            </div>
-          </div>
-        </div>
-      {% endif %}
-
-      {% if no_admissions %}
-        <div class="alert alert-warning" role="alert">
-          <strong>Nenhuma internação encontrada.</strong>
-          O registro informado não possui internações no sistema fonte.
-          A extração de evoluções não está disponível sem internações conhecidas.
-        </div>
-      {% elif run.status == 'succeeded' and intent == 'admissions_only' %}
-        <div class="alert alert-success" role="alert">
-          <strong>Internações sincronizadas com sucesso!</strong>
-          {{ run.admissions_seen }} internação(ões) encontrada(s).
-          {% if patient_admissions_url %}
-            <div class="mt-2">
-              <a href="{{ patient_admissions_url }}" class="btn btn-primary btn-sm">Selecionar internação</a>
-            </div>
-          {% endif %}
-        </div>
-      {% elif run.status == 'queued' %}
-        <div class="alert alert-info" role="alert">
-          <strong>Na fila:</strong> {% if intent == 'admissions_only' %}a sincronização de internações será processada em breve.{% else %}a extração será processada em breve pelo worker.{% endif %}
-        </div>
-      {% elif run.status == 'running' %}
-        <div class="alert alert-warning" role="alert">
-          <strong>Em execução:</strong> {% if intent == 'admissions_only' %}a sincronização de internações está em andamento.{% else %}a extração está em andamento.{% endif %} Esta página atualiza automaticamente.
-        </div>
-      {% elif run.status == 'succeeded' %}
-        <div class="alert alert-success" role="alert">
-          <strong>Concluído com sucesso!</strong> Os dados foram ingeridos no banco.
-        </div>
-      {% elif run.status == 'failed' %}
-        <div class="alert alert-danger" role="alert">
-          <strong>Falha na {% if intent == 'admissions_only' %}sincronização de internações{% else %}extração{% endif %}.</strong>
-          {% if run.error_message %}
-            <p class="mb-0 mt-2"><small><strong>Erro:</strong> {{ run.error_message }}</small></p>
-          {% endif %}
-        </div>
-      {% endif %}
-
-      {% if run.gaps_json %}
-        <div class="card mb-3">
-          <div class="card-body">
-            <h5 class="card-title">Janelas extraídas</h5>
-            <ul class="mb-0">
-              {% for gap in run.gaps_json %}
-                <li>{{ gap.start_date }} a {{ gap.end_date }}</li>
-              {% endfor %}
-            </ul>
-          </div>
-        </div>
-      {% endif %}
-
-      {% if no_admissions %}
-        <a href="{% url 'patients:patient_list' %}" class="btn btn-outline-secondary btn-sm">Voltar para pacientes</a>
-      {% else %}
-        <a href="{% url 'ingestion:create_run' %}" class="btn btn-outline-primary btn-sm">Nova extração</a>
-      {% endif %}
+<!-- Status card -->
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 class="card-title h6 fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">Estado</h5>
+      <span class="badge {{ status_class }}">{{ status_label }}</span>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  </body>
-</html>
+    <div class="row small g-3">
+      <div class="col-sm-6">
+        <span class="text-muted">Tipo:</span>
+        <span class="fw-medium">{{ run_type_label }}</span>
+      </div>
+      <div class="col-sm-6">
+        <span class="text-muted">Registro:</span>
+        <span class="fw-medium">{{ patient_record }}</span>
+      </div>
+      {% if admission_source_key or admission_id %}
+        <div class="col-sm-6">
+          <span class="text-muted">Internação:</span>
+          <span class="fw-medium">{% if admission_source_key %}{{ admission_source_key }}{% else %}#{{ admission_id }}{% endif %}</span>
+        </div>
+      {% endif %}
+      {% if intent != 'admissions_only' %}
+        <div class="col-sm-6">
+          <span class="text-muted">Período:</span>
+          <span class="fw-medium">{{ start_date }} a {{ end_date }}</span>
+        </div>
+      {% endif %}
+      <div class="col-sm-6">
+        <span class="text-muted">Início:</span>
+        <span class="fw-medium">{% if run.started_at %}{{ run.started_at|date:"d/m/Y H:i:s" }}{% else %}—{% endif %}</span>
+      </div>
+      <div class="col-sm-6">
+        <span class="text-muted">Término:</span>
+        <span class="fw-medium">{% if run.finished_at %}{{ run.finished_at|date:"d/m/Y H:i:s" }}{% else %}—{% endif %}</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Results -->
+{% if run.status == 'succeeded' or run.status == 'failed' %}
+  <div class="card border-0 shadow-sm mb-3">
+    <div class="card-body">
+      <h5 class="card-title h6 fw-semibold mb-3" style="color: var(--sirhosp-sidebar-bg);">Resultados</h5>
+      {% if run.admissions_seen > 0 %}
+        <div class="row text-center mb-3 g-2">
+          <div class="col-4">
+            <div class="h4 mb-0 fw-bold">{{ run.admissions_seen }}</div>
+            <small class="text-muted">Internações vistas</small>
+          </div>
+          <div class="col-4">
+            <div class="h4 mb-0 fw-bold" style="color: var(--bs-primary);">{{ run.admissions_created }}</div>
+            <small class="text-muted">Novas internações</small>
+          </div>
+          <div class="col-4">
+            <div class="h4 mb-0 fw-bold text-info">{{ run.admissions_updated }}</div>
+            <small class="text-muted">Atualizadas</small>
+          </div>
+        </div>
+        <hr>
+      {% endif %}
+      <div class="row text-center g-2">
+        <div class="col-3">
+          <div class="h4 mb-0 fw-bold">{{ run.events_processed }}</div>
+          <small class="text-muted">Processados</small>
+        </div>
+        <div class="col-3">
+          <div class="h4 mb-0 fw-bold" style="color: var(--bs-primary);">{{ run.events_created }}</div>
+          <small class="text-muted">Criados</small>
+        </div>
+        <div class="col-3">
+          <div class="h4 mb-0 fw-bold text-warning">{{ run.events_skipped }}</div>
+          <small class="text-muted">Duplicados</small>
+        </div>
+        <div class="col-3">
+          <div class="h4 mb-0 fw-bold text-info">{{ run.events_revised }}</div>
+          <small class="text-muted">Revisados</small>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endif %}
+
+<!-- Alerts -->
+{% if no_admissions %}
+  <div class="alert alert-warning d-flex align-items-center gap-2" role="alert">
+    <i class="bi bi-info-circle fs-5"></i>
+    <div>
+      <strong>Nenhuma internação encontrada.</strong>
+      O registro informado não possui internações no sistema fonte.
+      A extração de evoluções não está disponível sem internações conhecidas.
+    </div>
+  </div>
+{% elif run.status == 'succeeded' and intent == 'admissions_only' %}
+  <div class="alert d-flex align-items-center gap-2" role="alert"
+       style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker); border: none;">
+    <i class="bi bi-check-circle fs-5"></i>
+    <div>
+      <strong>Internações sincronizadas com sucesso!</strong>
+      {{ run.admissions_seen }} internação(ões) encontrada(s).
+      {% if patient_admissions_url %}
+        <div class="mt-2">
+          <a href="{{ patient_admissions_url }}" class="btn btn-primary btn-sm">
+            <i class="bi bi-arrow-right me-1"></i> Selecionar internação
+          </a>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+{% elif run.status == 'queued' %}
+  <div class="alert alert-info d-flex align-items-center gap-2" role="alert">
+    <i class="bi bi-hourglass-split fs-5"></i>
+    <div><strong>Na fila:</strong> {% if intent == 'admissions_only' %}a sincronização de internações será processada em breve.{% else %}a extração será processada em breve pelo worker.{% endif %}</div>
+  </div>
+{% elif run.status == 'running' %}
+  <div class="alert alert-warning d-flex align-items-center gap-2" role="alert">
+    <div class="spinner-border spinner-border-sm" role="status"></div>
+    <div><strong>Em execução:</strong> {% if intent == 'admissions_only' %}a sincronização de internações está em andamento.{% else %}a extração está em andamento.{% endif %} Esta página atualiza automaticamente.</div>
+  </div>
+{% elif run.status == 'succeeded' %}
+  <div class="alert d-flex align-items-center gap-2" role="alert"
+       style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker); border: none;">
+    <i class="bi bi-check-circle fs-5"></i>
+    <div><strong>Concluído com sucesso!</strong> Os dados foram ingeridos no banco.</div>
+  </div>
+{% elif run.status == 'failed' %}
+  <div class="alert alert-danger d-flex align-items-start gap-2" role="alert">
+    <i class="bi bi-exclamation-triangle mt-1"></i>
+    <div>
+      <strong>Falha na {% if intent == 'admissions_only' %}sincronização de internações{% else %}extração{% endif %}.</strong>
+      {% if run.error_message %}
+        <p class="mb-0 mt-2"><small>{{ run.error_message }}</small></p>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+
+<!-- Gap windows -->
+{% if run.gaps_json %}
+  <div class="card border-0 shadow-sm mb-3">
+    <div class="card-body">
+      <h5 class="card-title h6 fw-semibold mb-2" style="color: var(--sirhosp-sidebar-bg);">Janelas extraídas</h5>
+      <ul class="mb-0 small text-muted">
+        {% for gap in run.gaps_json %}
+          <li>{{ gap.start_date }} a {{ gap.end_date }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+{% endif %}
+
+<div class="mt-3">
+  {% if no_admissions %}
+    <a href="/pacientes/" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left me-1"></i> Voltar para pacientes
+    </a>
+  {% else %}
+    <a href="/ingestao/criar/" class="btn btn-outline-primary btn-sm">
+      <i class="bi bi-plus-circle me-1"></i> Nova extração
+    </a>
+  {% endif %}
+</div>
+{% endblock %}

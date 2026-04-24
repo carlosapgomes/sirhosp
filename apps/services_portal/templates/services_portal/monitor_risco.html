@@ -1,0 +1,165 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Monitor de Risco — SIRHOSP{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Monitor de Risco e Vigilância</h2>
+    <p class="text-muted small mb-0">Pesquisar termos em todas as evoluções recentes</p>
+  </div>
+</div>
+
+<!-- Search form -->
+<form method="get" class="card border-0 shadow-sm mb-4">
+  <div class="card-body">
+    <div class="row g-2 align-items-end">
+      <div class="col-12 col-md-7">
+        <label for="q" class="form-label small fw-semibold text-muted">
+          <i class="bi bi-search-heart me-1"></i> Termos de busca
+        </label>
+        <div class="input-group">
+          <span class="input-group-text bg-white"><i class="bi bi-tags"></i></span>
+          <input type="text" class="form-control" id="q" name="q"
+                 placeholder='Ex: "queda", "lesão", "febre", "sepse"'
+                 value="{{ termos }}"
+                 aria-label="Termos de busca">
+        </div>
+        <div class="form-text">Separe múltiplos termos com vírgula</div>
+      </div>
+      <div class="col-8 col-md-3">
+        <label for="periodo" class="form-label small fw-semibold text-muted">Período</label>
+        <select class="form-select" id="periodo" name="periodo">
+          <option value="24h" {% if periodo == "24h" %}selected{% endif %}>Últimas 24 horas</option>
+          <option value="48h" {% if periodo == "48h" %}selected{% endif %}>Últimas 48 horas</option>
+          <option value="7d" {% if periodo == "7d" %}selected{% endif %}>Últimos 7 dias</option>
+        </select>
+      </div>
+      <div class="col-4 col-md-2 d-grid">
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-search me-1"></i> Buscar
+        </button>
+      </div>
+    </div>
+  </div>
+</form>
+
+{% if termos %}
+  {% if not resultados %}
+    <!-- No results -->
+    <div class="card border-0 shadow-sm">
+      <div class="card-body text-center py-5">
+        <i class="bi bi-shield-check" style="font-size: 2.5rem; color: var(--bs-primary);"></i>
+        <h3 class="h5 mt-3 mb-2" style="color: var(--sirhosp-sidebar-bg);">
+          Nenhuma ocorrência encontrada
+        </h3>
+        <p class="text-muted small mb-0">
+          Não há evoluções contendo
+          <strong>"{{ termos }}"</strong>
+          {% if periodo == "24h" %}nas últimas 24 horas{% elif periodo == "7d" %}nos últimos 7 dias{% else %}nas últimas 48 horas{% endif %}.
+        </p>
+      </div>
+    </div>
+  {% else %}
+    <!-- Results summary -->
+    <div class="d-flex flex-wrap align-items-center gap-3 mb-3">
+      <div class="badge fs-6 fw-normal" style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker);">
+        <i class="bi bi-people me-1"></i>
+        {{ total_pacientes }} paciente{{ total_pacientes|pluralize }}
+      </div>
+      <div class="badge fs-6 fw-normal bg-light text-muted border">
+        <i class="bi bi-chat-text me-1"></i>
+        {{ total_ocorrencias }} ocorrência{{ total_ocorrencias|pluralize }}
+      </div>
+    </div>
+
+    <!-- Results: Accordion grouped by patient -->
+    <div class="accordion sirhosp-accordion" id="monitorAccordion">
+      {% for resultado in resultados %}
+        <div class="accordion-item border-0 shadow-sm mb-3">
+          <h3 class="accordion-header">
+            <button
+              class="accordion-button collapsed"
+              type="button"
+              data-bs-toggle="collapse"
+              data-bs-target="#monitor-collapse-{{ forloop.counter }}"
+              aria-expanded="{% if forloop.first %}true{% else %}false{% endif %}"
+              aria-controls="monitor-collapse-{{ forloop.counter }}"
+            >
+              <div class="d-flex flex-wrap justify-content-between align-items-center w-100 me-3 gap-2">
+                <div>
+                  <span class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">
+                    {{ resultado.patient_name }}
+                  </span>
+                  <span class="text-muted small ms-2">({{ resultado.patient_record }})</span>
+                </div>
+                <span class="badge" style="background: var(--bs-primary);">
+                  {{ resultado.ocorrencias }} ocorrência{{ resultado.ocorrencias|pluralize }}
+                </span>
+              </div>
+            </button>
+          </h3>
+          <div
+            id="monitor-collapse-{{ forloop.counter }}"
+            class="accordion-collapse collapse{% if forloop.first %} show{% endif %}"
+            data-bs-parent="#monitorAccordion"
+          >
+            <div class="accordion-body bg-light">
+              {% for evento in resultado.eventos %}
+                <div class="border-start border-primary border-3 bg-white rounded p-3 mb-2">
+                  <div class="d-flex justify-content-between align-items-start mb-1">
+                    <small class="fw-semibold text-muted">
+                      <i class="bi bi-clock me-1"></i>{{ evento.data }}
+                    </small>
+                    {% if evento.autor %}
+                      <small class="text-muted">
+                        <i class="bi bi-person me-1"></i>{{ evento.autor }}
+                      </small>
+                    {% endif %}
+                  </div>
+                  <p class="small mb-0 text-break">
+                    "{{ evento.texto|truncatechars:200 }}"
+                  </p>
+                </div>
+              {% endfor %}
+              <a href="/pacientes/?q={{ resultado.patient_record }}"
+                 class="btn btn-sm btn-outline-primary mt-2">
+                <i class="bi bi-folder2-open me-1"></i> Ver prontuário completo
+              </a>
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+{% else %}
+  <!-- Empty state: no search yet -->
+  <div class="card border-0 shadow-sm">
+    <div class="card-body text-center py-5">
+      <i class="bi bi-shield-shaded" style="font-size: 3rem; color: var(--bs-primary); opacity: 0.5;"></i>
+      <h3 class="h5 mt-3 mb-2" style="color: var(--sirhosp-sidebar-bg);">
+        Vigilância de eventos adversos
+      </h3>
+      <p class="text-muted small mb-4">
+        Informe um ou mais termos para buscar em todas as evoluções clínicas.<br>
+        Exemplos: "queda", "lesão", "sepse", "úlcera", "reintubação", "óbito".
+      </p>
+      <div class="row g-2 justify-content-center">
+        <div class="col-auto">
+          <a href="?q=queda&periodo=7d" class="btn btn-outline-primary btn-sm">queda</a>
+        </div>
+        <div class="col-auto">
+          <a href="?q=sepse&periodo=7d" class="btn btn-outline-primary btn-sm">sepse</a>
+        </div>
+        <div class="col-auto">
+          <a href="?q=lesão,úlcera&periodo=7d" class="btn btn-outline-primary btn-sm">lesão, úlcera</a>
+        </div>
+        <div class="col-auto">
+          <a href="?q=reintubação,extubação&periodo=7d" class="btn btn-outline-primary btn-sm">reintubação</a>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endif %}
+{% endblock %}

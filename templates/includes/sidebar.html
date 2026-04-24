@@ -1,0 +1,43 @@
+<aside class="sirhosp-sidebar" id="sidebar" role="navigation" aria-label="Menu principal">
+  <!-- Brand -->
+  <a href="/" class="sirhosp-sidebar-brand">
+    <i class="bi bi-heart-pulse"></i>
+    EHR Mirror
+  </a>
+
+  <!-- Navigation -->
+  <nav class="sirhosp-sidebar-nav">
+    <a href="/painel/" class="sirhosp-sidebar-link {% if active_menu == 'dashboard' %}active{% endif %}">
+      <i class="bi bi-grid-1x2-fill"></i>
+      Dashboard
+    </a>
+    <a href="/censo/" class="sirhosp-sidebar-link {% if active_menu == 'censo' %}active{% endif %}">
+      <i class="bi bi-hospital"></i>
+      Censo
+    </a>
+    <a href="/pacientes/" class="sirhosp-sidebar-link {% if active_menu == 'pacientes' %}active{% endif %}">
+      <i class="bi bi-people"></i>
+      Pacientes
+    </a>
+    <a href="/monitor/" class="sirhosp-sidebar-link {% if active_menu == 'monitor' %}active{% endif %}">
+      <i class="bi bi-exclamation-triangle"></i>
+      Monitor de Risco
+    </a>
+  </nav>
+
+  <!-- Footer -->
+  {% if user.is_authenticated %}
+  <div class="sirhosp-sidebar-footer">
+    <div class="d-flex align-items-center gap-2 text-white-50 small mb-2">
+      <i class="bi bi-person-circle"></i>
+      {{ user.username }}
+    </div>
+    <form method="post" action="{% url 'logout' %}" class="d-grid">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-sm btn-outline-light">
+        <i class="bi bi-box-arrow-right me-1"></i> Sair
+      </button>
+    </form>
+  </div>
+  {% endif %}
+</aside>

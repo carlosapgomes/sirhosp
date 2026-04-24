@@ -8,4 +8,5 @@ urlpatterns = [
     path("", include("apps.ingestion.urls")),
     path("", include("apps.patients.urls")),
     path("", include("apps.core.urls")),
+    path("", include("apps.services_portal.urls")),
 ]

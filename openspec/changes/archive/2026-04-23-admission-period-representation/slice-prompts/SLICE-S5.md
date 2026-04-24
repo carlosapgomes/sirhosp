@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # SLICE-S5 — Hardening final, gates completos e fechamento da change
 
 ## Handoff de entrada (contexto zero)

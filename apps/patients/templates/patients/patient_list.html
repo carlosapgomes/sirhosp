@@ -1,117 +1,114 @@
-{% load tz %}
-<!doctype html>
-<html lang="pt-BR">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Pacientes - SIRHOSP</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  </head>
-  <body class="bg-light">
-    {% include "includes/navbar.html" %}
+{% extends "base_sidebar.html" %}
 
-    <div class="container pb-4">
-      <h1 class="h4 mb-1">Pacientes</h1>
-      <p class="text-muted mb-3">Selecione um paciente para abrir admissões e timeline clínica.</p>
+{% block title %}Pacientes — SIRHOSP{% endblock %}
 
-      <form method="get" class="mb-3" role="search">
-        <div class="input-group">
-          <input
-            type="text"
-            name="q"
-            class="form-control"
-            placeholder="Buscar por nome ou registro..."
-            value="{{ query }}"
-            aria-label="Buscar por nome ou registro"
-          >
-          <button class="btn btn-primary" type="submit">Buscar</button>
-          {% if query %}
-            <a href="{% url 'patients:patient_list' %}" class="btn btn-outline-secondary">Limpar</a>
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Pacientes</h2>
+    <p class="text-muted small mb-0">Selecione um paciente para abrir internações e timeline clínica.</p>
+  </div>
+</div>
+
+<!-- Search form -->
+<form method="get" class="mb-4" role="search">
+  <div class="input-group">
+    <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+    <input
+      type="text"
+      name="q"
+      class="form-control"
+      placeholder="Buscar por nome ou registro..."
+      value="{{ query }}"
+      aria-label="Buscar por nome ou registro"
+    >
+    <button class="btn btn-primary" type="submit">Buscar</button>
+    {% if query %}
+      <a href="{% url 'patients:patient_list' %}" class="btn btn-outline-secondary">Limpar</a>
+    {% endif %}
+  </div>
+</form>
+
+<!-- Patient cards -->
+{% for patient in patients %}
+  <div class="card mb-2 border-0 shadow-sm">
+    <div class="card-body d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3">
+      <div>
+        <h5 class="card-title mb-1 fw-semibold" style="color: var(--sirhosp-sidebar-bg);">
+          {{ patient.name }}
+        </h5>
+        <small class="text-muted">Registro: {{ patient.patient_source_key }}</small>
+        {% with total=patient.admissions_total with_ev=patient.admissions_with_events without_ev=patient.admissions_without_events %}
+          {% if total > 0 %}
+            <div class="mt-1 d-flex flex-wrap gap-1">
+              <span class="badge bg-secondary">{{ total }} internação{{ total|pluralize }}</span>
+              <span class="badge" style="background: var(--bs-primary);">{{ with_ev }} c/ eventos</span>
+              {% if without_ev > 0 %}
+                <span class="badge bg-warning text-dark">{{ without_ev }} s/ eventos</span>
+              {% endif %}
+            </div>
           {% endif %}
+        {% endwith %}
+      </div>
+      <a href="{% url 'patients:admission_list' patient.pk %}"
+         class="btn btn-outline-primary btn-sm align-self-start align-self-md-center">
+        Internações <i class="bi bi-arrow-right ms-1"></i>
+      </a>
+    </div>
+  </div>
+{% empty %}
+  <div class="card border-0 shadow-sm">
+    <div class="card-body text-center py-5">
+      {% if query %}
+        <i class="bi bi-search text-muted" style="font-size: 2rem;"></i>
+        <p class="text-muted mt-2 mb-2">
+          Nenhum paciente encontrado para&nbsp;"<strong>{{ query }}</strong>".
+        </p>
+        <p class="mb-3 small text-muted">
+          Deseja buscar internações deste registro no sistema fonte?
+        </p>
+        <div class="d-flex flex-column flex-md-row justify-content-center gap-2">
+          <a href="{% url 'ingestion:create_admissions_only' %}?patient_record={{ query|urlencode }}"
+             class="btn btn-primary">
+            <i class="bi bi-hospital me-1"></i> Buscar/sincronizar internações
+          </a>
+          <a href="{% url 'ingestion:create_run' %}?patient_record={{ query|urlencode }}"
+             class="btn btn-outline-secondary btn-sm">
+            Extração por período (avançado)
+          </a>
         </div>
-      </form>
-
-      {% for patient in patients %}
-        <div class="card mb-2 shadow-sm border-0">
-          <div class="card-body d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3">
-            <div>
-              <h5 class="card-title mb-1">{{ patient.name }}</h5>
-              <small class="text-muted">Registro: {{ patient.patient_source_key }}</small>
-              {% with total=patient.admissions_total with_ev=patient.admissions_with_events without_ev=patient.admissions_without_events %}
-                {% if total > 0 %}
-                    <div class="mt-1">
-                      <small class="text-muted">
-                        <span class="badge bg-secondary me-1">{{ total }} internação{{ total|pluralize }}</span>
-                        <span class="badge bg-success me-1" title="Com eventos extraídos">{{ with_ev }} c/ eventos</span>
-                        {% if without_ev > 0 %}
-                          <span class="badge bg-warning text-dark" title="Sem eventos extraídos">{{ without_ev }} s/ eventos</span>
-                        {% endif %}
-                      </small>
-                    </div>
-                  {% endif %}
-              {% endwith %}
-            </div>
-            <a href="{% url 'patients:admission_list' patient.pk %}" class="btn btn-outline-primary btn-sm align-self-start align-self-md-center">
-              Internações &rarr;
-            </a>
-          </div>
-        </div>
-      {% empty %}
-        {% if query %}
-          <div class="card border-primary">
-            <div class="card-body text-center">
-              <p class="text-muted mb-2">
-                Nenhum paciente encontrado para&nbsp;"<strong>{{ query }}</strong>".
-              </p>
-              <p class="mb-3">
-                Deseja buscar internações deste registro no sistema fonte?
-              </p>
-              <div class="d-flex flex-column flex-md-row justify-content-center gap-2">
-                <a href="{% url 'ingestion:create_admissions_only' %}?patient_record={{ query|urlencode }}"
-                   class="btn btn-primary">
-                  Buscar/sincronizar internações
-                </a>
-                <a href="{% url 'ingestion:create_run' %}?patient_record={{ query|urlencode }}"
-                   class="btn btn-outline-secondary btn-sm">
-                  Extração por período (avançado)
-                </a>
-              </div>
-            </div>
-          </div>
-        {% else %}
-          <div class="card">
-            <div class="card-body text-center text-muted">
-              Nenhum paciente encontrado.
-            </div>
-          </div>
-        {% endif %}
-      {% endfor %}
-
-      {% if page_obj.has_other_pages %}
-        <nav aria-label="Navegação de pacientes" class="mt-3">
-          <ul class="pagination justify-content-center">
-            {% if page_obj.has_previous %}
-              <li class="page-item">
-                <a class="page-link" href="?page={{ page_obj.previous_page_number }}{% if query %}&amp;q={{ query }}{% endif %}">&laquo; Anterior</a>
-              </li>
-            {% endif %}
-
-            <li class="page-item disabled">
-              <span class="page-link">
-                Página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}
-              </span>
-            </li>
-
-            {% if page_obj.has_next %}
-              <li class="page-item">
-                <a class="page-link" href="?page={{ page_obj.next_page_number }}{% if query %}&amp;q={{ query }}{% endif %}">Próxima &raquo;</a>
-              </li>
-            {% endif %}
-          </ul>
-        </nav>
+      {% else %}
+        <i class="bi bi-inbox text-muted" style="font-size: 2rem;"></i>
+        <p class="text-muted mt-2 mb-0">Nenhum paciente encontrado.</p>
       {% endif %}
     </div>
+  </div>
+{% endfor %}
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  </body>
-</html>
+<!-- Pagination -->
+{% if page_obj.has_other_pages %}
+  <nav aria-label="Navegação de pacientes" class="mt-3">
+    <ul class="pagination justify-content-center">
+      {% if page_obj.has_previous %}
+        <li class="page-item">
+          <a class="page-link" href="?page={{ page_obj.previous_page_number }}{% if query %}&amp;q={{ query }}{% endif %}">
+            <i class="bi bi-chevron-left"></i> Anterior
+          </a>
+        </li>
+      {% endif %}
+      <li class="page-item disabled">
+        <span class="page-link px-3">
+          Página {{ page_obj.number }} de {{ page_obj.paginator.num_pages }}
+        </span>
+      </li>
+      {% if page_obj.has_next %}
+        <li class="page-item">
+          <a class="page-link" href="?page={{ page_obj.next_page_number }}{% if query %}&amp;q={{ query }}{% endif %}">
+            Próxima <i class="bi bi-chevron-right"></i>
+          </a>
+        </li>
+      {% endif %}
+    </ul>
+  </nav>
+{% endif %}
+{% endblock %}

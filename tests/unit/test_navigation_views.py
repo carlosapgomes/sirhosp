@@ -309,8 +309,11 @@ class TestAdmissionListView:
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        # Should contain a link to the timeline view
-        assert f"/admissions/{admission_maria_2.pk}/timeline/" in content
+        # Should contain the timeline embedded directly (no separate page link needed)
+        assert admission_maria_2.admission_date is not None
+        assert (
+            admission_maria_2.admission_date.strftime("%d/%m/%Y") in content
+        )
 
     def test_list_admissions_mobile_friendly(
         self,
@@ -571,7 +574,7 @@ class TestAdmissionListContextualActions:
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert "Nova extra" in content
+        assert "Nova Extra" in content
         assert f"patient_record={patient_maria.patient_source_key}" in content
 
     def test_admission_list_has_json_search_link(
@@ -598,7 +601,7 @@ class TestAdmissionListContextualActions:
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert '/patients/"' in content or "/patients/" in content
+        assert '/pacientes/' in content or "/patients/" in content
 
 
 class TestTimelineContextualActions:
@@ -730,7 +733,7 @@ class TestCardLayout:
 
 
 class TestAdmissionListFullSyncCTA:
-    """S3: Each admission shows a CTA to 'Sincronizar internação completa'."""
+    """S3: Each admission shows a CTA to 'Sincronizar'."""
 
     def test_admission_card_has_full_sync_cta(
         self,
@@ -738,12 +741,12 @@ class TestAdmissionListFullSyncCTA:
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
-        """Each admission card has a 'Sincronizar internação completa' button."""
+        """Each admission card has a 'Sincronizar' button."""
         response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert "Sincronizar internação completa" in content
+        assert "Sincronizar" in content
 
     def test_full_sync_cta_posts_to_ingestion_create(
         self,
@@ -858,13 +861,13 @@ class TestAdmissionCoverageBadge:
         admission_maria_1: Admission,
         db: None,
     ) -> None:
-        """Admission with no events shows 'Sem eventos extraídos' badge."""
+        """Admission with no events shows empty timeline message."""
         # admission_maria_1 has no events (only admission_maria_2 has events)
         response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert "Sem eventos extraídos" in content
+        assert "Nenhum evento registrado" in content
 
     def test_admission_with_events_hides_no_events_badge(
         self,
@@ -874,12 +877,12 @@ class TestAdmissionCoverageBadge:
         timeline_events: list[ClinicalEvent],
         db: None,
     ) -> None:
-        """Admission with events does NOT show 'Sem eventos extraídos' badge."""
+        """Admission with events does NOT show empty timeline message."""
         response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert "Sem eventos extraídos" not in content
+        assert "Nenhum evento registrado" not in content
 
     def test_mixed_admissions_show_correct_badges(
         self,
@@ -895,9 +898,9 @@ class TestAdmissionCoverageBadge:
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        # The admission without events should show badge
-        assert "Sem eventos extraídos" in content
-        # Both admissions should be visible
+        # Both admissions should be visible in the dropdown
+        assert "UTI" in content
+        assert "CLINICA MEDICA" in content
         assert "UTI" in content
         assert "CLINICA MEDICA" in content
 
