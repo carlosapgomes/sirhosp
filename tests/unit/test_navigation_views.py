@@ -310,7 +310,10 @@ class TestAdmissionListView:
         )
         content = response.content.decode()
         # Should contain the timeline embedded directly (no separate page link needed)
-        assert f"{admission_maria_2.admission_date.strftime('%d/%m/%Y')}" in content
+        assert admission_maria_2.admission_date is not None
+        assert (
+            admission_maria_2.admission_date.strftime("%d/%m/%Y") in content
+        )
 
     def test_list_admissions_mobile_friendly(
         self,

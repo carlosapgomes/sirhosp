@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # Design: admission-period-representation
 
 ## Contexto

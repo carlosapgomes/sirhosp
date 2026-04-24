@@ -24,6 +24,8 @@ Commands:
   integration   Run integration tests (tests/integration)
   lint          Run ruff lint
   typecheck     Run mypy
+  check-and-unit     Run check + unit (single container)
+  lint-and-typecheck Run lint + typecheck (single container, no DB)
   quality-gate  Run check + unit + lint + typecheck
 EOF
 }
@@ -109,6 +111,25 @@ main() {
             run_runner "PYTEST_ADDOPTS='-p no:cacheprovider' uv run --no-sync pytest -q tests/unit"
             run_runner "uv run --no-sync ruff check config apps tests manage.py"
             run_runner "uv run --no-sync mypy config apps tests manage.py"
+            ;;
+        check-and-unit)
+            up_stack
+            trap cleanup EXIT
+            run_runner "uv run --no-sync python manage.py check"
+            run_runner "PYTEST_ADDOPTS='-p no:cacheprovider' uv run --no-sync pytest -q tests/unit"
+            ;;
+        lint-and-typecheck)
+            # No DB needed — run in fresh container without database.
+            # Unset POSTGRES_HOST to skip the entrypoint DB wait.
+            log "Running lint and typecheck (no database)..."
+            dc run --rm --no-deps \
+                -e POSTGRES_HOST="" \
+                -e DATABASE_URL="" \
+                test-runner bash -lc "uv run --no-sync ruff check config apps tests manage.py"
+            dc run --rm --no-deps \
+                -e POSTGRES_HOST="" \
+                -e DATABASE_URL="" \
+                test-runner bash -lc "uv run --no-sync mypy config apps tests manage.py"
             ;;
         -h|--help|help)
             usage

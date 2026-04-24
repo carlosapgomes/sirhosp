@@ -136,7 +136,12 @@ def _search_clinical_events_html(termos: str, periodo: str) -> list[dict]:
         # Calculate date_from based on period
         days_map = {"24h": 1, "48h": 2, "7d": 7}
         days = days_map.get(periodo, 2)
-        date_from = date.today() - timedelta(days=days)
+        from datetime import datetime as dt_mod
+
+        date_from = dt_mod.combine(
+            date.today() - timedelta(days=days),
+            dt_mod.min.time(),
+        )
 
         params = SearchQueryParams(
             query=termos,

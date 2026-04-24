@@ -23,21 +23,48 @@ jobs:
       - name: Ensure test script is executable
         run: chmod +x ./scripts/test-in-container.sh
 
-      - name: Run containerized quality gate
+      # --- Step 1: Django check + unit tests (needs PostgreSQL) ---
+      - name: Run check and unit tests
+        id: tests
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          set -o pipefail
-          ./scripts/test-in-container.sh quality-gate 2>&1 | tee artifacts/quality-gate.log
+          ./scripts/test-in-container.sh check-and-unit 2>&1 | tee artifacts/tests.log
+
+      # --- Step 2: Lint (needs Python installed, no DB) ---
+      - name: Setup Python for static checks
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --frozen --no-install-project
+
+      - name: Run lint
+        id: lint
+        run: |
+          set -euo pipefail
+          uv run ruff check config apps tests manage.py 2>&1 | tee -a artifacts/lint.log
+
+      - name: Run typecheck
+        id: typecheck
+        run: |
+          set -euo pipefail
+          uv run mypy config apps tests manage.py 2>&1 | tee -a artifacts/typecheck.log
 
       - name: Collect Docker diagnostics on failure
         if: failure()
         shell: bash
         run: |
           mkdir -p artifacts
-          docker ps -a > artifacts/docker-ps.txt || true
-          docker compose -p sirhosp-test -f compose.yml -f compose.test.yml logs --no-color > artifacts/compose-test.log || true
+          docker ps -a > artifacts/docker-ps.txt 2>&1 || true
+          docker compose -p sirhosp-test -f compose.yml -f compose.test.yml logs --no-color > artifacts/compose-test.log 2>&1 || true
 
       - name: Force cleanup test stack
         if: always()

@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # Tasks: worker-loop-continuo-postgres-queue
 
 ## 1. Slice S1 - Worker contínuo (loop + sleep)

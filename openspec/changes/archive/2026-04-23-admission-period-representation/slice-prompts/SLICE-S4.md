@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # SLICE-S4 — Portal: cobertura de internações (pacientes + admissões)
 
 ## Handoff de entrada (contexto zero)

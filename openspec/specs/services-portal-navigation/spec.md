@@ -3,7 +3,9 @@
 ## Purpose
 
 Define the operational navigation flow in the portal from login to patient context pages.
+
 ## Requirements
+
 ### Requirement: Public landing with explicit authentication entry
 
 The system SHALL provide a public landing page with a clear login call-to-action for operational users.
@@ -141,4 +143,3 @@ The manual period extraction page MUST behave as a contextual secondary route in
 - **WHEN** user accesses `/ingestao/criar/` without valid patient/admission context
 - **THEN** the system redirects to `/patients/`
 - **AND** the user receives guidance to start from patient search and admission synchronization
-

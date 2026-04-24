@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # Tasks: admission-first-missing-patient-flow
 
 ## Fase 1 — Fluxo portal admission-first para paciente ausente

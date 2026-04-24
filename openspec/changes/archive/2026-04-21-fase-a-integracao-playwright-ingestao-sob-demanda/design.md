@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # Design: fase-a-integracao-playwright-ingestao-sob-demanda
 
 ## Context
@@ -99,7 +100,7 @@ Falta conectar esse ativo ao fluxo operacional do SirHosp de modo sustentável p
   Resp.: 90 segundos porque o sistema do hospital costuma ter delays frequentes em momentos de sobrecarga
 - Quais mensagens de erro serão mostradas para usuário final vs somente para log técnico?
   Resp.: Na minha opinião, o usuário precisa ver todas as mensagens de erro, porque isso vai ajudar na correção desses erros inicialmente. Então, no momento, ele precisa ver todos, até a gente conseguir deixar o sistema mais fluido.
-  
+
 ## Status de Implementação (Fase A — Slices S1–S5)
 
 Todos os artefatos descritos neste design foram implementados:

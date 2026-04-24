@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # Índice de prompts por slice
 
 Change: `admission-period-representation`

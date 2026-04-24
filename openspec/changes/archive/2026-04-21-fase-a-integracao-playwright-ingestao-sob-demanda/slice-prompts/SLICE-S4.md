@@ -1,4 +1,5 @@
 <!-- markdownlint-disable MD013 -->
+
 # Prompt Slice S4 (LLM Executor)
 
 ## Handoff de entrada (contexto zero)
