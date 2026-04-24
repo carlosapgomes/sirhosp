@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
@@ -38,6 +39,7 @@ DEFAULT_PROCESSED_TXT_OUTPUT_PATH: Final[Path] = Path("downloads/path2-evolucoes
 DEFAULT_SORTED_TXT_OUTPUT_PATH: Final[Path] = Path("downloads/path2-evolucoes-intervalo-ordenado.txt")
 DEFAULT_JSON_OUTPUT_PATH: Final[Path] = Path("downloads/path2-evolucoes-intervalo.json")
 FRAME_NAME: Final[str] = "frame_pol"
+FRAME_POLL_INTERVAL_MS: Final[int] = 500
 REPORT_WAIT_TIMEOUT_MS: Final[int] = 180000
 REPORT_POLL_INTERVAL_MS: Final[int] = 5000
 REPORT_DOWNLOAD_TIMEOUT_MS: Final[int] = 600000
@@ -272,14 +274,89 @@ def ensure_search_screen(page: Page) -> None:
     raise RuntimeError("A tela de pesquisa não ficou disponível após as tentativas de navegação.")
 
 
-def wait_internacoes_table(page: Page, timeout: int = 120000) -> Frame:
-    frame = page.frame(name=FRAME_NAME)
-    if frame is None:
-        raise RuntimeError(f"Iframe {FRAME_NAME} não encontrado.")
+def _describe_page_frames(page: Page) -> str:
+    frames = page.frames
+    if not frames:
+        return "(nenhum frame registrado pelo Playwright)"
 
-    rows_locator = frame.locator('#tabelaInternacoes\\:resultList_data > tr')
-    rows_locator.first.wait_for(state='visible', timeout=timeout)
-    return frame
+    items: list[str] = []
+    for index, frame in enumerate(frames):
+        frame_name = frame.name or "(sem nome)"
+        frame_url = frame.url or "(sem URL)"
+        items.append(f"[{index}] name={frame_name!r} url={frame_url!r}")
+
+    return "; ".join(items)
+
+
+def _describe_dom_iframes(page: Page) -> str:
+    try:
+        raw = page.eval_on_selector_all(
+            "iframe",
+            """
+            (frames) => frames.map((frame) => ({
+                id: frame.id || null,
+                name: frame.getAttribute('name') || null,
+                src: frame.getAttribute('src') || null,
+            }))
+            """,
+        )
+    except Exception as error:
+        return f"(falha ao inspecionar iframes no DOM: {error})"
+
+    if not raw:
+        return "(nenhum iframe encontrado no DOM)"
+
+    items: list[str] = []
+    for index, item in enumerate(raw):
+        src = str(item.get("src") or "")
+        compact_src = src if len(src) <= 180 else (src[:177] + "...")
+        items.append(
+            "[{index}] id={id!r} name={name!r} src={src!r}".format(
+                index=index,
+                id=item.get("id"),
+                name=item.get("name"),
+                src=compact_src,
+            )
+        )
+
+    return "; ".join(items)
+
+
+def wait_internacoes_table(page: Page, timeout: int = 120000) -> Frame:
+    started_at = time.monotonic()
+    last_rows_error: Exception | None = None
+
+    while True:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        remaining_ms = timeout - elapsed_ms
+        if remaining_ms <= 0:
+            break
+
+        frame = page.frame(name=FRAME_NAME)
+        if frame is not None:
+            rows_locator = frame.locator('#tabelaInternacoes\\:resultList_data > tr')
+            step_timeout = min(FRAME_POLL_INTERVAL_MS, max(1, remaining_ms))
+
+            try:
+                rows_locator.first.wait_for(state='attached', timeout=step_timeout)
+                return frame
+            except Exception as error:
+                last_rows_error = error
+
+        page.wait_for_timeout(min(FRAME_POLL_INTERVAL_MS, remaining_ms))
+
+    details = [
+        (
+            f"Iframe {FRAME_NAME} não ficou disponível com a tabela de internações "
+            f"dentro do timeout ({timeout} ms)."
+        ),
+        f"Frames Playwright: {_describe_page_frames(page)}",
+        f"Iframes no DOM: {_describe_dom_iframes(page)}",
+    ]
+    if last_rows_error is not None:
+        details.append(f"Último erro ao aguardar linhas da tabela: {last_rows_error}")
+
+    raise RuntimeError(" ".join(details))
 
 
 def read_internacoes_rows(page: Page) -> list[dict[str, object]]:
@@ -1312,7 +1389,6 @@ def run(
             internacoes = page.get_by_text("Internações", exact=True)
             internacoes.wait_for(state="visible", timeout=15000)
             internacoes.click()
-            page.wait_for_timeout(1500)
 
             all_admissions = read_internacoes_rows(page)
 

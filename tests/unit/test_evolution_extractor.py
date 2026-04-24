@@ -289,6 +289,34 @@ class TestSubprocessErrors:
 
             assert "90" in str(exc_info.value)
 
+    def test_timeout_includes_stdout_stderr_preview(self, tmp_path: Path):
+        """Timeout message should include partial stdout/stderr for diagnosis."""
+        extractor = _build_extractor(tmp_path)
+
+        with patch("apps.ingestion.extractors.playwright_extractor.subprocess.run") as mock_run:
+            import subprocess
+
+            mock_run.side_effect = subprocess.TimeoutExpired(
+                cmd=["python"],
+                timeout=300,
+                output="log parcial de progresso",
+                stderr="erro parcial",
+            )
+
+            with pytest.raises(ExtractionTimeoutError) as exc_info:
+                extractor.extract_evolutions(
+                    patient_record="123",
+                    start_date="2024-06-01",
+                    end_date="2024-06-15",
+                )
+
+            message = str(exc_info.value)
+            assert "timed out" in message
+            assert "stdout" in message
+            assert "stderr" in message
+            assert "log parcial de progresso" in message
+            assert "erro parcial" in message
+
     def test_nonzero_exit_raises_extraction_error(self, tmp_path: Path):
         """Non-zero exit code should raise ExtractionError."""
         extractor = _build_extractor(tmp_path)
@@ -307,6 +335,31 @@ class TestSubprocessErrors:
                 )
 
             assert "code 1" in str(exc_info.value)
+
+    def test_nonzero_exit_includes_stdout_stderr_preview(self, tmp_path: Path):
+        """Non-zero exit should include partial stdout/stderr for diagnosis."""
+        extractor = _build_extractor(tmp_path)
+
+        with patch("apps.ingestion.extractors.playwright_extractor.subprocess.run") as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 1
+            mock_result.stdout = "stdout parcial"
+            mock_result.stderr = "stderr parcial"
+            mock_run.return_value = mock_result
+
+            with pytest.raises(ExtractionError) as exc_info:
+                extractor.extract_evolutions(
+                    patient_record="123",
+                    start_date="2024-06-01",
+                    end_date="2024-06-15",
+                )
+
+            message = str(exc_info.value)
+            assert "code 1" in message
+            assert "stdout" in message
+            assert "stderr" in message
+            assert "stdout parcial" in message
+            assert "stderr parcial" in message
 
     def test_generic_exception_raises_extraction_error(self, tmp_path: Path):
         """Generic exceptions should be wrapped in ExtractionError."""
@@ -462,6 +515,37 @@ class TestExtractEvolutionsHappyPath:
         end_idx = captured_cmd.index("--end-date") + 1
         assert captured_cmd[start_idx] == "01/06/2024"
         assert captured_cmd[end_idx] == "15/06/2024"
+
+    def test_extract_evolutions_uses_longer_default_timeout(self, tmp_path: Path):
+        """Default timeout should allow slow report generation windows."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        captured_kwargs: dict[str, Any] = {}
+
+        def fake_run(cmd: list[str], **kwargs: Any) -> MagicMock:
+            captured_kwargs.update(kwargs)
+            json_arg_idx = cmd.index("--json-output") + 1
+            target_path = Path(cmd[json_arg_idx])
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_text("[]")
+            result = MagicMock()
+            result.returncode = 0
+            result.stderr = ""
+            return result
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            side_effect=fake_run,
+        ):
+            extractor.extract_evolutions(
+                patient_record="123",
+                start_date="2024-06-01",
+                end_date="2024-06-15",
+            )
+
+        assert captured_kwargs.get("timeout") == 600
 
     def test_date_conversion_single_digit_days(self, tmp_path: Path):
         """Dates with single-digit days/months should be zero-padded in DD/MM/YYYY."""
@@ -800,6 +884,35 @@ class TestGetAdmissionSnapshot:
                     end_date="2024-07-31",
                 )
 
+    def test_snapshot_nonzero_exit_includes_stdout_stderr_preview(self, tmp_path: Path):
+        """Non-zero snapshot failure should include stdout/stderr context."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run"
+        ) as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 1
+            mock_result.stdout = "stdout parcial"
+            mock_result.stderr = "stderr parcial"
+            mock_run.return_value = mock_result
+
+            with pytest.raises(ExtractionError) as exc_info:
+                extractor.get_admission_snapshot(
+                    patient_record="123",
+                    start_date="2024-06-01",
+                    end_date="2024-07-31",
+                )
+
+            message = str(exc_info.value)
+            assert "code 1" in message
+            assert "stdout" in message
+            assert "stderr" in message
+            assert "stdout parcial" in message
+            assert "stderr parcial" in message
+
     def test_timeout_raises_extraction_timeout_error(self, tmp_path: Path):
         """Subprocess timeout should raise ExtractionTimeoutError."""
         fake_script = tmp_path / "path2.py"
@@ -819,6 +932,37 @@ class TestGetAdmissionSnapshot:
                     start_date="2024-06-01",
                     end_date="2024-07-31",
                 )
+
+    def test_snapshot_timeout_includes_stdout_stderr_preview(self, tmp_path: Path):
+        """Admission timeout should include partial stdout/stderr for diagnosis."""
+        fake_script = tmp_path / "path2.py"
+        fake_script.write_text("# fake")
+        extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
+
+        with patch(
+            "apps.ingestion.extractors.playwright_extractor.subprocess.run"
+        ) as mock_run:
+            import subprocess
+
+            mock_run.side_effect = subprocess.TimeoutExpired(
+                cmd=["python"],
+                timeout=120,
+                output="stdout parcial",
+                stderr="stderr parcial",
+            )
+
+            with pytest.raises(ExtractionTimeoutError) as exc_info:
+                extractor.get_admission_snapshot(
+                    patient_record="123",
+                    start_date="2024-06-01",
+                    end_date="2024-07-31",
+                )
+
+            message = str(exc_info.value)
+            assert "stdout" in message
+            assert "stderr" in message
+            assert "stdout parcial" in message
+            assert "stderr parcial" in message
 
     def test_date_conversion_in_snapshot_extraction(self, tmp_path: Path):
         """Dates should be converted to DD/MM/YYYY for path2."""
