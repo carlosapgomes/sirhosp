@@ -43,8 +43,9 @@
 <!-- Patients table -->
 <div class="card border-0 shadow-sm">
   <div class="card-body p-0">
-    <div class="table-responsive">
-      <table class="table sirhosp-table mb-0">
+    <!-- Desktop: table view -->
+    <div class="table-responsive sirhosp-censo-table-wrapper">
+      <table class="table sirhosp-table sirhosp-censo-table mb-0">
         <thead>
           <tr>
             <th scope="col" class="ps-3">Leito</th>
@@ -83,6 +84,39 @@
           {% endfor %}
         </tbody>
       </table>
+    </div>
+
+    <!-- Mobile: card view -->
+    <div class="sirhosp-censo-cards" style="display: none;">
+      {% for paciente in pacientes %}
+        <a href="/pacientes/?q={{ paciente.registro }}"
+           class="text-decoration-none d-block border-bottom p-3"
+           style="color: inherit;">
+          <div class="d-flex justify-content-between align-items-start gap-2">
+            <div class="flex-grow-1 min-w-0">
+              <div class="fw-semibold small mb-1" style="color: var(--sirhosp-sidebar-bg);">
+                {{ paciente.nome }}
+              </div>
+              <div class="d-flex flex-wrap gap-2 align-items-center">
+                <span class="badge bg-light text-dark border fw-normal">{{ paciente.leito }}</span>
+                <small class="text-muted">{{ paciente.registro }}</small>
+                <small class="text-muted">{{ paciente.admissao }}</small>
+              </div>
+            </div>
+            <span class="badge small flex-shrink-0"
+                  style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker);">
+              {{ paciente.setor }}
+            </span>
+          </div>
+        </a>
+      {% empty %}
+        <div class="text-center py-4 text-muted">
+          <i class="bi bi-inbox me-1"></i>
+          Nenhum paciente encontrado
+          {% if setor_filtro %}no setor "{{ setor_filtro }}"{% endif %}
+          {% if busca %}para "{{ busca }}"{% endif %}.
+        </div>
+      {% endfor %}
     </div>
   </div>
   {% if total %}
