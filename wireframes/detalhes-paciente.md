@@ -7,23 +7,17 @@ Aqui está o blueprint adaptado para a **Página de Detalhes do Paciente**:
 | [ EHR MIRROR ] |  Prontuário e Linha do Tempo              [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
-|  MENU PRINCIPAL  |   [ BANNER DE IDENTIFICAÇÃO DO PACIENTE ]                         |
-|  --------------  |   +------------------------------------------------------------+  |
-|  [🏠] Dashboard  |   | NOME: FULANO DE TAL | REGISTRO: 00123 | IDADE: 45 anos (M) |  |
-|                  |   | NASC: 15/05/1980    | LEITO ATUAL: UTI - BOX 02            |  |
-|  [🏥] Setores    |   +------------------------------------------------------------+  |
-|                  |                                                                   |
-|  [🔍] Pacientes  |   COLUNA ESQUERDA (33%)         COLUNA DIREITA (66%)              |
-|       (Ativo)    |   +-------------------------+   +------------------------------+  |
-|  [⚠️] Monitor de |   | HISTÓRICO DE ESTADIAS   |   | PESQUISA NA EVOLUÇÃO         |  |
-|       Risco      |   | [ Buscar data...     ]  |   | [ Digite termo... ] [BUSCAR] |  |
+|  MENU            |   [ BANNER: FULANO DE TAL | ID: 00123 | IDADE: 45 | LEITO: 202-A ]|
+|  --------------  |                                                                   |
+|  [🏠] Dashboard  |   COLUNA: INTERNAÇÕES           COLUNA: EVOLUÇÕES (TIMELINE)      |
+|                  |   +-------------------------+   +------------------------------+  |
+|  [🏥] Censo      |   | SELECIONE O PERÍODO     |   | [ Buscar termo...    ] [Q]   |  |
 |                  |   |                         |   |                              |  |
-|  --------------  |   | > Ativa: 20/01/2026     |   | TIMELINE DA INTERNAÇÃO       |  |
-|                  |   | - Passada: 15/10/2025   |   | [ 24/01 08:00 ] ENFERMAGEM   |  |
-|  [⚙️] Configs    |   | - Passada: 03/05/2024   |   | "Texto da evolução aqui..."  |  |
-|                  |   |                         |   | ---------------------------- |  |
-|  [🚪] Sair       |   |                         |   | [ 23/01 14:00 ] FISIO        |  |
-|                  |   |                         |   | "Texto da evolução aqui..."  |  |
+|  [📂] Histórico  |   | > Atual (20/01/2026)    |   | [ 24/01 08:00 ] ENFERMAGEM   |  |
+|                  |   | - Alta (15/10/2025)     |   | "Texto capturado via scrape" |  |
+|  [⚠️] Monitor de |   | - Alta (03/05/2024)     |   | ---------------------------- |  |
+|       Risco      |   |                         |   | [ 23/01 14:00 ] FISIO        |  |
+|                  |   |                         |   | "Texto capturado via scrape" |  |
 +------------------+---+-------------------------+---+------------------------------+--+
 ```
 

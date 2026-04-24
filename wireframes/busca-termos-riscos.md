@@ -6,27 +6,21 @@ Aqui está o blueprint final para o **Monitor de Risco (Busca por Palavras-Chave
 
 ```text
 +--------------------------------------------------------------------------------------+
-| [ EHR MIRROR ] |  Monitor de Risco: Busca de Termos        [ Sincronizado: 12:45 ]   |
+| [ EHR MIRROR ] |  Monitor de Risco e Vigilância            [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
-|  MENU PRINCIPAL  |   MOTOR DE BUSCA CLÍNICA (Vigilância Ativa)                       |
+|  MENU            |   PESQUISAR TERMOS EM TODAS AS EVOLUÇÕES RECENTES                 |
 |  --------------  |   +------------------------------------------------------------+  |
-|  [🏠] Dashboard  |   | [ "queda", "febre", "sangramento" ]  [ 48h v ]  [ BUSCAR ]  |  |
+|  [🏠] Dashboard  |   | [ "queda", "lesão", "febre"    ] [ Últimas 48h v ] [BUSCAR] |  |
 |                  |   +------------------------------------------------------------+  |
-|  [🏥] Setores    |                                                                   |
-|                  |   RESULTADOS AGRUPADOS POR PACIENTE                               |
-|  [🔍] Pacientes  |   +------------------------------------------------------------+  |
-|                  |   | [v] PACIENTE: FULANO DE TAL (ID: 00123) - 3 Ocorrências    |  |
-|  [⚠️] Monitor de |   |     Setor: UTI - Leito: 02                                 |  |
-|       Risco      |   |     --------------------------------------------------     |  |
-|       (Ativo)    |   |     [ 23/01 10:00 ] "...risco de QUEDA elevado..."         |  |
-|  --------------  |   |     [ 22/01 14:00 ] "...episódio de QUEDA no leito..."     |  |
-|                  |   |     [ Ver Prontuário Completo ]                            |  |
-|  [⚙️] Configs    |   +------------------------------------------------------------+  |
-|                  |   | [>] PACIENTE: MARIA SILVA (ID: 05542) - 1 Ocorrência       |  |
-|  [🚪] Sair       |   +------------------------------------------------------------+  |
-|                  |   | [>] PACIENTE: JOÃO DOS SANTOS (ID: 01213) - 5 Ocorrências  |  |
-+------------------+---+------------------------------------------------------------+--+
+|  [🏥] Censo      |                                                                   |
+|                  |   PACIENTES COM OCORRÊNCIAS DOS TERMOS                            |
+|  [📂] Histórico  |   +------------------------------------------------------------+  |
+|                  |   | [v] FULANO DE TAL (202-A) - 2 correspondências             |  |
+|  [⚠️] Monitor de |   |     > "Risco de queda alto..." (23/01 10:00)               |  |
+|       Risco      |   | [>] BELTRANO DE SOUZA (UTI-05) - 1 correspondência         |  |
+|       (Ativo)    |   +------------------------------------------------------------+  |
++------------------+-------------------------------------------------------------------+
 ```
 
 ### Detalhes Estruturais desta Página:

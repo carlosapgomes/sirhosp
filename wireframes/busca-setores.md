@@ -4,27 +4,22 @@ Aqui está o blueprint ajustado, mantendo a navegação lateral, a barra superio
 
 ```text
 +--------------------------------------------------------------------------------------+
-| [ EHR MIRROR ] |  Busca de Pacientes / Censo               [ Sincronizado: 12:45 ]   |
+| [ EHR MIRROR ] |  Censo Hospitalar (Pacientes Internados)   [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
-|  MENU PRINCIPAL  |   FILTROS DE PESQUISA E FILTRAGEM POR SETOR                       |
+|  MENU            |   FILTRAR CENSO ATUAL                                             |
 |  --------------  |   +------------------------------------------------------------+  |
-|  [🏠] Dashboard  |   | [ Nome... ] [ Registro ] [ Selecione o Setor v ] [BUSCAR]  |  |
+|  [🏠] Dashboard  |   | [ Nome/Registro...     ] [ Setor (Todos) v ] [ BUSCAR ]    |  |
 |                  |   +------------------------------------------------------------+  |
-|  [🏥] Setores    |                                                                   |
-|       (Ativo)    |   RESULTADOS (TODOS OS PACIENTES OU FILTRADOS POR SETOR)          |
+|  [🏥] Censo      |                                                                   |
+|       (Ativo)    |   PACIENTES ATUALMENTE NO LEITO                                   |
 |                  |   +------------------------------------------------------------+  |
-|  [🔍] Pacientes  |   | REGISTRO | PACIENTE           | SETOR / LEITO | ADMISSÃO   |  |
-|                  |   |----------|--------------------|---------------|------------|  |
-|  [⚠️] Monitor de |   | 00123    | FULANO DE TAL      | UTI - 02      | 20/01/2026 |  |
-|       Risco      |   | 00456    | BELTRANO DE SOUZA  | ENF A - 105   | 22/01/2026 |  |
-|                  |   | 00789    | CICRANO DE OLIVEIRA| ENF B - 202   | 23/01/2026 |  |
-|  --------------  |   | 01011    | MARIA DA SILVA     | PED - 04      | 24/01/2026 |  |
-|                  |   | 01213    | JOÃO DOS SANTOS    | CC - SALA 01  | 24/01/2026 |  |
-|  [⚙️] Configs    |   | ...      | ...                | ...           | ...        |  |
+|  [📂] Histórico  |   | LEITO | PACIENTE             | REGISTRO | ADMISSÃO         |  |
+|                  |   |-------|----------------------|----------|------------------|  |
+|  [⚠️] Monitor de |   | 202-A | FULANO DE TAL        | 00123    | 20/01/2026       |  |
+|       Risco      |   | UTI-05| BELTRANO DE SOUZA    | 00456    | 22/01/2026       |  |
 |                  |   +------------------------------------------------------------+  |
-|  [🚪] Sair       |   | Exibindo 50 de 142 pacientes internados        [ < 1 2 3 > ]  |
-+------------------+---+------------------------------------------------------------+--+
++------------------+-------------------------------------------------------------------+
 ```
 
 ### Detalhes Estruturais:

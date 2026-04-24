@@ -2,24 +2,23 @@
 
 ```text
 +--------------------------------------------------------------------------------------+
-| [ LOGO SISTEMA ] |  Painel de Controle Principal           [ Sincronizado: 12:45 ]   |
+| [ EHR MIRROR ] |  Painel de Controle Principal           [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
-|  MENU PRINCIPAL  |   INDICADORES GERAIS (TEMPO REAL)                                 |
+|  MENU            |   RESUMO OPERACIONAL (HOJE)                                       |
 |  --------------  |                                                                   |
 |  [🏠] Dashboard  |   +------------------+    +------------------+    +------------------+ |
-|                  |   | INTERNADOS       |    | CADASTRADOS      |    | ALTAS (24h)      | |
-|  [🏥] Setores    |   |       142        |    |      5.230       |    |       12         | |
-|                  |   | [Icon: Leito]    |    | [Icon: Pessoas]  |    | [Icon: Saída]    | |
-|  [🔍] Pacientes  |   +------------------+    +------------------+    +------------------+ |
+|       (Ativo)    |   | INTERNADOS       |    | CADASTRADOS      |    | ALTAS (24h)      | |
+|                  |   |       142        |    |      5.230       |    |       12         | |
+|  [🏥] Censo      |   | [Icon: Leito]    |    | [Icon: Pessoas]  |    | [Icon: Saída]    | |
+|                  |   +------------------+    +------------------+    +------------------+ |
+|  [📂] Histórico  |                                                                   |
+|                  |   +--------------------------------------------------------------+    |
+|  [⚠️] Monitor de |   | STATUS DA COLETA DE DADOS (WEB SCRAPING)                     |    |
+|       Risco      |   | > Monitorando 18 setores em tempo real                       |    |
+|                  |   | > Última varredura completa: há 4 minutos                    |    |
+|  --------------  |   +--------------------------------------------------------------+    |
 |                  |                                                                   |
-|  [⚠️] Monitor de |   +--------------------------------------------------------------+    |
-|       Risco      |   | ATIVIDADE RECENTE DO SCRAPER                                 |    |
-|                  |   | > Setor UTI: Atualizado há 2 min                             |    |
-|  --------------  |   | > Setor Pediatria: Atualizado há 5 min                       |    |
-|                  |   | > Setor Cirurgia: Sincronizando agora... [|||||     ] 60%    |    |
-|  [⚙️] Configs    |   +--------------------------------------------------------------+    |
-|  [🚪] Sair       |                                                                   |
 +------------------+-------------------------------------------------------------------+
 ```
 
@@ -27,8 +26,8 @@
 
 1.  **Sidebar (Navegação Esquerda):**
     * **Dashboard:** Retorna à tela de indicadores gerais.
-    * **Setores:** Abre a lista de enfermarias para navegação por "mapa".
-    * **Pacientes:** Direciona para a página de busca por nome/registro/leito.
+    * **Censo:** Abre a lista de enfermarias para navegação por "mapa", busca por nome/registro.
+    * **Histórico:** Direciona para a página de busca por nome/registro.
     * **Monitor de Risco:** Abre a busca por palavras-chave (o coração do seu sistema).
 
 2.  **Área de Conteúdo (Direita):**

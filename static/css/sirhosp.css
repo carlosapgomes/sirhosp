@@ -1,0 +1,374 @@
+/* ==========================================================================
+   SIRHOSP — Hospital Mirror System
+   Identity: Professional Healthcare UI
+   Palette: Teal primary, Slate sidebar, Clean whites
+   ========================================================================== */
+
+:root {
+  /* Primary: Calming teal — widely used in healthcare interfaces */
+  --bs-primary: #0D9488;
+  --bs-primary-rgb: 13, 148, 136;
+  --bs-primary-dark: #0F766E;
+  --bs-primary-darker: #115E59;
+  --bs-primary-light: #14B8A6;
+  --bs-primary-lightest: #CCFBF1;
+
+  /* Sidebar */
+  --sirhosp-sidebar-bg: #0F172A;
+  --sirhosp-sidebar-width: 260px;
+  --sirhosp-sidebar-collapsed-width: 0px;
+
+  /* Topbar */
+  --sirhosp-topbar-height: 56px;
+
+  /* Body & content */
+  --sirhosp-bg: #F8FAFC;
+  --sirhosp-content-bg: #FFFFFF;
+
+  /* Override Bootstrap defaults for primary-based components */
+  --bs-link-color: var(--bs-primary);
+  --bs-link-hover-color: var(--bs-primary-darker);
+}
+
+/* --------------------------------------------------------------------------
+   Sidebar
+   -------------------------------------------------------------------------- */
+.sirhosp-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: var(--sirhosp-sidebar-width);
+  background: var(--sirhosp-sidebar-bg);
+  z-index: 1030;
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: transform 0.25s ease;
+}
+
+.sirhosp-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1.25rem 1.25rem 1rem;
+  color: white;
+  font-weight: 600;
+  font-size: 1.1rem;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 0.25rem;
+}
+
+.sirhosp-sidebar-brand:hover {
+  color: var(--bs-primary-light);
+}
+
+.sirhosp-sidebar-brand i {
+  font-size: 1.4rem;
+}
+
+.sirhosp-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  padding: 0.5rem 0.75rem;
+}
+
+.sirhosp-sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.625rem 0.75rem;
+  border-radius: 0.5rem;
+  color: rgba(255, 255, 255, 0.7);
+  text-decoration: none;
+  font-size: 0.9375rem;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.sirhosp-sidebar-link i {
+  font-size: 1.25rem;
+  width: 1.5rem;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.sirhosp-sidebar-link:hover {
+  color: white;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sirhosp-sidebar-link.active {
+  color: var(--bs-primary-light);
+  background: rgba(13, 148, 136, 0.15);
+  font-weight: 500;
+}
+
+.sirhosp-sidebar-footer {
+  margin-top: auto;
+  padding: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* --------------------------------------------------------------------------
+   Topbar
+   -------------------------------------------------------------------------- */
+.sirhosp-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 1025;
+  height: var(--sirhosp-topbar-height);
+  background: white;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  display: flex;
+  align-items: center;
+  padding: 0 1.5rem;
+  gap: 1rem;
+}
+
+.sirhosp-topbar-title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--sirhosp-sidebar-bg);
+  flex: 1;
+}
+
+.sirhosp-topbar-sync {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  color: var(--bs-primary-darker);
+  background: var(--bs-primary-lightest);
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.sirhosp-topbar-sync .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--bs-primary);
+  display: inline-block;
+}
+
+.sirhosp-topbar-toggle {
+  display: none;
+  background: none;
+  border: none;
+  padding: 0.25rem;
+  color: var(--sirhosp-sidebar-bg);
+  cursor: pointer;
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+/* --------------------------------------------------------------------------
+   Layout shell (authenticated pages)
+   -------------------------------------------------------------------------- */
+.sirhosp-layout {
+  display: flex;
+  min-height: 100vh;
+  background: var(--sirhosp-bg);
+}
+
+.sirhosp-main {
+  margin-left: var(--sirhosp-sidebar-width);
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  transition: margin-left 0.25s ease;
+}
+
+.sirhosp-content {
+  padding: 1.5rem;
+  flex: 1;
+  max-width: 1400px;
+  width: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   Public layout (landing / login)
+   -------------------------------------------------------------------------- */
+.sirhosp-public-bg {
+  background: linear-gradient(135deg, var(--bs-primary-darker) 0%, var(--bs-primary) 100%);
+  min-height: 100vh;
+}
+
+/* --------------------------------------------------------------------------
+   Cards and components
+   -------------------------------------------------------------------------- */
+.sirhosp-stat-card {
+  background: white;
+  border-radius: 0.75rem;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  transition: box-shadow 0.15s ease;
+}
+
+.sirhosp-stat-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+}
+
+.sirhosp-stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--sirhosp-sidebar-bg);
+}
+
+.sirhosp-stat-label {
+  font-size: 0.875rem;
+  color: #64748B;
+  font-weight: 500;
+}
+
+.sirhosp-stat-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 0.625rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+}
+
+/* Patient banner */
+.sirhosp-patient-banner {
+  background: white;
+  border-radius: 0.75rem;
+  padding: 1.25rem 1.5rem;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  margin-bottom: 1.5rem;
+}
+
+.sirhosp-patient-banner .patient-name {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--sirhosp-sidebar-bg);
+}
+
+.sirhosp-patient-banner .patient-meta {
+  font-size: 0.8125rem;
+  color: #64748B;
+}
+
+/* Data tables */
+.sirhosp-table {
+  background: white;
+  border-radius: 0.75rem;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.sirhosp-table thead th {
+  background: #F8FAFC;
+  color: #475569;
+  font-weight: 600;
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.025em;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.sirhosp-table tbody td {
+  font-size: 0.875rem;
+  color: var(--sirhosp-sidebar-bg);
+}
+
+.sirhosp-table tbody tr:hover {
+  background: var(--bs-primary-lightest);
+  cursor: pointer;
+}
+
+/* Accordion for risk monitor */
+.sirhosp-accordion .accordion-button:not(.collapsed) {
+  background: var(--bs-primary-lightest);
+  color: var(--bs-primary-darker);
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   Buttons
+   -------------------------------------------------------------------------- */
+.btn-primary {
+  --bs-btn-bg: var(--bs-primary);
+  --bs-btn-border-color: var(--bs-primary);
+  --bs-btn-hover-bg: var(--bs-primary-dark);
+  --bs-btn-hover-border-color: var(--bs-primary-dark);
+  --bs-btn-active-bg: var(--bs-primary-darker);
+}
+
+.btn-outline-primary {
+  --bs-btn-color: var(--bs-primary);
+  --bs-btn-border-color: var(--bs-primary);
+  --bs-btn-hover-bg: var(--bs-primary);
+  --bs-btn-hover-border-color: var(--bs-primary);
+  --bs-btn-active-bg: var(--bs-primary-dark);
+}
+
+/* Page link active override */
+.page-item.active .page-link {
+  background-color: var(--bs-primary);
+  border-color: var(--bs-primary);
+}
+
+/* Form focus */
+.form-control:focus,
+.form-select:focus {
+  border-color: var(--bs-primary-light);
+  box-shadow: 0 0 0 0.2rem rgba(13, 148, 136, 0.15);
+}
+
+/* --------------------------------------------------------------------------
+   Badges
+   -------------------------------------------------------------------------- */
+.badge.bg-success {
+  --bs-bg-opacity: 1;
+  background-color: var(--bs-primary) !important;
+}
+
+/* --------------------------------------------------------------------------
+   Responsive: mobile — sidebar becomes offcanvas triggered by hamburger
+   -------------------------------------------------------------------------- */
+@media (max-width: 991.98px) {
+  .sirhosp-sidebar {
+    transform: translateX(-100%);
+    box-shadow: none;
+  }
+
+  .sirhosp-sidebar.open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.15);
+  }
+
+  .sirhosp-main {
+    margin-left: 0;
+  }
+
+  .sirhosp-topbar-toggle {
+    display: block;
+  }
+
+  .sirhosp-content {
+    padding: 1rem;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Mobile sidebar overlay
+   -------------------------------------------------------------------------- */
+.sirhosp-sidebar-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 1028;
+}
+
+@media (max-width: 991.98px) {
+  .sirhosp-sidebar-overlay.show {
+    display: block;
+  }
+}
