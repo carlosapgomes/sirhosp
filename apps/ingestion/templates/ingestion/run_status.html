@@ -11,11 +11,11 @@
 {% block content %}
 <nav aria-label="breadcrumb" class="mb-3">
   <ol class="breadcrumb small">
-    <li class="breadcrumb-item"><a href="/painel/">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
     {% if no_admissions %}
-      <li class="breadcrumb-item"><a href="/pacientes/">Pacientes</a></li>
+      <li class="breadcrumb-item"><a href="{% url 'patients:patient_list' %}">Pacientes</a></li>
     {% else %}
-      <li class="breadcrumb-item"><a href="/ingestao/criar/">Extração</a></li>
+      <li class="breadcrumb-item"><a href="{% url 'ingestion:create_run' %}">Extração</a></li>
     {% endif %}
     <li class="breadcrumb-item active" aria-current="page">Status</li>
   </ol>
@@ -186,11 +186,11 @@
 
 <div class="mt-3">
   {% if no_admissions %}
-    <a href="/pacientes/" class="btn btn-outline-secondary btn-sm">
+    <a href="{% url 'patients:patient_list' %}" class="btn btn-outline-secondary btn-sm">
       <i class="bi bi-arrow-left me-1"></i> Voltar para pacientes
     </a>
   {% else %}
-    <a href="/ingestao/criar/" class="btn btn-outline-primary btn-sm">
+    <a href="{% url 'ingestion:create_run' %}" class="btn btn-outline-primary btn-sm">
       <i class="bi bi-plus-circle me-1"></i> Nova extração
     </a>
   {% endif %}

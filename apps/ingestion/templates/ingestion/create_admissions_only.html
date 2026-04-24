@@ -5,8 +5,8 @@
 {% block content %}
 <nav aria-label="breadcrumb" class="mb-3">
   <ol class="breadcrumb small">
-    <li class="breadcrumb-item"><a href="/painel/">Dashboard</a></li>
-    <li class="breadcrumb-item"><a href="/pacientes/">Pacientes</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'patients:patient_list' %}">Pacientes</a></li>
     <li class="breadcrumb-item active" aria-current="page">Sincronizar</li>
   </ol>
 </nav>
@@ -50,7 +50,7 @@
         <button type="submit" class="btn btn-primary">
           <i class="bi bi-hospital me-1"></i> Buscar internações
         </button>
-        <a href="/pacientes/" class="btn btn-outline-secondary">
+        <a href="{% url 'patients:patient_list' %}" class="btn btn-outline-secondary">
           <i class="bi bi-x-circle me-1"></i> Cancelar
         </a>
       </div>

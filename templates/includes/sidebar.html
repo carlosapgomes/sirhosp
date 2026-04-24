@@ -7,19 +7,19 @@
 
   <!-- Navigation -->
   <nav class="sirhosp-sidebar-nav">
-    <a href="/painel/" class="sirhosp-sidebar-link {% if active_menu == 'dashboard' %}active{% endif %}">
+    <a href="{% url 'services_portal:dashboard' %}" class="sirhosp-sidebar-link {% if active_menu == 'dashboard' %}active{% endif %}">
       <i class="bi bi-grid-1x2-fill"></i>
       Dashboard
     </a>
-    <a href="/censo/" class="sirhosp-sidebar-link {% if active_menu == 'censo' %}active{% endif %}">
+    <a href="{% url 'services_portal:censo' %}" class="sirhosp-sidebar-link {% if active_menu == 'censo' %}active{% endif %}">
       <i class="bi bi-hospital"></i>
       Censo
     </a>
-    <a href="/pacientes/" class="sirhosp-sidebar-link {% if active_menu == 'pacientes' %}active{% endif %}">
+    <a href="{% url 'patients:patient_list' %}" class="sirhosp-sidebar-link {% if active_menu == 'pacientes' %}active{% endif %}">
       <i class="bi bi-people"></i>
       Pacientes
     </a>
-    <a href="/monitor/" class="sirhosp-sidebar-link {% if active_menu == 'monitor' %}active{% endif %}">
+    <a href="{% url 'services_portal:monitor_risco' %}" class="sirhosp-sidebar-link {% if active_menu == 'monitor' %}active{% endif %}">
       <i class="bi bi-exclamation-triangle"></i>
       Monitor de Risco
     </a>

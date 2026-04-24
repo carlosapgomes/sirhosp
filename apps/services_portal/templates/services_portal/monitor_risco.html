@@ -122,7 +122,7 @@
                   </p>
                 </div>
               {% endfor %}
-              <a href="/pacientes/?q={{ resultado.patient_record }}"
+              <a href="{% url 'patients:patient_list' %}?q={{ resultado.patient_record }}"
                  class="btn btn-sm btn-outline-primary mt-2">
                 <i class="bi bi-folder2-open me-1"></i> Ver prontuário completo
               </a>

@@ -57,7 +57,7 @@
         </thead>
         <tbody>
           {% for paciente in pacientes %}
-            <tr onclick="window.location='/pacientes/?q={{ paciente.registro }}'"
+            <tr onclick="window.location='{% url 'patients:patient_list' %}?q={{ paciente.registro }}'"
                 style="cursor: pointer;" role="button" tabindex="0"
                 title="Abrir prontuário de {{ paciente.nome }}">
               <td class="ps-3">
@@ -89,7 +89,7 @@
     <!-- Mobile: card view -->
     <div class="sirhosp-censo-cards" style="display: none;">
       {% for paciente in pacientes %}
-        <a href="/pacientes/?q={{ paciente.registro }}"
+        <a href="{% url 'patients:patient_list' %}?q={{ paciente.registro }}"
            class="text-decoration-none d-block border-bottom p-3"
            style="color: inherit;">
           <div class="d-flex justify-content-between align-items-start gap-2">
