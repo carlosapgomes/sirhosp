@@ -241,6 +241,15 @@ class Command(BaseCommand):
         run.finished_at = timezone.now()
         run.save()
 
+        # Auto-enqueue full_sync for the most recent admission
+        if patient is not None:
+            full_sync_run = self._enqueue_most_recent_full_sync(patient, run)
+            if full_sync_run:
+                self.stdout.write(
+                    f"  Auto-enqueued full_sync run #{full_sync_run.pk} "
+                    f"for most recent admission"
+                )
+
         self.stdout.write(
             f"  Run #{run.pk} admissions-only succeeded "
             f"(admissions_seen={adm_metrics['seen']}, "
@@ -522,3 +531,47 @@ class Command(BaseCommand):
                     revised += 1
 
         return created, skipped, revised
+
+    # ------------------------------------------------------------------
+    # Slice S5: Auto-enqueue full_sync after admissions_only
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _enqueue_most_recent_full_sync(patient, run):
+        """Enqueue a full_sync run for the patient's most recent admission.
+
+        Returns the created IngestionRun or None if no admission exists.
+        """
+        from django.utils import timezone
+
+        from apps.ingestion.models import IngestionRun
+        from apps.patients.models import Admission
+
+        latest = (
+            Admission.objects.filter(patient=patient)
+            .order_by("-admission_date")
+            .first()
+        )
+        if latest is None:
+            return None
+
+        # Calculate end_date: use discharge_date if available,
+        # otherwise use current time (still admitted)
+        if latest.discharge_date:
+            end_date = latest.discharge_date.strftime("%Y-%m-%d")
+        else:
+            end_date = timezone.now().strftime("%Y-%m-%d")
+
+        return IngestionRun.objects.create(
+            status="queued",
+            intent="full_sync",
+            parameters_json={
+                "patient_record": patient.patient_source_key,
+                "admission_id": str(latest.pk),
+                "admission_source_key": latest.source_admission_key,
+                "start_date": latest.admission_date.strftime("%Y-%m-%d")
+                    if latest.admission_date else "",
+                "end_date": end_date,
+                "intent": "full_sync",
+            },
+        )
