@@ -1,0 +1,88 @@
+{% extends "base_sidebar.html" %}
+{% block title %}Leitos — SIRHOSP{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-3">
+  <h2 class="h5 fw-bold mb-3" style="color: var(--sirhosp-sidebar-bg);">Ocupação de Leitos</h2>
+
+  {% if not captured_at %}
+    <div class="alert alert-info">
+      Nenhum dado de censo disponível. Execute a extração do censo primeiro.
+    </div>
+  {% else %}
+    <p class="text-muted mb-3 small">
+      Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}
+    </p>
+
+    <div class="table-responsive">
+      <table class="table table-striped table-hover">
+        <thead>
+          <tr>
+            <th>Setor</th>
+            <th class="text-center">Ocupados</th>
+            <th class="text-center">Vagas</th>
+            <th class="text-center">Reservas</th>
+            <th class="text-center">Manutenção</th>
+            <th class="text-center">Isolamento</th>
+            <th class="text-center">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for sector in sectors %}
+          <tr class="sector-row" data-bs-toggle="collapse"
+              data-bs-target="#sector-{{ forloop.counter }}"
+              style="cursor: pointer;">
+            <td><strong>{{ sector.name }}</strong></td>
+            <td class="text-center">
+              <span class="badge bg-primary">{{ sector.occupied }}</span>
+            </td>
+            <td class="text-center">
+              <span class="badge bg-success">{{ sector.empty }}</span>
+            </td>
+            <td class="text-center">
+              <span class="badge bg-warning text-dark">{{ sector.reserved }}</span>
+            </td>
+            <td class="text-center">
+              <span class="badge bg-secondary">{{ sector.maintenance }}</span>
+            </td>
+            <td class="text-center">
+              <span class="badge bg-danger">{{ sector.isolation }}</span>
+            </td>
+            <td class="text-center"><strong>{{ sector.total }}</strong></td>
+          </tr>
+          <tr class="collapse" id="sector-{{ forloop.counter }}">
+            <td colspan="7" class="p-0">
+              <table class="table table-sm mb-0">
+                <thead>
+                  <tr>
+                    <th>Leito</th>
+                    <th>Status</th>
+                    <th>Paciente</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for bed in sector.beds %}
+                  <tr>
+                    <td><code>{{ bed.leito }}</code></td>
+                    <td>{{ bed.status_label }}</td>
+                    <td>
+                      {% if bed.prontuario %}
+                        {{ bed.nome }}
+                        <small class="text-muted">({{ bed.prontuario }})</small>
+                      {% else %}
+                        —
+                      {% endif %}
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

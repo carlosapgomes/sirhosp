@@ -10,6 +10,7 @@ from apps.patients.models import Admission, Patient
 
 if TYPE_CHECKING:
     from apps.clinical_docs.models import ClinicalEvent
+    from apps.ingestion.models import IngestionRun
 
 
 def search_patients_with_coverage(
@@ -79,6 +80,59 @@ def list_admissions_for_patient(patient_id: int) -> QuerySet[Admission]:
 def get_admission_or_404(admission_id: int) -> Admission:
     """Get admission by ID with related patient, or raise DoesNotExist."""
     return Admission.objects.select_related("patient").get(pk=admission_id)
+
+
+def merge_patients(
+    *,
+    keep: Patient,
+    merge: Patient,
+    run: IngestionRun | None = None,
+) -> dict[str, int]:
+    """Merge 'merge' patient into 'keep' patient.
+
+    Re-points all Admissions and ClinicalEvents from merge to keep,
+    records the merge in PatientIdentifierHistory, and deletes merge.
+
+    Args:
+        keep: Patient to preserve.
+        merge: Patient to merge and delete.
+        run: Optional IngestionRun for audit trail.
+
+    Returns:
+        Dict with counts: admissions_moved, events_moved
+    """
+    from apps.clinical_docs.models import ClinicalEvent
+    from apps.patients.models import PatientIdentifierHistory
+
+    if keep.pk == merge.pk:
+        raise ValueError("Cannot merge a patient into itself.")
+
+    # Re-point admissions
+    admissions_moved = Admission.objects.filter(
+        patient=merge
+    ).update(patient=keep)
+
+    # Re-point clinical events
+    events_moved = ClinicalEvent.objects.filter(
+        patient=merge
+    ).update(patient=keep)
+
+    # Record the merge
+    PatientIdentifierHistory.objects.create(
+        patient=keep,
+        identifier_type="patient_merge",
+        old_value=merge.patient_source_key,
+        new_value=keep.patient_source_key,
+        ingestion_run=run,
+    )
+
+    # Delete the merged patient
+    merge.delete()
+
+    return {
+        "admissions_moved": admissions_moved,
+        "events_moved": events_moved,
+    }
 
 
 def list_events_for_admission(
