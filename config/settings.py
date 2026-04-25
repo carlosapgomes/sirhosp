@@ -33,6 +33,7 @@ INSTALLED_APPS = [
     "apps.summaries",
     "apps.search",
     "apps.services_portal",
+    "apps.census",
 ]
 
 MIDDLEWARE = [
