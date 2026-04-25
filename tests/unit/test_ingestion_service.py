@@ -1064,3 +1064,297 @@ class TestDuplicateConsolidation:
         upsert_admission_snapshot(patient, snapshot_v2)
 
         assert Admission.objects.filter(patient=patient).count() == 1
+
+
+# ---------------------------------------------------------------------------
+# upsert_patient_demographics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestUpsertPatientDemographics:
+    """Test upsert_patient_demographics with full demographic data."""
+
+    def _make_demographics(self, **overrides) -> dict:
+        """Build a demographics dict as produced by extract_patient_demographics.
+
+        All data is synthetic — no real patient information.
+        """
+        base = {
+            "prontuario": "1234567",
+            "nome": "FERNANDA COSTA LIMA",
+            "nome_social": "",
+            "sexo": "Feminino",
+            "genero": "Mulher cisgênero",
+            "nome_mae": "HELENA COSTA LIMA",
+            "data_nascimento": "15/03/1980",
+            "nome_pai": "ROBERTO DIAS LIMA",
+            "raca_cor": "Preta",
+            "naturalidade": "SALVADOR - BA",
+            "nacionalidade": "BRASILEIRA",
+            "estado_civil": "Casada",
+            "profissao": "",
+            "grau_instrucao": "Ensino Superior",
+            "ddd_fone_residencial": "71",
+            "fone_residencial": "911112222",
+            "ddd_fone_celular": "71",
+            "fone_celular": "933334444",
+            "ddd_fone_recado": "",
+            "fone_recado": "",
+            "cns": "898001234567890",
+            "logradouro": "Rua EXEMPLO FICTICIO",
+            "numero": "100",
+            "complemento": "",
+            "bairro": "BAIRRO SINTETICO",
+            "cep": "40000000",
+            "cidade": "SALVADOR",
+            "uf": "BA",
+            "cpf": "529.982.450-09",
+        }
+        base.update(overrides)
+        return base
+
+    def test_creates_new_patient_with_demographics(self, db: object) -> None:
+        """Should create a patient with all demographic fields populated."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        demographics = self._make_demographics()
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.pk is not None
+        assert patient.name == "FERNANDA COSTA LIMA"
+        assert patient.social_name == ""
+        assert patient.gender == "Feminino"
+        assert patient.gender_identity == "Mulher cisgênero"
+        assert patient.mother_name == "HELENA COSTA LIMA"
+        assert patient.father_name == "ROBERTO DIAS LIMA"
+        assert patient.race_color == "Preta"
+        assert patient.birthplace == "SALVADOR - BA"
+        assert patient.nationality == "BRASILEIRA"
+        assert patient.marital_status == "Casada"
+        assert patient.education_level == "Ensino Superior"
+        assert patient.cns == "898001234567890"
+        # CPF should be cleaned (no dots/dashes)
+        assert patient.cpf == "52998245009"
+        # Phone should combine DDD + number
+        assert patient.phone_home == "71911112222"
+        assert patient.phone_cellular == "71933334444"
+        assert patient.phone_contact == ""
+        # Address
+        assert patient.street == "Rua EXEMPLO FICTICIO"
+        assert patient.address_number == "100"
+        assert patient.neighborhood == "BAIRRO SINTETICO"
+        assert patient.city == "SALVADOR"
+        assert patient.state == "BA"
+        assert patient.postal_code == "40000000"
+        # Date of birth parsed from BR format
+        assert patient.date_of_birth is not None
+        assert patient.date_of_birth.isoformat() == "1980-03-15"
+
+    def test_updates_existing_patient_demographics(self, db: object) -> None:
+        """Should update demographics for an existing patient."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        # Create a patient first (minimal)
+        Patient.objects.create(
+            patient_source_key="1234567",
+            source_system="tasy",
+            name="NOME PROVISORIO",
+        )
+
+        demographics = self._make_demographics()
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.name == "FERNANDA COSTA LIMA"
+        assert patient.gender == "Feminino"
+        assert patient.race_color == "Preta"
+
+    def test_empty_values_do_not_overwrite_existing(self, db: object) -> None:
+        """Empty demographic values must NOT overwrite existing non-empty data."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        # Create patient with some data
+        Patient.objects.create(
+            patient_source_key="1234567",
+            source_system="tasy",
+            name="FERNANDA COSTA LIMA",
+            race_color="Preta",
+            phone_cellular="71933334444",
+        )
+
+        # Demographics with empty values for race_color and phone
+        demographics = self._make_demographics(raca_cor="", fone_celular="")
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        # Existing values must be preserved
+        assert patient.race_color == "Preta"
+        assert patient.phone_cellular == "71933334444"
+
+    def test_non_empty_values_overwrite_existing(self, db: object) -> None:
+        """Non-empty demographic values MUST overwrite existing data."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        Patient.objects.create(
+            patient_source_key="1234567",
+            source_system="tasy",
+            name="FERNANDA",
+            marital_status="Solteira",
+        )
+
+        demographics = self._make_demographics(estado_civil="Casada")
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.marital_status == "Casada"
+
+    def test_tracks_cns_change_in_identifier_history(self, db: object) -> None:
+        """Changes to CNS should be recorded in PatientIdentifierHistory."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        Patient.objects.create(
+            patient_source_key="1234567",
+            source_system="tasy",
+            name="PACIENTE",
+            cns="111111111111111",
+        )
+
+        demographics = self._make_demographics()
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.cns == "898001234567890"
+
+        from apps.patients.models import PatientIdentifierHistory
+        hist = PatientIdentifierHistory.objects.filter(
+            patient=patient, identifier_type="cns"
+        ).first()
+        assert hist is not None
+        assert hist.old_value == "111111111111111"
+        assert hist.new_value == "898001234567890"
+
+    def test_tracks_cpf_change_in_identifier_history(self, db: object) -> None:
+        """Changes to CPF should be recorded in PatientIdentifierHistory."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        Patient.objects.create(
+            patient_source_key="1234567",
+            source_system="tasy",
+            name="PACIENTE",
+            cpf="00000000000",
+        )
+
+        demographics = self._make_demographics()
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.cpf == "52998245009"
+
+        from apps.patients.models import PatientIdentifierHistory
+        hist = PatientIdentifierHistory.objects.filter(
+            patient=patient, identifier_type="cpf"
+        ).first()
+        assert hist is not None
+
+    def test_no_identifier_history_when_cns_unchanged(self, db: object) -> None:
+        """No history record when CNS value is the same."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        Patient.objects.create(
+            patient_source_key="1234567",
+            source_system="tasy",
+            name="PACIENTE",
+            cns="898001234567890",
+        )
+
+        demographics = self._make_demographics()
+        upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+
+        from apps.patients.models import PatientIdentifierHistory
+        assert not PatientIdentifierHistory.objects.filter(
+            identifier_type="cns"
+        ).exists()
+
+    def test_cpf_formatting_stripped(self, db: object) -> None:
+        """CPF with dots/dashes should be stored as digits only."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        demographics = self._make_demographics(cpf="529.982.450-09")
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.cpf == "52998245009"
+
+    def test_phone_combines_ddd_and_number(self, db: object) -> None:
+        """Phone fields should combine DDD + number into a single field."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        demographics = self._make_demographics(
+            ddd_fone_residencial="71",
+            fone_residencial="911112222",
+        )
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.phone_home == "71911112222"
+
+    def test_date_of_birth_parsed_from_br_format(self, db: object) -> None:
+        """Date of birth in DD/MM/YYYY should be parsed to a date object."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        demographics = self._make_demographics(data_nascimento="15/03/1980")
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.date_of_birth is not None
+        assert patient.date_of_birth.year == 1980
+        assert patient.date_of_birth.month == 3
+        assert patient.date_of_birth.day == 15
+
+    def test_invalid_date_of_birth_ignored(self, db: object) -> None:
+        """Invalid date_of_birth should be silently ignored."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        demographics = self._make_demographics(data_nascimento="INVALID")
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.date_of_birth is None
+
+    def test_uses_source_system_default_tasy(self, db: object) -> None:
+        """Default source_system should be 'tasy'."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        demographics = self._make_demographics()
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            demographics=demographics,
+        )
+        assert patient.source_system == "tasy"
+
+    def test_uses_explicit_source_system(self, db: object) -> None:
+        """Explicit source_system should be used when provided."""
+        from apps.ingestion.services import upsert_patient_demographics
+
+        demographics = self._make_demographics()
+        patient = upsert_patient_demographics(
+            patient_source_key="1234567",
+            source_system="aghu",
+            demographics=demographics,
+        )
+        assert patient.source_system == "aghu"

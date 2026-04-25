@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -80,6 +81,195 @@ def _upsert_patient(evolution: dict[str, Any], run: IngestionRun) -> Patient:
             new_value=new_name,
             ingestion_run=run,
         )
+    return patient
+
+
+# Fields that can be updated from demographic data.
+# Only non-empty values overwrite existing data.
+DEMOGRAPHIC_UPDATE_FIELDS: list[str] = [
+    "name",
+    "social_name",
+    "date_of_birth",
+    "gender",
+    "gender_identity",
+    "mother_name",
+    "father_name",
+    "race_color",
+    "birthplace",
+    "nationality",
+    "marital_status",
+    "education_level",
+    "profession",
+    "cns",
+    "cpf",
+    "phone_home",
+    "phone_cellular",
+    "phone_contact",
+    "street",
+    "address_number",
+    "address_complement",
+    "neighborhood",
+    "city",
+    "state",
+    "postal_code",
+]
+
+
+def upsert_patient_demographics(
+    *,
+    patient_source_key: str,
+    source_system: str = "tasy",
+    demographics: dict[str, Any],
+    run: IngestionRun | None = None,
+) -> Patient:
+    """Create or update a Patient with full demographic data.
+
+    This is the primary entry point for the demographics extraction pipeline.
+    It accepts a flat dict of demographic fields (as produced by the
+    extract_patient_demographics script) and upserts them into the Patient
+    model.
+
+    Policy:
+    - Non-empty values always overwrite existing data.
+    - Empty/None values do NOT overwrite existing non-empty data.
+    - Changes to identifier fields (cns, cpf, patient_source_key) are
+      recorded in PatientIdentifierHistory.
+
+    Args:
+        patient_source_key: External patient identifier (prontuário).
+        source_system: Origin system identifier.
+        demographics: Dict of demographic field values. Keys must match
+            Patient model field names. The key 'prontuario' is mapped to
+            patient_source_key automatically.
+        run: Optional IngestionRun for audit trail.
+
+    Returns:
+        The upserted Patient instance.
+    """
+    from apps.patients.models import PatientIdentifierHistory
+
+    # Map external key names to model field names
+    field_map: dict[str, str] = {
+        "prontuario": "patient_source_key",
+        "nome": "name",
+        "nome_social": "social_name",
+        "data_nascimento": "date_of_birth",
+        "sexo": "gender",
+        "genero": "gender_identity",
+        "nome_mae": "mother_name",
+        "nome_pai": "father_name",
+        "raca_cor": "race_color",
+        "naturalidade": "birthplace",
+        "nacionalidade": "nationality",
+        "estado_civil": "marital_status",
+        "grau_instrucao": "education_level",
+        "profissao": "profession",
+        "cns": "cns",
+        "cpf": "cpf",
+        "fone_residencial": "phone_home",
+        "fone_celular": "phone_cellular",
+        "fone_recado": "phone_contact",
+        "logradouro": "street",
+        "numero": "address_number",
+        "complemento": "address_complement",
+        "bairro": "neighborhood",
+        "cidade": "city",
+        "uf": "state",
+        "cep": "postal_code",
+    }
+
+    # Normalize incoming data to model field names
+    normalized: dict[str, Any] = {}
+    for ext_key, model_field in field_map.items():
+        if ext_key in demographics:
+            value = demographics[ext_key]
+            normalized[model_field] = value
+
+    # Parse date_of_birth from BR format (DD/MM/YYYY) to date
+    dob_raw = normalized.get("date_of_birth", "")
+    if isinstance(dob_raw, str) and dob_raw:
+        try:
+            dt = datetime.strptime(dob_raw.strip(), "%d/%m/%Y").date()
+            normalized["date_of_birth"] = dt
+        except ValueError:
+            normalized.pop("date_of_birth", None)
+    elif not dob_raw:
+        normalized.pop("date_of_birth", None)
+
+    # Clean CPF: remove formatting dots/dashes
+    cpf_raw = normalized.get("cpf", "")
+    if isinstance(cpf_raw, str) and cpf_raw:
+        normalized["cpf"] = re.sub(r"[^0-9]", "", cpf_raw)
+
+    # Clean phone fields: keep only digits
+    for phone_field in ("phone_home", "phone_cellular", "phone_contact"):
+        phone_raw = normalized.get(phone_field, "")
+        if isinstance(phone_raw, str) and phone_raw:
+            # Combine DDD + number if both present in demographics
+            ddd_key = {
+                "phone_home": "ddd_fone_residencial",
+                "phone_cellular": "ddd_fone_celular",
+                "phone_contact": "ddd_fone_recado",
+            }[phone_field]
+            ddd = demographics.get(ddd_key, "")
+            if ddd and phone_raw:
+                full_phone = f"{ddd}{phone_raw}"
+                normalized[phone_field] = re.sub(r"[^0-9]", "", full_phone)
+            else:
+                normalized[phone_field] = re.sub(r"[^0-9]", "", phone_raw)
+
+    # Clean postal_code: keep only digits
+    cep_raw = normalized.get("postal_code", "")
+    if isinstance(cep_raw, str) and cep_raw:
+        normalized["postal_code"] = re.sub(r"[^0-9]", "", cep_raw)
+
+    # Build defaults for get_or_create (only non-empty values)
+    defaults: dict[str, Any] = {}
+    for field in DEMOGRAPHIC_UPDATE_FIELDS:
+        value = normalized.get(field)
+        if value is not None and value != "":
+            defaults[field] = value
+
+    patient, created = Patient.objects.get_or_create(
+        source_system=source_system,
+        patient_source_key=patient_source_key,
+        defaults=defaults,
+    )
+
+    if not created:
+        # Update only non-empty fields
+        changed_fields: list[str] = []
+        identifier_changes: list[tuple[str, str, str]] = []  # (field, old, new)
+
+        for field in DEMOGRAPHIC_UPDATE_FIELDS:
+            new_value = normalized.get(field)
+            if new_value is None or new_value == "":
+                continue
+            old_value = getattr(patient, field)
+            # For date fields, compare properly
+            if field == "date_of_birth" and old_value is None:
+                old_value = ""
+            if str(old_value) != str(new_value):
+                setattr(patient, field, new_value)
+                changed_fields.append(field)
+                # Track identifier changes for audit
+                if field in ("cns", "cpf", "patient_source_key"):
+                    identifier_changes.append(
+                        (field, str(old_value), str(new_value))
+                    )
+
+        if changed_fields:
+            patient.save(update_fields=changed_fields + ["updated_at"])
+
+            for field_name, old_val, new_val in identifier_changes:
+                PatientIdentifierHistory.objects.create(
+                    patient=patient,
+                    identifier_type=field_name,
+                    old_value=old_val,
+                    new_value=new_val,
+                    ingestion_run=run,
+                )
+
     return patient
 
 

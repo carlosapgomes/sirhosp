@@ -28,7 +28,7 @@ from source_system import (
     salvar_texto_extraido,
 )
 
-DEFAULT_PATIENT_RECORD: Final[str] = "8920415"
+DEFAULT_PATIENT_RECORD: Final[str] = "1234567"
 DEFAULT_START_DATE: Final[str] = "05/06/2024"
 DEFAULT_END_DATE: Final[str] = "01/07/2024"
 DEFAULT_OUTPUT_PATH: Final[Path] = Path("downloads/path2-evolucoes-intervalo.pdf")

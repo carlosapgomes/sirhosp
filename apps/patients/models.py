@@ -9,6 +9,9 @@ class Patient(models.Model):
     Fields:
         patient_source_key: External patient identifier from source system.
         source_system: Origin system identifier (default: "tasy").
+        social_name: Nome social do paciente.
+        gender_identity: Gênero (identidade de gênero) do paciente.
+        race_color: Raça/Cor declarada do paciente.
         cns: Cartão Nacional de Saúde.
         cpf: CPF number (fiscal identifier).
     """
@@ -17,12 +20,33 @@ class Patient(models.Model):
     source_system = models.CharField(max_length=100, default="tasy")
 
     name = models.CharField(max_length=512)
+    social_name = models.CharField(max_length=512, blank=True, default="")
     date_of_birth = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=20, blank=True, default="")
+    gender_identity = models.CharField(max_length=50, blank=True, default="")
     mother_name = models.CharField(max_length=512, blank=True, default="")
+    father_name = models.CharField(max_length=512, blank=True, default="")
+    race_color = models.CharField(max_length=50, blank=True, default="")
+    birthplace = models.CharField(max_length=200, blank=True, default="")
+    nationality = models.CharField(max_length=100, blank=True, default="")
+    marital_status = models.CharField(max_length=50, blank=True, default="")
+    education_level = models.CharField(max_length=100, blank=True, default="")
+    profession = models.CharField(max_length=200, blank=True, default="")
 
     cns = models.CharField(max_length=50, blank=True, default="")
     cpf = models.CharField(max_length=20, blank=True, default="")
+
+    phone_home = models.CharField(max_length=30, blank=True, default="")
+    phone_cellular = models.CharField(max_length=30, blank=True, default="")
+    phone_contact = models.CharField(max_length=30, blank=True, default="")
+
+    street = models.CharField(max_length=300, blank=True, default="")
+    address_number = models.CharField(max_length=20, blank=True, default="")
+    address_complement = models.CharField(max_length=200, blank=True, default="")
+    neighborhood = models.CharField(max_length=200, blank=True, default="")
+    city = models.CharField(max_length=200, blank=True, default="")
+    state = models.CharField(max_length=5, blank=True, default="")
+    postal_code = models.CharField(max_length=15, blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

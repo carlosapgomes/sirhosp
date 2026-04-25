@@ -412,7 +412,7 @@ class TestExtractEvolutionsHappyPath:
             side_effect=fake_run,
         ):
             results = extractor.extract_evolutions(
-                patient_record="8920415",
+                patient_record="1234567",
                 start_date="2024-06-01",
                 end_date="2024-06-15",
             )
@@ -474,13 +474,13 @@ class TestExtractEvolutionsHappyPath:
             side_effect=fake_run,
         ):
             results = extractor.extract_evolutions(
-                patient_record="8920415",
+                patient_record="1234567",
                 start_date="2024-06-01",
                 end_date="2024-06-15",
             )
 
         assert len(results) == 1
-        assert results[0]["patient_source_key"] == "8920415"
+        assert results[0]["patient_source_key"] == "1234567"
 
     def test_date_conversion_to_ddmmyyyy(self, tmp_path: Path):
         """start_date and end_date in YYYY-MM-DD must be converted to DD/MM/YYYY for path2."""
@@ -607,7 +607,7 @@ class TestExtractEvolutionsHappyPath:
             side_effect=fake_run,
         ):
             results = extractor.extract_evolutions(
-                patient_record="8920415",
+                patient_record="1234567",
                 start_date="2024-06-01",
                 end_date="2024-06-15",
             )
@@ -617,7 +617,7 @@ class TestExtractEvolutionsHappyPath:
         start_idx = captured_cmd.index("--start-date") + 1
         assert captured_cmd[start_idx] == "01/06/2024"
         # And patient_source_key is present
-        assert results[0]["patient_source_key"] == "8920415"
+        assert results[0]["patient_source_key"] == "1234567"
 
 
 class TestRequiredFieldValidation:
@@ -799,7 +799,7 @@ class TestGetAdmissionSnapshot:
             side_effect=fake_run,
         ):
             results = extractor.get_admission_snapshot(
-                patient_record="8920415",
+                patient_record="1234567",
                 start_date="2024-06-01",
                 end_date="2024-07-31",
             )
