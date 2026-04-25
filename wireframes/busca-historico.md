@@ -6,7 +6,7 @@ Aqui está o **Blueprint: Busca Histórica**, adaptado com a Sidebar e com essa 
 
 ```text
 +--------------------------------------------------------------------------------------+
-| [ EHR MIRROR ] |  Busca Histórica (Arquivo e On-Demand)    [ Sincronizado: 12:45 ]   |
+| [ SIRHOSP ] |  Busca Histórica (Arquivo e On-Demand)    [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
 |  MENU PRINCIPAL  |   PESQUISAR PACIENTES (INTERNADOS OU ALTAS)                       |

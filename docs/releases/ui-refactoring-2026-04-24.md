@@ -144,7 +144,7 @@ base.html (Bootstrap CSS + Icons + JS)
 
 ┌────────────────────┬────┐
 │ ╔══════════════╗   │    │ ← overlay semi-transparente
-│ ║ EHR Mirror   ║   │    │
+│ ║ SIRHosp      ║   │    │
 │ ║ 🏠 Dashboard ║   │    │
 │ ║ 🏥 Censo     ║   │    │
 │ ║ 👥 Pacientes ║   │    │
@@ -169,7 +169,7 @@ base.html (Bootstrap CSS + Icons + JS)
 ┌──────────────────────────────────────┐
 │         Fundo gradiente teal          │
 │  ┌────────────────────────────────┐   │
-│  │     ♥ EHR Mirror               │   │
+│  │     ♥ SIRHosp                  │   │
 │  │  Sistema de Relatórios          │   │
 │  │  Hospitalares                   │   │
 │  │                                 │   │

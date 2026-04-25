@@ -4,7 +4,7 @@ Aqui está o blueprint ajustado, mantendo a navegação lateral, a barra superio
 
 ```text
 +--------------------------------------------------------------------------------------+
-| [ EHR MIRROR ] |  Censo Hospitalar (Pacientes Internados)   [ Sincronizado: 12:45 ]   |
+| [ SIRHOSP ] |  Censo Hospitalar (Pacientes Internados)   [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
 |  MENU            |   FILTRAR CENSO ATUAL                                             |

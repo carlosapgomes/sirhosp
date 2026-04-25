@@ -4,7 +4,7 @@ Aqui está o blueprint adaptado para a **Página de Detalhes do Paciente**:
 
 ```text
 +--------------------------------------------------------------------------------------+
-| [ EHR MIRROR ] |  Prontuário e Linha do Tempo              [ Sincronizado: 12:45 ]   |
+| [ SIRHOSP ] |  Prontuário e Linha do Tempo              [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
 |  MENU            |   [ BANNER: FULANO DE TAL | ID: 00123 | IDADE: 45 | LEITO: 202-A ]|

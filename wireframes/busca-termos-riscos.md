@@ -6,7 +6,7 @@ Aqui está o blueprint final para o **Monitor de Risco (Busca por Palavras-Chave
 
 ```text
 +--------------------------------------------------------------------------------------+
-| [ EHR MIRROR ] |  Monitor de Risco e Vigilância            [ Sincronizado: 12:45 ]   |
+| [ SIRHOSP ] |  Monitor de Risco e Vigilância            [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
 |  MENU            |   PESQUISAR TERMOS EM TODAS AS EVOLUÇÕES RECENTES                 |

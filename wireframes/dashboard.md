@@ -2,7 +2,7 @@
 
 ```text
 +--------------------------------------------------------------------------------------+
-| [ EHR MIRROR ] |  Painel de Controle Principal           [ Sincronizado: 12:45 ]   |
+| [ SIRHOSP ] |  Painel de Controle Principal           [ Sincronizado: 12:45 ]   |
 +------------------+-------------------------------------------------------------------+
 |                  |                                                                   |
 |  MENU            |   RESUMO OPERACIONAL (HOJE)                                       |
