@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from django.contrib.auth.decorators import login_required
-from django.db.models import Max
+from django.db.models import Max, Q
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
 from django.utils import timezone
@@ -61,59 +61,70 @@ def dashboard(request: HttpRequest) -> HttpResponse:
 def censo(request: HttpRequest) -> HttpResponse:
     """Hospital census: filter by ward/sector and search patients.
 
-    Displays a table of current inpatients with bed, name, registry,
-    and admission date. Supports filtering by sector (dropdown) and
-    free-text search.
-
-    Uses demo/stub data until current inpatient sync is implemented.
+    Displays a table of current inpatients (occupied beds only)
+    from the latest CensusSnapshot. Supports filtering by sector
+    (dropdown populated from real data) and free-text search
+    across patient name and record number.
     """
-    # Demo sectors
-    setores_demo = [
-        "UTI Adulto", "UTI Neonatal", "Clínica Médica",
-        "Clínica Cirúrgica", "Ortopedia", "Cardiologia",
-        "Neurologia", "Pediatria", "Maternidade",
-        "Pronto Socorro", "Oncologia", "Nefrologia",
-    ]
+    latest = CensusSnapshot.objects.aggregate(latest=Max("captured_at"))["latest"]
 
-    # Demo patient data (table rows)
-    def _p(leito, nome, registro, admissao, setor):
-        return {"leito": leito, "nome": nome, "registro": registro,
-                "admissao": admissao, "setor": setor}
+    if latest is None:
+        return render(request, "services_portal/censo.html", {
+            "page_title": "Censo Hospitalar",
+            "setores": [],
+            "setor_filtro": "",
+            "busca": "",
+            "pacientes": [],
+            "total": 0,
+            "captured_at": None,
+        })
 
-    pacientes_demo = [
-        _p("202-A", "Fulano de Tal", "00123", "20/01/2026", "Clínica Médica"),
-        _p("UTI-05", "Beltrano de Souza", "00456", "22/01/2026", "UTI Adulto"),
-        _p("301-B", "Maria Oliveira", "00789", "25/01/2026", "Clínica Médica"),
-        _p("UTI-02", "José Ferreira", "00890", "23/01/2026", "UTI Adulto"),
-        _p("405-C", "Ana Paula Reis", "00332", "05/02/2026", "Ortopedia"),
-        _p("UTI-NEO-01", "Lucas Mendes", "01234", "28/01/2026", "UTI Neonatal"),
-        _p("502-A", "Carla Dantas", "01567", "18/01/2026", "Cardiologia"),
-        _p("601-D", "Rafael Torres", "01890", "10/02/2026", "Neurologia"),
-    ]
+    # Base queryset: only occupied beds from the most recent snapshot
+    qs = CensusSnapshot.objects.filter(
+        captured_at=latest,
+        bed_status=BedStatus.OCCUPIED,
+    ).order_by("setor", "leito")
 
+    # Distinct sectors for the dropdown
+    setores = list(
+        qs.values_list("setor", flat=True)
+        .distinct()
+        .order_by("setor")
+    )
+
+    # Filter by sector
     setor_filtro = request.GET.get("setor", "").strip()
-    busca = request.GET.get("q", "").strip()
-
-    # Filter
-    pacientes = pacientes_demo
     if setor_filtro and setor_filtro != "Todos":
-        pacientes = [p for p in pacientes if p["setor"] == setor_filtro]
-    if busca:
-        busca_lower = busca.lower()
-        pacientes = [
-            p for p in pacientes
-            if busca_lower in p["nome"].lower() or busca_lower in p["registro"]
-        ]
+        qs = qs.filter(setor=setor_filtro)
 
-    context = {
+    # Free-text search
+    busca = request.GET.get("q", "").strip()
+    if busca:
+        qs = qs.filter(
+            Q(nome__icontains=busca) | Q(prontuario__icontains=busca)
+        )
+
+    snapshots = list(qs)
+    pacientes = [
+        {
+            "leito": s.leito,
+            "nome": s.nome,
+            "registro": s.prontuario,
+            "admissao": "",
+            "setor": s.setor,
+        }
+        for s in snapshots
+    ]
+
+    return render(request, "services_portal/censo.html", {
         "page_title": "Censo Hospitalar",
-        "setores": setores_demo,
+        "setores": setores,
         "setor_filtro": setor_filtro,
         "busca": busca,
         "pacientes": pacientes,
         "total": len(pacientes),
-    }
-    return render(request, "services_portal/censo.html", context)
+        "captured_at": latest,
+    })
 
 
 @login_required

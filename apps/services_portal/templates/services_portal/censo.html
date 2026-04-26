@@ -7,6 +7,9 @@
   <div>
     <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Censo Hospitalar</h2>
     <p class="text-muted small mb-0">Pacientes atualmente internados por setor e leito</p>
+    {% if captured_at %}
+    <p class="text-muted small mb-0">Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}</p>
+    {% endif %}
   </div>
 </div>
 
