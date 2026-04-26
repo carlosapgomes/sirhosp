@@ -1,7 +1,8 @@
-"""Services portal views: dashboard, census, risk monitor.
+"""Services portal views: dashboard, census, risk monitor, ingestion metrics.
 
 Slice S2: Dashboard with operational stats (demo data).
 Slice DRD-S1: Dashboard with real DB queries.
+Slice IRMD-S6: Ingestion metric cards on dashboard and metrics page route.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from django.shortcuts import render
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.ingestion.models import IngestionRun
 from apps.patients.models import Admission, Patient
 
 
@@ -42,6 +44,9 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         discharge_date__gte=timezone.now() - timedelta(hours=24),
     ).count()
 
+    # ── IRMD-S6: Ingestion metrics for last 24h ──────────────────────
+    ingestion_stats = _compute_ingestion_stats()
+
     context = {
         "page_title": "Dashboard",
         "stats": {
@@ -53,8 +58,57 @@ def dashboard(request: HttpRequest) -> HttpResponse:
             "setores": setores,
             "ultima_varredura": ultima_varredura,
         },
+        "ingestion_stats": ingestion_stats,
     }
     return render(request, "services_portal/dashboard.html", context)
+
+
+def _compute_ingestion_stats() -> dict:
+    """Compute ingestion operational metrics for the last 24 hours.
+
+    Returns a dict with:
+        total_finished, success_rate, timeout_rate, avg_duration_seconds.
+    All values are zero when no runs exist in the window.
+    """
+    now = timezone.now()
+    window_start = now - timedelta(hours=24)
+
+    finished = IngestionRun.objects.filter(finished_at__gte=window_start)
+    total = finished.count()
+
+    if total == 0:
+        return {
+            "total_finished": 0,
+            "success_rate": 0.0,
+            "timeout_rate": 0.0,
+            "avg_duration_seconds": 0,
+        }
+
+    success_count = finished.filter(status="succeeded").count()
+    timeout_count = finished.filter(timed_out=True).count()
+
+    success_rate = round(success_count / total * 100, 1)
+    timeout_rate = round(timeout_count / total * 100, 1)
+
+    # Average processing duration for runs that have processing_started_at
+    runs_with_duration = finished.exclude(processing_started_at__isnull=True)
+    if runs_with_duration.exists():
+        durations: list[float] = []
+        for run in runs_with_duration:
+            if run.processing_started_at and run.finished_at:
+                durations.append(
+                    (run.finished_at - run.processing_started_at).total_seconds()
+                )
+        avg_seconds = round(sum(durations) / len(durations)) if durations else 0
+    else:
+        avg_seconds = 0
+
+    return {
+        "total_finished": total,
+        "success_rate": success_rate,
+        "timeout_rate": timeout_rate,
+        "avg_duration_seconds": avg_seconds,
+    }
 
 
 @login_required
@@ -125,6 +179,22 @@ def censo(request: HttpRequest) -> HttpResponse:
         "total": len(pacientes),
         "captured_at": latest,
     })
+
+
+@login_required
+def ingestion_metrics(request: HttpRequest) -> HttpResponse:
+    """Ingestion operational metrics page (S6: initial placeholder).
+
+    Renders a basic page that will receive filters and detailed
+    tables in S7.
+    """
+    ingestion_stats = _compute_ingestion_stats()
+
+    context = {
+        "page_title": "Métricas de Ingestão",
+        "ingestion_stats": ingestion_stats,
+    }
+    return render(request, "services_portal/ingestion_metrics.html", context)
 
 
 @login_required

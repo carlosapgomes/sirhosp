@@ -52,6 +52,64 @@
   </div>
 </div>
 
+<!-- Ingestion Metrics (24h) -->
+<div class="mb-4">
+  <div class="d-flex align-items-center justify-content-between mb-3">
+    <h3 class="h6 fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-arrow-repeat me-2 text-primary"></i> Ingestão de Dados (últimas 24h)
+    </h3>
+    <a href="{% url 'services_portal:ingestion_metrics' %}" class="btn btn-sm btn-outline-primary">
+      Ver detalhes <i class="bi bi-arrow-right ms-1"></i>
+    </a>
+  </div>
+  <div class="row g-3">
+    <div class="col-6 col-md-3">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: var(--bs-primary-lightest);">
+          <i class="bi bi-arrow-repeat" style="color: var(--bs-primary); font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value">{{ ingestion_stats.total_finished }}</div>
+          <div class="sirhosp-stat-label">Execuções</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #DCFCE7;">
+          <i class="bi bi-check-circle" style="color: #16A34A; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value">{{ ingestion_stats.success_rate }}%</div>
+          <div class="sirhosp-stat-label">Sucesso</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #FEE2E2;">
+          <i class="bi bi-clock-history" style="color: #DC2626; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value">{{ ingestion_stats.timeout_rate }}%</div>
+          <div class="sirhosp-stat-label">Timeout</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-6 col-md-3">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
+          <i class="bi bi-stopwatch" style="color: #0284C7; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value">{{ ingestion_stats.avg_duration_seconds }}s</div>
+          <div class="sirhosp-stat-label">Duração Média</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Data Collection Status -->
 <div class="card border-0 shadow-sm mb-4">
   <div class="card-body">

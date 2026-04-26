@@ -1,0 +1,68 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Métricas de Ingestão — SIRHOSP{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Métricas de Ingestão</h2>
+    <p class="text-muted small mb-0">Monitoramento operacional das execuções de ingestão de dados</p>
+  </div>
+</div>
+
+<!-- Resumo das últimas 24h -->
+<div class="row g-3 mb-4">
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: var(--bs-primary-lightest);">
+        <i class="bi bi-arrow-repeat" style="color: var(--bs-primary); font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ ingestion_stats.total_finished }}</div>
+        <div class="sirhosp-stat-label">Execuções (24h)</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #DCFCE7;">
+        <i class="bi bi-check-circle" style="color: #16A34A; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ ingestion_stats.success_rate }}%</div>
+        <div class="sirhosp-stat-label">Taxa de Sucesso</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FEE2E2;">
+        <i class="bi bi-clock-history" style="color: #DC2626; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ ingestion_stats.timeout_rate }}%</div>
+        <div class="sirhosp-stat-label">Taxa de Timeout</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
+        <i class="bi bi-stopwatch" style="color: #0284C7; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ ingestion_stats.avg_duration_seconds }}s</div>
+        <div class="sirhosp-stat-label">Duração Média</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card border-0 shadow-sm">
+  <div class="card-body text-center py-5">
+    <i class="bi bi-tools fs-1 text-muted mb-3 d-block"></i>
+    <h5 class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">Filtros e tabelas detalhadas</h5>
+    <p class="text-muted mb-0">A visualização detalhada com filtros estará disponível na próxima atualização.</p>
+  </div>
+</div>
+{% endblock %}
