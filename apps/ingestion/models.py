@@ -1,4 +1,4 @@
-"""IngestionRun - operational tracking of ingestion executions."""
+"""IngestionRun and IngestionRunStageMetric - operational tracking."""
 
 from django.db import models
 from django.utils import timezone
@@ -116,3 +116,57 @@ class IngestionRun(models.Model):
     def total_duration_seconds(self):
         """Seconds between enqueue (queued_at) and finish."""
         return self._timedelta_seconds(self.queued_at, self.finished_at)
+
+
+class IngestionRunStageMetric(models.Model):
+    """Per-stage execution metrics for an IngestionRun.
+
+    Captures start/end timestamps and outcome for each critical
+    execution stage, enabling operational diagnostics at stage level.
+
+    Stages tracked:
+        - admissions_capture
+        - gap_planning
+        - evolution_extraction
+        - ingestion_persistence
+    """
+
+    STAGE_STATUS_CHOICES = [
+        ("succeeded", "Succeeded"),
+        ("failed", "Failed"),
+        ("skipped", "Skipped"),
+    ]
+
+    run = models.ForeignKey(
+        IngestionRun,
+        on_delete=models.CASCADE,
+        related_name="stage_metrics",
+    )
+    stage_name = models.CharField(max_length=50)
+    started_at = models.DateTimeField()
+    finished_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(
+        max_length=20,
+        choices=STAGE_STATUS_CHOICES,
+        default="succeeded",
+    )
+    details_json = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional stage-level context (counters, gaps count, etc.).",
+    )
+
+    class Meta:
+        ordering = ["started_at"]
+        indexes = [
+            models.Index(fields=["run", "stage_name"]),
+            models.Index(fields=["stage_name", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"StageMetric #{self.pk} "
+            f"run={self.run_id} "
+            f"stage={self.stage_name} "
+            f"[{self.status}]"
+        )

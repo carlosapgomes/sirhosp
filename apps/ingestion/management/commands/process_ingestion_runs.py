@@ -22,7 +22,6 @@ from django.db import transaction
 from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
-from apps.ingestion.extractors.errors import ExtractionError
 from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionExtractor
 from apps.ingestion.gap_planner import plan_extraction_windows
 from apps.ingestion.models import IngestionRun
@@ -218,6 +217,62 @@ class Command(BaseCommand):
             return ("source_unavailable", False)
         return ("unexpected_exception", False)
 
+    @staticmethod
+    def _record_stage(
+        run: IngestionRun,
+        stage_name: str,
+        status: str,
+        started_at,
+        finished_at=None,
+        details_json=None,
+    ):
+        """Persist a stage metric record for the given run.
+
+        Args:
+            run: The IngestionRun instance.
+            stage_name: Stage identifier (e.g. 'admissions_capture').
+            status: One of 'succeeded', 'failed', 'skipped'.
+            started_at: Datetime when the stage started.
+            finished_at: Datetime when the stage finished (defaults to now).
+            details_json: Optional dict with stage-level context.
+        """
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        IngestionRunStageMetric.objects.create(
+            run=run,
+            stage_name=stage_name,
+            started_at=started_at,
+            finished_at=finished_at or timezone.now(),
+            status=status,
+            details_json=details_json or {},
+        )
+
+    @staticmethod
+    def _stage_error_details(exc: Exception) -> dict:
+        """Build normalized stage-level error details payload."""
+        return {
+            "error_type": exc.__class__.__name__,
+            "error_message": str(exc),
+        }
+
+    def _mark_run_failed(self, run: IngestionRun, exc: Exception) -> None:
+        """Transition run to failed with normalized failure fields."""
+        run.status = "failed"
+        run.error_message = str(exc)
+        run.finished_at = timezone.now()
+        failure_reason, timed_out = self._classify_failure_reason(exc)
+        run.failure_reason = failure_reason
+        run.timed_out = timed_out
+        run.save(
+            update_fields=[
+                "status",
+                "error_message",
+                "finished_at",
+                "failure_reason",
+                "timed_out",
+            ]
+        )
+
     def _process_run(
         self,
         run: IngestionRun,
@@ -271,17 +326,35 @@ class Command(BaseCommand):
             headless=headless,
         )
 
-        patient, adm_metrics = self._capture_admissions(
-            run=run,
-            extractor=extractor,
-            patient_record=patient_record,
-            start_date="",
-            end_date="",
-        )
-
-        # Run already failed in _capture_admissions
-        if run.status == "failed":
+        adm_stage_start = timezone.now()
+        try:
+            patient, adm_metrics = self._capture_admissions(
+                run=run,
+                extractor=extractor,
+                patient_record=patient_record,
+                start_date="",
+                end_date="",
+            )
+        except Exception as exc:
+            self._record_stage(
+                run=run,
+                stage_name="admissions_capture",
+                status="failed",
+                started_at=adm_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during admissions capture: {exc}"
+            )
             return
+
+        self._record_stage(
+            run=run,
+            stage_name="admissions_capture",
+            status="succeeded",
+            started_at=adm_stage_start,
+        )
 
         # Admissions-only: persist metrics and succeed, no gap planning
         run.admissions_seen = adm_metrics["seen"]
@@ -351,30 +424,75 @@ class Command(BaseCommand):
         # ------------------------------------------------------------------
         # Step 1: Capture admissions snapshot (mandatory — fail-fast)
         # ------------------------------------------------------------------
-        patient, adm_metrics = self._capture_admissions(
-            run=run,
-            extractor=extractor,
-            patient_record=patient_record,
-            start_date=start_date,
-            end_date=end_date,
-        )
-
-        # Run already failed + saved in _capture_admissions on error
-        if run.status == "failed":
+        adm_stage_start = timezone.now()
+        try:
+            patient, adm_metrics = self._capture_admissions(
+                run=run,
+                extractor=extractor,
+                patient_record=patient_record,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as exc:
+            self._record_stage(
+                run=run,
+                stage_name="admissions_capture",
+                status="failed",
+                started_at=adm_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during admissions capture: {exc}"
+            )
             return
+
+        self._record_stage(
+            run=run,
+            stage_name="admissions_capture",
+            status="succeeded",
+            started_at=adm_stage_start,
+        )
 
         # ------------------------------------------------------------------
         # Step 2: Plan extraction windows (cache-first)
         # ------------------------------------------------------------------
-        plan = plan_extraction_windows(
-            patient_source_key=patient_record,
-            source_system="tasy",
-            start_date=start_date,
-            end_date=end_date,
-        )
+        gap_stage_start = timezone.now()
+        try:
+            plan = plan_extraction_windows(
+                patient_source_key=patient_record,
+                source_system="tasy",
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except Exception as exc:
+            self._record_stage(
+                run=run,
+                stage_name="gap_planning",
+                status="failed",
+                started_at=gap_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(f"  Run #{run.pk} failed during gap planning: {exc}")
+            return
+
         run.gaps_json = plan["gaps"]
+        self._record_stage(
+            run=run,
+            stage_name="gap_planning",
+            status="succeeded",
+            started_at=gap_stage_start,
+        )
 
         if plan["skip_extraction"]:
+            # Full coverage — evolution_extraction skipped
+            self._record_stage(
+                run=run,
+                stage_name="evolution_extraction",
+                status="skipped",
+                started_at=timezone.now(),
+            )
             # Full coverage — nothing to extract
             run.admissions_seen = adm_metrics["seen"]
             run.admissions_created = adm_metrics["created"]
@@ -396,6 +514,7 @@ class Command(BaseCommand):
         # ------------------------------------------------------------------
         # Step 3: Extract evolutions for each gap window
         # ------------------------------------------------------------------
+        ev_stage_start = timezone.now()
         all_evolutions: list[dict] = []
         try:
             for window in plan["windows"]:
@@ -405,23 +524,56 @@ class Command(BaseCommand):
                     end_date=window["end_date"],
                 )
                 all_evolutions.extend(evolutions)
-        except ExtractionError as exc:
+        except Exception as exc:
             # Admissions were captured — preserve them, fail the run
-            run.status = "failed"
-            run.error_message = str(exc)
-            run.finished_at = timezone.now()
-            failure_reason, timed_out = self._classify_failure_reason(exc)
-            run.failure_reason = failure_reason
-            run.timed_out = timed_out
-            run.save()
+            self._record_stage(
+                run=run,
+                stage_name="evolution_extraction",
+                status="failed",
+                started_at=ev_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
             self.stderr.write(f"  Run #{run.pk} failed during evolution extraction: {exc}")
             return
+        self._record_stage(
+            run=run,
+            stage_name="evolution_extraction",
+            status="succeeded",
+            started_at=ev_stage_start,
+        )
 
         # ------------------------------------------------------------------
         # Step 4: Ingest evolutions (deterministic admission resolution)
         # ------------------------------------------------------------------
-        ev_created, ev_skipped, ev_revised = self._ingest_evolutions(
-            all_evolutions, run, patient=patient
+        ingest_stage_start = timezone.now()
+        try:
+            ev_created, ev_skipped, ev_revised = self._ingest_evolutions(
+                all_evolutions, run, patient=patient
+            )
+        except Exception as exc:
+            self._record_stage(
+                run=run,
+                stage_name="ingestion_persistence",
+                status="failed",
+                started_at=ingest_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(f"  Run #{run.pk} failed during ingestion persistence: {exc}")
+            return
+
+        self._record_stage(
+            run=run,
+            stage_name="ingestion_persistence",
+            status="succeeded",
+            started_at=ingest_stage_start,
+            details_json={
+                "processed": len(all_evolutions),
+                "created": ev_created,
+                "skipped": ev_skipped,
+                "revised": ev_revised,
+            },
         )
 
         # Persist metrics
@@ -475,44 +627,22 @@ class Command(BaseCommand):
 
         Side-effects:
             - Creates/updates Patient and Admission records.
-            - Transitions run to 'failed' on error.
+            - Propagates extractor errors to caller.
         """
         from apps.ingestion.services import upsert_admission_snapshot
         from apps.patients.models import Patient
 
         adm_metrics = {"seen": 0, "created": 0, "updated": 0}
 
-        try:
-            # For admissions-only runs with no date range, use a wide default
-            snap_start = start_date or "2000-01-01"
-            snap_end = end_date or timezone.now().strftime("%Y-%m-%d")
-            admissions_snapshot = extractor.get_admission_snapshot(
-                patient_record=patient_record,
-                start_date=snap_start,
-                end_date=snap_end,
-                timeout=120,
-            )
-        except Exception as exc:
-            run.status = "failed"
-            run.error_message = str(exc)
-            run.finished_at = timezone.now()
-            failure_reason, timed_out = self._classify_failure_reason(exc)
-            run.failure_reason = failure_reason
-            run.timed_out = timed_out
-            run.save(
-                update_fields=[
-                    "status",
-                    "error_message",
-                    "finished_at",
-                    "failure_reason",
-                    "timed_out",
-                ]
-            )
-            self.stderr.write(
-                f"  Run #{run.pk} failed during admissions capture: {exc}"
-            )
-            # Return dummy metrics so caller can check run.status == 'failed'
-            return None, adm_metrics
+        # For admissions-only runs with no date range, use a wide default
+        snap_start = start_date or "2000-01-01"
+        snap_end = end_date or timezone.now().strftime("%Y-%m-%d")
+        admissions_snapshot = extractor.get_admission_snapshot(
+            patient_record=patient_record,
+            start_date=snap_start,
+            end_date=snap_end,
+            timeout=120,
+        )
 
         adm_metrics["seen"] = len(admissions_snapshot)
 

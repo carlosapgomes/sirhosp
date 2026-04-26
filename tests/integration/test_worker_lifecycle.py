@@ -742,6 +742,539 @@ class TestWorkerVolatileKeyRegression:
         assert Admission.objects.filter(patient=patient).count() == 1
 
 
+# ------------------------------------------------------------------
+# SLICE-S3: Stage metrics (IngestionRunStageMetric)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestWorkerStageMetrics:
+    """S3: Worker persists per-stage metrics for critical execution stages."""
+
+    def _queue_run(self, **kwargs):
+        defaults = {
+            "status": "queued",
+            "parameters_json": {
+                "patient_record": "STAGE_TEST",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-19",
+            },
+        }
+        defaults.update(kwargs)
+        return IngestionRun.objects.create(**defaults)
+
+    def _make_extractor_mock(
+        self,
+        evolutions=None,
+        admissions_snapshot=None,
+        admission_error=None,
+        evolution_error=None,
+    ):
+        mock_ext = MagicMock()
+        mock_ext.extract_evolutions.return_value = evolutions or []
+        if evolution_error:
+            mock_ext.extract_evolutions.side_effect = evolution_error
+        if admission_error:
+            mock_ext.get_admission_snapshot.side_effect = admission_error
+        elif admissions_snapshot is not None:
+            mock_ext.get_admission_snapshot.return_value = admissions_snapshot
+        else:
+            mock_ext.get_admission_snapshot.return_value = []
+        return mock_ext
+
+    def _patch_and_call(self, mock_ext):
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+
+    # -- Stage: admissions_capture ------------------------------------
+
+    def test_admissions_capture_stage_succeeded(self):
+        """admissions_capture stage is persisted with status=succeeded."""
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=[],
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run).order_by("started_at")
+        stage_names = [s.stage_name for s in stages]
+        assert "admissions_capture" in stage_names
+        adm_stage = stages.get(stage_name="admissions_capture")
+        assert adm_stage.status == "succeeded"
+        assert adm_stage.started_at is not None
+        assert adm_stage.finished_at is not None
+        assert adm_stage.started_at <= adm_stage.finished_at
+
+    def test_admissions_capture_stage_failed(self):
+        """admissions_capture stage is persisted with status=failed on error."""
+        from apps.ingestion.extractors.errors import ExtractionError
+
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock(
+            admission_error=ExtractionError("Source unavailable"),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        stage_names = [s.stage_name for s in stages]
+        assert "admissions_capture" in stage_names
+        adm_stage = stages.get(stage_name="admissions_capture")
+        assert adm_stage.status == "failed"
+        assert adm_stage.started_at is not None
+        assert adm_stage.finished_at is not None
+        assert adm_stage.details_json["error_type"] == "ExtractionError"
+        assert "Source unavailable" in adm_stage.details_json["error_message"]
+        assert run.finished_at is not None
+        assert adm_stage.finished_at <= run.finished_at
+
+    # -- Stage: gap_planning ------------------------------------------
+
+    def test_gap_planning_stage_succeeded(self):
+        """gap_planning stage is persisted with status=succeeded."""
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=[],
+        )
+
+        self._patch_and_call(mock_ext)
+
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        assert stages.filter(stage_name="gap_planning").exists()
+        gap_stage = stages.get(stage_name="gap_planning")
+        assert gap_stage.status == "succeeded"
+        assert gap_stage.started_at is not None
+        assert gap_stage.finished_at is not None
+
+    def test_gap_planning_stage_failed(self):
+        """gap_planning stage is persisted as failed on planning error."""
+        from apps.ingestion.extractors.errors import ExtractionError
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=[],
+        )
+
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.plan_extraction_windows",
+            side_effect=ExtractionError("Gap planner unavailable"),
+        ):
+            self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        stage = IngestionRunStageMetric.objects.get(run=run, stage_name="gap_planning")
+        assert stage.status == "failed"
+        assert stage.details_json["error_type"] == "ExtractionError"
+        assert "Gap planner unavailable" in stage.details_json["error_message"]
+        assert run.finished_at is not None
+        assert stage.finished_at <= run.finished_at
+
+    # -- Stage: evolution_extraction ----------------------------------
+
+    def test_evolution_extraction_stage_succeeded(self):
+        """evolution_extraction stage is persisted with status=succeeded."""
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        evolutions = [
+            {
+                "happened_at": "2026-04-19T08:30:00",
+                "content_text": "Evolução OK.",
+                "author_name": "DR. TEST",
+                "profession_type": "medica",
+                "signature_line": "Dr. Test CRM 123",
+                "admission_key": "ADM001",
+                "patient_source_key": "STAGE_TEST",
+                "source_system": "tasy",
+                "patient_name": "PACIENTE STAGE",
+            },
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=evolutions,
+        )
+
+        self._patch_and_call(mock_ext)
+
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        assert stages.filter(stage_name="evolution_extraction").exists()
+        ev_stage = stages.get(stage_name="evolution_extraction")
+        assert ev_stage.status == "succeeded"
+        assert ev_stage.started_at is not None
+        assert ev_stage.finished_at is not None
+
+    def test_evolution_extraction_stage_skipped_on_full_coverage(self):
+        """evolution_extraction stage is persisted as skipped when
+        coverage is complete (no gaps to extract)."""
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=[],
+        )
+
+        # Patch gap planner to return full coverage (skip extraction)
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.plan_extraction_windows",
+            return_value={
+                "gaps": [],
+                "windows": [],
+                "skip_extraction": True,
+            },
+        ):
+            self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        assert stages.filter(stage_name="evolution_extraction").exists()
+        ev_stage = stages.get(stage_name="evolution_extraction")
+        assert ev_stage.status == "skipped"
+
+    def test_evolution_extraction_stage_failed(self):
+        """evolution_extraction stage is persisted as failed on error."""
+        from apps.ingestion.extractors.errors import ExtractionError
+
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolution_error=ExtractionError("PDF extraction crashed"),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        assert stages.filter(stage_name="evolution_extraction").exists()
+        ev_stage = stages.get(stage_name="evolution_extraction")
+        assert ev_stage.status == "failed"
+        assert ev_stage.details_json["error_type"] == "ExtractionError"
+        assert "PDF extraction crashed" in ev_stage.details_json["error_message"]
+        run.refresh_from_db()
+        assert run.finished_at is not None
+        assert ev_stage.finished_at <= run.finished_at
+
+    # -- Stage: ingestion_persistence ---------------------------------
+
+    def test_ingestion_persistence_stage_succeeded(self):
+        """ingestion_persistence stage is persisted with status=succeeded."""
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        evolutions = [
+            {
+                "happened_at": "2026-04-19T08:30:00",
+                "content_text": "Evolução OK.",
+                "author_name": "DR. TEST",
+                "profession_type": "medica",
+                "signature_line": "Dr. Test CRM 123",
+                "admission_key": "ADM001",
+                "patient_source_key": "STAGE_TEST",
+                "source_system": "tasy",
+                "patient_name": "PACIENTE STAGE",
+            },
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=evolutions,
+        )
+
+        self._patch_and_call(mock_ext)
+
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        assert stages.filter(stage_name="ingestion_persistence").exists()
+        ip_stage = stages.get(stage_name="ingestion_persistence")
+        assert ip_stage.status == "succeeded"
+        assert ip_stage.started_at is not None
+        assert ip_stage.finished_at is not None
+
+    def test_ingestion_persistence_stage_failed(self):
+        """ingestion_persistence stage is persisted as failed on ingest error."""
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        evolutions = [
+            {
+                "happened_at": "2026-04-19T08:30:00",
+                "content_text": "Evolução OK.",
+                "author_name": "DR. TEST",
+                "profession_type": "medica",
+                "signature_line": "Dr. Test CRM 123",
+                "admission_key": "ADM001",
+                "patient_source_key": "STAGE_TEST",
+                "source_system": "tasy",
+                "patient_name": "PACIENTE STAGE",
+            },
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=evolutions,
+        )
+
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.Command._ingest_evolutions",
+            side_effect=RuntimeError("Persistence layer unavailable"),
+        ):
+            self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        stage = IngestionRunStageMetric.objects.get(
+            run=run,
+            stage_name="ingestion_persistence",
+        )
+        assert stage.status == "failed"
+        assert stage.details_json["error_type"] == "RuntimeError"
+        assert "Persistence layer unavailable" in stage.details_json["error_message"]
+        assert run.finished_at is not None
+        assert stage.finished_at <= run.finished_at
+
+    def test_admissions_only_has_admissions_capture_stage(self):
+        """Admissions-only run also records admissions_capture stage."""
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            parameters_json={
+                "patient_record": "STAGE_ADM_ONLY",
+                "intent": "admissions_only",
+            },
+        )
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=[],
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        assert stages.filter(stage_name="admissions_capture").exists()
+
+    def test_admissions_only_reaches_run_failed_with_stage(self):
+        """Admissions-only failure also records the stage."""
+        from apps.ingestion.extractors.errors import ExtractionError
+
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            parameters_json={
+                "patient_record": "STAGE_ADM_ONLY_FAIL",
+                "intent": "admissions_only",
+            },
+        )
+        mock_ext = self._make_extractor_mock(
+            admission_error=ExtractionError("Source down"),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        assert stages.filter(stage_name="admissions_capture").exists()
+
+    # -- Stage ordering -----------------------------------------------
+
+    def test_stages_recorded_in_expected_order(self):
+        """Stages are recorded in chronological order matching execution flow."""
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        evolutions = [
+            {
+                "happened_at": "2026-04-19T08:30:00",
+                "content_text": "Evolução OK.",
+                "author_name": "DR. TEST",
+                "profession_type": "medica",
+                "signature_line": "Dr. Test CRM 123",
+                "admission_key": "ADM001",
+                "patient_source_key": "STAGE_TEST",
+                "source_system": "tasy",
+                "patient_name": "PACIENTE STAGE",
+            },
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=evolutions,
+        )
+
+        self._patch_and_call(mock_ext)
+
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        stages = IngestionRunStageMetric.objects.filter(run=run).order_by("started_at")
+        expected_order = [
+            "admissions_capture",
+            "gap_planning",
+            "evolution_extraction",
+            "ingestion_persistence",
+        ]
+        actual_order = [s.stage_name for s in stages]
+        assert actual_order == expected_order
+
+    # -- Stage details_json -------------------------------------------
+
+    def test_stage_details_json_populated(self):
+        """Stages may carry optional details_json with contextual info."""
+        run = self._queue_run()
+        admissions_snapshot = [
+            {
+                "admission_key": "ADM001",
+                "admission_start": "2026-04-01T00:00:00",
+                "admission_end": "2026-04-19T00:00:00",
+                "ward": "UTI",
+                "bed": "LEITO 01",
+            }
+        ]
+        evolutions = [
+            {
+                "happened_at": "2026-04-19T08:30:00",
+                "content_text": "Evolução OK.",
+                "author_name": "DR. TEST",
+                "profession_type": "medica",
+                "signature_line": "Dr. Test CRM 123",
+                "admission_key": "ADM001",
+                "patient_source_key": "STAGE_TEST",
+                "source_system": "tasy",
+                "patient_name": "PACIENTE STAGE",
+            },
+        ]
+        mock_ext = self._make_extractor_mock(
+            admissions_snapshot=admissions_snapshot,
+            evolutions=evolutions,
+        )
+
+        self._patch_and_call(mock_ext)
+
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        # ingestion_persistence stage should carry counters in details
+        ip_stage = IngestionRunStageMetric.objects.get(
+            run=run, stage_name="ingestion_persistence"
+        )
+        assert ip_stage.details_json is not None
+        # details_json is a dict—may be empty initially, but not None
+        assert isinstance(ip_stage.details_json, dict)
+
+
 @pytest.mark.django_db
 class TestAdmissionsOnlyWorker:
     """Worker behaviour for admissions-only runs (AFMF-S2).
