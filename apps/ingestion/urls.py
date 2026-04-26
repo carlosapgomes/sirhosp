@@ -13,5 +13,10 @@ urlpatterns = [
         views.create_admissions_only,
         name="create_admissions_only",
     ),
+    path(
+        "ingestao/status/<int:run_id>/progresso/",
+        views.run_status_fragment,
+        name="run_status_fragment",
+    ),
     path("ingestao/status/<int:run_id>/", views.run_status, name="run_status"),
 ]

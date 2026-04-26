@@ -1,0 +1,40 @@
+{% load ingestion_tags %}
+
+<div id="run-progress" class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <h5 class="card-title h6 fw-semibold mb-3" style="color: var(--sirhosp-sidebar-bg);">
+      Progresso
+    </h5>
+    {% if stage_metrics %}
+      {% for stage in stage_metrics %}
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <div class="flex-grow-1">
+            <span class="small fw-medium">{{ stage.stage_name|stage_label }}</span>
+          </div>
+          {% if stage.status == 'succeeded' %}
+            <span class="badge bg-success small">Concluído</span>
+            <small class="text-muted">{{ stage|stage_duration }}</small>
+          {% elif stage.status == 'failed' %}
+            <span class="badge bg-danger small">Falhou</span>
+            {% if stage.details_json.error_message %}
+              <small class="text-danger">{{ stage.details_json.error_message }}</small>
+            {% endif %}
+          {% elif stage.status == 'skipped' %}
+            <span class="badge bg-secondary small">Pulado</span>
+          {% endif %}
+        </div>
+      {% endfor %}
+      {% if run.status == 'running' %}
+        <div class="d-flex align-items-center gap-2 mt-2">
+          <div class="spinner-border spinner-border-sm" role="status"></div>
+          <small class="text-muted">Processando próximo estágio...</small>
+        </div>
+      {% endif %}
+    {% elif run.status == 'running' %}
+      <div class="d-flex align-items-center gap-2">
+        <div class="spinner-border spinner-border-sm" role="status"></div>
+        <small class="text-muted">Inicializando extração...</small>
+      </div>
+    {% endif %}
+  </div>
+</div>

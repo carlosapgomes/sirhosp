@@ -2,11 +2,7 @@
 
 {% block title %}Status #{{ run.pk }} — SIRHOSP{% endblock %}
 
-{% block extra_head %}
-{% if run.status == 'queued' or run.status == 'running' %}
-  <meta http-equiv="refresh" content="5">
-{% endif %}
-{% endblock %}
+{% block extra_head %}{% endblock %}
 
 {% block content %}
 <nav aria-label="breadcrumb" class="mb-3">
@@ -71,6 +67,17 @@
     </div>
   </div>
 </div>
+
+<!-- Progress section with HTMX polling -->
+{% if run.status == 'queued' or run.status == 'running' %}
+  <div hx-get="{% url 'ingestion:run_status_fragment' run.pk %}"
+       hx-trigger="every 3s"
+       hx-swap="innerHTML">
+    {% include "ingestion/_run_progress.html" %}
+  </div>
+{% else %}
+  {% include "ingestion/_run_progress.html" %}
+{% endif %}
 
 <!-- Results -->
 {% if run.status == 'succeeded' or run.status == 'failed' %}

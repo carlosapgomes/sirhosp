@@ -248,6 +248,8 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
     else:
         run_type_label = "Extração de evoluções"
 
+    stage_metrics = run.stage_metrics.all()
+
     # Determine if no admissions were found
     no_admissions = (
         intent == "admissions_only"
@@ -297,6 +299,27 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         "admission_source_key": admission_source_key,
         "no_admissions": no_admissions,
         "patient_admissions_url": patient_admissions_url,
+        "stage_metrics": stage_metrics,
     }
 
     return render(request, "ingestion/run_status.html", context)
+
+
+@login_required
+def run_status_fragment(request: HttpRequest, run_id: int) -> HttpResponse:
+    """Return HTML fragment with stage progress for HTMX polling.
+
+    Returns only the progress section (_run_progress.html partial)
+    so HTMX can swap it without reloading the full page.
+    """
+    try:
+        run = IngestionRun.objects.get(pk=run_id)
+    except IngestionRun.DoesNotExist as err:
+        raise Http404 from err
+
+    stage_metrics = run.stage_metrics.all()
+
+    return render(request, "ingestion/_run_progress.html", {
+        "run": run,
+        "stage_metrics": stage_metrics,
+    })

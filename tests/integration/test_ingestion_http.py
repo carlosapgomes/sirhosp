@@ -14,7 +14,7 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 
-from apps.ingestion.models import IngestionRun
+from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
 
 TZ = ZoneInfo("America/Sao_Paulo")
 
@@ -323,7 +323,7 @@ class TestRunStatusView:
         assert "execução" in content or "processamento" in content or "running" in content
 
     def test_status_queued_has_auto_refresh(self):
-        """Queued/running states should auto-refresh every 5 seconds."""
+        """Queued/running states should use HTMX polling, not meta-refresh."""
         run = IngestionRun.objects.create(
             status="queued",
             parameters_json={
@@ -337,11 +337,12 @@ class TestRunStatusView:
         response = client.get(reverse("ingestion:run_status", args=[run.pk]))
         assert response.status_code == 200
         content = response.content.decode("utf-8")
-        assert 'http-equiv="refresh"' in content
-        assert 'content="5"' in content
+        assert 'http-equiv="refresh"' not in content
+        assert "hx-get" in content
+        assert "hx-trigger" in content
 
     def test_status_terminal_state_has_no_auto_refresh(self):
-        """Terminal states should not force immediate refresh loops."""
+        """Terminal states should not have meta-refresh or HTMX polling."""
         run = IngestionRun.objects.create(
             status="failed",
             error_message="Falha de teste",
@@ -353,6 +354,7 @@ class TestRunStatusView:
         assert response.status_code == 200
         content = response.content.decode("utf-8")
         assert 'http-equiv="refresh"' not in content
+        assert "hx-trigger" not in content
 
     def test_status_shows_patient_record(self):
         """Status page shows the patient record from parameters."""
@@ -800,3 +802,156 @@ class TestFullAdmissionSyncRunHTTP:
         assert "ADM-2026-77" in content
         assert "2026-04-15" in content
         assert "2026-04-23" in content
+
+
+@pytest.mark.django_db
+class TestRunStatusProgressFeedback:
+    """Integration tests for run status progress feedback (PF-2)."""
+
+    def _login(self, client):
+        from django.contrib.auth.models import User
+        user = User.objects.create_user(
+            username="testuser_pf_int", password="testpass123"
+        )
+        client.force_login(user)
+
+    def test_run_status_includes_progress_section(self):
+        """Main run_status page includes the progress partial."""
+        run = IngestionRun.objects.create(
+            status="running",
+            parameters_json={
+                "patient_record": "12345",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-19",
+            },
+        )
+        client = Client()
+        self._login(client)
+
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        assert "run-progress" in content
+
+    def test_run_status_uses_htmx_not_meta_refresh(self):
+        """Running runs should use HTMX polling, not meta-refresh."""
+        run = IngestionRun.objects.create(
+            status="running",
+            parameters_json={"patient_record": "12345"},
+        )
+        client = Client()
+        self._login(client)
+
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+
+        assert 'http-equiv="refresh"' not in content
+        assert "hx-get" in content
+        assert "hx-trigger" in content or "every 3s" in content
+
+    def test_run_status_hx_get_points_to_fragment_url(self):
+        """HTMX hx-get should point to the fragment endpoint."""
+        run = IngestionRun.objects.create(
+            status="running",
+            parameters_json={"patient_record": "12345"},
+        )
+        client = Client()
+        self._login(client)
+
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+
+        content = response.content.decode("utf-8")
+        fragment_url = reverse("ingestion:run_status_fragment", args=[run.pk])
+        assert fragment_url in content
+
+    def test_terminal_state_no_htmx_polling(self):
+        """Succeeded/failed runs should NOT have HTMX polling active."""
+        client = Client()
+        self._login(client)
+        for status in ["succeeded", "failed"]:
+            run = IngestionRun.objects.create(
+                status=status,
+                parameters_json={"patient_record": "12345"},
+            )
+
+            url = reverse("ingestion:run_status", args=[run.pk])
+            response = client.get(url)
+
+            content = response.content.decode("utf-8")
+            assert "hx-trigger" not in content or \
+                   "every 3s" not in content
+
+    def test_queued_run_has_htmx_polling(self):
+        """Queued runs should also use HTMX polling."""
+        run = IngestionRun.objects.create(
+            status="queued",
+            parameters_json={"patient_record": "12345"},
+        )
+        client = Client()
+        self._login(client)
+
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+
+        content = response.content.decode("utf-8")
+        assert "hx-get" in content
+        assert 'http-equiv="refresh"' not in content
+
+    def test_htmx_script_loaded_in_page(self):
+        """Any page extending base.html should load HTMX script."""
+        run = IngestionRun.objects.create(
+            status="succeeded",
+            parameters_json={"patient_record": "12345"},
+        )
+        client = Client()
+        self._login(client)
+
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+
+        content = response.content.decode("utf-8")
+        assert "htmx.org" in content
+
+    def test_progress_section_present_on_failed_run(self):
+        """Failed runs should still show progress section with stage info."""
+        run = IngestionRun.objects.create(
+            status="failed",
+            error_message="Test failure",
+            parameters_json={"patient_record": "12345"},
+        )
+        from django.utils import timezone
+
+        now = timezone.now()
+        IngestionRunStageMetric.objects.create(
+            run=run,
+            stage_name="admissions_capture",
+            started_at=now,
+            finished_at=now,
+            status="succeeded",
+        )
+        IngestionRunStageMetric.objects.create(
+            run=run,
+            stage_name="gap_planning",
+            started_at=now,
+            finished_at=now,
+            status="failed",
+            details_json={"error_type": "ValueError",
+                          "error_message": "Bad input"},
+        )
+
+        client = Client()
+        self._login(client)
+
+        url = reverse("ingestion:run_status", args=[run.pk])
+        response = client.get(url)
+
+        content = response.content.decode("utf-8")
+        assert "run-progress" in content
+        assert "Falhou" in content or "failed" in content.lower() or \
+               "gap_planning" in content.lower()

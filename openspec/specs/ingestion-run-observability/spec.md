@@ -82,3 +82,23 @@ Ingestion run tracking SHALL persist per-stage execution metrics for operational
 - **WHEN** a run fails during a critical stage
 - **THEN** the system persists stage status as `failed`
 - **AND** the system persists stage-level error context linked to the parent run
+
+## ADDED Requirements (run-status-progress-feedback)
+
+### Requirement: Run status page exposes stage-level progress to users
+
+Ingestion run tracking SHALL expose per-stage execution progress on the run
+status page.
+
+#### Scenario: Stage metrics displayed on run status
+
+- **WHEN** an authenticated user opens the run status page
+- **THEN** the page displays a progress section with per-stage execution status
+- **AND** each stage shows its name, completion status, and duration
+- **AND** the progress section updates automatically while the run is active
+
+#### Scenario: Fragment endpoint returns stage progress HTML
+
+- **WHEN** an authenticated client polls the progress fragment endpoint
+- **THEN** the response contains an HTML fragment with stage names and statuses
+- **AND** the fragment is suitable for HTMX partial swap
