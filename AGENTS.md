@@ -10,7 +10,9 @@
 - Automação: Playwright + Python
 - Extração de PDF: PyMuPDF
 - Workflow: DevLoop + OpenSpec
-- Execução programada: `systemd timers` ou `cron`
+- Execução programada: `systemd timers` (ver `deploy/README.md` e `deploy/systemd/`)
+- Agendamento censo: `systemd timer` a cada 8h executa `extract_census` → `process_census_snapshot`
+- Worker contínuo: `process_ingestion_runs --loop --sleep-seconds 5` processa runs enfileirados
 - Processamento assíncrono fase 1: **sem Celery/Redis**; coordenação via PostgreSQL
 
 ## 2. Comandos de validação (Quality Gate)
@@ -76,13 +78,22 @@ uv run pytest -q tests/unit
 
 ### Jobs e automações
 
+**Comandos manuais:**
+
 ```bash
+uv run python manage.py extract_census
+uv run python manage.py process_census_snapshot
+uv run python manage.py process_ingestion_runs
 uv run python manage.py run_due_jobs
 uv run python manage.py sync_current_inpatients
 uv run python manage.py extract_medical_evolutions
 uv run python manage.py extract_prescriptions
 uv run python manage.py refresh_admission_summaries
 ```
+
+**Agendamento automático:** Configurar `systemd timer` conforme `deploy/README.md`.
+O timer executa `extract_census` + `process_census_snapshot` a cada 8h.
+O worker (`process_ingestion_runs --loop`) processa os runs enfileirados.
 
 ### Hooks
 
