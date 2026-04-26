@@ -1,0 +1,19 @@
+[Unit]
+Description=SIRHOSP — Timer de censo hospitalar (a cada 8 horas)
+Documentation=https://github.com/carlosapgomes/sirhosp
+
+[Timer]
+# Dispara às: 00:00, 08:00, 16:00 (horário do servidor)
+OnCalendar=*-*-* 00,08,16:00
+
+# Aleatoriza até 5 minutos para evitar picos em múltiplos servidores
+RandomizedDelaySec=300
+
+# Se o servidor estava desligado no horário, executa no boot
+Persistent=true
+
+# Não dispara de novo se o ciclo anterior ainda estiver rodando
+RemainAfterElapse=no
+
+[Install]
+WantedBy=timers.target
