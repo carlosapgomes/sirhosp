@@ -1,6 +1,7 @@
 """Services portal views: dashboard, census, risk monitor.
 
 Slice S2: Dashboard with operational stats (demo data).
+Slice DRD-S1: Dashboard with real DB queries.
 """
 
 from __future__ import annotations
@@ -8,29 +9,49 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from django.contrib.auth.decorators import login_required
+from django.db.models import Max
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
+from django.utils import timezone
+
+from apps.census.models import BedStatus, CensusSnapshot
+from apps.patients.models import Admission, Patient
 
 
 @login_required
 def dashboard(request: HttpRequest) -> HttpResponse:
-    """Main dashboard with operational indicators.
+    """Main dashboard with operational indicators from real DB queries.
 
-    Displays current inpatient census, total registered patients,
-    24h discharges, and data collection status.
-
-    Uses demo/stub data for indicators not yet backed by real queries.
+    Displays current inpatient census from latest CensusSnapshot,
+    total registered patients, 24h discharges, and data collection status.
     """
+    latest = CensusSnapshot.objects.aggregate(latest=Max("captured_at"))["latest"]
+
+    if latest is not None:
+        snapshots = CensusSnapshot.objects.filter(captured_at=latest)
+        internados = snapshots.filter(bed_status=BedStatus.OCCUPIED).count()
+        setores = snapshots.values("setor").distinct().count()
+        ultima_varredura = latest.strftime("%d/%m/%Y %H:%M")
+    else:
+        internados = 0
+        setores = 0
+        ultima_varredura = "Nenhum dado disponível"
+
+    cadastrados = Patient.objects.count()
+    altas_24h = Admission.objects.filter(
+        discharge_date__gte=timezone.now() - timedelta(hours=24),
+    ).count()
+
     context = {
         "page_title": "Dashboard",
         "stats": {
-            "internados": 142,
-            "cadastrados": 5230,
-            "altas_24h": 12,
+            "internados": internados,
+            "cadastrados": cadastrados,
+            "altas_24h": altas_24h,
         },
         "coleta": {
-            "setores": 18,
-            "ultima_varredura": "há 4 minutos",
+            "setores": setores,
+            "ultima_varredura": ultima_varredura,
         },
     }
     return render(request, "services_portal/dashboard.html", context)

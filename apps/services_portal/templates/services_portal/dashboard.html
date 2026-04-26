@@ -83,7 +83,7 @@
 
 <!-- Quick actions -->
 <div class="row g-3">
-  <div class="col-sm-6 col-lg-4">
+  <div class="col-sm-6 col-lg-3">
     <a href="{% url 'services_portal:censo' %}" class="card border-0 shadow-sm text-decoration-none h-100">
       <div class="card-body d-flex align-items-center gap-3">
         <i class="bi bi-hospital fs-3" style="color: var(--bs-primary);"></i>
@@ -94,7 +94,18 @@
       </div>
     </a>
   </div>
-  <div class="col-sm-6 col-lg-4">
+  <div class="col-sm-6 col-lg-3">
+    <a href="{% url 'census:bed_status' %}" class="card border-0 shadow-sm text-decoration-none h-100">
+      <div class="card-body d-flex align-items-center gap-3">
+        <i class="bi bi-door-open fs-3" style="color: var(--bs-primary);"></i>
+        <div>
+          <h4 class="h6 fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">Leitos</h4>
+          <p class="small text-muted mb-0">Ocupação e vagas por setor</p>
+        </div>
+      </div>
+    </a>
+  </div>
+  <div class="col-sm-6 col-lg-3">
     <a href="{% url 'patients:patient_list' %}" class="card border-0 shadow-sm text-decoration-none h-100">
       <div class="card-body d-flex align-items-center gap-3">
         <i class="bi bi-people fs-3" style="color: var(--bs-primary);"></i>
@@ -105,7 +116,7 @@
       </div>
     </a>
   </div>
-  <div class="col-sm-6 col-lg-4">
+  <div class="col-sm-6 col-lg-3">
     <a href="{% url 'services_portal:monitor_risco' %}" class="card border-0 shadow-sm text-decoration-none h-100">
       <div class="card-body d-flex align-items-center gap-3">
         <i class="bi bi-exclamation-triangle fs-3" style="color: var(--bs-primary);"></i>
