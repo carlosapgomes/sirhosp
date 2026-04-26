@@ -24,6 +24,24 @@ def bed_status_view(request):
 
     snapshots = CensusSnapshot.objects.filter(captured_at=latest_captured)
 
+    # Global totals across all sectors
+    global_totals_raw = (
+        snapshots.values("bed_status")
+        .annotate(count=Count("id"))
+    )
+    totals = {
+        "occupied": 0,
+        "empty": 0,
+        "maintenance": 0,
+        "reserved": 0,
+        "isolation": 0,
+        "total": snapshots.count(),
+    }
+    for row in global_totals_raw:
+        status = row["bed_status"]
+        if status in totals:
+            totals[status] = row["count"]
+
     # Aggregate by sector and status
     sectors_raw = (
         snapshots.values("setor", "bed_status")
@@ -73,4 +91,5 @@ def bed_status_view(request):
     return render(request, "census/bed_status.html", {
         "sectors": sorted_sectors,
         "captured_at": latest_captured,
+        "totals": totals,
     })

@@ -15,6 +15,10 @@
       <i class="bi bi-hospital"></i>
       Censo
     </a>
+    <a href="{% url 'census:bed_status' %}" class="sirhosp-sidebar-link {% if active_menu == 'leitos' %}active{% endif %}">
+      <i class="bi bi-door-open"></i>
+      Leitos
+    </a>
     <a href="{% url 'patients:patient_list' %}" class="sirhosp-sidebar-link {% if active_menu == 'pacientes' %}active{% endif %}">
       <i class="bi bi-people"></i>
       Pacientes
