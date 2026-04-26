@@ -193,6 +193,31 @@ class Command(BaseCommand):
     # Internal
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _classify_failure_reason(exc: Exception) -> tuple[str, bool]:
+        """Classify an exception into normalized failure taxonomy.
+
+        Returns:
+            (failure_reason, timed_out)
+        """
+        from django.core.exceptions import ValidationError
+
+        from apps.ingestion.extractors.errors import (
+            ExtractionError,
+            ExtractionTimeoutError,
+            InvalidJsonError,
+        )
+
+        if isinstance(exc, ExtractionTimeoutError):
+            return ("timeout", True)
+        if isinstance(exc, InvalidJsonError):
+            return ("invalid_payload", False)
+        if isinstance(exc, ValidationError):
+            return ("validation_error", False)
+        if isinstance(exc, ExtractionError):
+            return ("source_unavailable", False)
+        return ("unexpected_exception", False)
+
     def _process_run(
         self,
         run: IngestionRun,
@@ -209,7 +234,9 @@ class Command(BaseCommand):
 
         # Step 0: Transition to running
         run.status = "running"
-        run.save(update_fields=["status"])
+        if run.processing_started_at is None:
+            run.processing_started_at = timezone.now()
+        run.save(update_fields=["status", "processing_started_at"])
 
         if intent == "admissions_only":
             self._process_admissions_only(
@@ -266,6 +293,8 @@ class Command(BaseCommand):
         run.events_revised = 0
         run.status = "succeeded"
         run.finished_at = timezone.now()
+        run.failure_reason = ""
+        run.timed_out = False
         run.save()
 
         # Auto-enqueue full_sync for the most recent admission
@@ -356,6 +385,8 @@ class Command(BaseCommand):
             run.events_revised = 0
             run.status = "succeeded"
             run.finished_at = timezone.now()
+            run.failure_reason = ""
+            run.timed_out = False
             run.save()
             self.stdout.write(
                 f"  Run #{run.pk} skipped extraction (full coverage)."
@@ -379,6 +410,9 @@ class Command(BaseCommand):
             run.status = "failed"
             run.error_message = str(exc)
             run.finished_at = timezone.now()
+            failure_reason, timed_out = self._classify_failure_reason(exc)
+            run.failure_reason = failure_reason
+            run.timed_out = timed_out
             run.save()
             self.stderr.write(f"  Run #{run.pk} failed during evolution extraction: {exc}")
             return
@@ -400,6 +434,8 @@ class Command(BaseCommand):
         run.admissions_updated = adm_metrics["updated"]
         run.status = "succeeded"
         run.finished_at = timezone.now()
+        run.failure_reason = ""
+        run.timed_out = False
         run.save()
 
         self.stdout.write(
@@ -460,7 +496,18 @@ class Command(BaseCommand):
             run.status = "failed"
             run.error_message = str(exc)
             run.finished_at = timezone.now()
-            run.save()
+            failure_reason, timed_out = self._classify_failure_reason(exc)
+            run.failure_reason = failure_reason
+            run.timed_out = timed_out
+            run.save(
+                update_fields=[
+                    "status",
+                    "error_message",
+                    "finished_at",
+                    "failure_reason",
+                    "timed_out",
+                ]
+            )
             self.stderr.write(
                 f"  Run #{run.pk} failed during admissions capture: {exc}"
             )

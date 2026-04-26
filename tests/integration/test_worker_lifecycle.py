@@ -861,3 +861,215 @@ class TestAdmissionsOnlyWorker:
         run.refresh_from_db()
         assert run.status == "succeeded"
         mock_plan.assert_not_called()
+
+
+# ------------------------------------------------------------------
+# SLICE-S2: Lifecycle timestamps + failure classification
+# ------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestWorkerLifecycleTimestampsAndFailures:
+    """S2: Worker populates processing_started_at, finished_at,
+    and classifies failures into normalized categories."""
+
+    def _queue_run(self, **kwargs):
+        defaults = {
+            "status": "queued",
+            "parameters_json": {
+                "patient_record": "12345",
+                "start_date": "2026-04-01",
+                "end_date": "2026-04-19",
+            },
+        }
+        defaults.update(kwargs)
+        return IngestionRun.objects.create(**defaults)
+
+    def _make_extractor_mock(
+        self,
+        evolutions=None,
+        admission_error=None,
+        evolution_error=None,
+    ):
+        mock_ext = MagicMock()
+        mock_ext.extract_evolutions.return_value = evolutions or []
+        if evolution_error:
+            mock_ext.extract_evolutions.side_effect = evolution_error
+        if admission_error:
+            mock_ext.get_admission_snapshot.side_effect = admission_error
+        else:
+            mock_ext.get_admission_snapshot.return_value = []
+        return mock_ext
+
+    def _patch_and_call(self, mock_ext):
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+
+    # -- Lifecycle timestamps -----------------------------------------
+
+    def test_processing_started_at_set_on_run_start(self):
+        """processing_started_at is populated when worker picks up a run."""
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock()
+        assert run.processing_started_at is None
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.processing_started_at is not None
+        assert run.queued_at <= run.processing_started_at
+
+    def test_finished_at_set_on_success(self):
+        """finished_at is set on successful completion."""
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock()
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        assert run.finished_at is not None
+        assert run.processing_started_at <= run.finished_at
+
+    def test_finished_at_set_on_failure(self):
+        """finished_at is set on failed completion."""
+        from apps.ingestion.extractors.errors import ExtractionError
+
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock(
+            admission_error=ExtractionError("Source system crashed"),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.finished_at is not None
+        assert run.processing_started_at <= run.finished_at
+
+    def test_success_clears_failure_state(self):
+        """Success clears any previous failure_reason and timed_out."""
+        run = self._queue_run()
+        run.failure_reason = "timeout"
+        run.timed_out = True
+        run.save()
+        mock_ext = self._make_extractor_mock()
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        assert run.failure_reason == ""
+        assert run.timed_out is False
+
+    # -- Failure classification (taxonomy: timeout, source_unavailable,
+    #    invalid_payload, validation_error, unexpected_exception) -----
+
+    def test_timeout_classified_as_timeout_reason(self):
+        """ExtractionTimeoutError → failure_reason='timeout', timed_out=True."""
+        from apps.ingestion.extractors.errors import ExtractionTimeoutError
+
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock(
+            evolution_error=ExtractionTimeoutError(
+                "Extraction timed out after 90s"
+            ),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "timeout"
+        assert run.timed_out is True
+        assert "timed out" in run.error_message.lower()
+
+    def test_invalid_json_classified_as_invalid_payload(self):
+        """InvalidJsonError → failure_reason='invalid_payload',
+        timed_out=False."""
+        from apps.ingestion.extractors.errors import InvalidJsonError
+
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock(
+            evolution_error=InvalidJsonError("Expected JSON array, got str"),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "invalid_payload"
+        assert run.timed_out is False
+
+    def test_generic_extraction_error_classified_as_source_unavailable(self):
+        """Generic ExtractionError → failure_reason='source_unavailable',
+        timed_out=False."""
+        from apps.ingestion.extractors.errors import ExtractionError
+
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock(
+            evolution_error=ExtractionError("Source connection refused"),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "source_unavailable"
+        assert run.timed_out is False
+
+    def test_unexpected_exception_classified_as_unexpected_exception(self):
+        """Non-ExtractionError → failure_reason='unexpected_exception',
+        timed_out=False."""
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock(
+            admission_error=ValueError("Database connection pool exhausted"),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "unexpected_exception"
+        assert run.timed_out is False
+
+    def test_admissions_timeout_classified_correctly(self):
+        """Timeout during admissions capture is classified correctly."""
+        from apps.ingestion.extractors.errors import ExtractionTimeoutError
+
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock(
+            admission_error=ExtractionTimeoutError(
+                "Admissions capture timed out after 120s"
+            ),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "timeout"
+        assert run.timed_out is True
+
+    def test_validation_error_classified_as_validation_error(self):
+        """ValidationError → failure_reason='validation_error',
+        timed_out=False."""
+        from django.core.exceptions import ValidationError
+
+        run = self._queue_run()
+        mock_ext = self._make_extractor_mock(
+            admission_error=ValidationError(
+                "Patient record '99999' does not match expected format"
+            ),
+        )
+
+        self._patch_and_call(mock_ext)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "validation_error"
+        assert run.timed_out is False
