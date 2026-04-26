@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the extraction, storage, and processing contract for the daily inpatient census from the source system (AGHU/TASY Censo Diário).
+Define the extraction, storage, and processing contract for the daily inpatient census from the source system (Censo Diário).
 
 ## Requirements
 

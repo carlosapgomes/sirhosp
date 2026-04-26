@@ -4,7 +4,7 @@
 
 Atualmente, `Admission` possui unicidade por `(source_system, source_admission_key)`. Esse contrato presume estabilidade do identificador externo de internação.
 
-No conector AGHU (`path2.py`), o `admissionKey` observado pode variar entre execuções para a mesma internação (mesmo período), o que quebra a hipótese de estabilidade e induz duplicatas no espelho local.
+No conector fonte (`path2.py`), o `admissionKey` observado pode variar entre execuções para a mesma internação (mesmo período), o que quebra a hipótese de estabilidade e induz duplicatas no espelho local.
 
 ## Design Goals
 
