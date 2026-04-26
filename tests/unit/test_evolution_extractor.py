@@ -545,7 +545,7 @@ class TestExtractEvolutionsHappyPath:
                 end_date="2024-06-15",
             )
 
-        assert captured_kwargs.get("timeout") == 600
+        assert captured_kwargs.get("timeout") == 900
 
     def test_date_conversion_single_digit_days(self, tmp_path: Path):
         """Dates with single-digit days/months should be zero-padded in DD/MM/YYYY."""

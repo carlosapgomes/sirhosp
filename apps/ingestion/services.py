@@ -68,7 +68,7 @@ def _upsert_patient(evolution: dict[str, Any], run: IngestionRun) -> Patient:
             "name": new_name,
         },
     )
-    if not created and patient.name != new_name:
+    if not created and new_name and patient.name != new_name:
         old_name = patient.name
         patient.name = new_name
         patient.save(update_fields=["name", "updated_at"])

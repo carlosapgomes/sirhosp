@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
@@ -135,16 +136,29 @@ class Command(BaseCommand):
                 self.stdout.write(
                     f"[{timezone.now():%H:%M:%S}] No queued runs, sleeping {sleep_seconds}s..."
                 )
-            else:
-                self.stdout.write(
-                    f"[{timezone.now():%H:%M:%S}] Found {count} queued run(s), processing..."
-                )
-                for run in runs.iterator():
-                    self._process_run(
-                        run, script_path=script_path, headless=headless
-                    )
+                time.sleep(sleep_seconds)
+                continue
 
-            time.sleep(sleep_seconds)
+            self.stdout.write(
+                f"[{timezone.now():%H:%M:%S}] Found {count} queued run(s), processing..."
+            )
+            # Claim and process runs atomically (safe for multiple workers)
+            while True:
+                with transaction.atomic():
+                    run = (
+                        IngestionRun.objects
+                        .select_for_update(skip_locked=True)
+                        .filter(status="queued")
+                        .order_by("pk")
+                        .first()
+                    )
+                    if run is None:
+                        break
+                    run.status = "running"
+                    run.save(update_fields=["status"])
+                self._process_run(
+                    run, script_path=script_path, headless=headless
+                )
 
     def _process_once(self, script_path: str, headless: bool) -> None:
         """Process all queued runs once and exit (original behavior)."""
@@ -157,7 +171,20 @@ class Command(BaseCommand):
 
         self.stdout.write(f"Processing {count} queued run(s)...")
 
-        for run in runs.iterator():
+        # Claim and process runs atomically (safe for multiple workers)
+        while True:
+            with transaction.atomic():
+                run = (
+                    IngestionRun.objects
+                    .select_for_update(skip_locked=True)
+                    .filter(status="queued")
+                    .order_by("pk")
+                    .first()
+                )
+                if run is None:
+                    break
+                run.status = "running"
+                run.save(update_fields=["status"])
             self._process_run(run, script_path=script_path, headless=headless)
 
         self.stdout.write(self.style.SUCCESS("Done."))
