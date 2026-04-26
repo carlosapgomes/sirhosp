@@ -7,7 +7,10 @@ from typing import Any
 from django.db.models import Max
 
 from apps.census.models import BedStatus, CensusSnapshot
-from apps.ingestion.services import queue_admissions_only_run
+from apps.ingestion.services import (
+    queue_admissions_only_run,
+    queue_demographics_only_run,
+)
 from apps.patients.models import Patient
 
 
@@ -105,8 +108,8 @@ def process_census_snapshot(
     """Process the most recent census snapshot and enqueue patient sync runs.
 
     For each occupied bed with a prontuario, creates or updates the
-    corresponding Patient record and enqueues an admissions-only
-    ingestion run.
+    corresponding Patient record and enqueues both admissions-only
+    and demographics-only ingestion runs.
 
     Args:
         run_id: Optional IngestionRun ID to process a specific census run.
@@ -117,7 +120,8 @@ def process_census_snapshot(
             patients_total: Total unique prontuarios processed
             patients_new: Patients created (not previously in DB)
             patients_updated: Patients whose name was updated
-            runs_enqueued: IngestionRuns created
+            runs_enqueued: Admissions ingestion runs created
+            demographics_runs_enqueued: Demographics ingestion runs created
             patients_skipped: Patients skipped (e.g., no prontuario)
     """
     # Determine which census run to process
@@ -133,6 +137,7 @@ def process_census_snapshot(
                 "patients_new": 0,
                 "patients_updated": 0,
                 "runs_enqueued": 0,
+                "demographics_runs_enqueued": 0,
                 "patients_skipped": 0,
             }
         snapshots = CensusSnapshot.objects.filter(captured_at=latest_captured)
@@ -181,10 +186,14 @@ def process_census_snapshot(
         queue_admissions_only_run(patient_record=prontuario)
         enqueued_count += 1
 
+        # Enqueue demographics-only run for this patient
+        queue_demographics_only_run(patient_record=prontuario)
+
     return {
         "patients_total": len(patients_to_process),
         "patients_new": new_count,
         "patients_updated": updated_count,
         "runs_enqueued": enqueued_count,
+        "demographics_runs_enqueued": len(patients_to_process),
         "patients_skipped": max(0, occupied.count() - len(patients_to_process)),
     }

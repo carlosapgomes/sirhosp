@@ -443,6 +443,31 @@ def queue_admissions_only_run(
     )
 
 
+def queue_demographics_only_run(
+    *,
+    patient_record: str,
+) -> IngestionRun:
+    """Create an IngestionRun for demographics-only extraction.
+
+    The worker will execute the demographics Playwright script and
+    persist the extracted data via upsert_patient_demographics().
+
+    Args:
+        patient_record: Patient record identifier (prontuário).
+
+    Returns:
+        IngestionRun instance with status=queued and intent='demographics_only'.
+    """
+    return IngestionRun.objects.create(
+        status="queued",
+        intent="demographics_only",
+        parameters_json={
+            "patient_record": patient_record,
+            "intent": "demographics_only",
+        },
+    )
+
+
 def ingest_evolution(
     evolutions: list[dict[str, Any]],
     parameters: dict[str, Any] | None = None,

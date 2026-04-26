@@ -17,6 +17,7 @@ class TestProcessCensusSnapshot:
         assert result["patients_total"] == 0
         assert result["patients_new"] == 0
         assert result["runs_enqueued"] == 0
+        assert result["demographics_runs_enqueued"] == 0
 
     def test_only_empty_beds_no_patients(self):
         """Beds without prontuario are skipped."""
@@ -36,6 +37,7 @@ class TestProcessCensusSnapshot:
         result = process_census_snapshot()
         assert result["patients_total"] == 0
         assert result["runs_enqueued"] == 0
+        assert result["demographics_runs_enqueued"] == 0
         assert Patient.objects.count() == 0
 
     def test_new_patient_created_and_run_enqueued(self):
@@ -57,6 +59,7 @@ class TestProcessCensusSnapshot:
         assert result["patients_new"] == 1
         assert result["patients_total"] == 1
         assert result["runs_enqueued"] == 1
+        assert result["demographics_runs_enqueued"] == 1
 
         patient = Patient.objects.get(
             source_system="tasy", patient_source_key="14160147"
@@ -94,6 +97,7 @@ class TestProcessCensusSnapshot:
         assert result["patients_new"] == 0
         assert result["patients_updated"] == 0
         assert result["runs_enqueued"] == 1
+        assert result["demographics_runs_enqueued"] == 1
         assert Patient.objects.count() == 1
 
     def test_existing_patient_name_updated(self):
@@ -119,6 +123,7 @@ class TestProcessCensusSnapshot:
         result = process_census_snapshot()
         assert result["patients_updated"] == 1
         assert result["runs_enqueued"] == 1
+        assert result["demographics_runs_enqueued"] == 1
 
         patient = Patient.objects.get(
             source_system="tasy", patient_source_key="14160147"
@@ -153,6 +158,7 @@ class TestProcessCensusSnapshot:
         )
         result = process_census_snapshot()
         assert result["runs_enqueued"] == 1
+        assert result["demographics_runs_enqueued"] == 1
         assert result["patients_total"] == 1
 
         # Name should be from the LAST occurrence
@@ -195,6 +201,8 @@ class TestProcessCensusSnapshot:
         # Process only run1
         result = process_census_snapshot(run_id=run1.pk)
         assert result["patients_total"] == 1
+        assert result["runs_enqueued"] == 1
+        assert result["demographics_runs_enqueued"] == 1
         assert Patient.objects.filter(patient_source_key="111").exists()
         assert not Patient.objects.filter(patient_source_key="222").exists()
 
@@ -221,7 +229,115 @@ class TestProcessCensusSnapshot:
         assert result["patients_total"] == 3
         assert result["patients_new"] == 3
         assert result["runs_enqueued"] == 3
+        assert result["demographics_runs_enqueued"] == 3
         assert Patient.objects.count() == 3
         assert IngestionRun.objects.filter(
             intent="admissions_only", status="queued"
         ).count() == 3
+
+    def test_demographics_run_enqueued_for_new_patient(self):
+        """New patient → demographics_only run is also enqueued."""
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        CensusSnapshot.objects.create(
+            captured_at=timezone.now(),
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        result = process_census_snapshot()
+
+        assert result["demographics_runs_enqueued"] == 1
+
+        # Verify demographics run exists
+        demo_run = IngestionRun.objects.filter(
+            intent="demographics_only", status="queued"
+        ).first()
+        assert demo_run is not None
+        assert demo_run.parameters_json["patient_record"] == "14160147"
+
+        # Verify admissions run also exists (existing behavior)
+        adm_run = IngestionRun.objects.filter(
+            intent="admissions_only", status="queued"
+        ).first()
+        assert adm_run is not None
+
+    def test_demographics_run_enqueued_for_existing_patient(self):
+        """Existing patient → demographics_only run is still enqueued."""
+        Patient.objects.create(
+            source_system="tasy",
+            patient_source_key="14160147",
+            name="JOSE MERCES",
+        )
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        CensusSnapshot.objects.create(
+            captured_at=timezone.now(),
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        result = process_census_snapshot()
+
+        # Demographics run should be enqueued even for existing patients
+        assert result["demographics_runs_enqueued"] == 1
+        assert IngestionRun.objects.filter(
+            intent="demographics_only", status="queued"
+        ).exists()
+
+    def test_multiple_patients_get_demographics_runs(self):
+        """Multiple occupied beds → one demographics run per patient."""
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        now = timezone.now()
+        for i, (pront, nome) in enumerate(
+            [("111", "A"), ("222", "B"), ("333", "C")]
+        ):
+            CensusSnapshot.objects.create(
+                captured_at=now,
+                ingestion_run=run,
+                setor="UTI",
+                leito=f"L{i}",
+                prontuario=pront,
+                nome=nome,
+                especialidade="TST",
+                bed_status=BedStatus.OCCUPIED,
+            )
+        result = process_census_snapshot()
+        assert result["demographics_runs_enqueued"] == 3
+        assert result["runs_enqueued"] == 3  # admissions runs
+        assert IngestionRun.objects.filter(
+            intent="demographics_only", status="queued"
+        ).count() == 3
+
+    def test_demographics_not_enqueued_for_empty_beds(self):
+        """Empty beds → no demographics runs."""
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        CensusSnapshot.objects.create(
+            captured_at=timezone.now(),
+            ingestion_run=run,
+            setor="UTI A",
+            leito="01",
+            prontuario="",
+            nome="DESOCUPADO",
+            especialidade="",
+            bed_status=BedStatus.EMPTY,
+        )
+        result = process_census_snapshot()
+        assert result["demographics_runs_enqueued"] == 0
+        assert not IngestionRun.objects.filter(
+            intent="demographics_only"
+        ).exists()

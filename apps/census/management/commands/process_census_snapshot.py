@@ -24,10 +24,11 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 f"Census snapshot processed:\n"
-                f"  Patients total:    {result['patients_total']}\n"
-                f"  Patients new:      {result['patients_new']}\n"
-                f"  Patients updated:  {result['patients_updated']}\n"
-                f"  Runs enqueued:     {result['runs_enqueued']}\n"
-                f"  Skipped (no pront): {result['patients_skipped']}"
+                f"  Patients total:             {result['patients_total']}\n"
+                f"  Patients new:               {result['patients_new']}\n"
+                f"  Patients updated:           {result['patients_updated']}\n"
+                f"  Admissions runs enqueued:   {result['runs_enqueued']}\n"
+                f"  Demographics runs enqueued: {result['demographics_runs_enqueued']}\n"
+                f"  Skipped (no pront):         {result['patients_skipped']}"
             )
         )

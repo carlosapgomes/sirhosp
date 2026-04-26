@@ -40,6 +40,15 @@ DEFAULT_SCRIPT_PATH = str(
     / "path2.py"
 )
 
+# Path to the demographics extraction Playwright script.
+DEMOGRAPHICS_SCRIPT_PATH = str(
+    Path(__file__).resolve().parents[4]
+    / "automation"
+    / "source_system"
+    / "patient_demographics"
+    / "extract_patient_demographics.py"
+)
+
 
 class Command(BaseCommand):
     help = "Process queued ingestion runs (async worker without Celery)."
@@ -199,6 +208,8 @@ class Command(BaseCommand):
         Returns:
             (failure_reason, timed_out)
         """
+        import subprocess
+
         from django.core.exceptions import ValidationError
 
         from apps.ingestion.extractors.errors import (
@@ -207,7 +218,7 @@ class Command(BaseCommand):
             InvalidJsonError,
         )
 
-        if isinstance(exc, ExtractionTimeoutError):
+        if isinstance(exc, (ExtractionTimeoutError, subprocess.TimeoutExpired)):
             return ("timeout", True)
         if isinstance(exc, InvalidJsonError):
             return ("invalid_payload", False)
@@ -299,6 +310,8 @@ class Command(BaseCommand):
                 script_path=script_path,
                 headless=headless,
             )
+        elif intent == "demographics_only":
+            self._process_demographics_only(run=run)
         else:
             self._process_full_sync(
                 run=run,
@@ -384,6 +397,178 @@ class Command(BaseCommand):
             f"(admissions_seen={adm_metrics['seen']}, "
             f"admissions_created={adm_metrics['created']}, "
             f"admissions_updated={adm_metrics['updated']})"
+        )
+
+    # ------------------------------------------------------------------
+    # Demographics-only processing (DI-1)
+    # ------------------------------------------------------------------
+
+    def _process_demographics_only(
+        self,
+        run: IngestionRun,
+    ) -> None:
+        """Process demographics-only run: extract and persist patient demographics.
+
+        Executes the demographics Playwright script as a subprocess,
+        reads the JSON output, and calls upsert_patient_demographics().
+        """
+        import json
+        import subprocess
+        import sys
+        import tempfile
+
+        from apps.ingestion.services import upsert_patient_demographics
+
+        params = run.parameters_json or {}
+        patient_record = params.get("patient_record", "")
+
+        if not patient_record:
+            self._mark_run_failed(
+                run, ValueError("Missing patient_record in parameters")
+            )
+            return
+
+        # Stage: demographics_extraction (subprocess)
+        ext_stage_start = timezone.now()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            json_output_path = Path(tmpdir) / "demographics_output.json"
+
+            cmd = [
+                sys.executable,
+                DEMOGRAPHICS_SCRIPT_PATH,
+                "--patient-record", patient_record,
+                "--headless",
+                "--json-output", str(json_output_path),
+            ]
+
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,  # 5 minutes max for single-patient extraction
+                )
+            except subprocess.TimeoutExpired as exc:
+                self._record_stage(
+                    run=run,
+                    stage_name="demographics_extraction",
+                    status="failed",
+                    started_at=ext_stage_start,
+                    details_json=self._stage_error_details(exc),
+                )
+                self._mark_run_failed(run, exc)
+                return
+            except Exception as exc:
+                self._record_stage(
+                    run=run,
+                    stage_name="demographics_extraction",
+                    status="failed",
+                    started_at=ext_stage_start,
+                    details_json=self._stage_error_details(exc),
+                )
+                self._mark_run_failed(run, exc)
+                return
+
+            if result.returncode != 0:
+                err_msg = f"Exit code {result.returncode}: {result.stderr[:500]}"
+                self._record_stage(
+                    run=run,
+                    stage_name="demographics_extraction",
+                    status="failed",
+                    started_at=ext_stage_start,
+                    details_json={"returncode": result.returncode},
+                )
+                run.status = "failed"
+                run.error_message = err_msg
+                run.finished_at = timezone.now()
+                run.failure_reason = "source_unavailable"
+                run.timed_out = False
+                run.save()
+                return
+
+            # Stage: demographics_extraction succeeded
+            self._record_stage(
+                run=run,
+                stage_name="demographics_extraction",
+                status="succeeded",
+                started_at=ext_stage_start,
+            )
+
+            # Read JSON output
+            if not json_output_path.exists():
+                self._mark_run_failed(
+                    run,
+                    ValueError(f"JSON output not found at {json_output_path}"),
+                )
+                return
+
+            try:
+                demographics_data = json.loads(
+                    json_output_path.read_text(encoding="utf-8")
+                )
+            except json.JSONDecodeError as exc:
+                self._mark_run_failed(run, exc)
+                return
+
+        # Stage: demographics_persistence (upsert)
+        persist_stage_start = timezone.now()
+        try:
+            patient = upsert_patient_demographics(
+                patient_source_key=patient_record,
+                source_system="tasy",
+                demographics=demographics_data,
+                run=run,
+            )
+        except Exception as exc:
+            self._record_stage(
+                run=run,
+                stage_name="demographics_persistence",
+                status="failed",
+                started_at=persist_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            return
+
+        self._record_stage(
+            run=run,
+            stage_name="demographics_persistence",
+            status="succeeded",
+            started_at=persist_stage_start,
+        )
+
+        # Count how many fields were populated (non-empty after upsert)
+        fields_populated = sum(
+            1
+            for field_name in [
+                "name", "social_name", "date_of_birth", "gender",
+                "gender_identity", "mother_name", "father_name",
+                "race_color", "birthplace", "nationality",
+                "marital_status", "education_level", "profession",
+                "cns", "cpf", "phone_home", "phone_cellular",
+                "phone_contact", "street", "address_number",
+                "address_complement", "neighborhood", "city",
+                "state", "postal_code",
+            ]
+            if getattr(patient, field_name, None)
+        )
+
+        # Success
+        run.status = "succeeded"
+        run.finished_at = timezone.now()
+        run.failure_reason = ""
+        run.timed_out = False
+        # Store demographics metrics in parameters_json
+        run.parameters_json = {
+            **params,
+            "demographics_fields_extracted": fields_populated,
+        }
+        run.save()
+
+        self.stdout.write(
+            f"  Run #{run.pk} demographics_only succeeded "
+            f"(fields_populated={fields_populated})"
         )
 
     # ------------------------------------------------------------------
