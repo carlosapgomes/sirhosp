@@ -1,0 +1,207 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Métricas de Ingestão — SIRHOSP{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Métricas de Ingestão</h2>
+    <p class="text-muted small mb-0">Monitoramento operacional das execuções de ingestão de dados</p>
+  </div>
+</div>
+
+<!-- Resumo do período selecionado -->
+<div class="row g-3 mb-4">
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: var(--bs-primary-lightest);">
+        <i class="bi bi-arrow-repeat" style="color: var(--bs-primary); font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ ingestion_stats.total_finished }}</div>
+        <div class="sirhosp-stat-label">
+          Execuções{% if filters.periodo != "24h" %} ({{ filters.periodo }}){% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #DCFCE7;">
+        <i class="bi bi-check-circle" style="color: #16A34A; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ ingestion_stats.success_rate }}%</div>
+        <div class="sirhosp-stat-label">Taxa de Sucesso</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FEE2E2;">
+        <i class="bi bi-clock-history" style="color: #DC2626; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ ingestion_stats.timeout_rate }}%</div>
+        <div class="sirhosp-stat-label">Taxa de Timeout</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
+        <i class="bi bi-stopwatch" style="color: #0284C7; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ ingestion_stats.avg_duration_seconds }}s</div>
+        <div class="sirhosp-stat-label">Duração Média</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Filtros -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body">
+    <form method="get" class="row g-2 align-items-end">
+      <div class="col-6 col-md-2">
+        <label for="periodo" class="form-label small fw-semibold">Período</label>
+        <select name="periodo" id="periodo" class="form-select form-select-sm">
+          <option value="24h" {% if filters.periodo == "24h" %}selected{% endif %}>Últimas 24h</option>
+          <option value="7d" {% if filters.periodo == "7d" %}selected{% endif %}>Últimos 7 dias</option>
+          <option value="30d" {% if filters.periodo == "30d" %}selected{% endif %}>Últimos 30 dias</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label for="status" class="form-label small fw-semibold">Status</label>
+        <select name="status" id="status" class="form-select form-select-sm">
+          <option value="">Todos</option>
+          {% for s in filter_options.statuses %}
+            <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label for="intent" class="form-label small fw-semibold">Intenção</label>
+        <select name="intent" id="intent" class="form-select form-select-sm">
+          <option value="">Todas</option>
+          {% for i in filter_options.intents %}
+            <option value="{{ i }}" {% if filters.intent == i %}selected{% endif %}>{{ i }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label for="failure_reason" class="form-label small fw-semibold">Falha</label>
+        <select name="failure_reason" id="failure_reason" class="form-select form-select-sm">
+          <option value="">Todas</option>
+          {% for fr in filter_options.failure_reasons %}
+            <option value="{{ fr }}" {% if filters.failure_reason == fr %}selected{% endif %}>{{ fr }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <button type="submit" class="btn btn-sm btn-primary w-100">
+          <i class="bi bi-funnel me-1"></i> Filtrar
+        </button>
+      </div>
+      <div class="col-6 col-md-2">
+        <a href="{% url 'services_portal:ingestion_metrics' %}" class="btn btn-sm btn-outline-secondary w-100">
+          <i class="bi bi-x-circle me-1"></i> Limpar
+        </a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Tabela de Runs -->
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-white border-bottom-0 d-flex justify-content-between align-items-center">
+    <h5 class="fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-list-ul me-2"></i>Execuções
+      <span class="badge bg-secondary ms-2">{{ runs|length }}</span>
+    </h5>
+  </div>
+  <div class="card-body p-0">
+    {% if runs %}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3 small">ID</th>
+            <th class="small">Intenção</th>
+            <th class="small">Status</th>
+            <th class="small">Enfileirado</th>
+            <th class="small">Fila</th>
+            <th class="small">Processamento</th>
+            <th class="small">Total</th>
+            <th class="small">Timeout</th>
+            <th class="small">Falha</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in runs %}
+          <tr>
+            <td class="ps-3 fw-semibold small">{{ run.pk }}</td>
+            <td><span class="badge bg-light text-dark small">{{ run.intent|default:"-" }}</span></td>
+            <td>
+              {% if run.status == "succeeded" %}
+                <span class="badge bg-success">Sucesso</span>
+              {% elif run.status == "failed" %}
+                <span class="badge bg-danger">Falhou</span>
+              {% elif run.status == "running" %}
+                <span class="badge bg-warning text-dark">Executando</span>
+              {% else %}
+                <span class="badge bg-secondary">{{ run.status }}</span>
+              {% endif %}
+            </td>
+            <td class="small text-muted">{{ run.queued_at|date:"d/m H:i" }}</td>
+            <td class="small text-muted">
+              {% if run.queue_latency_seconds %}
+                {{ run.queue_latency_seconds|floatformat:0 }}s
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td class="small text-muted">
+              {% if run.processing_duration_seconds %}
+                {{ run.processing_duration_seconds|floatformat:0 }}s
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td class="small text-muted">
+              {% if run.total_duration_seconds %}
+                {{ run.total_duration_seconds|floatformat:0 }}s
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>
+              {% if run.timed_out %}
+                <span class="badge bg-warning text-dark">Sim</span>
+              {% else %}
+                <span class="text-muted">-</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if run.failure_reason %}
+                <span class="badge bg-danger">{{ run.get_failure_reason_display }}</span>
+              {% else %}
+                <span class="text-muted">-</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center py-5">
+      <i class="bi bi-inbox fs-1 text-muted mb-3 d-block"></i>
+      <h5 class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">Nenhuma execução encontrada</h5>
+      <p class="text-muted mb-0">Nenhum run corresponde aos filtros selecionados no período.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

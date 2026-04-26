@@ -1,7 +1,8 @@
-"""Services portal views: dashboard, census, risk monitor.
+"""Services portal views: dashboard, census, risk monitor, ingestion metrics.
 
 Slice S2: Dashboard with operational stats (demo data).
 Slice DRD-S1: Dashboard with real DB queries.
+Slice IRMD-S6: Ingestion metric cards on dashboard and metrics page route.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from django.shortcuts import render
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.ingestion.models import IngestionRun
 from apps.patients.models import Admission, Patient
 
 
@@ -42,6 +44,9 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         discharge_date__gte=timezone.now() - timedelta(hours=24),
     ).count()
 
+    # ── IRMD-S6: Ingestion metrics for last 24h ──────────────────────
+    ingestion_stats = _compute_ingestion_stats()
+
     context = {
         "page_title": "Dashboard",
         "stats": {
@@ -53,8 +58,90 @@ def dashboard(request: HttpRequest) -> HttpResponse:
             "setores": setores,
             "ultima_varredura": ultima_varredura,
         },
+        "ingestion_stats": ingestion_stats,
     }
     return render(request, "services_portal/dashboard.html", context)
+
+
+def _build_filtered_queryset(
+    periodo: str = "24h",
+    status: str = "",
+    intent: str = "",
+    failure_reason: str = "",
+):
+    """Build a filtered IngestionRun queryset and its aggregated stats.
+
+    Returns a dict with keys:
+        runs: the filtered queryset
+        stats: dict with total_finished, success_rate, timeout_rate,
+               avg_duration_seconds
+    """
+    now = timezone.now()
+    periodo_hours = {"24h": 24, "7d": 7 * 24, "30d": 30 * 24}
+    hours = periodo_hours.get(periodo, 24)
+    window_start = now - timedelta(hours=hours)
+
+    qs = IngestionRun.objects.filter(finished_at__gte=window_start)
+
+    if status:
+        qs = qs.filter(status=status)
+    if intent:
+        qs = qs.filter(intent=intent)
+    if failure_reason:
+        qs = qs.filter(failure_reason=failure_reason)
+
+    total = qs.count()
+
+    if total == 0:
+        return {
+            "runs": IngestionRun.objects.none(),
+            "stats": {
+                "total_finished": 0,
+                "success_rate": 0.0,
+                "timeout_rate": 0.0,
+                "avg_duration_seconds": 0,
+            },
+        }
+
+    success_count = qs.filter(status="succeeded").count()
+    timeout_count = qs.filter(timed_out=True).count()
+
+    success_rate = round(success_count / total * 100, 1)
+    timeout_rate = round(timeout_count / total * 100, 1)
+
+    runs_with_duration = qs.exclude(processing_started_at__isnull=True)
+    if runs_with_duration.exists():
+        durations: list[float] = []
+        for run in runs_with_duration:
+            if run.processing_started_at and run.finished_at:
+                durations.append(
+                    (run.finished_at - run.processing_started_at).total_seconds()
+                )
+        avg_seconds = round(sum(durations) / len(durations)) if durations else 0
+    else:
+        avg_seconds = 0
+
+    return {
+        "runs": qs.order_by("-finished_at"),
+        "stats": {
+            "total_finished": total,
+            "success_rate": success_rate,
+            "timeout_rate": timeout_rate,
+            "avg_duration_seconds": avg_seconds,
+        },
+    }
+
+
+def _compute_ingestion_stats() -> dict:
+    """Compute ingestion operational metrics for the last 24 hours.
+
+    Returns a dict with:
+        total_finished, success_rate, timeout_rate, avg_duration_seconds.
+    All values are zero when no runs exist in the window.
+
+    Delegates to _build_filtered_queryset for consistency.
+    """
+    return _build_filtered_queryset(periodo="24h")["stats"]
 
 
 @login_required
@@ -125,6 +212,62 @@ def censo(request: HttpRequest) -> HttpResponse:
         "total": len(pacientes),
         "captured_at": latest,
     })
+
+
+@login_required
+def ingestion_metrics(request: HttpRequest) -> HttpResponse:
+    """Ingestion operational metrics page with filters and run table (S7).
+
+    Supports filtering by period (24h/7d/30d), status, intent and
+    failure_reason via querystring. Renders aggregated summary cards
+    and a detailed run table, both coherent with the filtered dataset.
+    """
+    periodo = request.GET.get("periodo", "24h").strip()
+    status = request.GET.get("status", "").strip()
+    intent = request.GET.get("intent", "").strip()
+    failure_reason = request.GET.get("failure_reason", "").strip()
+
+    result = _build_filtered_queryset(
+        periodo=periodo,
+        status=status,
+        intent=intent,
+        failure_reason=failure_reason,
+    )
+
+    # Collect distinct values for filter dropdowns from the full dataset
+    # (not filtered by status/intent so dropdowns always have options)
+    all_finished = IngestionRun.objects.filter(finished_at__isnull=False)
+    all_statues = sorted(
+        all_finished.values_list("status", flat=True).distinct()
+    )
+    all_intents = sorted(
+        t for t in
+        all_finished.values_list("intent", flat=True).distinct()
+        if t
+    )
+    all_failure_reasons = sorted(
+        r for r in
+        all_finished.exclude(failure_reason="")
+        .values_list("failure_reason", flat=True).distinct()
+    )
+
+    context = {
+        "page_title": "Métricas de Ingestão",
+        "ingestion_stats": result["stats"],
+        "runs": result["runs"],
+        "filters": {
+            "periodo": periodo,
+            "status": status,
+            "intent": intent,
+            "failure_reason": failure_reason,
+        },
+        "filter_options": {
+            "statuses": all_statues,
+            "intents": all_intents,
+            "failure_reasons": all_failure_reasons,
+        },
+    }
+    return render(request, "services_portal/ingestion_metrics.html", context)
 
 
 @login_required

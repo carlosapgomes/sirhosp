@@ -1,4 +1,6 @@
-"""Slice DRD-S1: Dashboard with real DB queries."""
+"""Slice DRD-S1: Dashboard with real DB queries.
+Slice IRMD-S6: Ingestion metric cards on dashboard.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.ingestion.models import IngestionRun
 from apps.patients.models import Admission, Patient
 
 
@@ -160,3 +163,83 @@ class TestDashboardRealStats:
         content = response.content.decode()
         assert response.status_code == 200
         assert 'census:bed_status' in content or '/beds/' in content
+
+
+@pytest.mark.django_db
+class TestDashboardIngestionMetrics:
+    """S6: Dashboard shows ingestion operation metric cards (24h window)."""
+
+    def _create_run(self, **kwargs):
+        """Helper to create an IngestionRun with defaults for 24h window."""
+        now = timezone.now()
+        defaults = {
+            "status": "succeeded",
+            "intent": "full_sync",
+            "queued_at": now - timedelta(hours=2),
+            "processing_started_at": now - timedelta(hours=1, minutes=55),
+            "finished_at": now - timedelta(hours=1),
+            "timed_out": False,
+            "failure_reason": "",
+        }
+        defaults.update(kwargs)
+        return IngestionRun.objects.create(**defaults)
+
+    def test_dashboard_shows_ingestion_metrics_with_data(self, admin_client):
+        """With runs in the last 24h, cards show correct aggregated values."""
+        # 4 succeeded, 1 failed (timeout)
+        for _ in range(4):
+            self._create_run(status="succeeded", timed_out=False)
+        self._create_run(
+            status="failed", timed_out=True, failure_reason="timeout",
+        )
+
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+        ingestion = response.context["ingestion_stats"]
+        assert ingestion["total_finished"] == 5
+        assert ingestion["success_rate"] == 80.0   # 4/5
+        assert ingestion["timeout_rate"] == 20.0   # 1/5
+        assert ingestion["avg_duration_seconds"] > 0
+
+    def test_ingestion_metrics_cards_with_no_runs(self, admin_client):
+        """When no runs exist in the 24h window, all values are zero."""
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+        ingestion = response.context["ingestion_stats"]
+        assert ingestion["total_finished"] == 0
+        assert ingestion["success_rate"] == 0.0
+        assert ingestion["timeout_rate"] == 0.0
+        assert ingestion["avg_duration_seconds"] == 0
+
+    def test_ingestion_metrics_only_counts_last_24h(self, admin_client):
+        """Runs older than 24h are excluded from dashboard aggregation."""
+        now = timezone.now()
+        # Old run (25 hours ago)
+        IngestionRun.objects.create(
+            status="succeeded",
+            finished_at=now - timedelta(hours=25),
+            processing_started_at=now - timedelta(hours=26),
+        )
+        # Recent run
+        self._create_run(status="succeeded")
+
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+        ingestion = response.context["ingestion_stats"]
+        assert ingestion["total_finished"] == 1
+
+    def test_dashboard_has_ingestion_metrics_cta(self, admin_client):
+        """Dashboard includes a CTA linking to ingestion metrics page."""
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        # Verify the URL for ingestion_metrics is present
+        metrics_url = reverse("services_portal:ingestion_metrics")
+        assert metrics_url in content
