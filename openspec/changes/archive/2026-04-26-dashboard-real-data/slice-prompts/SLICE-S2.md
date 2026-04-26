@@ -40,7 +40,7 @@ O layout responsivo existente (tabela no desktop, cards no mobile) deve ser pres
 
 ## 3. Estrutura atual do projeto (relevante)
 
-```text
+````text
 sirhosp/
 ├── apps/
 │   ├── patients/
@@ -303,10 +303,10 @@ uma lista de dicionários com as chaves `leito`, `nome`, `registro`, `admissao`,
    {% if captured_at %}
    <p class="text-muted small mb-0">Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}</p>
    {% endif %}
-   ```
+````
 
-   Coloque isso logo após o `<p class="text-muted small mb-0">Pacientes atualmente internados...</p>`
-   (linha ~6 do arquivo).
+Coloque isso logo após o `<p class="text-muted small mb-0">Pacientes atualmente internados...</p>`
+(linha ~6 do arquivo).
 
 1. **Dropdown "Todos os setores"**: Remover a opção hardcoded "Todos os setores"? NÃO — manter.
    O template já tem `<option value="">Todos os setores</option>` que funciona como "sem filtro".
@@ -319,7 +319,7 @@ a lógica responsiva (`.sirhosp-censo-table-wrapper` + `.sirhosp-censo-cards`) d
 
 ### 6.3 Testes: `tests/unit/test_services_portal_censo.py` (NOVO)
 
-```python
+````python
 from __future__ import annotations
 
 import pytest
@@ -597,3 +597,4 @@ S3 — /beds/ com cards, totalização e link na sidebar
 - ❌ Usar `from django.db.models import Q` sem também adicionar ao arquivo
 - ❌ Esquecer `from __future__ import annotations`
 - ❌ Modificar arquivos fora do escopo (dashboard, monitor_risco, beds)
+````

@@ -31,13 +31,13 @@ Aqui está o **Blueprint: Busca Histórica**, adaptado com a Sidebar e com essa 
 ## Detalhes Estratégicos para sua Apresentação
 
 1. **A Coluna "Fonte" (Diferencial Técnico):**
-    - Mostre para a diretoria que o sistema é capaz de distinguir o que já está "em casa" (**Local**) do que ele precisa "ir buscar" (**EHR Sync**). Isso demonstra a inteligência da ferramenta em não duplicar trabalho, mas ser completa quando necessário.
+   - Mostre para a diretoria que o sistema é capaz de distinguir o que já está "em casa" (**Local**) do que ele precisa "ir buscar" (**EHR Sync**). Isso demonstra a inteligência da ferramenta em não duplicar trabalho, mas ser completa quando necessário.
 
 2. **O Fluxo "On-Demand":**
-    - Se o usuário clica no paciente que está com a fonte "EHR (Sync)", você pode explicar que o sistema abrirá uma barra de progresso rápida: _"Coletando dados históricos do sistema original... 40%"_. Assim que terminar, ele cai na **Página de Timeline** que já desenhamos.
+   - Se o usuário clica no paciente que está com a fonte "EHR (Sync)", você pode explicar que o sistema abrirá uma barra de progresso rápida: _"Coletando dados históricos do sistema original... 40%"_. Assim que terminar, ele cai na **Página de Timeline** que já desenhamos.
 
 3. **Utilidade para o Setor de Qualidade:**
-    - Destaque que a Qualidade pode auditar eventos adversos mesmo meses após a alta, sem a lentidão ou as limitações de busca do sistema original. O seu sistema permite buscas que o EHR padrão muitas vezes não faz (como buscar por um registro antigo e já consolidar todas as passagens dele).
+   - Destaque que a Qualidade pode auditar eventos adversos mesmo meses após a alta, sem a lentidão ou as limitações de busca do sistema original. O seu sistema permite buscas que o EHR padrão muitas vezes não faz (como buscar por um registro antigo e já consolidar todas as passagens dele).
 
 ### Resumo da Navegação Final para a Diretoria
 

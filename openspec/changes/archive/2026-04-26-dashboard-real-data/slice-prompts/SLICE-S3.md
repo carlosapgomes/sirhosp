@@ -37,7 +37,7 @@ Três mudanças na página `/beds/` e na sidebar:
 
 ## 3. Estrutura atual do projeto (relevante)
 
-```text
+````text
 sirhosp/
 ├── apps/
 │   ├── census/
@@ -698,3 +698,4 @@ Nenhum. Este é o último slice do change dashboard-real-data.
 - ❌ Cards de setor expandidos por padrão (devem ser `collapse` sem classe `show`)
 - ❌ Esquecer `from __future__ import annotations`
 - ❌ Modificar arquivos fora do escopo (dashboard, censo, monitor_risco)
+````

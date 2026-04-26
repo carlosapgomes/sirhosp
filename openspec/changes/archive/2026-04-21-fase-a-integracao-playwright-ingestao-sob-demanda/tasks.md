@@ -1,4 +1,3 @@
-
 # Tasks: fase-a-integracao-playwright-ingestao-sob-demanda
 
 ## 1. Slice S1 - Contrato do conector Playwright + adapter de transição

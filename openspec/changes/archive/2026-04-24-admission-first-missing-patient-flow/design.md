@@ -1,4 +1,3 @@
-
 # Design: admission-first-missing-patient-flow
 
 ## Context

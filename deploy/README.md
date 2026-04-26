@@ -147,8 +147,8 @@ docker compose -f compose.yml -f compose.prod.yml ps
 
 ## 7. Troubleshooting
 
-| Problema | Verificação |
-|----------|-------------|
-| Censo não extrai | `journalctl -u sirhosp-census.service -n 30` — ver credenciais, conectividade |
-| Worker não processa | `docker compose logs worker` — ver fila, conexão DB |
-| Container não sobe | `docker compose logs web` — ver `.env`, secrets, porta ocupada |
+| Problema            | Verificação                                                                   |
+| ------------------- | ----------------------------------------------------------------------------- |
+| Censo não extrai    | `journalctl -u sirhosp-census.service -n 30` — ver credenciais, conectividade |
+| Worker não processa | `docker compose logs worker` — ver fila, conexão DB                           |
+| Container não sobe  | `docker compose logs web` — ver `.env`, secrets, porta ocupada                |

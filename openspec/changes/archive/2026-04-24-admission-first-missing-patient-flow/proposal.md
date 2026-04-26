@@ -1,4 +1,3 @@
-
 # Change Proposal: admission-first-missing-patient-flow
 
 ## Why

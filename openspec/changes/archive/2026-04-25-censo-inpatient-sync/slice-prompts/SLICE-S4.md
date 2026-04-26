@@ -15,7 +15,7 @@
 
 ## 2. Estado atual do projeto (após Slices S1–S3)
 
-```text
+````text
 apps/census/
 ├── models.py         ← CensusSnapshot, BedStatus
 ├── services.py       ← classify_bed_status(), parse_census_csv()
@@ -498,3 +498,4 @@ Gerar `/tmp/sirhosp-slice-CIS-S4-report.md`.
 - ❌ Não processar leitos com `bed_status != occupied`
 - ❌ Não enfileirar run para prontuario vazio
 - ❌ Não modificar `apps/ingestion/services.py` (usar funções existentes)
+````

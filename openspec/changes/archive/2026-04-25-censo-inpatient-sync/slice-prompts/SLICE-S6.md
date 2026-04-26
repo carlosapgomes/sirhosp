@@ -15,7 +15,7 @@
 
 ## 2. Estado atual (após S1–S5)
 
-```text
+````text
 apps/
 ├── census/
 │   ├── models.py       ← CensusSnapshot, BedStatus
@@ -599,3 +599,4 @@ Gerar `/tmp/sirhosp-slice-CIS-S6-report.md`.
 - ❌ Modificar `base.html` sem necessidade
 - ❌ Criar templates sem herdar de `base.html`
 - ❌ Sobrescrever `PatientAdmin` existente sem preservar configurações
+````

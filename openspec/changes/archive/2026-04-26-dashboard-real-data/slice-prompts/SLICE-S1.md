@@ -41,7 +41,7 @@ Após este slice, o dashboard exibirá:
 
 ## 3. Estrutura atual do projeto (relevante)
 
-```text
+````text
 sirhosp/
 ├── config/
 │   └── settings.py
@@ -496,3 +496,4 @@ S2 — Censo Hospitalar com dados reais
 - ❌ Hardcodar URL `/beds/` no template — usar `{% url 'census:bed_status' %}`
 - ❌ Não rodar os gates de qualidade
 - ❌ Modificar arquivos fora do escopo (ex.: mexer em `censo()` ou `monitor_risco()`)
+````

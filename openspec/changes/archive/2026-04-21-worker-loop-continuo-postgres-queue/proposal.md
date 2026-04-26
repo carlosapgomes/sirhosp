@@ -1,4 +1,3 @@
-
 # Change Proposal: worker-loop-continuo-postgres-queue
 
 ## Why

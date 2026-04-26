@@ -19,7 +19,7 @@
 
 ## 2. Estado atual do projeto (após Slice S1)
 
-```text
+````text
 sirhosp/
 ├── config/settings.py          ← INSTALLED_APPS inclui "apps.census"
 ├── apps/
@@ -303,3 +303,4 @@ S3 — Management command extract_census + parser CSV + classificador
 - ❌ Alterar a lógica de scraping (seletores, fluxo de setores, paginação)
 - ❌ Usar caminho hardcoded para diretórios (usar `__file__` relativo)
 - ❌ Rodar o script contra o sistema fonte real durante implementação
+````

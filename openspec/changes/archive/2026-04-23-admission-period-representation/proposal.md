@@ -1,4 +1,3 @@
-
 # Change Proposal: admission-period-representation
 
 ## Why

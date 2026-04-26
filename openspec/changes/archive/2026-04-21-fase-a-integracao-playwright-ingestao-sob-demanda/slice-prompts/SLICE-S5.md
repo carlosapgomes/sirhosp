@@ -1,4 +1,3 @@
-
 # Prompt Slice S5 (LLM Executor)
 
 ## Handoff de entrada (contexto zero)

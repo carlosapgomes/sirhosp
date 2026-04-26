@@ -1,4 +1,3 @@
-
 # SLICE-S3 — Worker: semântica de falha + métricas de internações no run
 
 ## Handoff de entrada (contexto zero)

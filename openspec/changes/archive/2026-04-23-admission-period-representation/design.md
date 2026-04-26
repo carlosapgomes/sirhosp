@@ -1,4 +1,3 @@
-
 # Design: admission-period-representation
 
 ## Contexto

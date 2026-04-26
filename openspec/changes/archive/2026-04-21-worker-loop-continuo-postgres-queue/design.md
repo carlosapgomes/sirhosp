@@ -1,4 +1,3 @@
-
 # Design: worker-loop-continuo-postgres-queue
 
 ## Context

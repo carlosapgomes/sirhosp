@@ -41,7 +41,7 @@ nome, especialidade e status do leito.
 
 ## 3. Estrutura atual do projeto (relevante para este slice)
 
-```text
+````text
 sirhosp/
 ├── config/
 │   └── settings.py        ← INSTALLED_APPS está aqui
@@ -561,3 +561,4 @@ S2 — Script de extração do censo integrado
 - ❌ Criar índices sem nome explícito
 - ❌ Não rodar os gates de qualidade
 - ❌ Modificar arquivos fora do escopo (ex.: mexer em `apps/patients/`)
+````

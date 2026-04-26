@@ -92,15 +92,15 @@ class CensusSnapshot(models.Model):
 
 ### Classificação de `bed_status`
 
-| Padrão no campo `nome` | `bed_status` |
-| --- | --- |
-| Prontuário numérico presente | `occupied` |
-| `DESOCUPADO`, `VAZIO`, `vazio` | `empty` |
-| `LIMPEZA`, `limpeza` | `maintenance` |
-| `RESERVA INTERNA`, `RESERVA CIRÚRGICA`, `RESERVA REGULAÇÃO`, `RESERVA HEMODINÂMICA`, `RESERVA AMBULATORIO` | `reserved` |
-| `ISOLAMENTO MÉDICO`, `ISOLAMENTO SOCIAL`, `ISOLAMENTO` | `isolation` |
-| `IGNORADO`, `PACIENTE IGNORADO` | `occupied` (tem prontuário) |
-| Nome de pessoa sem prontuário (ex.: centro cirúrgico) | `occupied` se tem prontuário, `empty` se vazio |
+| Padrão no campo `nome`                                                                                     | `bed_status`                                   |
+| ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Prontuário numérico presente                                                                               | `occupied`                                     |
+| `DESOCUPADO`, `VAZIO`, `vazio`                                                                             | `empty`                                        |
+| `LIMPEZA`, `limpeza`                                                                                       | `maintenance`                                  |
+| `RESERVA INTERNA`, `RESERVA CIRÚRGICA`, `RESERVA REGULAÇÃO`, `RESERVA HEMODINÂMICA`, `RESERVA AMBULATORIO` | `reserved`                                     |
+| `ISOLAMENTO MÉDICO`, `ISOLAMENTO SOCIAL`, `ISOLAMENTO`                                                     | `isolation`                                    |
+| `IGNORADO`, `PACIENTE IGNORADO`                                                                            | `occupied` (tem prontuário)                    |
+| Nome de pessoa sem prontuário (ex.: centro cirúrgico)                                                      | `occupied` se tem prontuário, `empty` se vazio |
 
 **Regra de ouro**: `prontuario` não-vazio e numérico → `occupied`. Se `prontuario` vazio → classifica por `nome`.
 
@@ -158,7 +158,7 @@ Modificação no `_process_admissions_only()` do worker (`process_ingestion_runs
 ```python
 def _process_admissions_only(self, run, ...):
     # ... existing admissions capture logic ...
-    
+
     # NEW: auto-enqueue full_sync for most recent admission
     latest = Admission.objects.filter(patient=patient).order_by("-admission_date").first()
     if latest:
@@ -180,11 +180,11 @@ def _process_admissions_only(self, run, ...):
 
 Template com tabela agrupada por setor:
 
-| Setor | Ocupados | Vagas | Reservas | Manutenção | Isolamento | Total |
-| --- | --- | --- | --- | --- | --- | --- |
-| UTI GERAL ADULTO 1 | 18 | 0 | 1 | 0 | 0 | 20 |
-| INTERMEDIARIO ALA C | 28 | 1 | 2 | 0 | 0 | 35 |
-| ... | | | | | | |
+| Setor               | Ocupados | Vagas | Reservas | Manutenção | Isolamento | Total |
+| ------------------- | -------- | ----- | -------- | ---------- | ---------- | ----- |
+| UTI GERAL ADULTO 1  | 18       | 0     | 1        | 0          | 0          | 20    |
+| INTERMEDIARIO ALA C | 28       | 1     | 2        | 0          | 0          | 35    |
+| ...                 |          |       |          |            |            |       |
 
 Ao clicar num setor, expande para mostrar leitos individuais com status e nome do paciente (se ocupado).
 
@@ -197,9 +197,9 @@ Função no `apps/patients/services.py`:
 ```python
 def merge_patients(*, keep: Patient, merge: Patient, run: IngestionRun | None = None) -> dict:
     """Merge 'merge' patient into 'keep' patient.
-    
+
     - Re-points all Admissions from merge to keep
-    - Re-points all ClinicalEvents from merge to keep  
+    - Re-points all ClinicalEvents from merge to keep
     - Records identifier history entries for traceability
     - Deletes the 'merge' patient
     """

@@ -1,4 +1,3 @@
-
 # SLICE-S5 — Hardening final + contrato de chunking
 
 ## Handoff de entrada (contexto zero)

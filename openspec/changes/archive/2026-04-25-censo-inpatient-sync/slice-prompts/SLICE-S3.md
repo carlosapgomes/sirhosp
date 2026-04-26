@@ -17,7 +17,7 @@
 
 ## 2. Estado atual do projeto (após Slices S1–S2)
 
-```text
+````text
 apps/census/
 ├── __init__.py
 ├── apps.py              ← CensusConfig
@@ -548,3 +548,4 @@ Gerar `/tmp/sirhosp-slice-CIS-S3-report.md` com status, arquivos criados/modific
 - ❌ Esquecer `__init__.py` nos pacotes `management/` e `management/commands/`
 - ❌ Usar `print()` em vez de `self.stdout.write()` / `self.stderr.write()` no management command
 - ❌ Hardcodar caminhos absolutos (usar `__file__` relativo)
+````

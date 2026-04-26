@@ -15,7 +15,7 @@
 
 ## 2. Estado atual do projeto (após Slices S1–S4)
 
-```text
+````text
 apps/ingestion/
 ├── management/
 │   └── commands/
@@ -350,3 +350,4 @@ Gerar `/tmp/sirhosp-slice-CIS-S5-report.md`.
 - ❌ Alterar a lógica de `_capture_admissions`
 - ❌ Criar import circular (usar imports locais dentro dos métodos, como já faz o worker)
 - ❌ Quebrar testes existentes do worker
+````

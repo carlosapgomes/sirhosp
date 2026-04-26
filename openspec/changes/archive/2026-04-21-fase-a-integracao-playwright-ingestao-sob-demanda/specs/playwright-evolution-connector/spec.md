@@ -1,4 +1,3 @@
-
 # ADDED Specification: playwright-evolution-connector
 
 ## Requirements

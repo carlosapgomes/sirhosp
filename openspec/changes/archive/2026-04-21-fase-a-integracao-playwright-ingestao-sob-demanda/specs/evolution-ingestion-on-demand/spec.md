@@ -1,4 +1,3 @@
-
 # MODIFIED Specification: evolution-ingestion-on-demand
 
 ## Requirements

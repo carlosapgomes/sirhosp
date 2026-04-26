@@ -1,4 +1,3 @@
-
 # Índice de prompts por slice
 
 Change: `admission-period-representation`

@@ -27,11 +27,11 @@ Aqui está o blueprint final para o **Monitor de Risco (Busca por Palavras-Chave
 
 1. **Sidebar (Navegação Persistente):** O item **Monitor de Risco** está realçado como o local atual.
 2. **Motor de Busca (Filtros):**
-    - **Input de Termos:** Permite múltiplos termos (ex: separados por vírgula).
-    - **Filtro Temporal:** Um dropdown rápido (Últimas 24h, 48h, 7 dias) para focar no que é recente.
+   - **Input de Termos:** Permite múltiplos termos (ex: separados por vírgula).
+   - **Filtro Temporal:** Um dropdown rápido (Últimas 24h, 48h, 7 dias) para focar no que é recente.
 3. **Resultados em Accordion (Bootstrap `.accordion`):**
-    - **Cabeçalho do Card:** Mostra o nome do paciente e o **contador de ocorrências**. Isso permite que o usuário foque primeiro em quem tem mais alertas (ex: João dos Santos com 5 ocorrências).
-    - **Corpo do Card (Expandido):** Mostra os _snippets_ (trechos) do texto com a data e a palavra-chave em destaque.
+   - **Cabeçalho do Card:** Mostra o nome do paciente e o **contador de ocorrências**. Isso permite que o usuário foque primeiro em quem tem mais alertas (ex: João dos Santos com 5 ocorrências).
+   - **Corpo do Card (Expandido):** Mostra os _snippets_ (trechos) do texto com a data e a palavra-chave em destaque.
 4. **Links de Navegação Interna:** Dentro de cada card expandido, há um botão "Ver Prontuário Completo", que levaria o usuário direto para a **Página de Detalhes do Paciente (Timeline)** que desenhamos antes.
 
 ### Por que apresentar isso à diretoria?

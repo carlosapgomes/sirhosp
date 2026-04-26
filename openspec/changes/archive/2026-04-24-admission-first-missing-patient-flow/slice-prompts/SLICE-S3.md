@@ -1,4 +1,3 @@
-
 # SLICE-S3 — Seleção de internação e sincronização completa
 
 ## Handoff de entrada (contexto zero)

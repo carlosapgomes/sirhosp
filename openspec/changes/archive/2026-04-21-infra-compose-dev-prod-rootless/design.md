@@ -1,4 +1,3 @@
-
 # Design: infra-compose-dev-prod-rootless
 
 ## Context

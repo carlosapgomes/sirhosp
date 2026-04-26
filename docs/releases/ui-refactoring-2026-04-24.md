@@ -61,7 +61,7 @@ da sidebar cria hierarquia visual clara sem cansar os olhos em uso prolongado.
 
 ## 4. Arquitetura de Templates
 
-```text
+````text
 templates/
 ├── base.html                  ← Público: landing, login (sem sidebar)
 ├── base_sidebar.html          ← Autenticado: sidebar + topbar + conteúdo
@@ -160,8 +160,8 @@ base.html (Bootstrap CSS + Icons + JS)
 
 ### 5.1 Landing Page (`/`)
 
-**Template:** `apps/core/templates/core/home.html`  
-**View:** `apps/core/views.py:home()`  
+**Template:** `apps/core/templates/core/home.html`
+**View:** `apps/core/views.py:home()`
 **Autenticação:** Pública
 
 ```text
@@ -186,8 +186,8 @@ base.html (Bootstrap CSS + Icons + JS)
 
 ### 5.2 Login (`/login/`)
 
-**Template:** `templates/registration/login.html`  
-**View:** Django `auth_views.LoginView`  
+**Template:** `templates/registration/login.html`
+**View:** Django `auth_views.LoginView`
 **Autenticação:** Pública → redireciona para `/painel/`
 
 Features:
@@ -199,8 +199,8 @@ Features:
 
 ### 5.3 Dashboard (`/painel/`)
 
-**Template:** `apps/services_portal/templates/services_portal/dashboard.html`  
-**View:** `apps/services_portal/views.py:dashboard()`  
+**Template:** `apps/services_portal/templates/services_portal/dashboard.html`
+**View:** `apps/services_portal/views.py:dashboard()`
 **Dados:** Demo/stub
 
 | Card        | Valor | Ícone                | Cor   |
@@ -218,8 +218,8 @@ Features:
 
 ### 5.4 Censo Hospitalar (`/censo/`)
 
-**Template:** `apps/services_portal/templates/services_portal/censo.html`  
-**View:** `apps/services_portal/views.py:censo()`  
+**Template:** `apps/services_portal/templates/services_portal/censo.html`
+**View:** `apps/services_portal/views.py:censo()`
 **Dados:** Demo/stub (8 pacientes em 12 setores)
 
 **Filtros:**
@@ -228,15 +228,15 @@ Features:
 - Dropdown: 12 setores (UTI Adulto, UTI Neonatal, Clínica Médica, etc.)
 - Botão: Filtrar
 
-**Desktop:** Tabela com colunas Leito | Paciente | Registro | Admissão | Setor  
+**Desktop:** Tabela com colunas Leito | Paciente | Registro | Admissão | Setor
 **Mobile:** Cards empilháveis com nome + badges (leito, registro, admissão, setor)
 
 Linhas/Cards são clicáveis → redirecionam para busca do paciente.
 
 ### 5.5 Detalhes do Paciente (`/pacientes/<id>/admissions/`)
 
-**Template:** `apps/patients/templates/patients/admission_list.html`  
-**View:** `apps/patients/views.py:admission_list_view()`  
+**Template:** `apps/patients/templates/patients/admission_list.html`
+**View:** `apps/patients/views.py:admission_list_view()`
 **Dados:** Reais (Patient, Admission, ClinicalEvent models)
 
 **Banner de identidade:** Nome, registro, data de nascimento, idade calculada, setor, leito.
@@ -254,8 +254,8 @@ Linhas/Cards são clicáveis → redirecionam para busca do paciente.
 
 ### 5.6 Monitor de Risco (`/monitor/`)
 
-**Template:** `apps/services_portal/templates/services_portal/monitor_risco.html`  
-**View:** `apps/services_portal/views.py:monitor_risco()`  
+**Template:** `apps/services_portal/templates/services_portal/monitor_risco.html`
+**View:** `apps/services_portal/views.py:monitor_risco()`
 **Dados:** Híbrido (tenta `search_clinical_events` real, fallback demo)
 
 **Busca:**
@@ -505,3 +505,4 @@ wireframes/detalhes-paciente.md
 - [AGENTS.md](AGENTS.md) — Regras de qualidade e workflow
 - [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md) — Resumo executivo
 - [Wireframes](wireframes/) — Blueprints das páginas
+````
