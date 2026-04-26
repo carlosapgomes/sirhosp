@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # census-snapshot-mirror Specification
 
 ## Purpose

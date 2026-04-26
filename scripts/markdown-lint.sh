@@ -25,10 +25,12 @@ if [ ${#files[@]} -eq 0 ]; then
   exit 0
 fi
 
-MARKDOWNLINT_CONFIG="${MARKDOWNLINT_CONFIG:-$HOME/.markdownlint.json}"
-
-if [ -f "$MARKDOWNLINT_CONFIG" ]; then
-  npx --yes markdownlint-cli2 --config "$MARKDOWNLINT_CONFIG" "${files[@]}"
+# Prioriza config local do projeto (.markdownlint-cli2.yaml),
+# depois .markdownlint.json no HOME, senão roda sem --config.
+if [ -f ".markdownlint-cli2.yaml" ]; then
+  npx --yes markdownlint-cli2 "${files[@]}"
+elif [ -f "$HOME/.markdownlint.json" ]; then
+  npx --yes markdownlint-cli2 --config "$HOME/.markdownlint.json" "${files[@]}"
 else
   npx --yes markdownlint-cli2 "${files[@]}"
 fi

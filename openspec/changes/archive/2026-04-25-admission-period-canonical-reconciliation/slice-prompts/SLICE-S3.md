@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S3 — Regressão de lifecycle do worker (rerun com chave volátil não duplica internação)
 
 ## Handoff de entrada (contexto zero)

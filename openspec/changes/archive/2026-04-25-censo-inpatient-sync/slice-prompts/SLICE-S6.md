@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 MD033 MD040 MD036 -->
 # SLICE-S6: Página de leitos + merge_patients + admin action
 
 > **Handoff para executor com ZERO contexto adicional.**
@@ -16,7 +15,7 @@
 
 ## 2. Estado atual (após S1–S5)
 
-```
+```text
 apps/
 ├── census/
 │   ├── models.py       ← CensusSnapshot, BedStatus
@@ -37,7 +36,7 @@ config/
 
 templates/              ← templates globais
 └── base.html           ← base template do portal
-```
+```text
 
 ### Configuração de autenticação
 
@@ -118,7 +117,7 @@ def merge_patients(
         "admissions_moved": admissions_moved,
         "events_moved": events_moved,
     }
-```
+```text
 
 **Nota**: `ClinicalEvent` é importado de `apps.clinical_docs.models`. O import deve ser **local** (dentro da função) para evitar import circular, pois `clinical_docs` pode importar de `patients`.
 
@@ -206,7 +205,7 @@ class TestMergePatients:
         )
         with pytest.raises(ValueError, match="itself"):
             merge_patients(keep=patient, merge=patient)
-```
+```text
 
 ---
 
@@ -264,7 +263,7 @@ class PatientAdmin(admin.ModelAdmin):
             f"Merged {merged_count} patient(s) into {keep} (ID={keep.pk}).",
             level=messages.SUCCESS,
         )
-```
+```text
 
 **Verificar** se `apps/patients/admin.py` já existe. Se existir com um `PatientAdmin` já registrado, **apenas adicionar** o método `merge_selected_patients` e o `actions = [...]`. Não sobrescrever configurações existentes.
 
@@ -347,7 +346,7 @@ def bed_status_view(request):
         "sectors": sorted_sectors,
         "captured_at": latest_captured,
     })
-```
+```text
 
 ### 6.2 `apps/census/urls.py`
 
@@ -363,7 +362,7 @@ app_name = "census"
 urlpatterns = [
     path("beds/", views.bed_status_view, name="bed_status"),
 ]
-```
+```text
 
 ### 6.3 Incluir em `config/urls.py`
 
@@ -371,7 +370,7 @@ Adicionar ao `urlpatterns` de `config/urls.py`:
 
 ```python
 path("", include("apps.census.urls")),
-```
+```text
 
 Local exato: junto com os outros `path("", include("apps.XXXXX.urls"))`.
 
@@ -468,7 +467,7 @@ Criar diretório `apps/census/templates/census/` e o arquivo:
   {% endif %}
 </div>
 {% endblock %}
-```
+```text
 
 **Nota**: Este template assume que o `base.html` tem bloco `content` e Bootstrap 5 carregado. Verifique o base template existente em `templates/base.html` para confirmar os nomes dos blocos (pode ser `{% block main %}` ou `{% block body %}`). Adapte conforme necessário.
 
@@ -562,7 +561,7 @@ class TestBedStatusView:
         assert "NEW SETOR" in content
         # Old sector should NOT be present
         assert "OLD SETOR" not in content
-```
+```text
 
 ---
 
@@ -581,7 +580,7 @@ uv run python manage.py check
 # Verificar URL de leitos
 uv run python manage.py show_urls 2>/dev/null || \
   uv run python -c "from django.urls import reverse; print(reverse('census:bed_status'))"
-```
+```text
 
 ---
 

@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # ADDED Specification: playwright-evolution-connector
 

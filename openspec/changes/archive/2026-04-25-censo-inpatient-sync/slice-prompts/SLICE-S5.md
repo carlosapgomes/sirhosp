@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 MD033 MD040 MD036 -->
 # SLICE-S5: Worker — auto-enfileira `full_sync` da admissão mais recente
 
 > **Handoff para executor com ZERO contexto adicional.**
@@ -16,7 +15,7 @@
 
 ## 2. Estado atual do projeto (após Slices S1–S4)
 
-```
+```text
 apps/ingestion/
 ├── management/
 │   └── commands/
@@ -33,7 +32,7 @@ apps/census/
 │   └── commands/
 │       ├── extract_census.py
 │       └── process_census_snapshot.py
-```
+```text
 
 ### Modelo `Admission` (campos relevantes)
 
@@ -46,7 +45,7 @@ class Admission(models.Model):
     discharge_date = models.DateTimeField(null=True, blank=True)
     ward = models.CharField(max_length=100, blank=True, default="")
     bed = models.CharField(max_length=50, blank=True, default="")
-```
+```text
 
 ### Modelo `IngestionRun` (campos relevantes)
 
@@ -55,7 +54,7 @@ class IngestionRun(models.Model):
     status = models.CharField(max_length=20, ...)  # queued, running, succeeded, failed
     intent = models.CharField(max_length=50, ...)  # admissions_only, full_sync, census_extraction
     parameters_json = models.JSONField(default=dict)
-```
+```text
 
 ---
 
@@ -93,7 +92,7 @@ def _process_admissions_only(self, run, *, script_path, headless):
         f"(admissions_seen={adm_metrics['seen']}, ...)"
     )
     # ← AQUI: adicionar auto-enfileiramento
-```
+```text
 
 ---
 
@@ -151,7 +150,7 @@ antes de qualquer outro método existente (ou após o último método):
                 "intent": "full_sync",
             },
         )
-```
+```text
 
 ### 5.2 Chamar o método no final de `_process_admissions_only`
 
@@ -166,7 +165,7 @@ Após `run.save()` e antes do `self.stdout.write(...)`, adicionar:
                     f"  Auto-enqueued full_sync run #{full_sync_run.pk} "
                     f"for most recent admission"
                 )
-```
+```text
 
 O local exato é logo após:
 
@@ -178,7 +177,7 @@ O local exato é logo após:
     # ← AQUI: inserir o bloco de auto-enfileiramento
 
     self.stdout.write(...)
-```
+```text
 
 ### 5.3 Garantir que `patient` não é None
 
@@ -322,7 +321,7 @@ class TestWorkerAutoFullSync:
         # End date should be today (still admitted)
         today = timezone.now().strftime("%Y-%m-%d")
         assert result.parameters_json["end_date"] == today
-```
+```text
 
 ---
 
@@ -332,7 +331,7 @@ class TestWorkerAutoFullSync:
 ./scripts/test-in-container.sh check
 ./scripts/test-in-container.sh unit
 ./scripts/test-in-container.sh lint
-```
+```text
 
 **Atenção**: garantir que TODOS os testes existentes do worker continuam passando (test_worker_lifecycle.py, test_worker_gap_planning.py, test_worker_loop_resilience.py).
 

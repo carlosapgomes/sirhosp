@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S2 — Consolidação de duplicatas já existentes (merge determinístico + preservação de eventos)
 
 ## Handoff de entrada (contexto zero)

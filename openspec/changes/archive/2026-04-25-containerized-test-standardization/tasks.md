@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Tasks: containerized-test-standardization
 
 ## 1. Slice S1 - Infra base para testes em container

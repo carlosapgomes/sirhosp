@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Change Proposal: portal-hierarquia-login-pacientes
 
 ## Why

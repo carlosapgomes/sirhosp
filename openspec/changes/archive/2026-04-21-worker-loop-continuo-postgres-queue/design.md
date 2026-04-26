@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Design: worker-loop-continuo-postgres-queue
 

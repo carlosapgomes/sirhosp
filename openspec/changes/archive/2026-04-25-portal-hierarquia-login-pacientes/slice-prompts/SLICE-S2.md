@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S2 — Lista de pacientes (`/patients/`) com busca por nome/registro
 
 ## Handoff de entrada (contexto zero)

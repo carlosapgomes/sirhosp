@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # SLICE-S4 — Portal: cobertura de internações (pacientes + admissões)
 

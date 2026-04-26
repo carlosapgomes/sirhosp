@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Tasks: portal-hierarquia-login-pacientes
 
 ## 1. Slice S1 - Entrada autenticada e redirecionamento padrão

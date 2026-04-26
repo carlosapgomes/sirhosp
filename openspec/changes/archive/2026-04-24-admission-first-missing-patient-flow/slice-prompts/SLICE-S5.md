@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # SLICE-S5 — Hardening final + contrato de chunking
 

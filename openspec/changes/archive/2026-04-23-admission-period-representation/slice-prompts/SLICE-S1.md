@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # SLICE-S1 — Snapshot de internações no conector/extractor
 

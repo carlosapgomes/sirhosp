@@ -1,0 +1,18 @@
+# Configuração do markdownlint-cli2 para o projeto sirhosp
+# Ref: https://github.com/DavidAnson/markdownlint-cli2
+#
+# Uso obrigatório: todo arquivo .md criado/alterado deve passar sem erros
+# por `markdownlint-cli2` (ou `./scripts/markdown-lint.sh`).
+
+config:
+  # Ativar todas as regras default
+  default: true
+
+  # MD013/line-length — desabilitado porque docs técnicos em português
+  # frequentemente excedem 80 caracteres. Não é prático requebrar
+  # textos longos (URLs, tabelas, diagramas ASCII, paths).
+  MD013: false
+
+  # MD033/no-inline-html — permitido para diagramas ASCII em code blocks
+  # e templates (ex: ADR template com placeholders).
+  MD033: false

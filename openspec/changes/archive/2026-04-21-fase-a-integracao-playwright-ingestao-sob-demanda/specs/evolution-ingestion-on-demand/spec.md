@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # MODIFIED Specification: evolution-ingestion-on-demand
 

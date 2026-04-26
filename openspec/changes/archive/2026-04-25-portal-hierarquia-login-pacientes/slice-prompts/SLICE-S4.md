@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S4 — Hardening de autenticação do portal + regressão final
 
 ## Handoff de entrada (contexto zero)

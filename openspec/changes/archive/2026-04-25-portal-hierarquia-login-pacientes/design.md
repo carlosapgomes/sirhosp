@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Design: portal-hierarquia-login-pacientes
 
 ## Context

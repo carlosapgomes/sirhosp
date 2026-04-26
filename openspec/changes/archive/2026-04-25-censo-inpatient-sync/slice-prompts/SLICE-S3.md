@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 MD033 MD040 MD036 -->
 # SLICE-S3: Management command `extract_census` + parser CSV + classificador
 
 > **Handoff para executor com ZERO contexto adicional.**
@@ -18,7 +17,7 @@
 
 ## 2. Estado atual do projeto (após Slices S1–S2)
 
-```
+```text
 apps/census/
 ├── __init__.py
 ├── apps.py              ← CensusConfig
@@ -33,7 +32,7 @@ tests/unit/
 automation/source_system/current_inpatients/
 ├── extract_census.py     ← script Playwright (S2)
 └── README.md
-```
+```text
 
 ### Modelo `CensusSnapshot` (relevante para este slice)
 
@@ -54,7 +53,7 @@ class CensusSnapshot(models.Model):
     nome = models.CharField(max_length=512, blank=True, default="")
     especialidade = models.CharField(max_length=100, blank=True, default="")
     bed_status = models.CharField(max_length=20, choices=BedStatus.choices)
-```
+```text
 
 ### Modelo `IngestionRun` (referência)
 
@@ -71,7 +70,7 @@ class IngestionRun(models.Model):
     error_message = models.TextField(blank=True, default="")
     events_processed = models.PositiveIntegerField(default=0)
     # ... outros campos
-```
+```text
 
 ### Contrato de saída do script `extract_census.py`
 
@@ -84,7 +83,7 @@ setor,qrt_leito,prontuario,nome,esp
 UTI GERAL ADULTO 1 - HGRS,UG01A,14160147,JOSE AUGUSTO MERCES,NEF
 UTI GERAL ADULTO 1 - HGRS,UG09I,,RESERVA CIRÚRGICA,
 UTI PEDIATRICA - HGRS,UP01B,,LIMPEZA,
-```
+```text
 
 ---
 
@@ -197,7 +196,7 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
             })
 
     return rows
-```
+```text
 
 ### 4.2 `apps/census/management/__init__.py`
 
@@ -368,13 +367,13 @@ class Command(BaseCommand):
                     f"{len(snapshots)} rows persisted."
                 )
             )
-```
+```text
 
 ---
 
 ## 5. Estrutura de diretórios a criar
 
-```
+```text
 apps/census/
 ├── services.py              ← classify_bed_status + parse_census_csv (NOVO)
 ├── management/
@@ -382,7 +381,7 @@ apps/census/
 │   └── commands/
 │       ├── __init__.py       ← vazio (NOVO)
 │       └── extract_census.py ← management command (NOVO)
-```
+```text
 
 **Nota**: o arquivo `services.py` é novo. O S4 vai adicionar `process_census_snapshot()` a ele. Não crie `census_parser.py` separado — coloque `parse_census_csv` e `classify_bed_status` em `services.py`.
 
@@ -449,7 +448,7 @@ class TestClassifyBedStatus:
     def test_empty_prontuario_empty_string(self):
         """Prontuario vazio com string vazia."""
         assert classify_bed_status("", "") == BedStatus.EMPTY
-```
+```text
 
 ### 6.2 `tests/unit/test_extract_census_command.py`
 
@@ -517,7 +516,7 @@ class TestParseCensusCsv:
                 parse_census_csv(csv_path)
         finally:
             csv_path.unlink(missing_ok=True)
-```
+```text
 
 ---
 
@@ -532,7 +531,7 @@ class TestParseCensusCsv:
 
 # Lint
 ./scripts/test-in-container.sh lint
-```
+```text
 
 ---
 

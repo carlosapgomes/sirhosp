@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Tasks: fase-a-integracao-playwright-ingestao-sob-demanda
 

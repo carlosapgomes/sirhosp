@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S4 — Hardening operacional e transição final
 
 ## Handoff de entrada (contexto zero)

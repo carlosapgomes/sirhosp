@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S1 — Entrada autenticada (landing + login + redirect)
 
 ## Handoff de entrada (contexto zero)

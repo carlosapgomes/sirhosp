@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Design: admission-period-canonical-reconciliation
 
 ## Context

@@ -28,7 +28,7 @@ Aqui está o **Blueprint: Busca Histórica**, adaptado com a Sidebar e com essa 
 +------------------+-------------------------------------------------------------------+
 ```
 
-### Detalhes Estratégicos para sua Apresentação
+## Detalhes Estratégicos para sua Apresentação
 
 1. **A Coluna "Fonte" (Diferencial Técnico):**
     - Mostre para a diretoria que o sistema é capaz de distinguir o que já está "em casa" (**Local**) do que ele precisa "ir buscar" (**EHR Sync**). Isso demonstra a inteligência da ferramenta em não duplicar trabalho, mas ser completa quando necessário.

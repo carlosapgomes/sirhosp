@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Índice de prompts por slice
 
 Cada slice possui arquivo próprio com handoff de entrada para executor iniciando com contexto zero.

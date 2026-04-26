@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Tasks: admission-period-representation
 

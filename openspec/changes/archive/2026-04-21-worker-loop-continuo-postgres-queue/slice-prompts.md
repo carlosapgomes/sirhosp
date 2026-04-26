@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Índice de prompts por slice
 

@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # bed-status-view Specification
 
 ## Purpose

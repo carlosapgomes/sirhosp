@@ -36,7 +36,14 @@
   oficial.
 - Motivo: `POSTGRES_HOST=db` resolve apenas na rede Docker Compose; no host
   pode falhar com `failed to resolve host 'db'`.
-- Regra de documentação: todo `.md` criado/alterado deve passar no lint.
+- **Regra de documentação (MANDATÓRIA):** todo arquivo `.md` criado ou
+  alterado deve passar sem erros pelo `markdownlint-cli2` (executável via
+  `./scripts/markdown-lint.sh`). O projeto possui configuração própria em
+  `.markdownlint-cli2.yaml`. **Não é permitido inibir erros** — corrija a causa
+  raiz. **É proibido usar `<!-- markdownlint-disable ... -->`** em qualquer
+  arquivo `.md`; se uma regra estiver incomodando, desabilite-a no
+  `.markdownlint-cli2.yaml` do projeto com justificativa documentada.
+  Use `./scripts/markdown-format.sh` para autofix quando possível.
 
 ## 3. Comandos essenciais (operação local)
 
@@ -119,7 +126,7 @@ git config core.hooksPath .githooks
 - [ ] testes relevantes passando (`./scripts/test-in-container.sh unit` ou `quality-gate`)
 - [ ] `./scripts/test-in-container.sh lint` sem erro
 - [ ] `./scripts/test-in-container.sh typecheck` sem erro relevante ou com exceções justificadas
-- [ ] markdown lint sem erro quando houver mudança em `.md` (preferencialmente validado com `markdownlint-cli2`)
+- [ ] markdown lint sem erro quando houver mudança em `.md` — validação **obrigatória** com `markdownlint-cli2` via `./scripts/markdown-lint.sh` (config: `.markdownlint-cli2.yaml`). Proibido `<!-- markdownlint-disable -->`; corrija a causa raiz ou desabilite a regra no `.markdownlint-cli2.yaml` com justificativa.
 - [ ] artefatos OpenSpec atualizados quando aplicável
 - [ ] sem credenciais nem dados reais no diff
 - [ ] commit claro e rastreável

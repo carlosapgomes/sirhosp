@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 MD033 MD040 MD036 -->
 # SLICE-S4: Processador de censo — descoberta de pacientes + enfileiramento
 
 > **Handoff para executor com ZERO contexto adicional.**
@@ -16,7 +15,7 @@
 
 ## 2. Estado atual do projeto (após Slices S1–S3)
 
-```
+```text
 apps/census/
 ├── models.py         ← CensusSnapshot, BedStatus
 ├── services.py       ← classify_bed_status(), parse_census_csv()
@@ -37,7 +36,7 @@ tests/unit/
 ├── test_census_models.py        ← 9 testes (S1)
 ├── test_bed_classification.py   ← 15 testes (S3)
 └── test_extract_census_command.py ← 3 testes (S3)
-```
+```text
 
 ### Função existente para enfileirar
 
@@ -54,7 +53,7 @@ def queue_admissions_only_run(*, patient_record: str) -> IngestionRun:
             "intent": "admissions_only",
         },
     )
-```
+```text
 
 ### Modelo Patient (resumo)
 
@@ -72,7 +71,7 @@ class Patient(models.Model):
                 name="uq_patient_src",
             ),
         ]
-```
+```text
 
 ---
 
@@ -199,7 +198,7 @@ def process_census_snapshot(
         "runs_enqueued": enqueued_count,
         "patients_skipped": max(0, occupied.count() - len(patients_to_process)),
     }
-```
+```text
 
 **IMPORTANTE**: esta função é **ADICIONADA** ao `services.py` existente. Não sobrescrever as funções `classify_bed_status` e `parse_census_csv` já presentes.
 
@@ -239,7 +238,7 @@ class Command(BaseCommand):
                 f"  Skipped (no pront): {result['patients_skipped']}"
             )
         )
-```
+```text
 
 ---
 
@@ -471,7 +470,7 @@ class TestProcessCensusSnapshot:
         assert IngestionRun.objects.filter(
             intent="admissions_only", status="queued"
         ).count() == 3
-```
+```text
 
 ---
 
@@ -481,7 +480,7 @@ class TestProcessCensusSnapshot:
 ./scripts/test-in-container.sh check
 ./scripts/test-in-container.sh unit
 ./scripts/test-in-container.sh lint
-```
+```text
 
 ---
 

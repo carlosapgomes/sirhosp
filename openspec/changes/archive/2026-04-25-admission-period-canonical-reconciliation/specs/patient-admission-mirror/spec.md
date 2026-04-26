@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # patient-admission-mirror Specification
 
 ## MODIFIED Requirements

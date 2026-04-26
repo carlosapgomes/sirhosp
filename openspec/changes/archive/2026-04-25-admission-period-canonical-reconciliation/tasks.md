@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Tasks: admission-period-canonical-reconciliation
 
 ## 1. Slice S1 - Reconciliação canônica por paciente+período

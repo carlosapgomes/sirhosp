@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Tasks: censo-inpatient-sync
 
 ## 1. Slice S1 — App `census` + modelo `CensusSnapshot`

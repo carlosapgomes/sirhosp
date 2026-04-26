@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Tasks: worker-loop-continuo-postgres-queue
 

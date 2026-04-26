@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S3 — CI usando o mesmo entrypoint containerizado
 
 ## Handoff de entrada (contexto zero)

@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Design: fase-a-integracao-playwright-ingestao-sob-demanda
 

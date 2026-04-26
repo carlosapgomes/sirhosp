@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Prompt Slice S3 (LLM Executor)
 

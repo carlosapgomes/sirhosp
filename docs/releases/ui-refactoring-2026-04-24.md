@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 MD040 -->
 # Release Evidence Pack — UI Refactoring (2026-04-24)
 
 ## 1. Identificação
@@ -62,7 +61,7 @@ da sidebar cria hierarquia visual clara sem cansar os olhos em uso prolongado.
 
 ## 4. Arquitetura de Templates
 
-```
+```text
 templates/
 ├── base.html                  ← Público: landing, login (sem sidebar)
 ├── base_sidebar.html          ← Autenticado: sidebar + topbar + conteúdo
@@ -88,11 +87,11 @@ apps/
     ├── dashboard.html          ← Dashboard (extends base_sidebar.html)
     ├── censo.html              ← Censo hospitalar (extends base_sidebar.html)
     └── monitor_risco.html      ← Monitor de risco (extends base_sidebar.html)
-```
+```text
 
 ### Diagrama de herança
 
-```
+```text
 base.html (Bootstrap CSS + Icons + JS)
   ├── base_sidebar.html (+ sidebar + topbar + offcanvas JS)
   │     ├── dashboard.html
@@ -107,11 +106,11 @@ base.html (Bootstrap CSS + Icons + JS)
   │     └── run_status.html
   ├── home.html              ← landing pública
   └── login.html             ← login pública
-```
+```text
 
 ### Layout autenticado
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │ TOPBAR: [☰] Dashboard                      [🟢 Sync 12:45] │
 ├──────────────┬──────────────────────────────────────────┤
@@ -126,11 +125,11 @@ base.html (Bootstrap CSS + Icons + JS)
 │ 👤 user      │                                          │
 │ [🚪 Sair]    │                                          │
 └──────────────┴──────────────────────────────────────────┘
-```
+```text
 
 ### Layout mobile (≤991px)
 
-```
+```text
 ┌─────────────────────────┐
 │ [☰] Dashboard    [🟢]  │ ← topbar com hamburger
 ├─────────────────────────┤
@@ -153,7 +152,7 @@ base.html (Bootstrap CSS + Icons + JS)
 │ ║ [🚪 Sair]    ║   │    │
 │ ╚══════════════╝   │    │
 └────────────────────┴────┘
-```
+```text
 
 ---
 
@@ -165,7 +164,7 @@ base.html (Bootstrap CSS + Icons + JS)
 **View:** `apps/core/views.py:home()`  
 **Autenticação:** Pública
 
-```
+```text
 ┌──────────────────────────────────────┐
 │         Fundo gradiente teal          │
 │  ┌────────────────────────────────┐   │
@@ -183,7 +182,7 @@ base.html (Bootstrap CSS + Icons + JS)
 │  └────────────────────────────────┘   │
 │     🔒 Acesso restrito a profissionais │
 └──────────────────────────────────────┘
-```
+```text
 
 ### 5.2 Login (`/login/`)
 
@@ -349,7 +348,7 @@ O tema usa variáveis CSS nativas que sobrescrevem as do Bootstrap 5.3.3:
   --bs-primary-rgb: 13, 148, 136; /* Para rgba() */
   --bs-link-color: var(--bs-primary);
 }
-```
+```text
 
 Isso mantém compatibilidade com todos os componentes Bootstrap (badges, alerts,
 buttons, pagination) sem precisar de build step.
@@ -401,19 +400,19 @@ substituir o dicionário por queries Django sem alterar o template.
 ./scripts/test-in-container.sh unit       # ✅ 298 passed
 ./scripts/test-in-container.sh lint       # ✅ All checks passed
 ./scripts/test-in-container.sh typecheck  # ✅ No errors
-```
+```text
 
 ---
 
 ## 11. Arquivos Alterados (Manifesto Completo)
 
-```
+```shell
 32 files changed, 2401 insertions(+), 816 deletions(-)
-```
+```text
 
 ### Novos (14 arquivos)
 
-```
+```text
 static/css/sirhosp.css
 templates/base.html
 templates/base_sidebar.html
@@ -425,11 +424,11 @@ apps/services_portal/urls.py
 apps/services_portal/templates/services_portal/dashboard.html
 apps/services_portal/templates/services_portal/censo.html
 apps/services_portal/templates/services_portal/monitor_risco.html
-```
+```text
 
 ### Modificados (17 arquivos)
 
-```
+```text
 apps/core/templates/core/home.html
 apps/core/views.py
 apps/ingestion/templates/ingestion/create_run.html
@@ -445,23 +444,23 @@ config/settings.py
 config/urls.py
 templates/registration/login.html
 tests/unit/test_navigation_views.py
-```
+```text
 
 ### Removidos (1 arquivo)
 
-```
+```text
 templates/includes/navbar.html              ← substituído por sidebar + topbar
-```
+```text
 
 ### Wireframes (5 arquivos — já existiam, apenas atualizados)
 
-```
+```text
 wireframes/dashboard.md
 wireframes/busca-setores.md
 wireframes/busca-historico.md
 wireframes/busca-termos-riscos.md
 wireframes/detalhes-paciente.md
-```
+```text
 
 ---
 

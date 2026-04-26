@@ -23,7 +23,7 @@ Aqui está o blueprint final para o **Monitor de Risco (Busca por Palavras-Chave
 +------------------+-------------------------------------------------------------------+
 ```
 
-### Detalhes Estruturais desta Página
+## Detalhes Estruturais desta Página
 
 1. **Sidebar (Navegação Persistente):** O item **Monitor de Risco** está realçado como o local atual.
 2. **Motor de Busca (Filtros):**

@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # Change Proposal: containerized-test-standardization
 
 ## Why

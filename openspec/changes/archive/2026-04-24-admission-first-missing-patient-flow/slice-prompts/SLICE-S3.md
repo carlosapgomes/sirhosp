@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # SLICE-S3 — Seleção de internação e sincronização completa
 

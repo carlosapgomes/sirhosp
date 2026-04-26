@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 MD033 MD040 MD036 -->
 # SLICE-S2: Script de extração do censo integrado
 
 > **Handoff para executor com ZERO contexto adicional.**
@@ -20,7 +19,7 @@
 
 ## 2. Estado atual do projeto (após Slice S1)
 
-```
+```text
 sirhosp/
 ├── config/settings.py          ← INSTALLED_APPS inclui "apps.census"
 ├── apps/
@@ -34,7 +33,7 @@ sirhosp/
 │       ├── patient_demographics/
 │       └── current_inpatients/
 │           └── README.md           ← "Conector planejado para sincronização..."
-```
+```text
 
 O módulo `automation/source_system/medical_evolution/source_system.py` exporta:
 
@@ -42,7 +41,7 @@ O módulo `automation/source_system/medical_evolution/source_system.py` exporta:
 DEFAULT_TIMEOUT_MS = 180000       # timeout padrão Playwright
 def aguardar_pagina_estavel(page: Page) -> None: ...
 def fechar_dialogos_iniciais(page: Page) -> None: ...
-```
+```text
 
 ---
 
@@ -50,9 +49,9 @@ def fechar_dialogos_iniciais(page: Page) -> None: ...
 
 Copiar e adaptar o MVP `busca_todos_pacientes_slim.py` do projeto `pontelo/` para dentro do SIRHOSP como:
 
-```
+```text
 automation/source_system/current_inpatients/extract_census.py
-```
+```text
 
 O script mantém a mesma lógica de scraping (login → abrir Censo → listar setores → iterar setores → extrair pacientes com paginação → salvar CSV+JSON), mas adaptado para usar os helpers compartilhados do projeto.
 
@@ -62,9 +61,9 @@ O script mantém a mesma lógica de scraping (login → abrir Censo → listar s
 
 O arquivo fonte está em:
 
-```
+```text
 /home/carlos/projects/pontelo/busca_todos_pacientes_slim.py
-```
+```text
 
 Leia-o integralmente. Você vai COPIAR o conteúdo e fazer as adaptações abaixo.
 
@@ -104,7 +103,7 @@ Leia-o integralmente. Você vai COPIAR o conteúdo e fazer as adaptações abaix
 ```python
 from dotenv import load_dotenv
 from source_system import DEFAULT_TIMEOUT_MS, aguardar_pagina_estavel, fechar_dialogos_iniciais
-```
+```text
 
 **Adicionar** (caminho relativo a partir de `automation/source_system/current_inpatients/`):
 
@@ -122,7 +121,7 @@ from source_system import aguardar_pagina_estavel, fechar_dialogos_iniciais
 
 # Configurar timeout — mesmo valor do original
 DEFAULT_TIMEOUT_MS = 180000
-```
+```text
 
 E remover as funções `load_dotenv` e `required_env`. Em vez de `required_env`, usar `os.getenv` direto com fallback. Não usar `python-dotenv` — o SIRHOSP carrega variáveis via Django settings ou arquivo `.env` no diretório raiz.
 
@@ -139,7 +138,7 @@ As funções `wait_visible`, `safe_click`, `get_censo_frame`, `wait_ajax_idle`, 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DOWNLOADS_DIR = _PROJECT_ROOT / "downloads"
 DEBUG_DIR = _PROJECT_ROOT / "debug"
-```
+```text
 
 ### 5.4 CLI: adicionar `--output-dir`
 
@@ -152,7 +151,7 @@ parser.add_argument(
     default=None,
     help="Diretório de saída para CSV/JSON (default: <project_root>/downloads)",
 )
-```
+```text
 
 Se `--output-dir` for informado, sobrescrever `DOWNLOADS_DIR`.
 
@@ -164,7 +163,7 @@ parser.add_argument(
     action="store_true",
     help="Gerar apenas CSV (não gerar JSON)",
 )
-```
+```text
 
 ### 5.6 Função `run()` — login
 
@@ -176,7 +175,7 @@ page.get_by_role("textbox", name="Senha").fill(password)
 page.get_by_role("button", name="Entrar").click()
 aguardar_pagina_estavel(page)
 fechar_dialogos_iniciais(page)
-```
+```text
 
 Isso já é compatível com os helpers do `source_system.py`.
 
@@ -195,7 +194,7 @@ def main() -> None:
         table_timeout_ms=args.table_timeout_ms,
         search_retries=args.search_retries,
     )
-```
+```text
 
 ### 5.8 Atualizar `README.md`
 
@@ -213,7 +212,7 @@ Diário do sistema fonte (AGHU/TASY).
 uv run python automation/source_system/current_inpatients/extract_census.py \
     --headless \
     --output-dir downloads/
-```
+```text
 
 ## Output
 
@@ -228,7 +227,7 @@ CSV columns: `setor`, `qrt_leito`, `prontuario`, `nome`, `esp`
 - `SOURCE_SYSTEM_USERNAME` — Usuário de acesso
 - `SOURCE_SYSTEM_PASSWORD` — Senha de acesso
 
-```
+```text
 
 ---
 
@@ -259,7 +258,7 @@ uv run ruff check automation/source_system/current_inpatients/
 
 # Lint do projeto
 ./scripts/test-in-container.sh lint
-```
+```text
 
 **Nota**: NÃO é possível rodar o script de scraping nos testes (precisa de credenciais reais + sistema fonte). O gate verifica sintaxe, lint e integridade do projeto.
 
@@ -292,7 +291,7 @@ Gerar `/tmp/sirhosp-slice-CIS-S2-report.md` com:
 
 ## Próximo slice
 S3 — Management command extract_census + parser CSV + classificador
-```
+```text
 
 ---
 

@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S3 — Hierarquia operacional + ações contextuais (extração e busca JSON)
 
 ## Handoff de entrada (contexto zero)

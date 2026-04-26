@@ -22,7 +22,7 @@
 +------------------+-------------------------------------------------------------------+
 ```
 
-### Detalhes Funcionais da Interface
+## Detalhes Funcionais da Interface
 
 1. **Sidebar (Navegação Esquerda):**
     - **Dashboard:** Retorna à tela de indicadores gerais.

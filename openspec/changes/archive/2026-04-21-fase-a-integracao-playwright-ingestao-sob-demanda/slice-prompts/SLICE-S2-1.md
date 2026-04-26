@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Prompt Slice S2.1 (LLM Executor)
 

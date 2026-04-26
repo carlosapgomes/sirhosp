@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S1 — Reconciliação canônica por paciente+período (prevenção de novas duplicatas)
 
 ## Handoff de entrada (contexto zero)

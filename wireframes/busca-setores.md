@@ -22,7 +22,7 @@ Aqui está o blueprint ajustado, mantendo a navegação lateral, a barra superio
 +------------------+-------------------------------------------------------------------+
 ```
 
-### Detalhes Estruturais
+## Detalhes Estruturais
 
 1. **Dropdown de Setores:** No Bootstrap 5.3.3, esse `<select>` pode conter todos os seus 20 setores. Ao selecionar um (ex: "UTI Adulto") e clicar em buscar, a tabela abaixo é recarregada apenas com os pacientes daquele local.
 2. **Tabela Unificada:** A tabela serve tanto para a busca global quanto para a navegação por setor. Isso simplifica o código e a experiência do usuário.

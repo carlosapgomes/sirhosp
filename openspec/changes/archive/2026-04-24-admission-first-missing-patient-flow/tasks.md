@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 
 # Tasks: admission-first-missing-patient-flow
 

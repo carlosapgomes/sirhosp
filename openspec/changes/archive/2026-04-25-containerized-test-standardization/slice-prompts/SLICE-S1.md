@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 -->
 # SLICE-S1 — Infra base de testes em container (Compose + test-runner)
 
 ## Handoff de entrada (contexto zero)

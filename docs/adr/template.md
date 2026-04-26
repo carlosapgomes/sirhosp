@@ -1,4 +1,4 @@
-# ADR-XXXX: <Titulo>
+# ADR-XXXX: Titulo
 
 ## Status
 

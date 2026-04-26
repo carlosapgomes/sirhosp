@@ -1,4 +1,3 @@
-<!-- markdownlint-disable MD013 MD033 MD040 MD036 -->
 # SLICE-S1: App `census` + modelo `CensusSnapshot`
 
 > **Handoff para executor com ZERO contexto adicional.**
@@ -42,7 +41,7 @@ nome, especialidade e status do leito.
 
 ## 3. Estrutura atual do projeto (relevante para este slice)
 
-```
+```text
 sirhosp/
 ├── config/
 │   └── settings.py        ← INSTALLED_APPS está aqui
@@ -65,7 +64,7 @@ sirhosp/
 │   ├── unit/
 │   └── integration/
 └── manage.py
-```
+```text
 
 **INSTALLED_APPS atual** em `config/settings.py`:
 
@@ -87,7 +86,7 @@ INSTALLED_APPS = [
     "apps.search",
     "apps.services_portal",
 ]
-```
+```text
 
 ---
 
@@ -113,7 +112,7 @@ class IngestionRun(models.Model):
     events_processed = models.PositiveIntegerField(default=0)
     events_created = models.PositiveIntegerField(default=0)
     # ... mais campos
-```
+```text
 
 ---
 
@@ -171,7 +170,7 @@ class CensusConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.census"
     verbose_name = "Census"
-```
+```text
 
 ### 6.3 `apps/census/models.py`
 
@@ -262,7 +261,7 @@ class CensusSnapshot(models.Model):
             f"{self.prontuario or '-'} "
             f"@ {self.captured_at:%Y-%m-%d %H:%M}"
         )
-```
+```text
 
 ### 6.4 `apps/census/admin.py`
 
@@ -298,7 +297,7 @@ class CensusSnapshotAdmin(admin.ModelAdmin):
     ]
     date_hierarchy = "captured_at"
     ordering = ["-captured_at", "setor", "leito"]
-```
+```text
 
 ### 6.5 `apps/census/migrations/0001_initial.py`
 
@@ -306,7 +305,7 @@ NÃO criar manualmente. Rodar:
 
 ```bash
 uv run python manage.py makemigrations census
-```
+```text
 
 ### 6.6 Registrar em `config/settings.py`
 
@@ -470,7 +469,7 @@ class TestCensusSnapshot:
             bed_status=BedStatus.EMPTY,
         )
         assert snap.ingestion_run is None
-```
+```text
 
 ---
 
@@ -497,7 +496,7 @@ Rodar **todos** estes comandos e garantir que passam sem erro:
 
 # Lint (ruff)
 ./scripts/test-in-container.sh lint
-```
+```text
 
 Se `./scripts/test-in-container.sh` não funcionar (ex.: Docker não disponível), usar fallback:
 
@@ -505,7 +504,7 @@ Se `./scripts/test-in-container.sh` não funcionar (ex.: Docker não disponível
 uv run python manage.py check
 uv run pytest tests/unit/test_census_models.py -v
 uv run ruff check apps/census tests/unit/test_census_models.py
-```
+```text
 
 ---
 
@@ -548,7 +547,7 @@ Gerar `/tmp/sirhosp-slice-CIS-S1-report.md` com:
 
 ## Próximo slice sugerido
 S2 — Script de extração do censo integrado
-```
+```text
 
 ---
 
