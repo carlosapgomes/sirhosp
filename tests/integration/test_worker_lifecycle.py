@@ -1320,6 +1320,10 @@ class TestAdmissionsOnlyWorker:
         with patch(
             "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
             return_value=mock_ext,
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs"
+            ".Command._enqueue_most_recent_full_sync",
+            return_value=None,
         ):
             call_command("process_ingestion_runs")
 

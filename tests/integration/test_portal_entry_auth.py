@@ -53,19 +53,19 @@ class TestLoginRoute:
         content = resp.content.decode()
         assert "username" in content.lower()
 
-    def test_login_success_redirects_to_patients(
+    def test_login_success_redirects_to_dashboard(
         self,
         client: Client,
         registered_user: User,
         user_password: str,
     ) -> None:
-        """Successful login redirects to /patients/."""
+        """Successful login redirects to /painel/."""
         resp = client.post(
             "/login/",
             {"username": "operador", "password": user_password},
         )
         assert resp.status_code == 302
-        assert resp["Location"] == "/patients/"
+        assert resp["Location"] == "/painel/"
 
 
 # ── Logout ───────────────────────────────────────────────────────
