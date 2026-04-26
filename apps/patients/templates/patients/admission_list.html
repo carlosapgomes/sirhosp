@@ -40,14 +40,7 @@
         </div>
       {% endif %}
     </div>
-    <div class="d-flex gap-2">
-      <a href="{% url 'ingestion:create_run' %}?patient_record={{ patient.patient_source_key }}" class="btn btn-sm btn-outline-primary">
-        <i class="bi bi-plus-circle me-1"></i> Nova Extração
-      </a>
-      <a href="{% url 'search:clinical_events' %}" class="btn btn-sm btn-outline-secondary">
-        <i class="bi bi-code-slash me-1"></i> JSON
-      </a>
-    </div>
+
   </div>
 </div>
 

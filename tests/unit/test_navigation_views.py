@@ -563,32 +563,31 @@ class TestTimelineFilterByProfession:
 class TestAdmissionListContextualActions:
     """Test contextual actions on admission list page."""
 
-    def test_admission_list_has_new_extraction_cta(
+    def test_admission_list_no_broken_new_extraction_button(
         self,
         auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
-        """Admission list shows 'Nova extração' CTA linked with patient record."""
+        """Admission list no longer shows broken 'Nova Extração' button."""
         response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert "Nova Extra" in content
-        assert f"patient_record={patient_maria.patient_source_key}" in content
+        assert "Nova Extra" not in content
 
-    def test_admission_list_has_json_search_link(
+    def test_admission_list_no_broken_json_button(
         self,
         auth_client: Client,
         patient_maria: Patient,
         admission_maria_2: Admission,
     ) -> None:
-        """Admission list shows link to JSON search endpoint."""
+        """Admission list no longer shows broken 'JSON' button."""
         response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert "/search/clinical-events/" in content
+        assert "/search/clinical-events/" not in content
 
     def test_admission_list_back_link_goes_to_patients(
         self,
@@ -607,33 +606,32 @@ class TestAdmissionListContextualActions:
 class TestTimelineContextualActions:
     """Test contextual actions on timeline page."""
 
-    def test_timeline_has_new_extraction_cta(
+    def test_timeline_no_broken_extraction_button(
         self,
         auth_client: Client,
         admission_maria_2: Admission,
         patient_maria: Patient,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        """Timeline shows 'Nova extração' CTA linked with patient record."""
+        """Timeline no longer shows broken 'Nova extração' button."""
         response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
-        assert "Nova extra" in content
-        assert f"patient_record={patient_maria.patient_source_key}" in content
+        assert "Nova extra" not in content
 
-    def test_timeline_has_json_search_link(
+    def test_timeline_no_broken_json_button(
         self,
         auth_client: Client,
         admission_maria_2: Admission,
         timeline_events: list[ClinicalEvent],
     ) -> None:
-        """Timeline shows link to JSON search endpoint."""
+        """Timeline no longer shows broken 'Busca JSON' button."""
         response = auth_client.get(
             f"/admissions/{admission_maria_2.pk}/timeline/"
         )
         content = response.content.decode()
-        assert "/search/clinical-events/" in content
+        assert "/search/clinical-events/" not in content
 
     def test_timeline_displays_fisioterapia_for_phisiotherapy(
         self,
