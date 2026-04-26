@@ -44,6 +44,11 @@ REPORT_WAIT_TIMEOUT_MS: Final[int] = 180000
 REPORT_POLL_INTERVAL_MS: Final[int] = 5000
 REPORT_DOWNLOAD_TIMEOUT_MS: Final[int] = 600000
 from chunking import MAX_CHUNK_DAYS, CHUNK_OVERLAP_DAYS, build_chunks_for_interval as _build_chunks_for_interval
+from empty_chunk_guard import (
+    EMPTY_CHUNK_STOP_THRESHOLD,
+    is_no_evolutions_warning_message,
+    update_empty_chunk_streak,
+)
 
 MAX_CHUNK_DAYS: Final[int] = MAX_CHUNK_DAYS
 CHUNK_OVERLAP_DAYS: Final[int] = CHUNK_OVERLAP_DAYS
@@ -218,6 +223,112 @@ def format_iso_date(value: date | None) -> str | None:
 def normalize_signature_key(value: str) -> str:
     collapsed = re.sub(r"\s+", " ", (value or "").strip().casefold())
     return collapsed
+
+
+def _maybe_close_no_evolutions_dialog(context: Page | Frame) -> bool:
+    dialog = context.locator("#msgDialog")
+    if dialog.count() == 0:
+        return False
+
+    target_dialog = dialog.first
+
+    try:
+        if not target_dialog.is_visible():
+            return False
+    except Exception:
+        return False
+
+    summary = target_dialog.locator(".ui-messages-warn-summary")
+    if summary.count() == 0:
+        return False
+
+    summary_text = summary.first.inner_text().strip()
+    if not is_no_evolutions_warning_message(summary_text):
+        return False
+
+    close_button = target_dialog.locator(".ui-dialog-titlebar-close")
+    if close_button.count() > 0:
+        if not click_with_fallback(close_button, "mensagem de chunk sem evoluções", timeout=3000):
+            target_dialog.evaluate(
+                """
+                (element) => {
+                    element.setAttribute('aria-hidden', 'true');
+                    element.style.display = 'none';
+                    element.style.visibility = 'hidden';
+                }
+                """
+            )
+    else:
+        target_dialog.evaluate(
+            """
+            (element) => {
+                element.setAttribute('aria-hidden', 'true');
+                element.style.display = 'none';
+                element.style.visibility = 'hidden';
+            }
+            """
+        )
+
+    try:
+        target_dialog.wait_for(state="hidden", timeout=3000)
+    except Exception:
+        pass
+
+    print("OK: mensagem de chunk sem evoluções detectada no sistema fonte.")
+    return True
+
+
+def close_evolution_modal_if_open(page: Page) -> None:
+    """Close the evolution filter modal when it remains open after warnings."""
+    frame = page.frame(name=FRAME_NAME)
+    if frame is None:
+        return
+
+    modal = frame.locator("#modalEvolucao")
+    if modal.count() == 0:
+        return
+
+    target_modal = modal.first
+    try:
+        if not target_modal.is_visible():
+            return
+    except Exception:
+        return
+
+    close_button = target_modal.locator(".ui-dialog-titlebar-close")
+    if close_button.count() > 0:
+        click_with_fallback(close_button, "modal de evolução", timeout=3000)
+    else:
+        target_modal.evaluate(
+            """
+            (element) => {
+                element.setAttribute('aria-hidden', 'true');
+                element.style.display = 'none';
+                element.style.visibility = 'hidden';
+            }
+            """
+        )
+
+    try:
+        wait_for_modal_evolucao(page, timeout=3000)
+    except Exception:
+        pass
+
+
+def detect_no_evolutions_dialog_and_recover(page: Page) -> bool:
+    """Detect source warning for empty chunk and restore UI state for next chunk."""
+    frame = page.frame(name=FRAME_NAME)
+
+    handled = False
+    if frame is not None and _maybe_close_no_evolutions_dialog(frame):
+        handled = True
+    elif _maybe_close_no_evolutions_dialog(page):
+        handled = True
+
+    if handled:
+        close_evolution_modal_if_open(page)
+
+    return handled
 
 
 def open_pol_menu(page: Page) -> bool:
@@ -1076,7 +1187,14 @@ def open_report_for_interval(page: Page, chunk_start: date, chunk_end: date) -> 
     click_visualizar_relatorio(frame_locator, page)
 
     try:
-        return wait_for_report_page(page)
+        report_frame = wait_for_report_page(page)
+        if report_frame is None:
+            print(
+                "Aviso: relatório não foi gerado para este chunk. "
+                f"intervalo={inicio_text} até {fim_text}"
+            )
+            return None
+        return report_frame
     except RuntimeError as error:
         frame = page.frame(name=FRAME_NAME)
         current_url = frame.url if frame else ""
@@ -1089,7 +1207,7 @@ def open_report_for_interval(page: Page, chunk_start: date, chunk_end: date) -> 
         raise error
 
 
-def wait_for_report_page(page: Page) -> Frame:
+def wait_for_report_page(page: Page) -> Frame | None:
     elapsed = 0
 
     while elapsed < REPORT_WAIT_TIMEOUT_MS:
@@ -1099,6 +1217,9 @@ def wait_for_report_page(page: Page) -> Frame:
 
         frame_url = frame.url or ''
         print(f'Aguardando relatório... {elapsed // 1000}s · frame={frame_url}')
+
+        if detect_no_evolutions_dialog_and_recover(page):
+            return None
 
         if 'relatorioAnaEvoInternacaoPdf.xhtml' in frame_url:
             try:
@@ -1467,6 +1588,7 @@ def run(
                 open_internacao_detail(page, current_admission)
 
                 last_chunk_had_report = False
+                empty_chunk_streak = 0
 
                 for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
                     if chunk_idx > 0 and last_chunk_had_report:
@@ -1474,8 +1596,27 @@ def run(
 
                     report_frame = open_report_for_interval(page, chunk_start, chunk_end)
                     if report_frame is None:
+                        empty_chunk_streak, should_stop_early = update_empty_chunk_streak(
+                            previous_streak=empty_chunk_streak,
+                            chunk_has_report=False,
+                        )
+                        print(
+                            "Aviso: chunk sem evoluções. "
+                            f"streak={empty_chunk_streak}/{EMPTY_CHUNK_STOP_THRESHOLD}"
+                        )
                         last_chunk_had_report = False
+                        if should_stop_early:
+                            print(
+                                "Aviso: encerrando esta internação após "
+                                f"{empty_chunk_streak} chunks consecutivos sem evoluções."
+                            )
+                            break
                         continue
+
+                    empty_chunk_streak, _ = update_empty_chunk_streak(
+                        previous_streak=empty_chunk_streak,
+                        chunk_has_report=True,
+                    )
 
                     chunk_pdf_path = build_chunk_artifact_path(output_path, admission_idx, chunk_idx)
                     chunk_debug_path = build_chunk_artifact_path(debug_output_path, admission_idx, chunk_idx)
