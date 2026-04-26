@@ -7,7 +7,7 @@
 
 ## 1. Contexto do Projeto
 
-**SIRHOSP** — Sistema Interno de Relatórios Hospitalares. Extrai dados clínicos do sistema fonte hospitalar (AGHU/TASY) via web scraping (Playwright), persiste em PostgreSQL paralelo, oferece portal Django.
+**SIRHOSP** — Sistema Interno de Relatórios Hospitalares. Extrai dados clínicos do sistema fonte hospitalar via web scraping (Playwright), persiste em PostgreSQL paralelo, oferece portal Django.
 
 **Stack**: Python 3.12, Django 5.x, PostgreSQL, `uv`, Playwright (Chromium), pytest, Bootstrap+HTMX.
 
@@ -204,7 +204,7 @@ Substituir o conteúdo de `automation/source_system/current_inpatients/README.md
 # Current Inpatients Connector
 
 Extrai pacientes internados atualmente de todos os setores do Censo
-Diário do sistema fonte (AGHU/TASY).
+Diário do sistema fonte.
 
 ## Uso
 

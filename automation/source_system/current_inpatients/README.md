@@ -1,7 +1,7 @@
 # Current Inpatients Connector
 
 Extrai pacientes internados atualmente de todos os setores do Censo
-Diário do sistema fonte (AGHU/TASY).
+Diário do sistema fonte.
 
 ## Uso
 

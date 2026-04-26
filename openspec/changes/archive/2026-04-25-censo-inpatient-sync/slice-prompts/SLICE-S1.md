@@ -9,7 +9,7 @@
 ## 1. Contexto do Projeto
 
 **SIRHOSP** — Sistema Interno de Relatórios Hospitalares.
-Extrai dados clínicos do sistema fonte hospitalar (AGHU/TASY) via web scraping (Playwright),
+Extrai dados clínicos do sistema fonte hospitalar via web scraping (Playwright),
 persiste em banco PostgreSQL paralelo, e oferece portal web Django para consulta rápida
 por diretoria, qualidade e jurídico.
 

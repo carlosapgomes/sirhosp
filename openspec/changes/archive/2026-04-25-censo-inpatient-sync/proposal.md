@@ -4,7 +4,7 @@
 
 O SIRHOSP já extrai e persiste dados clínicos por paciente (evoluções, prescrições, demografia), mas **não tem mecanismo para descobrir QUAIS pacientes existem no hospital**. Hoje, toda ingestão depende de um operador humano informar manualmente um prontuário.
 
-O sistema fonte (AGHU/TASY) oferece a tela de **Censo Diário de Pacientes**, que lista todos os pacientes internados no momento, por setor e leito, com prontuário, nome e especialidade. Há um MVP funcional (`busca_todos_pacientes_slim.py` no projeto `pontelo/`) que faz scraping dessa tela completa, incluindo paginação por setor.
+O sistema fonte oferece a tela de **Censo Diário de Pacientes**, que lista todos os pacientes internados no momento, por setor e leito, com prontuário, nome e especialidade. Há um MVP funcional (`busca_todos_pacientes_slim.py` no projeto `pontelo/`) que faz scraping dessa tela completa, incluindo paginação por setor.
 
 **Sem essa descoberta automatizada de pacientes**, o SIRHOSP permanece reativo, dependente de entrada manual.
 

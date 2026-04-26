@@ -2,7 +2,7 @@
 
 ## Context
 
-O sistema fonte (AGHU/TASY) expõe o **Censo Diário de Pacientes** via iframe JSF/PrimeFaces. O MVP `busca_todos_pacientes_slim.py` (projeto `pontelo/`) já domina a navegação: abre dropdown de setores, itera um a um, seleciona, pesquisa, extrai pacientes com paginação.
+O sistema fonte expõe o **Censo Diário de Pacientes** via iframe JSF/PrimeFaces. O MVP `busca_todos_pacientes_slim.py` (projeto `pontelo/`) já domina a navegação: abre dropdown de setores, itera um a um, seleciona, pesquisa, extrai pacientes com paginação.
 
 O SIRHOSP hoje só ingere dados de pacientes cujo prontuário é informado manualmente. Este change automatiza a descoberta de pacientes e adiciona visibilidade de ocupação de leitos.
 
