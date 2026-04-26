@@ -26,16 +26,18 @@ def search_patients_with_coverage(
     total - with_events to keep the SQL simple.
     """
     qs = Patient.objects.annotate(
-        admissions_total=Count("admissions"),
+        admissions_total=Count("admissions", distinct=True),
         admissions_with_events=Count(
             "admissions",
             filter=Q(admissions__events__isnull=False),
+            distinct=True,
         ),
         admissions_without_events=(
-            Count("admissions")
+            Count("admissions", distinct=True)
             - Count(
                 "admissions",
                 filter=Q(admissions__events__isnull=False),
+                distinct=True,
             )
         ),
     )

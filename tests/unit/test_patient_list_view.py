@@ -376,8 +376,50 @@ class TestPatientCoverageSummary:
             )
         resp = auth_client.get("/patients/")
         content = resp.content.decode()
-        # Only 1 of 2 admissions has events
-        assert "1" in content  # at least one admission with events
+
+        # Verify each badge independently using regex to extract counts.
+        # Template renders:
+        #   <span class="badge bg-secondary">N internação...</span>
+        #   <span class="badge" style="...">N c/ eventos</span>
+        #   <span class="badge bg-warning text-dark">N s/ eventos</span>
+        import re
+
+        total_m = re.search(
+            r'<span class="badge bg-secondary">(\d+) interna',
+            content,
+        )
+        with_ev_m = re.search(
+            r'c/ eventos</span>',
+            content,
+        )
+        without_ev_m = re.search(
+            r'<span class="badge bg-warning text-dark">(\d+) s/ eventos',
+            content,
+        )
+
+        assert total_m is not None, "Badge 'internações' not found"
+        assert with_ev_m is not None, "Badge 'c/ eventos' not found"
+        assert without_ev_m is not None, "Badge 's/ eventos' not found"
+
+        assert total_m.group(1) == "2", (
+            f"Expected 2 internações, got {total_m.group(1)}"
+        )
+
+        # Extract the number before 'c/ eventos' (badge with inline style)
+        with_ev_val_m = re.search(
+            r'<span class="badge" style="[^"]*">(\d+) c/ eventos',
+            content,
+        )
+        assert with_ev_val_m is not None, (
+            "Could not extract 'c/ eventos' badge number"
+        )
+        assert with_ev_val_m.group(1) == "1", (
+            f"Expected 1 c/ eventos, got {with_ev_val_m.group(1)}"
+        )
+
+        assert without_ev_m.group(1) == "1", (
+            f"Expected 1 s/ eventos, got {without_ev_m.group(1)}"
+        )
 
 
 # =========================================================================
