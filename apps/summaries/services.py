@@ -4,6 +4,7 @@ APS-S2: queue_summary_run for on-demand enqueue.
 APS-S4: execute_summary_run for worker-driven processing.
 APS-S5: retry per chunk (MAX_RETRIES_PER_CHUNK=3), partial completion, and
         atomic state+version persistence.
+APS-S6: get_admission_summary_context for UI badge/CTA state.
 """
 
 from __future__ import annotations
@@ -31,6 +32,127 @@ if TYPE_CHECKING:
 VALID_MODES = {"generate", "update", "regenerate"}
 
 MAX_RETRIES_PER_CHUNK = 3
+
+# ---------------------------------------------------------------------------
+# UI context helper (APS-S6)
+# ---------------------------------------------------------------------------
+
+
+def get_admission_summary_context(
+    admission: Admission,
+) -> dict:
+    """Return summary UI context for the admission page.
+
+    Returns a dict with keys:
+      - badge_label: "Sem resumo" | "Em processamento" |
+                     "Disponível" | "Incompleto"
+      - badge_css: Bootstrap badge class
+      - cta_label: "Gerar resumo" | "Atualizar resumo" |
+                   "Regenerar resumo"
+      - cta_mode: "generate" | "update" | "regenerate"
+      - is_processing: bool
+      - show_ler_resumo: bool
+      - latest_run_id: int | None (for "Ler resumo" link)
+    """
+    today = date.today()
+
+    # 1. Check for active (queued or running) run → "Em processamento"
+    active_run = (
+        SummaryRun.objects.filter(
+            admission=admission,
+            status__in=[
+                SummaryRun.Status.QUEUED,
+                SummaryRun.Status.RUNNING,
+            ],
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+    if active_run is not None:
+        return {
+            "badge_label": "Em processamento",
+            "badge_css": "bg-info text-dark",
+            "cta_label": "Regenerar resumo",
+            "cta_mode": "regenerate",
+            "is_processing": True,
+            "show_ler_resumo": False,
+            "latest_run_id": active_run.pk,
+        }
+
+    # 2. Look up AdmissionSummaryState
+    try:
+        state = AdmissionSummaryState.objects.get(admission=admission)
+    except AdmissionSummaryState.DoesNotExist:
+        # No summary at all → "Gerar resumo"
+        return {
+            "badge_label": "Sem resumo",
+            "badge_css": "bg-secondary",
+            "cta_label": "Gerar resumo",
+            "cta_mode": "generate",
+            "is_processing": False,
+            "show_ler_resumo": False,
+            "latest_run_id": None,
+        }
+
+    # 3. Determine if summary is outdated
+    #    Outdated = coverage_end < target_end_date
+    #    For open admission: target = today
+    #    For closed admission: target = min(today, discharge_date)
+    if admission.discharge_date:
+        target_end = min(today, admission.discharge_date.date())
+    else:
+        target_end = today
+
+    is_outdated = state.coverage_end < target_end
+
+    # 4. Get latest run for "Ler resumo" link
+    latest_run_id: int | None = None
+    has_narrative = bool(state.narrative_markdown)
+    if has_narrative:
+        latest_run = (
+            SummaryRun.objects.filter(
+                admission=admission,
+                status__in=[
+                    SummaryRun.Status.SUCCEEDED,
+                    SummaryRun.Status.PARTIAL,
+                ],
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if latest_run is not None:
+            latest_run_id = latest_run.pk
+
+    # 5. Build response based on state
+    if state.status == AdmissionSummaryState.Status.INCOMPLETE:
+        return {
+            "badge_label": "Incompleto",
+            "badge_css": "bg-warning text-dark",
+            "cta_label": "Regenerar resumo",
+            "cta_mode": "regenerate",
+            "is_processing": False,
+            "show_ler_resumo": has_narrative,
+            "latest_run_id": latest_run_id,
+        }
+
+    # DRAFT or COMPLETE
+    if is_outdated:
+        cta_label = "Atualizar resumo"
+        cta_mode = "update"
+    else:
+        cta_label = "Regenerar resumo"
+        cta_mode = "regenerate"
+
+    return {
+        "badge_label": "Disponível",
+        "badge_css": "bg-success",
+        "cta_label": cta_label,
+        "cta_mode": cta_mode,
+        "is_processing": False,
+        "show_ler_resumo": has_narrative,
+        "latest_run_id": latest_run_id,
+    }
 
 
 def queue_summary_run(

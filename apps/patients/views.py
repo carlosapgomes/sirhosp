@@ -100,6 +100,13 @@ def admission_list_view(
     ward = selected_admission.ward if selected_admission else None
     bed = selected_admission.bed if selected_admission else None
 
+    # --- APS-S6: Summary CTA context ---
+    summary_context: dict = {}
+    if selected_admission:
+        from apps.summaries.services import get_admission_summary_context
+
+        summary_context = get_admission_summary_context(selected_admission)
+
     context = {
         "patient": patient,
         "idade": idade,
@@ -112,6 +119,7 @@ def admission_list_view(
         "active_filter": profession_filter or "",
         "page_title": patient.name,
         "today": date_mod.today().isoformat(),
+        "summary": summary_context,
     }
     return render(request, "patients/admission_list.html", context)
 
