@@ -482,6 +482,7 @@ def run(
                 context.close()
             if browser is not None:
                 browser.close()
+            playwright.stop()
 
 
 # ---------------------------------------------------------------------------

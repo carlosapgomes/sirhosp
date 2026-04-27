@@ -567,6 +567,7 @@ def capture_evolution_data(
                 context.close()
             if browser is not None:
                 browser.close()
+            playwright.stop()
 
 
 def capture_evolution_data_from_fixture(

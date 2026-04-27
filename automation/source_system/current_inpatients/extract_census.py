@@ -656,6 +656,7 @@ def run(
                 context.close()
             if browser:
                 browser.close()
+            pw.stop()
 
 
 def main() -> None:

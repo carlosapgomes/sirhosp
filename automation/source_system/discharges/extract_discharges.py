@@ -556,6 +556,7 @@ def main() -> None:
         finally:
             context.close()
             browser.close()
+            pw.stop()
 
 
 if __name__ == "__main__":
