@@ -2,6 +2,8 @@
 
 APS-S2: queue_summary_run for on-demand enqueue.
 APS-S4: execute_summary_run for worker-driven processing.
+APS-S5: retry per chunk (MAX_RETRIES_PER_CHUNK=3), partial completion, and
+        atomic state+version persistence.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING, Optional
 
+from django.db import transaction
 from django.utils import timezone as django_timezone
 
 from apps.patients.models import Admission
@@ -26,6 +29,8 @@ if TYPE_CHECKING:
     from django.contrib.auth.models import User
 
 VALID_MODES = {"generate", "update", "regenerate"}
+
+MAX_RETRIES_PER_CHUNK = 3
 
 
 def queue_summary_run(
@@ -163,26 +168,7 @@ def execute_summary_run(
             window_end=window_end,
         )
 
-        # --- b. Create/update chunk record ---
-        chunk, _ = SummaryRunChunk.objects.get_or_create(
-            run=run,
-            chunk_index=idx,
-            defaults={
-                "window_start": window_start,
-                "window_end": window_end,
-                "status": SummaryRunChunk.Status.RUNNING,
-                "attempt_count": 1,
-                "input_event_count": len(events),
-            },
-        )
-        chunk.status = SummaryRunChunk.Status.RUNNING
-        chunk.attempt_count = 1
-        chunk.input_event_count = len(events)
-        chunk.save(
-            update_fields=["status", "attempt_count", "input_event_count"]
-        )
-
-        # --- c. Build input and call LLM gateway ---
+        # Build event dicts once (deterministic per window)
         novas_evolucoes = [
             {
                 "event_id": getattr(ev, "event_identity_key", str(ev.pk)),
@@ -199,63 +185,124 @@ def execute_summary_run(
             for ev in events
         ]
 
-        llm_response = call_llm_gateway(
-            estado_estruturado_anterior=state.structured_state_json or {},
-            resumo_markdown_anterior=state.narrative_markdown or "",
-            novas_evolucoes=novas_evolucoes,
+        # --- b. Create/update chunk record ---
+        chunk, _ = SummaryRunChunk.objects.get_or_create(
+            run=run,
+            chunk_index=idx,
+            defaults={
+                "window_start": window_start,
+                "window_end": window_end,
+                "status": SummaryRunChunk.Status.QUEUED,
+                "attempt_count": 0,
+                "input_event_count": len(events),
+            },
         )
 
-        # --- d. Validate output ---
-        validation_errors = validate_summary_output(llm_response)
-        if validation_errors:
-            error_msg = "; ".join(validation_errors)
+        # --- c-e. Retry loop: call LLM + validate, up to MAX_RETRIES ---
+        llm_response: dict | None = None
+        last_error_msg: str = ""
+
+        for attempt in range(1, MAX_RETRIES_PER_CHUNK + 1):
+            chunk.status = SummaryRunChunk.Status.RUNNING
+            chunk.attempt_count = attempt
+            chunk.input_event_count = len(events)
+            chunk.save(
+                update_fields=[
+                    "status", "attempt_count", "input_event_count",
+                ]
+            )
+
+            llm_response = call_llm_gateway(
+                estado_estruturado_anterior=(
+                    state.structured_state_json or {}
+                ),
+                resumo_markdown_anterior=state.narrative_markdown or "",
+                novas_evolucoes=novas_evolucoes,
+            )
+
+            validation_errors = validate_summary_output(llm_response)
+            if not validation_errors:
+                # Success — break out of retry loop
+                last_error_msg = ""
+                break
+
+            # Record failure for this attempt
+            last_error_msg = "; ".join(validation_errors)
+            chunk.error_message = last_error_msg
+            chunk.status = SummaryRunChunk.Status.FAILED
+            chunk.save(update_fields=["status", "error_message"])
+
+        # ---- Exhausted retries? ------
+        if last_error_msg:
+            # All attempts failed for this chunk
+            error_msg = (
+                f"Chunk {idx} exhausted {MAX_RETRIES_PER_CHUNK} "
+                f"retries: {last_error_msg}"
+            )
             chunk.status = SummaryRunChunk.Status.FAILED
             chunk.error_message = error_msg
             chunk.save(update_fields=["status", "error_message"])
-            run.status = SummaryRun.Status.FAILED
-            run.error_message = f"Chunk {idx}: {error_msg}"
+
+            run.status = SummaryRun.Status.PARTIAL
+            run.error_message = error_msg
             run.finished_at = django_timezone.now()
-            run.save(update_fields=["status", "error_message", "finished_at"])
+            run.save(
+                update_fields=[
+                    "status", "error_message", "finished_at",
+                ]
+            )
+
+            # Mark canonical state as incomplete (last valid state kept)
+            state.status = AdmissionSummaryState.Status.INCOMPLETE
+            state.save(update_fields=["status"])
+
             return run
 
-        # --- e. Update canonical state ---
-        state.coverage_start = min(
-            state.coverage_start or window_start, window_start
-        )
-        state.coverage_end = max(
-            state.coverage_end or window_end, window_end
-        )
-        state.structured_state_json = llm_response["estado_estruturado"]
-        state.narrative_markdown = llm_response["resumo_markdown"]
-        state.last_source_event_happened_at = run.pinned_cutoff_happened_at
-        state.status = AdmissionSummaryState.Status.DRAFT
-        state.save()
+        # ---- d-e-f. Persist state + version atomically (APS-S5 fix) ----
+        with transaction.atomic():
+            state.coverage_start = min(
+                state.coverage_start or window_start, window_start
+            )
+            state.coverage_end = max(
+                state.coverage_end or window_end, window_end
+            )
+            state.structured_state_json = llm_response["estado_estruturado"]
+            state.narrative_markdown = llm_response["resumo_markdown"]
+            state.last_source_event_happened_at = (
+                run.pinned_cutoff_happened_at
+            )
+            state.status = AdmissionSummaryState.Status.DRAFT
+            state.save()
 
-        # --- f. Create version snapshot ---
-        AdmissionSummaryVersion.objects.create(
-            admission=admission,
-            summary_state=state,
-            run=run,
-            chunk_index=idx,
-            coverage_start=window_start,
-            coverage_end=window_end,
-            structured_state_json=llm_response["estado_estruturado"],
-            narrative_markdown=llm_response["resumo_markdown"],
-            changes_json={
-                "mudancas": llm_response.get("mudancas_da_rodada", [])
-            },
-            uncertainties_json={
-                "incertezas": llm_response.get("incertezas", [])
-            },
-            evidences_json=llm_response.get("evidencias", []),
-            llm_provider="stub",
-            llm_model="stub-v0",
-            prompt_version="aps-s4-v1",
-        )
+            AdmissionSummaryVersion.objects.create(
+                admission=admission,
+                summary_state=state,
+                run=run,
+                chunk_index=idx,
+                coverage_start=window_start,
+                coverage_end=window_end,
+                structured_state_json=(
+                    llm_response["estado_estruturado"]
+                ),
+                narrative_markdown=llm_response["resumo_markdown"],
+                changes_json={
+                    "mudancas": llm_response.get(
+                        "mudancas_da_rodada", []
+                    )
+                },
+                uncertainties_json={
+                    "incertezas": llm_response.get("incertezas", [])
+                },
+                evidences_json=llm_response.get("evidencias", []),
+                llm_provider="stub",
+                llm_model="stub-v0",
+                prompt_version="aps-s5-v1",
+            )
 
-        # --- g. Mark chunk succeeded ---
+        # ---- g. Mark chunk succeeded ----
         chunk.status = SummaryRunChunk.Status.SUCCEEDED
-        chunk.save(update_fields=["status"])
+        chunk.error_message = ""
+        chunk.save(update_fields=["status", "error_message"])
 
     # ---- 4. Finalise run -------
     run.status = SummaryRun.Status.SUCCEEDED

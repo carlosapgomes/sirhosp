@@ -48,6 +48,10 @@
         <span class="text-muted">Data alvo:</span>
         <strong>{{ run.target_end_date|date:"d/m/Y" }}</strong>
       </div>
+      <div class="col-sm-6">
+        <span class="text-muted">Progresso:</span>
+        <strong>Chunk {{ run.current_chunk_index }} / {{ run.total_chunks }}</strong>
+      </div>
       {% if run.started_at %}
       <div class="col-sm-6">
         <span class="text-muted">Iniciado:</span>
@@ -65,6 +69,25 @@
         <strong>{{ run.created_at|date:"d/m/Y H:i" }}</strong>
       </div>
     </div>
+
+    {% if run.error_message %}
+    <div class="mt-3">
+      <div class="alert
+        {% if run.status == 'partial' %}alert-warning
+        {% elif run.status == 'failed' %}alert-danger
+        {% endif %}
+        small mb-0">
+        <i class="bi
+          {% if run.status == 'partial' %}bi-exclamation-triangle
+          {% elif run.status == 'failed' %}bi-x-circle
+          {% endif %} me-1"></i>
+        <span class="fw-semibold">
+          {% if run.status == 'partial' %}Resumo parcial (incompleto){% else %}Erro{% endif %}:
+        </span>
+        {{ run.error_message }}
+      </div>
+    </div>
+    {% endif %}
   </div>
 </div>
 
