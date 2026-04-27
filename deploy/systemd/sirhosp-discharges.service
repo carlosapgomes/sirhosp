@@ -1,0 +1,25 @@
+[Unit]
+Description=SIRHOSP — Extração diária de altas do sistema fonte
+Documentation=https://github.com/carlosapgomes/sirhosp
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/sirhosp
+ExecStart=/opt/sirhosp/deploy/discharges-scheduler.sh
+
+# Timeout generoso: login + download PDF + parse (10 minutos)
+TimeoutStartSec=600
+
+# Logs vão para o journal (acessível via journalctl -u sirhosp-discharges)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sirhosp-discharges
+
+# Segurança: impede execução simultânea
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target
