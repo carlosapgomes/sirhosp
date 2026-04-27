@@ -69,3 +69,33 @@ services:
         condition: service_healthy
     command: ["uv", "run", "--no-sync", "python", "manage.py", "process_ingestion_runs", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped
+
+  summary_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    container_name: sirhosp-summary-worker
+    volumes:
+      - .:/app
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-change-me}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-true}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - POSTGRES_DB=${POSTGRES_DB:-sirhosp}
+      - POSTGRES_USER=${POSTGRES_USER:-sirhosp}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change-me}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      # Credenciais do sistema legado (conector Playwright integrado)
+      - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
+      - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
+      - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
+      # uv: ambiente virtual fora do bind mount (/opt) para evitar problemas de permissão
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - UV_CACHE_DIR=/home/10001/.uv_cache
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["uv", "run", "--no-sync", "python", "manage.py", "process_summary_runs", "--loop", "--sleep-seconds", "5"]
+    restart: unless-stopped

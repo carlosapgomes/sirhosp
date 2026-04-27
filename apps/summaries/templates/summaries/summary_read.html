@@ -1,0 +1,183 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }}{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item">
+      <a href="{% url 'patients:admission_list' run.admission.patient.pk %}">
+        {{ run.admission.patient.name }}
+      </a>
+    </li>
+    <li class="breadcrumb-item active" aria-current="page">Resumo #{{ run.pk }}</li>
+  </ol>
+</nav>
+
+<!-- Page header -->
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+  <div>
+    <h5 class="mb-1 fw-bold">
+      <i class="bi bi-file-earmark-text me-2"></i>Resumo de Internação
+    </h5>
+    <p class="text-muted small mb-0">
+      {{ run.admission.patient.name }}
+      &middot; Internação {{ run.admission.admission_date|date:"d/m/Y"|default:"—" }}
+      {% if run.admission.discharge_date %}
+        → {{ run.admission.discharge_date|date:"d/m/Y" }}
+      {% endif %}
+      &middot; Cobertura:
+      {% if state %}
+        {{ state.coverage_start|date:"d/m/Y" }} – {{ state.coverage_end|date:"d/m/Y" }}
+      {% else %}
+        —
+      {% endif %}
+    </p>
+  </div>
+
+  <div class="d-flex gap-2">
+    {% if raw_markdown %}
+      <button type="button" class="btn btn-outline-secondary btn-sm"
+              id="copy-markdown-btn"
+              title="Copiar Markdown bruto para a área de transferência">
+        <i class="bi bi-clipboard me-1"></i> Copiar Markdown
+      </button>
+    {% endif %}
+    <a href="{% url 'summaries:run_status' run.pk %}"
+       class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-info-circle me-1"></i> Status da execução
+    </a>
+    <a href="{% url 'patients:admission_list' run.admission.patient.pk %}{% if run.admission_id %}?admission_id={{ run.admission_id }}{% endif %}"
+       class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left me-1"></i> Voltar
+    </a>
+  </div>
+</div>
+
+<!-- AI Disclaimer -->
+<div class="alert alert-warning border-0 d-flex align-items-center gap-2 mb-3 small" role="alert">
+  <i class="bi bi-robot flex-shrink-0 fs-5"></i>
+  <span>
+    <strong>Resumo assistido por IA.</strong>
+    Este conteúdo foi gerado automaticamente e não substitui o
+    julgamento clínico. Sempre verifique as informações no sistema
+    de origem.
+  </span>
+</div>
+
+<!-- Incomplete warning -->
+{% if incomplete %}
+  <div class="alert alert-danger border-0 d-flex align-items-center gap-3 mb-3" role="alert">
+    <i class="bi bi-exclamation-triangle-fill fs-4 flex-shrink-0"></i>
+    <div>
+      <strong>Resumo incompleto.</strong>
+      Nem todas as janelas de eventos foram processadas com sucesso.
+      O conteúdo abaixo reflete o último estado válido disponível.
+    </div>
+  </div>
+{% endif %}
+
+{% if not state %}
+  <!-- No state at all -->
+  <div class="card border-0 shadow-sm">
+    <div class="card-body text-center py-5">
+      <i class="bi bi-hourglass-split text-muted" style="font-size: 2rem;"></i>
+      <p class="text-muted mt-2 mb-0">
+        O resumo ainda está sendo gerado. Acompanhe o progresso na
+        <a href="{% url 'summaries:run_status' run.pk %}">página de status</a>.
+      </p>
+    </div>
+  </div>
+{% else %}
+  <!-- Rendered Markdown -->
+  <div class="card border-0 shadow-sm">
+    <div class="card-body summary-content p-4">
+      {{ html_content }}
+    </div>
+  </div>
+{% endif %}
+{% endblock %}
+
+{% block extra_head %}
+{{ block.super }}
+<style>
+  /* --- Summary content typography (Markdown output) --- */
+  .summary-content h1 { font-size: 1.5rem; font-weight: 700; margin-top: 1.5rem; margin-bottom: 0.75rem; }
+  .summary-content h2 { font-size: 1.25rem; font-weight: 600; margin-top: 1.25rem; margin-bottom: 0.5rem; }
+  .summary-content h3 { font-size: 1.1rem; font-weight: 600; margin-top: 1rem; margin-bottom: 0.5rem; }
+  .summary-content p  { margin-bottom: 0.75rem; }
+  .summary-content ul, .summary-content ol { margin-bottom: 0.75rem; padding-left: 1.5rem; }
+  .summary-content li { margin-bottom: 0.25rem; }
+  .summary-content blockquote {
+    border-left: 3px solid var(--bs-primary);
+    padding: 0.5rem 1rem;
+    margin: 0.75rem 0;
+    background: var(--bs-light);
+  }
+  .summary-content code {
+    background: var(--bs-light);
+    padding: 0.15rem 0.4rem;
+    border-radius: 0.25rem;
+    font-size: 0.875em;
+  }
+  .summary-content pre {
+    background: var(--bs-light);
+    padding: 1rem;
+    border-radius: 0.375rem;
+    overflow-x: auto;
+  }
+  .summary-content pre code {
+    background: none;
+    padding: 0;
+  }
+  .summary-content table {
+    width: 100%;
+    margin-bottom: 0.75rem;
+  }
+  .summary-content th, .summary-content td {
+    padding: 0.5rem;
+    border: 1px solid var(--bs-border-color);
+    text-align: left;
+  }
+  .summary-content th {
+    background: var(--bs-light);
+    font-weight: 600;
+  }
+  .summary-content hr {
+    margin: 1.5rem 0;
+  }
+</style>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+{% if raw_markdown %}
+<script>
+  /* APS-S8: Client-side Markdown copy button */
+  (() => {
+    const RAW_MARKDOWN = {{ raw_markdown_json|safe }};
+
+    const btn = document.getElementById("copy-markdown-btn");
+    if (!btn) return;
+
+    btn.addEventListener("click", () => {
+      navigator.clipboard.writeText(RAW_MARKDOWN).then(() => {
+        const originalHTML = btn.innerHTML;
+        btn.innerHTML = '<i class="bi bi-check-lg me-1"></i> Copiado!';
+        btn.classList.add("btn-success");
+        btn.classList.remove("btn-outline-secondary");
+        setTimeout(() => {
+          btn.innerHTML = originalHTML;
+          btn.classList.remove("btn-success");
+          btn.classList.add("btn-outline-secondary");
+        }, 2000);
+      }).catch(() => {
+        alert("Não foi possível copiar. Tente selecionar o texto manualmente.");
+      });
+    });
+  })();
+</script>
+{% endif %}
+{% endblock %}

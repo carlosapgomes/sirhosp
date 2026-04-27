@@ -1,0 +1,115 @@
+{# APS-S7: Chunk-level progress partial — used for HTMX polling #}
+{% load static %}
+
+<div id="summary-run-progress" class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <h6 class="card-subtitle mb-3 text-muted small">
+      <i class="bi bi-list-check me-1"></i>
+      Progresso dos chunks
+      <span class="text-muted">({{ run.current_chunk_index }} / {{ run.total_chunks }})</span>
+    </h6>
+
+    {# --- Chunk progress bar --- #}
+    <div class="d-flex gap-1 mb-3 flex-wrap">
+      {% for chunk in chunks %}
+        <div class="flex-fill"
+             style="min-width: 60px;"
+             title="Chunk {{ chunk.chunk_index|add:1 }}: {{ chunk.get_status_display }}
+Janela: {{ chunk.window_start|date:"d/m/Y" }} → {{ chunk.window_end|date:"d/m/Y" }}
+{% if chunk.error_message %}Erro: {{ chunk.error_message }}{% endif %}">
+          <div class="d-flex align-items-center gap-1 mb-1">
+            {% if chunk.status == "succeeded" %}
+              <i class="bi bi-check-circle-fill text-success small"></i>
+              <small class="text-success fw-semibold">Chunk {{ chunk.chunk_index|add:1 }}</small>
+            {% elif chunk.status == "running" %}
+              <span class="spinner-border spinner-border-sm text-primary" role="status"></span>
+              <small class="text-primary fw-semibold">Chunk {{ chunk.chunk_index|add:1 }}</small>
+            {% elif chunk.status == "failed" %}
+              <i class="bi bi-x-circle-fill text-danger small"></i>
+              <small class="text-danger fw-semibold">Chunk {{ chunk.chunk_index|add:1 }}</small>
+            {% else %}
+              <i class="bi bi-circle text-muted small"></i>
+              <small class="text-muted">Chunk {{ chunk.chunk_index|add:1 }}</small>
+            {% endif %}
+          </div>
+          <div class="progress" style="height: 6px;">
+            <div class="progress-bar
+              {% if chunk.status == 'succeeded' %}bg-success
+              {% elif chunk.status == 'running' %}bg-primary progress-bar-striped progress-bar-animated
+              {% elif chunk.status == 'failed' %}bg-danger
+              {% else %}bg-light{% endif %}"
+              role="progressbar"
+              style="width: 100%;"
+              aria-valuenow="100" aria-valuemin="0" aria-valuemax="100">
+            </div>
+          </div>
+          <small class="text-muted">
+            {% if chunk.status == "succeeded" %}Concluído
+            {% elif chunk.status == "running" %}Em andamento
+            {% elif chunk.status == "failed" %}Falhou
+            {% else %}Pendente{% endif %}
+          </small>
+        </div>
+      {% empty %}
+        <div class="text-muted small">
+          <i class="bi bi-info-circle me-1"></i>
+          Nenhum chunk registrado ainda.
+        </div>
+      {% endfor %}
+    </div>
+
+    {# --- Chunk detail table --- #}
+    {% if chunks %}
+    <div class="table-responsive">
+      <table class="table table-sm small mb-2">
+        <thead class="table-light">
+          <tr>
+            <th>Chunk</th>
+            <th>Janela</th>
+            <th>Eventos</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for chunk in chunks %}
+          <tr>
+            <td class="fw-semibold">{{ chunk.chunk_index|add:1 }}</td>
+            <td>{{ chunk.window_start|date:"d/m/Y" }} → {{ chunk.window_end|date:"d/m/Y" }}</td>
+            <td>{{ chunk.input_event_count }}</td>
+            <td>
+              {% if chunk.status == "succeeded" %}
+                <span class="badge bg-success">Concluído</span>
+              {% elif chunk.status == "running" %}
+                <span class="badge bg-primary">
+                  <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                  Em andamento
+                </span>
+              {% elif chunk.status == "failed" %}
+                <span class="badge bg-danger">Falhou
+                  {% if chunk.error_message %}
+                    <i class="bi bi-info-circle ms-1"
+                       title="{{ chunk.error_message }}"></i>
+                  {% endif %}
+                </span>
+              {% else %}
+                <span class="badge bg-secondary">Pendente</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+
+    {# --- Leave and come back message --- #}
+    {% if not terminal %}
+    <div class="alert alert-light border small mb-0 mt-2">
+      <i class="bi bi-info-circle me-1"></i>
+      O processamento continua em segundo plano.
+      <strong>Você pode sair desta página e voltar depois.</strong>
+      O resumo ficará disponível quando a execução terminar.
+    </div>
+    {% endif %}
+  </div>
+</div>

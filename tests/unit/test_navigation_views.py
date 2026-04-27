@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -12,6 +12,7 @@ from django.utils import timezone
 from apps.clinical_docs.models import ClinicalEvent
 from apps.ingestion.models import IngestionRun
 from apps.patients.models import Admission, Patient
+from apps.summaries.models import AdmissionSummaryState, SummaryRun
 
 TZ = ZoneInfo("America/Sao_Paulo")
 
@@ -993,3 +994,346 @@ class TestIngestionCreateContextualAccess:
         from datetime import date as date_type
         today_str = date_type.today().isoformat()
         assert today_str in content
+
+
+# =========================================================================
+# APS-S6: Summary CTA and badge fixtures
+# =========================================================================
+
+
+@pytest.fixture
+def summary_state_maria_2(
+    admission_maria_2: Admission,
+) -> AdmissionSummaryState:
+    """Completed summary state for Maria's second admission.
+
+    Coverage ends today so it appears "current" (regenerate, not update).
+    Also creates a succeeded SummaryRun so "Ler resumo" link works.
+    """
+    state = AdmissionSummaryState.objects.create(
+        admission=admission_maria_2,
+        coverage_start=date(2026, 4, 15),
+        coverage_end=date.today(),
+        structured_state_json={"motivo_internacao": "Pneumonia"},
+        narrative_markdown="# Resumo\n\nPaciente com pneumonia.",
+        status=AdmissionSummaryState.Status.COMPLETE,
+    )
+    # Create a completed run so "Ler resumo" link resolves
+    SummaryRun.objects.create(
+        admission=admission_maria_2,
+        mode="generate",
+        target_end_date=date.today(),
+        status=SummaryRun.Status.SUCCEEDED,
+    )
+    return state
+
+
+@pytest.fixture
+def summary_state_incomplete(
+    admission_maria_2: Admission,
+) -> AdmissionSummaryState:
+    """Incomplete summary state for Maria's second admission.
+
+    Also creates a partial SummaryRun so "Ler resumo" link works.
+    """
+    state = AdmissionSummaryState.objects.create(
+        admission=admission_maria_2,
+        coverage_start=date(2026, 4, 15),
+        coverage_end=date(2026, 4, 17),
+        structured_state_json={"motivo_internacao": "Pneumonia"},
+        narrative_markdown="# Resumo Parcial\n\nIncompleto.",
+        status=AdmissionSummaryState.Status.INCOMPLETE,
+    )
+    SummaryRun.objects.create(
+        admission=admission_maria_2,
+        mode="generate",
+        target_end_date=date(2026, 4, 17),
+        status=SummaryRun.Status.PARTIAL,
+    )
+    return state
+
+
+@pytest.fixture
+def queued_run_maria_2(
+    admission_maria_2: Admission,
+) -> SummaryRun:
+    """Queued summary run for Maria's second admission."""
+    run_admission_date = (
+        admission_maria_2.admission_date.date()
+        if admission_maria_2.admission_date
+        else date(2026, 4, 15)
+    )
+    return SummaryRun.objects.create(
+        admission=admission_maria_2,
+        mode="generate",
+        target_end_date=run_admission_date,
+        status=SummaryRun.Status.QUEUED,
+    )
+
+
+# =========================================================================
+# APS-S6: Summary CTA contextual on admission page
+# =========================================================================
+
+
+class TestAdmissionPageSummaryCTA:
+    """APS-S6: Contextual summary CTAs and badges on admission page."""
+
+    def test_no_summary_shows_gerar_resumo(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        db: object,
+    ) -> None:
+        """When no summary exists, shows 'Gerar resumo' button."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Gerar resumo" in content
+
+    def test_no_summary_badge_sem_resumo(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        db: object,
+    ) -> None:
+        """When no summary exists, badge shows 'Sem resumo'."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Sem resumo" in content
+
+    def test_no_summary_hides_ler_resumo(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        db: object,
+    ) -> None:
+        """When no summary exists, 'Ler resumo' link is NOT shown."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Ler resumo" not in content
+
+    def test_gerar_resumo_form_posts_to_create_run(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        db: object,
+    ) -> None:
+        """The 'Gerar resumo' button posts to create_summary_run with
+        mode=generate."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        # Should have a form posting to summaries create endpoint
+        assert (
+            f"/admissions/{admission_maria_2.pk}/summary/create/"
+            in content
+        )
+        assert 'name="mode" value="generate"' in content
+
+    def test_with_complete_summary_shows_regenerar(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        summary_state_maria_2: AdmissionSummaryState,
+        db: object,
+    ) -> None:
+        """When complete summary exists and coverage is current,
+        shows 'Regenerar resumo'."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Regenerar resumo" in content
+
+    def test_complete_summary_badge_disponivel(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        summary_state_maria_2: AdmissionSummaryState,
+        db: object,
+    ) -> None:
+        """When complete summary exists, badge shows 'Disponível'."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Disponível" in content
+
+    def test_with_summary_shows_ler_resumo(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        summary_state_maria_2: AdmissionSummaryState,
+        db: object,
+    ) -> None:
+        """When summary exists, 'Ler resumo' link is visible."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Ler resumo" in content
+
+    def test_incomplete_summary_shows_regenerar(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        summary_state_incomplete: AdmissionSummaryState,
+        db: object,
+    ) -> None:
+        """When incomplete summary exists, shows 'Regenerar resumo'."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Regenerar resumo" in content
+
+    def test_incomplete_summary_badge_incompleto(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        summary_state_incomplete: AdmissionSummaryState,
+        db: object,
+    ) -> None:
+        """When incomplete summary, badge shows 'Incompleto'."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Incompleto" in content
+
+    def test_incomplete_summary_shows_ler_resumo(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        summary_state_incomplete: AdmissionSummaryState,
+        db: object,
+    ) -> None:
+        """Even with incomplete summary, 'Ler resumo' is visible."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Ler resumo" in content
+
+    def test_processing_run_shows_badge_em_processamento(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        queued_run_maria_2: SummaryRun,
+        db: object,
+    ) -> None:
+        """When a summary run is queued/running, badge shows
+        'Em processamento'."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Em processamento" in content
+
+    def test_outdated_summary_shows_atualizar(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        db: object,
+    ) -> None:
+        """When summary exists but coverage is outdated,
+        shows 'Atualizar resumo'.
+
+        Create a summary with coverage ending before today.
+        """
+        old_end = date.today() - timedelta(days=10)
+
+        AdmissionSummaryState.objects.create(
+            admission=admission_maria_2,
+            coverage_start=date(2026, 4, 15),
+            coverage_end=old_end,
+            structured_state_json={"motivo_internacao": "Pneumonia"},
+            narrative_markdown="# Resumo antigo",
+            status=AdmissionSummaryState.Status.COMPLETE,
+        )
+
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert "Atualizar resumo" in content
+
+    def test_regenerar_form_posts_mode_regenerate(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        summary_state_maria_2: AdmissionSummaryState,
+        db: object,
+    ) -> None:
+        """The 'Regenerar' CTA posts mode=regenerate."""
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert 'name="mode" value="regenerate"' in content
+
+    def test_atualizar_form_posts_mode_update(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+        db: object,
+    ) -> None:
+        """The 'Atualizar' CTA posts mode=update."""
+        old_end = date.today() - timedelta(days=5)
+
+        AdmissionSummaryState.objects.create(
+            admission=admission_maria_2,
+            coverage_start=date(2026, 4, 15),
+            coverage_end=old_end,
+            structured_state_json={"motivo_internacao": "Pneumonia"},
+            narrative_markdown="# Resumo antigo",
+            status=AdmissionSummaryState.Status.COMPLETE,
+        )
+
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+        )
+        content = response.content.decode()
+        assert 'name="mode" value="update"' in content
+
+    def test_different_admission_no_summary_does_not_affect_other(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_1: Admission,
+        admission_maria_2: Admission,
+        summary_state_maria_2: AdmissionSummaryState,
+        db: object,
+    ) -> None:
+        """Summary state for admission_maria_2 does not leak to
+        admission_maria_1 when explicitly selected."""
+        # Explicitly select admission_maria_1 (no summary)
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/"
+            f"?admission_id={admission_maria_1.pk}"
+        )
+        content = response.content.decode()
+        # maria_1 has no summary, should show 'Gerar resumo'
+        assert "Gerar resumo" in content
+        assert "Sem resumo" in content

@@ -1,0 +1,115 @@
+{% extends "base_sidebar.html" %}
+{% load static %}
+
+{% block title %}Resumo — Status #{{ run.pk }} — SIRHOSP{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'patients:patient_list' %}">Pacientes</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'patients:admission_list' run.admission.patient_id %}">{{ run.admission.patient.name }}</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Status do Resumo</li>
+  </ol>
+</nav>
+
+<h2 class="h5 fw-bold mb-3" style="color: var(--sirhosp-sidebar-bg);">
+  Status do Resumo #{{ run.pk }}
+</h2>
+
+<!-- Status card -->
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h5 class="card-title h6 fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">Estado</h5>
+      <span class="badge
+        {% if run.status == 'queued' %}bg-secondary
+        {% elif run.status == 'running' %}bg-primary
+        {% elif run.status == 'succeeded' %}bg-success
+        {% elif run.status == 'partial' %}bg-warning text-dark
+        {% elif run.status == 'failed' %}bg-danger
+        {% endif %}">
+        {{ run.get_status_display }}
+      </span>
+    </div>
+
+    <div class="row small g-3">
+      <div class="col-sm-6">
+        <span class="text-muted">Paciente:</span>
+        <strong>{{ run.admission.patient.name }}</strong>
+      </div>
+      <div class="col-sm-6">
+        <span class="text-muted">Internação:</span>
+        <strong>{{ run.admission.source_admission_key }}</strong>
+      </div>
+      <div class="col-sm-6">
+        <span class="text-muted">Modo:</span>
+        <strong>{{ run.get_mode_display }}</strong>
+      </div>
+      <div class="col-sm-6">
+        <span class="text-muted">Data alvo:</span>
+        <strong>{{ run.target_end_date|date:"d/m/Y" }}</strong>
+      </div>
+      <div class="col-sm-6">
+        <span class="text-muted">Progresso:</span>
+        <strong>Chunk {{ run.current_chunk_index }} / {{ run.total_chunks }}</strong>
+      </div>
+      {% if run.started_at %}
+      <div class="col-sm-6">
+        <span class="text-muted">Iniciado:</span>
+        <strong>{{ run.started_at|date:"d/m/Y H:i" }}</strong>
+      </div>
+      {% endif %}
+      {% if run.finished_at %}
+      <div class="col-sm-6">
+        <span class="text-muted">Finalizado:</span>
+        <strong>{{ run.finished_at|date:"d/m/Y H:i" }}</strong>
+      </div>
+      {% endif %}
+      <div class="col-sm-6">
+        <span class="text-muted">Criado:</span>
+        <strong>{{ run.created_at|date:"d/m/Y H:i" }}</strong>
+      </div>
+    </div>
+
+    {% if run.error_message %}
+    <div class="mt-3">
+      <div class="alert
+        {% if run.status == 'partial' %}alert-warning
+        {% elif run.status == 'failed' %}alert-danger
+        {% endif %}
+        small mb-0">
+        <i class="bi
+          {% if run.status == 'partial' %}bi-exclamation-triangle
+          {% elif run.status == 'failed' %}bi-x-circle
+          {% endif %} me-1"></i>
+        <span class="fw-semibold">
+          {% if run.status == 'partial' %}Resumo parcial (incompleto){% else %}Erro{% endif %}:
+        </span>
+        {{ run.error_message }}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- APS-S7: Chunk-level progress — HTMX polling for non-terminal runs -->
+{% if terminal %}
+  {# Terminal run: render the progress partial once, no polling #}
+  {% include "summaries/_summary_run_progress.html" %}
+{% else %}
+  {# Non-terminal run: render with HTMX polling every 3 seconds #}
+  <div hx-get="{% url 'summaries:run_progress' run.pk %}"
+       hx-trigger="every 3s"
+       hx-swap="outerHTML">
+    {% include "summaries/_summary_run_progress.html" %}
+  </div>
+{% endif %}
+
+<!-- Action buttons -->
+<div class="d-flex gap-2 mt-4">
+  <a href="{% url 'patients:admission_list' run.admission.patient_id %}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left me-1"></i>Voltar para o paciente
+  </a>
+</div>
+{% endblock %}

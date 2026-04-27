@@ -1,0 +1,488 @@
+"""Summary services — business logic for progressive admission summaries.
+
+APS-S2: queue_summary_run for on-demand enqueue.
+APS-S4: execute_summary_run for worker-driven processing.
+APS-S5: retry per chunk (MAX_RETRIES_PER_CHUNK=3), partial completion, and
+        atomic state+version persistence.
+APS-S6: get_admission_summary_context for UI badge/CTA state.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import TYPE_CHECKING, Optional
+
+from django.db import transaction
+from django.utils import timezone as django_timezone
+
+from apps.patients.models import Admission
+from apps.summaries.llm_gateway import call_llm_gateway
+from apps.summaries.models import (
+    AdmissionSummaryState,
+    AdmissionSummaryVersion,
+    SummaryRun,
+    SummaryRunChunk,
+)
+from apps.summaries.planner import plan_windows
+from apps.summaries.schema import validate_summary_output
+
+if TYPE_CHECKING:
+    from django.contrib.auth.models import User
+
+VALID_MODES = {"generate", "update", "regenerate"}
+
+MAX_RETRIES_PER_CHUNK = 3
+
+# ---------------------------------------------------------------------------
+# UI context helper (APS-S6)
+# ---------------------------------------------------------------------------
+
+
+def get_admission_summary_context(
+    admission: Admission,
+) -> dict:
+    """Return summary UI context for the admission page.
+
+    Returns a dict with keys:
+      - badge_label: "Sem resumo" | "Em processamento" |
+                     "Disponível" | "Incompleto"
+      - badge_css: Bootstrap badge class
+      - cta_label: "Gerar resumo" | "Atualizar resumo" |
+                   "Regenerar resumo"
+      - cta_mode: "generate" | "update" | "regenerate"
+      - is_processing: bool
+      - show_ler_resumo: bool
+      - latest_run_id: int | None (for "Ler resumo" link)
+
+    # TODO: prefetch se badges forem mostrados para múltiplas
+    # admissões no dropdown (até 2 queries por admissão).
+    """
+    today = date.today()
+
+    # 1. Check for active (queued or running) run → "Em processamento"
+    active_run = (
+        SummaryRun.objects.filter(
+            admission=admission,
+            status__in=[
+                SummaryRun.Status.QUEUED,
+                SummaryRun.Status.RUNNING,
+            ],
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+    if active_run is not None:
+        return {
+            "badge_label": "Em processamento",
+            "badge_css": "bg-info text-dark",
+            "cta_label": "Regenerar resumo",
+            "cta_mode": "regenerate",
+            "is_processing": True,
+            "show_ler_resumo": False,
+            "latest_run_id": active_run.pk,
+        }
+
+    # 2. Look up AdmissionSummaryState
+    try:
+        state = AdmissionSummaryState.objects.get(admission=admission)
+    except AdmissionSummaryState.DoesNotExist:
+        # No summary at all → "Gerar resumo"
+        return {
+            "badge_label": "Sem resumo",
+            "badge_css": "bg-secondary",
+            "cta_label": "Gerar resumo",
+            "cta_mode": "generate",
+            "is_processing": False,
+            "show_ler_resumo": False,
+            "latest_run_id": None,
+        }
+
+    # 3. Determine if summary is outdated
+    #    Outdated = coverage_end < target_end_date
+    #    For open admission: target = today
+    #    For closed admission: target = min(today, discharge_date)
+    if admission.discharge_date:
+        target_end = min(today, admission.discharge_date.date())
+    else:
+        target_end = today
+
+    is_outdated = state.coverage_end < target_end
+
+    # 4. Get latest run for "Ler resumo" link
+    latest_run_id: int | None = None
+    has_narrative = bool(state.narrative_markdown)
+    if has_narrative:
+        latest_run = (
+            SummaryRun.objects.filter(
+                admission=admission,
+                status__in=[
+                    SummaryRun.Status.SUCCEEDED,
+                    SummaryRun.Status.PARTIAL,
+                ],
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if latest_run is not None:
+            latest_run_id = latest_run.pk
+
+    # 5. Build response based on state
+    if state.status == AdmissionSummaryState.Status.INCOMPLETE:
+        return {
+            "badge_label": "Incompleto",
+            "badge_css": "bg-warning text-dark",
+            "cta_label": "Regenerar resumo",
+            "cta_mode": "regenerate",
+            "is_processing": False,
+            "show_ler_resumo": has_narrative,
+            "latest_run_id": latest_run_id,
+        }
+
+    # DRAFT or COMPLETE
+    if is_outdated:
+        cta_label = "Atualizar resumo"
+        cta_mode = "update"
+    else:
+        cta_label = "Regenerar resumo"
+        cta_mode = "regenerate"
+
+    return {
+        "badge_label": "Disponível",
+        "badge_css": "bg-success",
+        "cta_label": cta_label,
+        "cta_mode": cta_mode,
+        "is_processing": False,
+        "show_ler_resumo": has_narrative,
+        "latest_run_id": latest_run_id,
+    }
+
+
+def queue_summary_run(
+    *,
+    admission: Admission,
+    mode: str,
+    requested_by: User | None = None,
+) -> SummaryRun:
+    """Create a queued SummaryRun for an admission.
+
+    Calculates target_end_date:
+      - open admission (no discharge_date): today
+      - closed admission: min(today, discharge_date)
+    """
+    today = date.today()
+
+    if admission.discharge_date:
+        discharge_date = admission.discharge_date.date()
+        target_end_date = min(today, discharge_date)
+    else:
+        target_end_date = today
+
+    run = SummaryRun.objects.create(
+        admission=admission,
+        requested_by=requested_by,
+        mode=mode,
+        target_end_date=target_end_date,
+        status=SummaryRun.Status.QUEUED,
+    )
+    return run
+
+
+# ---------------------------------------------------------------------------
+# Worker execution (APS-S4)
+# ---------------------------------------------------------------------------
+
+
+def execute_summary_run(
+    run: SummaryRun,
+    *,
+    admission: Admission | None = None,
+) -> SummaryRun:
+    """Execute a single SummaryRun synchronously.
+
+    Lifecycle:
+    1. Claim: queued -> running, set pinned_cutoff_happened_at.
+    2. Plan windows via ``plan_windows``.
+    3. For each window:
+       a. Load ClinicalEvents filtered by admission + happened_at <= cutoff.
+       b. Create/update SummaryRunChunk (queued -> running).
+       c. Call LLM gateway with prior state + new events.
+       d. Validate LLM output.
+       e. Update AdmissionSummaryState.
+       f. Create AdmissionSummaryVersion.
+       g. Update chunk to succeeded.
+    4. Transition run to succeeded.
+
+    Args:
+        run: A SummaryRun in ``queued`` status.
+        admission: Pre-fetched Admission (avoids extra query).
+
+    Returns:
+        The updated SummaryRun (persisted).
+    """
+    # ---- 1. Claim -------
+    now = django_timezone.now()
+    run.status = SummaryRun.Status.RUNNING
+    run.pinned_cutoff_happened_at = now
+    run.started_at = now
+    run.save(
+        update_fields=[
+            "status",
+            "pinned_cutoff_happened_at",
+            "started_at",
+        ]
+    )
+
+    # Load admission if not provided
+    if admission is None:
+        admission = Admission.objects.select_related("patient").get(
+            pk=run.admission_id
+        )
+
+    # Determine admission start date
+    if admission.admission_date is None:
+        admission_start = date.today()
+    else:
+        admission_start = admission.admission_date.date()
+
+    # ---- 2. Plan windows -------
+    # Determine prior_coverage_end for update mode
+    prior_coverage_end: Optional[date] = None
+    if run.mode == "update":
+        try:
+            state = AdmissionSummaryState.objects.get(
+                admission=admission
+            )
+            prior_coverage_end = state.coverage_end
+        except AdmissionSummaryState.DoesNotExist:
+            prior_coverage_end = None
+
+    windows = plan_windows(
+        admission_date=admission_start,
+        target_end_date=run.target_end_date,
+        mode=run.mode,
+        prior_coverage_end=prior_coverage_end,
+    )
+
+    run.total_chunks = len(windows)
+    run.current_chunk_index = 0
+    run.save(update_fields=["total_chunks", "current_chunk_index"])
+
+    # ---- 3. Process each window -------
+    # Get or create the canonical state for this admission
+    state, _created = AdmissionSummaryState.objects.get_or_create(
+        admission=admission,
+        defaults={
+            "coverage_start": admission_start,
+            "coverage_end": admission_start,
+            "structured_state_json": {},
+            "narrative_markdown": "",
+            "status": AdmissionSummaryState.Status.DRAFT,
+        },
+    )
+
+    for idx, (window_start, window_end) in enumerate(windows):
+        run.current_chunk_index = idx
+        run.save(update_fields=["current_chunk_index"])
+
+        # --- a. Load events for this window ---
+        events = _load_events_for_window(
+            run=run,
+            admission_id=admission.pk,
+            window_start=window_start,
+            window_end=window_end,
+        )
+
+        # Build event dicts once (deterministic per window)
+        novas_evolucoes = [
+            {
+                "event_id": getattr(ev, "event_identity_key", str(ev.pk)),
+                "happened_at": (
+                    ev.happened_at.isoformat()
+                    if hasattr(ev, "happened_at")
+                    else ""
+                ),
+                "profession_type": getattr(
+                    ev, "profession_type", ""
+                ),
+                "content_text": getattr(ev, "content_text", ""),
+            }
+            for ev in events
+        ]
+
+        # --- b. Create/update chunk record ---
+        chunk, _ = SummaryRunChunk.objects.get_or_create(
+            run=run,
+            chunk_index=idx,
+            defaults={
+                "window_start": window_start,
+                "window_end": window_end,
+                "status": SummaryRunChunk.Status.QUEUED,
+                "attempt_count": 0,
+                "input_event_count": len(events),
+            },
+        )
+
+        # --- c-e. Retry loop: call LLM + validate, up to MAX_RETRIES ---
+        llm_response: dict | None = None
+        last_error_msg: str = ""
+
+        for attempt in range(1, MAX_RETRIES_PER_CHUNK + 1):
+            chunk.status = SummaryRunChunk.Status.RUNNING
+            chunk.attempt_count = attempt
+            chunk.input_event_count = len(events)
+            chunk.save(
+                update_fields=[
+                    "status", "attempt_count", "input_event_count",
+                ]
+            )
+
+            llm_response = call_llm_gateway(
+                estado_estruturado_anterior=(
+                    state.structured_state_json or {}
+                ),
+                resumo_markdown_anterior=state.narrative_markdown or "",
+                novas_evolucoes=novas_evolucoes,
+            )
+
+            validation_errors = validate_summary_output(llm_response)
+            if not validation_errors:
+                # Success — break out of retry loop
+                last_error_msg = ""
+                break
+
+            # Record failure for this attempt
+            last_error_msg = "; ".join(validation_errors)
+            chunk.error_message = last_error_msg
+            chunk.status = SummaryRunChunk.Status.FAILED
+            chunk.save(update_fields=["status", "error_message"])
+
+        # ---- Exhausted retries? ------
+        if last_error_msg:
+            # All attempts failed for this chunk
+            error_msg = (
+                f"Chunk {idx} exhausted {MAX_RETRIES_PER_CHUNK} "
+                f"retries: {last_error_msg}"
+            )
+            chunk.status = SummaryRunChunk.Status.FAILED
+            chunk.error_message = error_msg
+            chunk.save(update_fields=["status", "error_message"])
+
+            run.status = SummaryRun.Status.PARTIAL
+            run.error_message = error_msg
+            run.finished_at = django_timezone.now()
+            run.save(
+                update_fields=[
+                    "status", "error_message", "finished_at",
+                ]
+            )
+
+            # Mark canonical state as incomplete (last valid state kept)
+            state.status = AdmissionSummaryState.Status.INCOMPLETE
+            state.save(update_fields=["status"])
+
+            return run
+
+        # ---- d-e-f. Persist state + version atomically (APS-S5 fix) ----
+        # At this point we broke out of the retry loop with a valid
+        # response, so llm_response is guaranteed to be a dict.
+        assert llm_response is not None
+        with transaction.atomic():
+            state.coverage_start = min(
+                state.coverage_start or window_start, window_start
+            )
+            state.coverage_end = max(
+                state.coverage_end or window_end, window_end
+            )
+            state.structured_state_json = llm_response["estado_estruturado"]
+            state.narrative_markdown = llm_response["resumo_markdown"]
+            state.last_source_event_happened_at = (
+                run.pinned_cutoff_happened_at
+            )
+            state.status = AdmissionSummaryState.Status.DRAFT
+            state.save()
+
+            AdmissionSummaryVersion.objects.create(
+                admission=admission,
+                summary_state=state,
+                run=run,
+                chunk_index=idx,
+                coverage_start=window_start,
+                coverage_end=window_end,
+                structured_state_json=(
+                    llm_response["estado_estruturado"]
+                ),
+                narrative_markdown=llm_response["resumo_markdown"],
+                changes_json={
+                    "mudancas": llm_response.get(
+                        "mudancas_da_rodada", []
+                    )
+                },
+                uncertainties_json={
+                    "incertezas": llm_response.get("incertezas", [])
+                },
+                evidences_json=llm_response.get("evidencias", []),
+                llm_provider="stub",
+                llm_model="stub-v0",
+                prompt_version="aps-s5-v1",
+            )
+
+        # ---- g. Mark chunk succeeded ----
+        chunk.status = SummaryRunChunk.Status.SUCCEEDED
+        chunk.error_message = ""
+        chunk.save(update_fields=["status", "error_message"])
+
+    # ---- 4. Finalise run -------
+    run.status = SummaryRun.Status.SUCCEEDED
+    run.current_chunk_index = run.total_chunks
+    run.finished_at = django_timezone.now()
+    run.save(
+        update_fields=["status", "current_chunk_index", "finished_at"]
+    )
+
+    return run
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_events_for_window(
+    *,
+    run: SummaryRun,
+    admission_id: int,
+    window_start: date,
+    window_end: date,
+) -> list:
+    """Load ClinicalEvents for a window, respecting the pinned cutoff.
+
+    Filters by:
+      - admission_id (only events for this admission)
+      - happened_at date within [window_start, window_end]
+      - happened_at <= pinned_cutoff_happened_at (no new events after
+        run start)
+
+    Returns:
+        List of ClinicalEvent instances ordered by happened_at.
+    """
+    from apps.clinical_docs.models import ClinicalEvent
+
+    qs = ClinicalEvent.objects.filter(
+        admission_id=admission_id,
+    )
+
+    # Date range filter
+    qs = qs.filter(
+        happened_at__date__gte=window_start,
+        happened_at__date__lte=window_end,
+    )
+
+    # Cutoff filter — only events that happened at or before the pinned
+    # cutoff timestamp.
+    if run.pinned_cutoff_happened_at is not None:
+        qs = qs.filter(
+            happened_at__lte=run.pinned_cutoff_happened_at
+        )
+
+    return list(qs.order_by("happened_at"))
