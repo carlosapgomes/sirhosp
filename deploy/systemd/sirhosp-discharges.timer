@@ -1,0 +1,24 @@
+[Unit]
+Description=SIRHOSP — Timer de extração de altas (3x ao dia)
+Documentation=https://github.com/carlosapgomes/sirhosp
+
+[Timer]
+# Dispara às: 11:00, 19:00, 23:55 (horário do servidor)
+# 11:00 — primeiras altas do dia (geralmente após 9h-10h)
+# 19:00 — cobre altas da tarde
+# 23:55 — captura o restante antes da virada do dia
+OnCalendar=*-*-* 11:00:00
+OnCalendar=*-*-* 19:00:00
+OnCalendar=*-*-* 23:55:00
+
+# Aleatoriza até 2 minutos para evitar picos
+RandomizedDelaySec=120
+
+# Se o servidor estava desligado no horário, executa no boot
+Persistent=true
+
+# Não dispara de novo se o ciclo anterior ainda estiver rodando
+RemainAfterElapse=no
+
+[Install]
+WantedBy=timers.target

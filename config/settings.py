@@ -34,6 +34,7 @@ INSTALLED_APPS = [
     "apps.search",
     "apps.services_portal",
     "apps.census",
+    "apps.discharges.DischargesConfig",
 ]
 
 MIDDLEWARE = [
