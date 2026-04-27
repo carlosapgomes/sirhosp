@@ -61,8 +61,10 @@ class TestCensoRealData:
         response = admin_client.get(url)
         content = response.content.decode()
         assert response.status_code == 200
-        # Should contain date somewhere
-        date_str = now.strftime("%d/%m/%Y")
+        # localtime() converts UTC to TIME_ZONE (America/Sao_Paulo)
+        # to match template rendering {{ captured_at|date:"d/m/Y H:i" }}
+        local_now = timezone.localtime(now)
+        date_str = local_now.strftime("%d/%m/%Y")
         assert date_str in content
 
     def test_censo_filters_by_setor(self, admin_client):
