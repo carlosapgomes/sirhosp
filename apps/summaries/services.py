@@ -53,6 +53,9 @@ def get_admission_summary_context(
       - is_processing: bool
       - show_ler_resumo: bool
       - latest_run_id: int | None (for "Ler resumo" link)
+
+    # TODO: prefetch se badges forem mostrados para múltiplas
+    # admissões no dropdown (até 2 queries por admissão).
     """
     today = date.today()
 
@@ -381,6 +384,9 @@ def execute_summary_run(
             return run
 
         # ---- d-e-f. Persist state + version atomically (APS-S5 fix) ----
+        # At this point we broke out of the retry loop with a valid
+        # response, so llm_response is guaranteed to be a dict.
+        assert llm_response is not None
         with transaction.atomic():
             state.coverage_start = min(
                 state.coverage_start or window_start, window_start

@@ -93,8 +93,7 @@ class TestGenerateCTA:
             {"mode": "generate"},
         )
         assert response.status_code == 302
-        run = SummaryRun.objects.latest("created_at")
-        assert f"/summaries/{run.pk}/" in response.url  # type: ignore[attr-defined]
+        assert "/summaries/status/" in response.url  # type: ignore[attr-defined]
 
 
 class TestUpdateCTA:

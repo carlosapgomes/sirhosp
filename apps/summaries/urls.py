@@ -13,8 +13,18 @@ urlpatterns = [
         name="create_summary_run",
     ),
     path(
-        "summaries/<int:run_id>/",
+        "summaries/status/<int:run_id>/",
         views.run_status,
         name="run_status",
+    ),
+    path(
+        "summaries/status/<int:run_id>/progress/",
+        views.run_progress,
+        name="run_progress",
+    ),
+    path(
+        "summaries/read/<int:run_id>/",
+        views.summary_read,
+        name="read",
     ),
 ]

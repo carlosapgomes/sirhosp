@@ -1,4 +1,5 @@
 {% extends "base_sidebar.html" %}
+{% load static %}
 
 {% block title %}Resumo — Status #{{ run.pk }} — SIRHOSP{% endblock %}
 
@@ -7,6 +8,7 @@
   <ol class="breadcrumb small">
     <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
     <li class="breadcrumb-item"><a href="{% url 'patients:patient_list' %}">Pacientes</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'patients:admission_list' run.admission.patient_id %}">{{ run.admission.patient.name }}</a></li>
     <li class="breadcrumb-item active" aria-current="page">Status do Resumo</li>
   </ol>
 </nav>
@@ -90,6 +92,19 @@
     {% endif %}
   </div>
 </div>
+
+<!-- APS-S7: Chunk-level progress — HTMX polling for non-terminal runs -->
+{% if terminal %}
+  {# Terminal run: render the progress partial once, no polling #}
+  {% include "summaries/_summary_run_progress.html" %}
+{% else %}
+  {# Non-terminal run: render with HTMX polling every 3 seconds #}
+  <div hx-get="{% url 'summaries:run_progress' run.pk %}"
+       hx-trigger="every 3s"
+       hx-swap="outerHTML">
+    {% include "summaries/_summary_run_progress.html" %}
+  </div>
+{% endif %}
 
 <!-- Action buttons -->
 <div class="d-flex gap-2 mt-4">
