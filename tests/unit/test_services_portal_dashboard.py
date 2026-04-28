@@ -4,13 +4,14 @@ Slice IRMD-S6: Ingestion metric cards on dashboard.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from django.urls import reverse
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.discharges.models import DailyDischargeCount
 from apps.ingestion.models import IngestionRun
 from apps.patients.models import Admission, Patient
 
@@ -27,7 +28,7 @@ class TestDashboardRealStats:
         ctx = response.context
         assert ctx["stats"]["internados"] == 0
         assert ctx["stats"]["cadastrados"] == 0
-        assert ctx["stats"]["altas_24h"] == 0
+        assert ctx["stats"]["altas_hoje"] == 0
         assert ctx["coleta"]["setores"] == 0
         assert ctx["coleta"]["ultima_varredura"] == "Nenhum dado disponível"
 
@@ -71,23 +72,32 @@ class TestDashboardRealStats:
         assert response.status_code == 200
         assert response.context["stats"]["cadastrados"] == 2
 
-    def test_dashboard_shows_discharges_24h(self, admin_client):
-        """Dashboard counts admissions discharged in last 24h."""
+    def test_dashboard_shows_discharges_today(self, admin_client):
+        """Dashboard counts admissions discharged TODAY only, not last 24h."""
         patient = Patient.objects.create(
             patient_source_key="P1", source_system="tasy", name="A",
         )
         now = timezone.now()
-        # Discharged 1 hour ago
+        today = timezone.localdate()
+
+        # Discharged today at 10:00
+        today_morning = timezone.make_aware(
+            datetime(today.year, today.month, today.day, 10, 0, 0),
+        )
         Admission.objects.create(
             patient=patient, source_admission_key="ADM1", source_system="tasy",
             admission_date=now - timedelta(days=5),
-            discharge_date=now - timedelta(hours=1),
+            discharge_date=today_morning,
         )
-        # Discharged 48 hours ago (should NOT be counted)
+        # Discharged yesterday at 23:00 (within last 24h but NOT today)
+        yesterday = today - timedelta(days=1)
+        yesterday_night = timezone.make_aware(
+            datetime(yesterday.year, yesterday.month, yesterday.day, 23, 0, 0),
+        )
         Admission.objects.create(
             patient=patient, source_admission_key="ADM2", source_system="tasy",
             admission_date=now - timedelta(days=10),
-            discharge_date=now - timedelta(hours=48),
+            discharge_date=yesterday_night,
         )
         # Not discharged yet
         Admission.objects.create(
@@ -98,7 +108,7 @@ class TestDashboardRealStats:
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
         assert response.status_code == 200
-        assert response.context["stats"]["altas_24h"] == 1
+        assert response.context["stats"]["altas_hoje"] == 1  # only today
 
     def test_dashboard_shows_sectors_and_timestamp(self, admin_client):
         """Dashboard shows sector count and last capture time."""
@@ -163,6 +173,16 @@ class TestDashboardRealStats:
         content = response.content.decode()
         assert response.status_code == 200
         assert 'census:bed_status' in content or '/beds/' in content
+
+    def test_dashboard_discharge_card_links_to_chart(self, admin_client):
+        """The discharge stat card is clickable and links to /painel/altas/."""
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        chart_url = reverse("services_portal:discharge_chart")
+        assert chart_url in content
+        assert '<a href="' in content
 
 
 @pytest.mark.django_db
@@ -243,3 +263,92 @@ class TestDashboardIngestionMetrics:
         # Verify the URL for ingestion_metrics is present
         metrics_url = reverse("services_portal:ingestion_metrics")
         assert metrics_url in content
+
+
+@pytest.mark.django_db
+class TestDischargeChartView:
+    """Tests for /painel/altas/ discharge chart page."""
+
+    def _create_counts(self, days: int, start_count: int = 5):
+        """Helper: create DailyDischargeCount entries for last N days."""
+        today = timezone.localdate()
+        for i in range(days):
+            day = today - timedelta(days=days - i)
+            DailyDischargeCount.objects.create(date=day, count=start_count + i)
+
+    def test_chart_requires_authentication(self, client):
+        """Anonymous users are redirected to login."""
+        url = reverse("services_portal:discharge_chart")
+        response = client.get(url)
+        assert response.status_code == 302
+
+    def test_chart_accessible_when_authenticated(self, admin_client):
+        """Authenticated users can access the chart page."""
+        url = reverse("services_portal:discharge_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+    def test_chart_default_90_days(self, admin_client):
+        """Chart shows data for last 90 days by default."""
+        self._create_counts(120)  # more than 90
+        url = reverse("services_portal:discharge_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert len(chart_data["labels"]) <= 90
+        today_str = timezone.localdate().strftime("%d/%m/%Y")
+        assert today_str not in chart_data["labels"]
+
+    def test_chart_respects_dias_parameter(self, admin_client):
+        """?dias=30 shows only last 30 days."""
+        self._create_counts(60)
+        url = reverse("services_portal:discharge_chart") + "?dias=30"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert len(chart_data["labels"]) <= 30
+
+    def test_chart_invalid_dias_falls_back_to_90(self, admin_client):
+        """Invalid ?dias=abc falls back to default 90."""
+        self._create_counts(100)
+        url = reverse("services_portal:discharge_chart") + "?dias=abc"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert len(chart_data["labels"]) <= 90
+
+    def test_chart_context_has_all_ma_keys(self, admin_client):
+        """Context contains labels, counts, ma3, ma10, ma30."""
+        self._create_counts(35)
+        url = reverse("services_portal:discharge_chart") + "?dias=30"
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        assert "labels" in chart_data
+        assert "counts" in chart_data
+        assert "ma3" in chart_data
+        assert "ma10" in chart_data
+        assert "ma30" in chart_data
+        n = len(chart_data["labels"])
+        assert len(chart_data["counts"]) == n
+        assert len(chart_data["ma3"]) == n
+        assert len(chart_data["ma10"]) == n
+        assert len(chart_data["ma30"]) == n
+
+    def test_ma3_is_none_for_first_two_days(self, admin_client):
+        """MA-3 is None for indices 0 and 1, value from index 2."""
+        self._create_counts(10)
+        url = reverse("services_portal:discharge_chart") + "?dias=10"
+        response = admin_client.get(url)
+        ma3 = response.context["chart_data"]["ma3"]
+        assert ma3[0] is None
+        assert ma3[1] is None
+        assert ma3[2] is not None
+
+    def test_chart_handles_empty_data(self, admin_client):
+        """Page renders without error when no DailyDischargeCount exists."""
+        url = reverse("services_portal:discharge_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert chart_data["labels"] == []
+        assert chart_data["counts"] == []
