@@ -3,6 +3,12 @@
 {% block title %}Pacientes — SIRHOSP{% endblock %}
 
 {% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Pacientes</li>
+  </ol>
+</nav>
 <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
   <div>
     <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Pacientes</h2>
