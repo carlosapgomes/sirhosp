@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from django.core.management import call_command
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
@@ -186,6 +187,10 @@ class Command(BaseCommand):
                 run.status = "succeeded"
                 run.finished_at = timezone.now()
                 run.save()
+
+                # Refresh daily discharge tracking table
+                call_command("refresh_daily_discharge_counts")
+
                 self.stdout.write(self.style.SUCCESS("No discharges found today."))
                 return
 
@@ -231,6 +236,9 @@ class Command(BaseCommand):
             run.status = "succeeded"
             run.finished_at = timezone.now()
             run.save()
+
+            # Refresh daily discharge tracking table
+            call_command("refresh_daily_discharge_counts")
 
             self.stdout.write(
                 self.style.SUCCESS(
