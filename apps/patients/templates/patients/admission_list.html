@@ -26,6 +26,9 @@
         {% if idade %}
           &middot; Idade: <strong>{{ idade }} anos</strong>
         {% endif %}
+        {% if patient.gender %}
+          &middot; {{ patient.gender }}
+        {% endif %}
       </div>
       {% if ward %}
         <div class="mt-1 d-flex gap-2 align-items-center">
@@ -40,7 +43,104 @@
         </div>
       {% endif %}
     </div>
+    <div>
+      <button class="btn btn-sm btn-outline-secondary" type="button"
+              data-bs-toggle="collapse" data-bs-target="#patient-demographics"
+              aria-expanded="false" aria-controls="patient-demographics">
+        <i class="bi bi-info-circle me-1"></i> Dados demogr&aacute;ficos
+      </button>
+    </div>
+  </div>
+</div>
 
+<!-- Collapsible Demographics -->
+<div class="collapse mb-3" id="patient-demographics">
+  <div class="card border-0 shadow-sm">
+    <div class="card-body">
+      <div class="row g-3">
+        <!-- Coluna 1: Dados pessoais -->
+        <div class="col-12 col-md-6">
+          <dl class="row mb-0 small">
+            {% if patient.race_color %}
+              <dt class="col-sm-5 text-muted fw-normal">Ra&ccedil;a/Cor</dt>
+              <dd class="col-sm-7">{{ patient.race_color }}</dd>
+            {% endif %}
+            {% if patient.marital_status %}
+              <dt class="col-sm-5 text-muted fw-normal">Estado civil</dt>
+              <dd class="col-sm-7">{{ patient.marital_status }}</dd>
+            {% endif %}
+            {% if patient.education_level %}
+              <dt class="col-sm-5 text-muted fw-normal">Escolaridade</dt>
+              <dd class="col-sm-7">{{ patient.education_level }}</dd>
+            {% endif %}
+            {% if patient.profession %}
+              <dt class="col-sm-5 text-muted fw-normal">Profiss&atilde;o</dt>
+              <dd class="col-sm-7">{{ patient.profession }}</dd>
+            {% endif %}
+            {% if patient.nationality %}
+              <dt class="col-sm-5 text-muted fw-normal">Nacionalidade</dt>
+              <dd class="col-sm-7">{{ patient.nationality }}</dd>
+            {% endif %}
+            {% if patient.birthplace %}
+              <dt class="col-sm-5 text-muted fw-normal">Naturalidade</dt>
+              <dd class="col-sm-7">{{ patient.birthplace }}</dd>
+            {% endif %}
+          </dl>
+        </div>
+
+        <!-- Coluna 2: Documentos e contato -->
+        <div class="col-12 col-md-6">
+          <dl class="row mb-0 small">
+            {% if patient.mother_name %}
+              <dt class="col-sm-5 text-muted fw-normal">M&atilde;e</dt>
+              <dd class="col-sm-7">{{ patient.mother_name }}</dd>
+            {% endif %}
+            {% if patient.father_name %}
+              <dt class="col-sm-5 text-muted fw-normal">Pai</dt>
+              <dd class="col-sm-7">{{ patient.father_name }}</dd>
+            {% endif %}
+            {% if patient.cns %}
+              <dt class="col-sm-5 text-muted fw-normal">CNS</dt>
+              <dd class="col-sm-7"><code class="small">{{ patient.cns }}</code></dd>
+            {% endif %}
+            {% if patient.cpf %}
+              <dt class="col-sm-5 text-muted fw-normal">CPF</dt>
+              <dd class="col-sm-7"><code class="small">{{ patient.cpf }}</code></dd>
+            {% endif %}
+            {% if patient.phone_cellular %}
+              <dt class="col-sm-5 text-muted fw-normal">Celular</dt>
+              <dd class="col-sm-7">{{ patient.phone_cellular }}</dd>
+            {% endif %}
+            {% if patient.phone_home %}
+              <dt class="col-sm-5 text-muted fw-normal">Tel. fixo</dt>
+              <dd class="col-sm-7">{{ patient.phone_home }}</dd>
+            {% endif %}
+            {% if patient.phone_contact %}
+              <dt class="col-sm-5 text-muted fw-normal">Contato</dt>
+              <dd class="col-sm-7">{{ patient.phone_contact }}</dd>
+            {% endif %}
+          </dl>
+        </div>
+
+        <!-- Coluna 3: Endere&ccedil;o (full width) -->
+        {% if patient.street %}
+        <div class="col-12">
+          <hr class="my-1">
+          <dl class="row mb-0 small">
+            <dt class="col-sm-2 text-muted fw-normal">Endere&ccedil;o</dt>
+            <dd class="col-sm-10">
+              {{ patient.street }}
+              {% if patient.address_number %}, {{ patient.address_number }}{% endif %}
+              {% if patient.address_complement %} &mdash; {{ patient.address_complement }}{% endif %}
+              {% if patient.neighborhood %} &mdash; {{ patient.neighborhood }}{% endif %}
+              {% if patient.city %} &mdash; {{ patient.city }}/{{ patient.state }}{% endif %}
+              {% if patient.postal_code %} &mdash; CEP {{ patient.postal_code }}{% endif %}
+            </dd>
+          </dl>
+        </div>
+        {% endif %}
+      </div>
+    </div>
   </div>
 </div>
 
