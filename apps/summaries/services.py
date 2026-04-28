@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import date
 from typing import TYPE_CHECKING, Optional
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone as django_timezone
 
@@ -262,6 +263,8 @@ def execute_summary_run(
         target_end_date=run.target_end_date,
         mode=run.mode,
         prior_coverage_end=prior_coverage_end,
+        chunk_days=getattr(settings, "SUMMARY_CHUNK_DAYS", 4),
+        overlap_days=getattr(settings, "SUMMARY_OVERLAP_DAYS", 2),
     )
 
     run.total_chunks = len(windows)
@@ -422,8 +425,8 @@ def execute_summary_run(
                     "incertezas": llm_response.get("incertezas", [])
                 },
                 evidences_json=llm_response.get("evidencias", []),
-                llm_provider="stub",
-                llm_model="stub-v0",
+                llm_provider=llm_response.get("_meta", {}).get("provider", "stub"),
+                llm_model=llm_response.get("_meta", {}).get("model", "stub-v0"),
                 prompt_version="aps-s5-v1",
             )
 

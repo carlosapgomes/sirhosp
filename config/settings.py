@@ -110,3 +110,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "/login/"
 LOGIN_REDIRECT_URL = "/painel/"
 LOGOUT_REDIRECT_URL = "/"
+
+# ---------------------------------------------------------------------------
+# Progressive admission summary (APS)
+# ---------------------------------------------------------------------------
+# Chunk size in days for the planner (default: 4).
+SUMMARY_CHUNK_DAYS: int = int(os.getenv("SUMMARY_CHUNK_DAYS", "4"))
+# Overlap between consecutive chunks in days (default: 2).
+SUMMARY_OVERLAP_DAYS: int = int(os.getenv("SUMMARY_OVERLAP_DAYS", "2"))

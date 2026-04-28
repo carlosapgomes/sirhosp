@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -15,7 +16,7 @@ UTC = timezone.utc
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Module-level mock: prevent real LLM calls in unit tests.
 # ---------------------------------------------------------------------------
 
 
@@ -42,6 +43,21 @@ def _stub_llm_response():
             {"event_id": "evt-001", "snippet": "dor abdominal há 2 dias"},
         ],
     }
+
+
+@pytest.fixture(autouse=True)
+def _mock_llm_gateway():
+    """Mock call_llm_gateway so unit tests never call a real API."""
+    with patch(
+        "apps.summaries.services.call_llm_gateway",
+        return_value=_stub_llm_response(),
+    ):
+        yield
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _make_realistic_run():
@@ -511,60 +527,3 @@ class TestQueueSummaryRunTypeHintCorrection:
         assert "User" in annotation
         assert "models.Model" not in annotation
         assert "Model" not in annotation or "models" not in annotation
-
-
-# ---------------------------------------------------------------------------
-# llm_gateway stub tests
-# ---------------------------------------------------------------------------
-
-
-class TestLlmGatewayStub:
-    """The stub LLM gateway returns a controlled response for tests."""
-
-    def test_stub_returns_valid_dict(self):
-        """Stub gateway returns a dict with required fields."""
-        from apps.summaries.llm_gateway import call_llm_gateway
-
-        result = call_llm_gateway(
-            estado_estruturado_anterior={},
-            resumo_markdown_anterior="",
-            novas_evolucoes=[],
-        )
-
-        assert isinstance(result, dict)
-        assert "estado_estruturado" in result
-        assert "resumo_markdown" in result
-        assert "mudancas_da_rodada" in result
-        assert "incertezas" in result
-        assert "evidencias" in result
-
-    def test_stub_passes_schema_validation(self):
-        """Stub output passes validate_summary_output."""
-        from apps.summaries.llm_gateway import call_llm_gateway
-        from apps.summaries.schema import validate_summary_output
-
-        result = call_llm_gateway(
-            estado_estruturado_anterior={},
-            resumo_markdown_anterior="",
-            novas_evolucoes=[],
-        )
-
-        errors = validate_summary_output(result)
-        assert len(errors) == 0
-
-    def test_stub_is_deterministic(self):
-        """Stub returns the same structure each time (deterministic)."""
-        from apps.summaries.llm_gateway import call_llm_gateway
-
-        r1 = call_llm_gateway(
-            estado_estruturado_anterior={},
-            resumo_markdown_anterior="",
-            novas_evolucoes=[],
-        )
-        r2 = call_llm_gateway(
-            estado_estruturado_anterior={},
-            resumo_markdown_anterior="",
-            novas_evolucoes=[],
-        )
-
-        assert r1 == r2

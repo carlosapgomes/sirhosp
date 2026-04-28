@@ -91,6 +91,11 @@ services:
       - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
       - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
       - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
+      # LLM (OpenAI ou compatível) — necessário para sumário via IA
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - LLM_TIMEOUT_SECONDS=${LLM_TIMEOUT_SECONDS:-120}
       # uv: ambiente virtual fora do bind mount (/opt) para evitar problemas de permissão
       - UV_PROJECT_ENVIRONMENT=/opt/venv
       - UV_CACHE_DIR=/home/10001/.uv_cache

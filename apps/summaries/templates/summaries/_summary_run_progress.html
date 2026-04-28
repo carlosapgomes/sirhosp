@@ -1,7 +1,12 @@
 {# APS-S7: Chunk-level progress partial — used for HTMX polling #}
 {% load static %}
 
-<div id="summary-run-progress" class="card border-0 shadow-sm mb-3">
+<div id="summary-run-progress" class="card border-0 shadow-sm mb-3"
+     {% if not terminal %}
+     hx-get="{% url 'summaries:run_progress' run.pk %}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     {% endif %}>
   <div class="card-body">
     <h6 class="card-subtitle mb-3 text-muted small">
       <i class="bi bi-list-check me-1"></i>
