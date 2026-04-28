@@ -66,9 +66,15 @@
         </thead>
         <tbody>
           {% for paciente in pacientes %}
+            {% if paciente.patient_id %}
+            <tr onclick="window.location='{% url 'patients:admission_list' paciente.patient_id %}'"
+                style="cursor: pointer;" role="button" tabindex="0"
+                title="Abrir prontu&aacute;rio de {{ paciente.nome }}">
+            {% else %}
             <tr onclick="window.location='{% url 'patients:patient_list' %}?q={{ paciente.registro }}'"
                 style="cursor: pointer;" role="button" tabindex="0"
-                title="Abrir prontuário de {{ paciente.nome }}">
+                title="Buscar prontu&aacute;rio de {{ paciente.nome }}">
+            {% endif %}
               <td class="ps-3">
                 <span class="badge bg-light text-dark border fw-normal">{{ paciente.leito }}</span>
               </td>
@@ -98,9 +104,15 @@
     <!-- Mobile: card view -->
     <div class="sirhosp-censo-cards" style="display: none;">
       {% for paciente in pacientes %}
+        {% if paciente.patient_id %}
+        <a href="{% url 'patients:admission_list' paciente.patient_id %}"
+           class="text-decoration-none d-block border-bottom p-3"
+           style="color: inherit;">
+        {% else %}
         <a href="{% url 'patients:patient_list' %}?q={{ paciente.registro }}"
            class="text-decoration-none d-block border-bottom p-3"
            style="color: inherit;">
+        {% endif %}
           <div class="d-flex justify-content-between align-items-start gap-2">
             <div class="flex-grow-1 min-w-0">
               <div class="fw-semibold small mb-1" style="color: var(--sirhosp-sidebar-bg);">

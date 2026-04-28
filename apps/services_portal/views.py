@@ -257,11 +257,22 @@ def censo(request: HttpRequest) -> HttpResponse:
         )
 
     snapshots = list(qs)
+
+    # Look up internal Patient IDs for direct linking to admission_list
+    prontuarios = [s.prontuario for s in snapshots if s.prontuario]
+    patient_map: dict[str, int] = {}
+    if prontuarios:
+        patient_map = {
+            p.patient_source_key: p.pk
+            for p in Patient.objects.filter(patient_source_key__in=prontuarios)
+        }
+
     pacientes = [
         {
             "leito": s.leito,
             "nome": s.nome,
             "registro": s.prontuario,
+            "patient_id": patient_map.get(s.prontuario),
             "admissao": "",
             "setor": s.setor,
         }

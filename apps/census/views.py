@@ -7,6 +7,7 @@ from django.db.models import Count, Max
 from django.shortcuts import render
 
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.patients.models import Patient
 
 
 @login_required
@@ -73,6 +74,16 @@ def bed_status_view(request):
 
     # Add individual bed details
     bed_details = snapshots.order_by("leito")
+
+    # Look up internal Patient IDs for direct linking to admission_list
+    prontuarios = [b.prontuario for b in bed_details if b.prontuario]
+    patient_map: dict[str, int] = {}
+    if prontuarios:
+        patient_map = {
+            p.patient_source_key: p.pk
+            for p in Patient.objects.filter(patient_source_key__in=prontuarios)
+        }
+
     for bed in bed_details:
         if bed.setor in sectors:
             sectors[bed.setor]["beds"].append({
@@ -83,6 +94,7 @@ def bed_status_view(request):
                 if bed.bed_status == BedStatus.OCCUPIED
                 else "",
                 "prontuario": bed.prontuario,
+                "patient_id": patient_map.get(bed.prontuario),
             })
 
     # Sort sectors by name

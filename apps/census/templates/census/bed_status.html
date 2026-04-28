@@ -127,8 +127,17 @@
                   </div>
                   <div class="text-end small">
                     {% if bed.prontuario %}
-                      {{ bed.nome }}
-                      <span class="text-muted">({{ bed.prontuario }})</span>
+                      {% if bed.patient_id %}
+                      <a href="{% url 'patients:admission_list' bed.patient_id %}" class="text-decoration-none">
+                        {{ bed.nome }}
+                        <span class="text-muted">({{ bed.prontuario }})</span>
+                      </a>
+                      {% else %}
+                      <a href="{% url 'patients:patient_list' %}?q={{ bed.prontuario }}" class="text-decoration-none">
+                        {{ bed.nome }}
+                        <span class="text-muted">({{ bed.prontuario }})</span>
+                      </a>
+                      {% endif %}
                     {% else %}
                       <span class="text-muted">—</span>
                     {% endif %}
