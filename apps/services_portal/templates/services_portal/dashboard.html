@@ -38,17 +38,19 @@
     </div>
   </div>
 
-  <!-- Altas (24h) -->
+  <!-- Altas no dia -->
   <div class="col-12 col-md-6 col-lg-4">
-    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
-      <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
-        <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
+    <a href="{% url 'services_portal:discharge_chart' %}" class="text-decoration-none">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
+          <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.altas_hoje }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Altas no dia</div>
+        </div>
       </div>
-      <div>
-        <div class="sirhosp-stat-value">{{ stats.altas_24h }}</div>
-        <div class="sirhosp-stat-label">Altas (24h)</div>
-      </div>
-    </div>
+    </a>
   </div>
 </div>
 

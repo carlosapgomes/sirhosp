@@ -25,7 +25,7 @@ def dashboard(request: HttpRequest) -> HttpResponse:
     """Main dashboard with operational indicators from real DB queries.
 
     Displays current inpatient census from latest CensusSnapshot,
-    total registered patients, 24h discharges, and data collection status.
+    total registered patients, today's discharges, and data collection status.
     """
     latest = CensusSnapshot.objects.aggregate(latest=Max("captured_at"))["latest"]
 
@@ -40,8 +40,8 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         ultima_varredura = "Nenhum dado disponível"
 
     cadastrados = Patient.objects.count()
-    altas_24h = Admission.objects.filter(
-        discharge_date__gte=timezone.now() - timedelta(hours=24),
+    altas_hoje = Admission.objects.filter(
+        discharge_date__date=timezone.localdate(),
     ).count()
 
     # ── IRMD-S6: Ingestion metrics for last 24h ──────────────────────
@@ -52,7 +52,7 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         "stats": {
             "internados": internados,
             "cadastrados": cadastrados,
-            "altas_24h": altas_24h,
+            "altas_hoje": altas_hoje,
         },
         "coleta": {
             "setores": setores,
@@ -61,6 +61,71 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         "ingestion_stats": ingestion_stats,
     }
     return render(request, "services_portal/dashboard.html", context)
+
+
+@login_required
+def discharge_chart(request: HttpRequest) -> HttpResponse:
+    """Discharge chart page with daily bars and moving averages.
+
+    Query parameter:
+        ?dias=N  — number of days to display (default: 90)
+
+    The chart always shows data through YESTERDAY (today is excluded
+    because it is still in progress).
+    """
+    # Parse ?dias parameter
+    dias_str = request.GET.get("dias", "90").strip()
+    try:
+        dias = int(dias_str)
+        if dias < 1:
+            dias = 90
+    except (ValueError, TypeError):
+        dias = 90
+
+    from apps.discharges.models import DailyDischargeCount
+
+    today = timezone.localdate()
+
+    entries_recent = list(
+        DailyDischargeCount.objects
+        .filter(date__lt=today)
+        .order_by("-date")[:dias]
+    )
+    entries_recent.reverse()  # chronological order
+
+    labels = [e.date.strftime("%d/%m/%Y") for e in entries_recent]
+    counts = [e.count for e in entries_recent]
+
+    chart_data = {
+        "labels": labels,
+        "counts": counts,
+        "ma3": _moving_average(counts, 3),
+        "ma10": _moving_average(counts, 10),
+        "ma30": _moving_average(counts, 30),
+    }
+
+    context = {
+        "page_title": "Altas por Dia",
+        "chart_data": chart_data,
+        "dias": dias,
+        "period_options": [30, 60, 90, 180, 365],
+    }
+    return render(request, "services_portal/discharge_chart.html", context)
+
+
+def _moving_average(values: list[int], window: int) -> list[float | None]:
+    """Calculate simple moving average over `window` days.
+
+    First (window-1) positions are None (insufficient history).
+    """
+    result: list[float | None] = []
+    for i in range(len(values)):
+        if i < window - 1:
+            result.append(None)
+        else:
+            window_slice = values[i - window + 1 : i + 1]
+            result.append(round(sum(window_slice) / window, 1))
+    return result
 
 
 def _build_filtered_queryset(

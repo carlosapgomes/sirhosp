@@ -11,4 +11,5 @@ urlpatterns = [
     path("censo/", views.censo, name="censo"),
     path("monitor/", views.monitor_risco, name="monitor_risco"),
     path("metrica-ingestao/", views.ingestion_metrics, name="ingestion_metrics"),
+    path("painel/altas/", views.discharge_chart, name="discharge_chart"),
 ]

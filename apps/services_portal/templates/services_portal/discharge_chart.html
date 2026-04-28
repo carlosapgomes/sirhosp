@@ -1,0 +1,145 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}Altas por Dia — SIRHOSP{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Altas por Dia</h2>
+    <p class="text-muted small mb-0">Contagem diária de altas com médias móveis</p>
+  </div>
+</div>
+
+<!-- Period selector -->
+<div class="d-flex gap-2 mb-4 flex-wrap">
+  <span class="text-muted small align-self-center me-2">Período:</span>
+  {% for option in period_options %}
+    <a href="?dias={{ option }}"
+       class="btn btn-sm {% if option == dias %}btn-primary{% else %}btn-outline-primary{% endif %}">
+      {{ option }} dias
+    </a>
+  {% endfor %}
+</div>
+
+<!-- Chart -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body">
+    {% if chart_data.counts %}
+    <div style="position: relative; height: 400px;">
+      <canvas id="dischargeChart"></canvas>
+    </div>
+    {% else %}
+    <div class="text-center py-5 text-muted">
+      <i class="bi bi-bar-chart" style="font-size: 3rem;"></i>
+      <p class="mt-3">Nenhum dado de alta disponível.</p>
+      <p class="small">Os dados começarão a aparecer após a primeira extração de altas.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Legend -->
+<div class="d-flex gap-4 flex-wrap small text-muted mb-4">
+  <div class="d-flex align-items-center gap-2">
+    <span style="display:inline-block;width:12px;height:12px;background:#0D6EFD33;border:1px solid #0D6EFD;border-radius:2px;"></span>
+    Barras: altas diárias
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <span style="display:inline-block;width:20px;height:2px;background:#0D6EFD;"></span>
+    MM 3 dias
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <span style="display:inline-block;width:20px;height:2px;background:#F59E0B;"></span>
+    MM 10 dias
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <span style="display:inline-block;width:20px;height:2px;background:#DC2626;"></span>
+    MM 30 dias
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{{ chart_data|json_script:"chart-data" }}
+<script>
+  const rawData = JSON.parse(document.getElementById('chart-data').textContent);
+
+  if (rawData.labels && rawData.labels.length > 0) {
+    const ctx = document.getElementById('dischargeChart').getContext('2d');
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: rawData.labels,
+        datasets: [
+          {
+            label: 'Altas',
+            data: rawData.counts,
+            backgroundColor: '#0D6EFD33',
+            borderColor: '#0D6EFD',
+            borderWidth: 1,
+            order: 2,
+          },
+          {
+            label: 'MM 3 dias',
+            data: rawData.ma3,
+            type: 'line',
+            borderColor: '#0D6EFD',
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+            spanGaps: false,
+            order: 1,
+          },
+          {
+            label: 'MM 10 dias',
+            data: rawData.ma10,
+            type: 'line',
+            borderColor: '#F59E0B',
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+            spanGaps: false,
+            order: 1,
+          },
+          {
+            label: 'MM 30 dias',
+            data: rawData.ma30,
+            type: 'line',
+            borderColor: '#DC2626',
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+            spanGaps: false,
+            order: 1,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: {
+          mode: 'index',
+          intersect: false,
+        },
+        plugins: {
+          legend: {
+            display: false,
+          },
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            ticks: {
+              stepSize: 1,
+            },
+          },
+        },
+      },
+    });
+  }
+</script>
+{% endblock %}
