@@ -107,10 +107,10 @@ class TestRefreshDailyDischargeCounts:
 
 @pytest.mark.django_db
 class TestExtractDischargesHook:
-    """Smoke tests: verify extract_discharges calls refresh."""
+    """Smoke tests: verify extract_discharges updates DailyDischargeCount."""
 
-    def test_command_file_contains_refresh_call(self):
-        """extract_discharges.py contains call_command('refresh_daily...')."""
+    def test_command_file_contains_daily_discharge_upsert(self):
+        """extract_discharges.py contains DailyDischargeCount.update_or_create."""
         from pathlib import Path
         source = (
             Path(__file__).resolve().parents[2]
@@ -118,11 +118,16 @@ class TestExtractDischargesHook:
             / "extract_discharges.py"
         )
         content = source.read_text()
-        assert "refresh_daily_discharge_counts" in content
-        assert "call_command" in content
+        assert "DailyDischargeCount" in content
+        assert "update_or_create" in content
+        # Ensure refresh is no longer called automatically
+        assert "call_command" not in content, (
+            "extract_discharges should NOT call refresh_daily_discharge_counts; "
+            "it should update DailyDischargeCount directly from PDF count."
+        )
 
-    def test_refresh_follows_status_succeeded_assignment(self):
-        """The refresh call appears after run.status = 'succeeded'."""
+    def test_upsert_follows_status_succeeded_assignment(self):
+        """DailyDischargeCount upsert appears after run.status = 'succeeded'."""
         from pathlib import Path
         source = (
             Path(__file__).resolve().parents[2]
@@ -131,9 +136,9 @@ class TestExtractDischargesHook:
         )
         content = source.read_text()
         pos_status = content.find('run.status = "succeeded"')
-        pos_refresh = content.find("refresh_daily_discharge_counts")
+        pos_upsert = content.find("DailyDischargeCount.objects.update_or_create")
         assert pos_status > 0, "status succeeded line not found"
-        assert pos_refresh > 0, "refresh call not found"
-        assert pos_refresh > pos_status, (
-            "refresh must appear AFTER status succeeded"
+        assert pos_upsert > 0, "DailyDischargeCount upsert not found"
+        assert pos_upsert > pos_status, (
+            "DailyDischargeCount upsert must appear AFTER status succeeded"
         )

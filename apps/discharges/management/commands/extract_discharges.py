@@ -5,13 +5,14 @@ import os
 import subprocess
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-from django.core.management import call_command
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
+from apps.discharges.models import DailyDischargeCount
 from apps.discharges.services import process_discharges
 from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
 
@@ -188,8 +189,11 @@ class Command(BaseCommand):
                 run.finished_at = timezone.now()
                 run.save()
 
-                # Refresh daily discharge tracking table
-                call_command("refresh_daily_discharge_counts")
+                # Record zero discharges for today (source of truth: PDF)
+                DailyDischargeCount.objects.update_or_create(
+                    date=date.today(),
+                    defaults={"count": 0},
+                )
 
                 self.stdout.write(self.style.SUCCESS("No discharges found today."))
                 return
@@ -237,8 +241,21 @@ class Command(BaseCommand):
             run.finished_at = timezone.now()
             run.save()
 
-            # Refresh daily discharge tracking table
-            call_command("refresh_daily_discharge_counts")
+            # Record discharge count from PDF (source of truth)
+            pdf_date_str = data.get("data", "")
+            try:
+                pdf_date = (
+                    date.fromisoformat(pdf_date_str)
+                    if pdf_date_str
+                    else date.today()
+                )
+            except ValueError:
+                pdf_date = date.today()
+
+            DailyDischargeCount.objects.update_or_create(
+                date=pdf_date,
+                defaults={"count": len(patients)},
+            )
 
             self.stdout.write(
                 self.style.SUCCESS(
