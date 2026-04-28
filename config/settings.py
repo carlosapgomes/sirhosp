@@ -97,7 +97,7 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "pt-br"
-TIME_ZONE = "America/Sao_Paulo"
+TIME_ZONE = "America/Bahia"
 USE_I18N = True
 USE_TZ = True
 
@@ -114,7 +114,7 @@ LOGOUT_REDIRECT_URL = "/"
 # ---------------------------------------------------------------------------
 # Progressive admission summary (APS)
 # ---------------------------------------------------------------------------
-# Chunk size in days for the planner (default: 4).
-SUMMARY_CHUNK_DAYS: int = int(os.getenv("SUMMARY_CHUNK_DAYS", "4"))
-# Overlap between consecutive chunks in days (default: 2).
-SUMMARY_OVERLAP_DAYS: int = int(os.getenv("SUMMARY_OVERLAP_DAYS", "2"))
+# Chunk size in days for the planner (default: 3).
+SUMMARY_CHUNK_DAYS: int = int(os.getenv("SUMMARY_CHUNK_DAYS", "3"))
+# Overlap between consecutive chunks in days (default: 1).
+SUMMARY_OVERLAP_DAYS: int = int(os.getenv("SUMMARY_OVERLAP_DAYS", "1"))
