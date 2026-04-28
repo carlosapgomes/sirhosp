@@ -1,6 +1,6 @@
 <aside class="sirhosp-sidebar" id="sidebar" role="navigation" aria-label="Menu principal">
   <!-- Brand -->
-  <a href="/" class="sirhosp-sidebar-brand">
+  <a href="{% if user.is_authenticated %}{% url 'services_portal:dashboard' %}{% else %}/{% endif %}" class="sirhosp-sidebar-brand">
     <i class="bi bi-heart-pulse"></i>
     SIRHosp
   </a>
