@@ -19,7 +19,7 @@ template parcial reutilizável, e view `run_status` expondo `stage_metrics`.
   - `test_run_status_view_includes_stage_metrics`: view principal inclui
     `stage_metrics` no contexto
 - [x] 1.2 Criar `apps/ingestion/templates/ingestion/_run_progress.html`:
-  template parcial com lista de estágios, badges de status e durações
+      template parcial com lista de estágios, badges de status e durações
 - [x] 1.3 Adicionar view `run_status_fragment` em `apps/ingestion/views.py`
 - [x] 1.4 Adicionar URL em `apps/ingestion/urls.py`
 - [x] 1.5 Atualizar view `run_status` para incluir `stage_metrics` no contexto
@@ -47,7 +47,7 @@ template parcial reutilizável, e view `run_status` expondo `stage_metrics`.
   - `test_htmx_script_loaded_in_base`: `base.html` inclui tag script HTMX
 - [x] 2.2 Adicionar `<script>` HTMX no `templates/base.html`
 - [x] 2.3 Modificar `run_status.html`: substituir meta-refresh por HTMX
-  polling + incluir `_run_progress.html`
+      polling + incluir `_run_progress.html`
 - [x] 2.4 **Gate PF-2**: `./scripts/test-in-container.sh check integration lint`
 - [x] 2.5 Gerar `/tmp/sirhosp-slice-PF-2-report.md`
 
@@ -62,7 +62,7 @@ relatórios.
 
 - [x] 3.1 Atualizar/adicionar spec `run-status-progress` com cenários Gherkin
 - [x] 3.2 Atualizar spec `ingestion-run-observability` com requisito de
-  exposição de estágios na UI
+      exposição de estágios na UI
 - [x] 3.3 Executar gate completo: `./scripts/test-in-container.sh quality-gate`
 - [x] 3.4 Validar markdown: `./scripts/markdown-lint.sh`
 - [x] 3.5 Atualizar `tasks.md` com checklist final

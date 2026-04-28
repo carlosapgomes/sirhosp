@@ -52,11 +52,11 @@ class IngestionRunStageMetric(models.Model):
 O worker (`process_ingestion_runs.py`) persiste estágios para runs de todos os
 intents:
 
-| Intent | Estágios registrados |
-| ------ | ------------------- |
+| Intent                           | Estágios registrados                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------- |
 | `full_admission_sync` / genérico | `admissions_capture`, `gap_planning`, `evolution_extraction`, `ingestion_persistence` |
-| `admissions_only` | `admissions_capture` |
-| `demographics_only` | `demographics_extraction`, `demographics_persistence` |
+| `admissions_only`                | `admissions_capture`                                                                  |
+| `demographics_only`              | `demographics_extraction`, `demographics_persistence`                                 |
 
 ### 2.2 View run_status atual
 
@@ -96,15 +96,10 @@ urlpatterns = [
 ### 2.4 Template run_status.html atual (partes relevantes)
 
 ```html
-{% extends "base_sidebar.html" %}
-
-{% block extra_head %}
-{% if run.status == 'queued' or run.status == 'running' %}
-  <meta http-equiv="refresh" content="5">
-{% endif %}
-{% endblock %}
-
-{% block content %}
+{% extends "base_sidebar.html" %} {% block extra_head %} {% if run.status ==
+'queued' or run.status == 'running' %}
+<meta http-equiv="refresh" content="5" />
+{% endif %} {% endblock %} {% block content %}
 <!-- breadcrumb, título, card de estado, alertas de status -->
 <!-- ... -->
 {% endblock %}
@@ -176,39 +171,38 @@ Estrutura HTML: usar Bootstrap 5 cards/badges alinhados com o estilo existente
 ```html
 <div id="run-progress" class="card border-0 shadow-sm mb-3">
   <div class="card-body">
-    <h5 class="card-title h6 fw-semibold mb-3" style="color: var(--sirhosp-sidebar-bg);">
+    <h5
+      class="card-title h6 fw-semibold mb-3"
+      style="color: var(--sirhosp-sidebar-bg);"
+    >
       Progresso
     </h5>
-    {% if stage_metrics %}
-      {% for stage in stage_metrics %}
-        <div class="d-flex align-items-center gap-2 mb-2">
-          {# Ícone e nome do estágio #}
-          <div class="flex-grow-1">
-            <span class="small fw-medium">{{ stage.stage_name }}</span>
-          </div>
-          {# Badge de status #}
-          {% if stage.status == 'succeeded' %}
-            <span class="badge bg-success small">Concluído</span>
-            <small class="text-muted">{{ duração }}</small>
-          {% elif stage.status == 'failed' %}
-            <span class="badge bg-danger small">Falhou</span>
-          {% elif stage.status == 'skipped' %}
-            <span class="badge bg-secondary small">Pulado</span>
-          {% endif %}
-        </div>
-      {% endfor %}
-      {# Indicador de estágio em andamento #}
-      {% if run.status == 'running' %}
-        <div class="d-flex align-items-center gap-2 mt-2">
-          <div class="spinner-border spinner-border-sm" role="status"></div>
-          <small class="text-muted">Processando próximo estágio...</small>
-        </div>
-      {% endif %}
-    {% elif run.status == 'running' %}
-      <div class="d-flex align-items-center gap-2">
-        <div class="spinner-border spinner-border-sm" role="status"></div>
-        <small class="text-muted">Inicializando extração...</small>
+    {% if stage_metrics %} {% for stage in stage_metrics %}
+    <div class="d-flex align-items-center gap-2 mb-2">
+      {# Ícone e nome do estágio #}
+      <div class="flex-grow-1">
+        <span class="small fw-medium">{{ stage.stage_name }}</span>
       </div>
+      {# Badge de status #} {% if stage.status == 'succeeded' %}
+      <span class="badge bg-success small">Concluído</span>
+      <small class="text-muted">{{ duração }}</small>
+      {% elif stage.status == 'failed' %}
+      <span class="badge bg-danger small">Falhou</span>
+      {% elif stage.status == 'skipped' %}
+      <span class="badge bg-secondary small">Pulado</span>
+      {% endif %}
+    </div>
+    {% endfor %} {# Indicador de estágio em andamento #} {% if run.status ==
+    'running' %}
+    <div class="d-flex align-items-center gap-2 mt-2">
+      <div class="spinner-border spinner-border-sm" role="status"></div>
+      <small class="text-muted">Processando próximo estágio...</small>
+    </div>
+    {% endif %} {% elif run.status == 'running' %}
+    <div class="d-flex align-items-center gap-2">
+      <div class="spinner-border spinner-border-sm" role="status"></div>
+      <small class="text-muted">Inicializando extração...</small>
+    </div>
     {% endif %}
   </div>
 </div>
@@ -216,13 +210,13 @@ Estrutura HTML: usar Bootstrap 5 cards/badges alinhados com o estilo existente
 
 **Labels amigáveis para stage_name (mapear no template):**
 
-| stage_name | Label |
-| ---------- | ----- |
-| `admissions_capture` | Captura de internações |
-| `gap_planning` | Planejamento de gaps |
-| `evolution_extraction` | Extração de evoluções |
-| `ingestion_persistence` | Persistência dos dados |
-| `demographics_extraction` | Extração de dados demográficos |
+| stage_name                 | Label                              |
+| -------------------------- | ---------------------------------- |
+| `admissions_capture`       | Captura de internações             |
+| `gap_planning`             | Planejamento de gaps               |
+| `evolution_extraction`     | Extração de evoluções              |
+| `ingestion_persistence`    | Persistência dos dados             |
+| `demographics_extraction`  | Extração de dados demográficos     |
 | `demographics_persistence` | Persistência de dados demográficos |
 
 ### 4.2 MODIFICAR: `apps/ingestion/views.py`

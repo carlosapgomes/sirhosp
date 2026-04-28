@@ -33,17 +33,11 @@ O Slice PF-1 (já concluído) criou:
 ### 2.2 Template run_status.html atual (ANTES das mudanças)
 
 ```html
-{% extends "base_sidebar.html" %}
-
-{% block title %}Status #{{ run.pk }} — SIRHOSP{% endblock %}
-
-{% block extra_head %}
-{% if run.status == 'queued' or run.status == 'running' %}
-  <meta http-equiv="refresh" content="5">
-{% endif %}
-{% endblock %}
-
-{% block content %}
+{% extends "base_sidebar.html" %} {% block title %}Status #{{ run.pk }} —
+SIRHOSP{% endblock %} {% block extra_head %} {% if run.status == 'queued' or
+run.status == 'running' %}
+<meta http-equiv="refresh" content="5" />
+{% endif %} {% endblock %} {% block content %}
 <nav aria-label="breadcrumb" class="mb-3">
   <!-- breadcrumb ... -->
 </nav>
@@ -59,7 +53,7 @@ O Slice PF-1 (já concluído) criou:
 
 <!-- Results (só aparece em succeeded/failed) -->
 {% if run.status == 'succeeded' or run.status == 'failed' %}
-  <!-- contadores ... -->
+<!-- contadores ... -->
 {% endif %}
 
 <!-- Alerts (queued/running/succeeded/failed/no_admissions) -->
@@ -80,19 +74,22 @@ O Slice PF-1 (já concluído) criou:
 {% load static %}
 <!DOCTYPE html>
 <html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{% block title %}SIRHOSP{% endblock %}</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.5/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.5/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
     <!-- ... outros CSS ... -->
     {% block extra_head %}{% endblock %}
-</head>
-<body>
+  </head>
+  <body>
     {% block body %}{% endblock %}
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.5/dist/js/bootstrap.bundle.min.js"></script>
     {% block extra_js %}{% endblock %}
-</body>
+  </body>
 </html>
 ```
 
@@ -132,9 +129,13 @@ Localização exata: após o `<script>` do Bootstrap e antes de
 `{% block extra_js %}`.
 
 ```html
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.5/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://unpkg.com/htmx.org@2.0.4" integrity="sha384-HGVzbSkoAGq0eaeB7Tjjs0BzRWtvUZy6VU1hQ3UPh5fS4wFvpIkJ5hWLlOahwRr" crossorigin="anonymous"></script>
-    {% block extra_js %}{% endblock %}
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.5/dist/js/bootstrap.bundle.min.js"></script>
+<script
+  src="https://unpkg.com/htmx.org@2.0.4"
+  integrity="sha384-HGVzbSkoAGq0eaeB7Tjjs0BzRWtvUZy6VU1hQ3UPh5fS4wFvpIkJ5hWLlOahwRr"
+  crossorigin="anonymous"
+></script>
+{% block extra_js %}{% endblock %}
 ```
 
 **IMPORTANTE**: Usar `integrity` e `crossorigin` para segurança. A hash acima
@@ -151,11 +152,10 @@ Remover TODO o bloco `{% block extra_head %}` que contém o meta-refresh:
 **ANTES:**
 
 ```html
-{% block extra_head %}
-{% if run.status == 'queued' or run.status == 'running' %}
-  <meta http-equiv="refresh" content="5">
-{% endif %}
-{% endblock %}
+{% block extra_head %} {% if run.status == 'queued' or run.status == 'running'
+%}
+<meta http-equiv="refresh" content="5" />
+{% endif %} {% endblock %}
 ```
 
 **DEPOIS:**
@@ -174,14 +174,14 @@ e antes de `<!-- Results -->`.
 ```html
 <!-- Progress section with HTMX polling -->
 {% if run.status == 'queued' or run.status == 'running' %}
-  <div hx-get="{% url 'ingestion:run_status_fragment' run.pk %}"
-       hx-trigger="every 3s"
-       hx-swap="innerHTML">
-    {% include "ingestion/_run_progress.html" %}
-  </div>
-{% else %}
+<div
+  hx-get="{% url 'ingestion:run_status_fragment' run.pk %}"
+  hx-trigger="every 3s"
+  hx-swap="innerHTML"
+>
   {% include "ingestion/_run_progress.html" %}
-{% endif %}
+</div>
+{% else %} {% include "ingestion/_run_progress.html" %} {% endif %}
 ```
 
 **Explicação da lógica:**

@@ -91,7 +91,10 @@ Gera JSON com 35+ campos + `_meta`. Exemplo de saída:
 
 ```json
 {
-  "_meta": {"patient_record": "14160147", "extracted_at": "2026-04-26T10:30:00"},
+  "_meta": {
+    "patient_record": "14160147",
+    "extracted_at": "2026-04-26T10:30:00"
+  },
   "prontuario": "14160147",
   "nome": "JOSE AUGUSTO MERCES",
   "nome_social": "",
