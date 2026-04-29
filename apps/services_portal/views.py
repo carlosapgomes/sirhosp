@@ -99,9 +99,9 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
     chart_data = {
         "labels": labels,
         "counts": counts,
-        "ma3": _moving_average(counts, 3),
-        "ma10": _moving_average(counts, 10),
-        "ma30": _moving_average(counts, 30),
+        "sma7": _moving_average(counts, 7),
+        "ema7": _exponential_moving_average(counts, 7),
+        "sma30": _moving_average(counts, 30),
     }
 
     context = {
@@ -125,6 +125,37 @@ def _moving_average(values: list[int], window: int) -> list[float | None]:
         else:
             window_slice = values[i - window + 1 : i + 1]
             result.append(round(sum(window_slice) / window, 1))
+    return result
+
+
+def _exponential_moving_average(
+    values: list[int], span: int
+) -> list[float | None]:
+    """Calculate exponential moving average with the given span.
+
+    Uses α = 2/(span+1), the common convention that matches pandas.
+    The EMA is seeded at position (span-1) with the SMA of the first
+    `span` values. Positions before that are None.
+    """
+    n = len(values)
+    result: list[float | None] = [None] * n
+
+    if n < span or span < 1:
+        return result
+
+    alpha = 2.0 / (span + 1.0)
+
+    # Seed: SMA of first `span` values at index span-1
+    seed_slice = values[:span]
+    seed = sum(seed_slice) / len(seed_slice)
+    result[span - 1] = round(seed, 1)
+
+    # Compute EMA forward
+    ema = seed
+    for i in range(span, n):
+        ema = alpha * values[i] + (1 - alpha) * ema
+        result[i] = round(ema, 1)
+
     return result
 
 

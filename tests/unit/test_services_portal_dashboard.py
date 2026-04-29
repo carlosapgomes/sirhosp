@@ -318,31 +318,82 @@ class TestDischargeChartView:
         assert len(chart_data["labels"]) <= 90
 
     def test_chart_context_has_all_ma_keys(self, admin_client):
-        """Context contains labels, counts, ma3, ma10, ma30."""
+        """Context contains labels, counts, sma7, ema7, sma30."""
         self._create_counts(35)
         url = reverse("services_portal:discharge_chart") + "?dias=30"
         response = admin_client.get(url)
         chart_data = response.context["chart_data"]
         assert "labels" in chart_data
         assert "counts" in chart_data
-        assert "ma3" in chart_data
-        assert "ma10" in chart_data
-        assert "ma30" in chart_data
+        assert "sma7" in chart_data
+        assert "ema7" in chart_data
+        assert "sma30" in chart_data
         n = len(chart_data["labels"])
         assert len(chart_data["counts"]) == n
-        assert len(chart_data["ma3"]) == n
-        assert len(chart_data["ma10"]) == n
-        assert len(chart_data["ma30"]) == n
+        assert len(chart_data["sma7"]) == n
+        assert len(chart_data["ema7"]) == n
+        assert len(chart_data["sma30"]) == n
 
-    def test_ma3_is_none_for_first_two_days(self, admin_client):
-        """MA-3 is None for indices 0 and 1, value from index 2."""
-        self._create_counts(10)
-        url = reverse("services_portal:discharge_chart") + "?dias=10"
+    def test_sma7_is_none_for_first_six_days(self, admin_client):
+        """SMA-7 is None for indices 0-5, value from index 6."""
+        self._create_counts(15)
+        url = reverse("services_portal:discharge_chart") + "?dias=15"
         response = admin_client.get(url)
-        ma3 = response.context["chart_data"]["ma3"]
-        assert ma3[0] is None
-        assert ma3[1] is None
-        assert ma3[2] is not None
+        sma7 = response.context["chart_data"]["sma7"]
+        assert sma7[0] is None
+        assert sma7[5] is None
+        assert sma7[6] is not None
+
+    def test_ema7_is_none_for_first_six_days(self, admin_client):
+        """EMA-7 is None for indices 0-5 (seeded at index 6 with SMA)."""
+        self._create_counts(15)
+        url = reverse("services_portal:discharge_chart") + "?dias=15"
+        response = admin_client.get(url)
+        ema7 = response.context["chart_data"]["ema7"]
+        assert ema7[0] is None
+        assert ema7[5] is None
+        assert ema7[6] is not None
+
+    def test_ema7_matches_sma7_at_seed_position(self, admin_client):
+        """At position 6 (index 6), EMA-7 seed equals SMA-7 of first 7 values."""
+        self._create_counts(15)
+        url = reverse("services_portal:discharge_chart") + "?dias=15"
+        response = admin_client.get(url)
+        sma7 = response.context["chart_data"]["sma7"]
+        ema7 = response.context["chart_data"]["ema7"]
+        assert sma7[6] == ema7[6]  # seed position
+        # EMA is defined for all positions >= 6 (no additional None gaps)
+        for i in range(7, 15):
+            assert ema7[i] is not None
+            assert isinstance(ema7[i], float)
+
+    def test_ema7_reacts_faster_than_sma7_to_changes(self, admin_client):
+        """EMA-7 gives more weight to recent values than SMA-7."""
+        # Create constant counts for 10 days then a spike
+        today = timezone.localdate()
+        for i in range(15):
+            day = today - timedelta(days=15 - i)
+            count = 5 if i < 12 else 20  # spike at day 12 (index 11)
+            DailyDischargeCount.objects.create(date=day, count=count)
+
+        url = reverse("services_portal:discharge_chart") + "?dias=15"
+        response = admin_client.get(url)
+        sma7 = response.context["chart_data"]["sma7"]
+        ema7 = response.context["chart_data"]["ema7"]
+        # After spike, EMA should be higher than SMA
+        assert ema7[13] is not None
+        assert sma7[13] is not None
+        assert ema7[13] > sma7[13]
+
+    def test_sma30_is_none_for_first_29_days(self, admin_client):
+        """SMA-30 is None for indices 0-28, value from index 29."""
+        self._create_counts(35)
+        url = reverse("services_portal:discharge_chart") + "?dias=35"
+        response = admin_client.get(url)
+        sma30 = response.context["chart_data"]["sma30"]
+        assert sma30[0] is None
+        assert sma30[28] is None
+        assert sma30[29] is not None
 
     def test_chart_handles_empty_data(self, admin_client):
         """Page renders without error when no DailyDischargeCount exists."""

@@ -52,15 +52,15 @@
   </div>
   <div class="d-flex align-items-center gap-2">
     <span style="display:inline-block;width:20px;height:2px;background:#0D6EFD;"></span>
-    MM 3 dias
+    SMA 7 dias
   </div>
   <div class="d-flex align-items-center gap-2">
-    <span style="display:inline-block;width:20px;height:2px;background:#F59E0B;"></span>
-    MM 10 dias
+    <span style="display:inline-block;width:20px;height:2px;background:#16A34A;border-top:2px dashed #16A34A;"></span>
+    EMA 7 dias
   </div>
   <div class="d-flex align-items-center gap-2">
     <span style="display:inline-block;width:20px;height:2px;background:#DC2626;"></span>
-    MM 30 dias
+    SMA 30 dias
   </div>
 </div>
 {% endblock %}
@@ -87,8 +87,8 @@
             order: 2,
           },
           {
-            label: 'MM 3 dias',
-            data: rawData.ma3,
+            label: 'SMA 7 dias',
+            data: rawData.sma7,
             type: 'line',
             borderColor: '#0D6EFD',
             backgroundColor: 'transparent',
@@ -99,20 +99,21 @@
             order: 1,
           },
           {
-            label: 'MM 10 dias',
-            data: rawData.ma10,
+            label: 'EMA 7 dias',
+            data: rawData.ema7,
             type: 'line',
-            borderColor: '#F59E0B',
+            borderColor: '#16A34A',
             backgroundColor: 'transparent',
             borderWidth: 2,
+            borderDash: [5, 3],
             pointRadius: 0,
             tension: 0.3,
             spanGaps: false,
             order: 1,
           },
           {
-            label: 'MM 30 dias',
-            data: rawData.ma30,
+            label: 'SMA 30 dias',
+            data: rawData.sma30,
             type: 'line',
             borderColor: '#DC2626',
             backgroundColor: 'transparent',
