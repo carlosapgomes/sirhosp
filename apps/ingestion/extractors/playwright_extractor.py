@@ -7,7 +7,6 @@ connector and maps its JSON output to the canonical ingestion format.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -22,6 +21,10 @@ from apps.ingestion.extractors.errors import (
     InvalidJsonError,
 )
 from apps.ingestion.extractors.ports import EvolutionExtractorPort
+from apps.ingestion.extractors.subprocess_utils import (
+    SubprocessTimeoutError,
+    run_subprocess,
+)
 
 # ---------------------------------------------------------------------------
 # Date conversion
@@ -108,9 +111,9 @@ def _build_process_output_context(
     return " | ".join(parts)
 
 
-def _build_timeout_context(exc: subprocess.TimeoutExpired) -> str:
-    """Build diagnostic context from TimeoutExpired stdout/stderr."""
-    stdout_value = exc.stdout if exc.stdout is not None else exc.output
+def _build_timeout_context(exc: SubprocessTimeoutError) -> str:
+    """Build diagnostic context from SubprocessTimeoutError output/stderr."""
+    stdout_value = exc.output
     return _build_process_output_context(stdout_value, exc.stderr)
 
 
@@ -192,13 +195,11 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
                 cmd.append("--headless")
 
             try:
-                result = subprocess.run(
+                result = run_subprocess(
                     cmd,
-                    capture_output=True,
-                    text=True,
                     timeout=timeout,
                 )
-            except subprocess.TimeoutExpired as exc:
+            except SubprocessTimeoutError as exc:
                 timeout_context = _build_timeout_context(exc)
                 message = (
                     f"Extraction timed out after {exc.timeout}s "
@@ -280,13 +281,11 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
             ]
 
             try:
-                result = subprocess.run(
+                result = run_subprocess(
                     cmd,
-                    capture_output=True,
-                    text=True,
                     timeout=timeout,
                 )
-            except subprocess.TimeoutExpired as exc:
+            except SubprocessTimeoutError as exc:
                 timeout_context = _build_timeout_context(exc)
                 message = (
                     f"Admission snapshot extraction timed out after {exc.timeout}s "

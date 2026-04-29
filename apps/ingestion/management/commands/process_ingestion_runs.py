@@ -208,8 +208,6 @@ class Command(BaseCommand):
         Returns:
             (failure_reason, timed_out)
         """
-        import subprocess
-
         from django.core.exceptions import ValidationError
 
         from apps.ingestion.extractors.errors import (
@@ -217,8 +215,11 @@ class Command(BaseCommand):
             ExtractionTimeoutError,
             InvalidJsonError,
         )
+        from apps.ingestion.extractors.subprocess_utils import (
+            SubprocessTimeoutError,
+        )
 
-        if isinstance(exc, (ExtractionTimeoutError, subprocess.TimeoutExpired)):
+        if isinstance(exc, (ExtractionTimeoutError, SubprocessTimeoutError)):
             return ("timeout", True)
         if isinstance(exc, InvalidJsonError):
             return ("invalid_payload", False)
@@ -413,10 +414,13 @@ class Command(BaseCommand):
         reads the JSON output, and calls upsert_patient_demographics().
         """
         import json
-        import subprocess
         import sys
         import tempfile
 
+        from apps.ingestion.extractors.subprocess_utils import (
+            SubprocessTimeoutError,
+            run_subprocess,
+        )
         from apps.ingestion.services import upsert_patient_demographics
 
         params = run.parameters_json or {}
@@ -443,13 +447,11 @@ class Command(BaseCommand):
             ]
 
             try:
-                result = subprocess.run(
+                result = run_subprocess(
                     cmd,
-                    capture_output=True,
-                    text=True,
                     timeout=300,  # 5 minutes max for single-patient extraction
                 )
-            except subprocess.TimeoutExpired as exc:
+            except SubprocessTimeoutError as exc:
                 self._record_stage(
                     run=run,
                     stage_name="demographics_extraction",

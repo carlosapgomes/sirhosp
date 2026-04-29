@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -10,6 +9,10 @@ from django.utils import timezone
 
 from apps.census.models import CensusSnapshot
 from apps.census.services import parse_census_csv
+from apps.ingestion.extractors.subprocess_utils import (
+    SubprocessTimeoutError,
+    run_subprocess,
+)
 from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
 
 
@@ -83,13 +86,11 @@ class Command(BaseCommand):
             # -- Stage: census_extraction (subprocess) ---------------------
             ext_stage_start = timezone.now()
             try:
-                result = subprocess.run(
+                result = run_subprocess(
                     cmd,
-                    capture_output=True,
-                    text=True,
                     timeout=1800,  # 30 minutes max
                 )
-            except subprocess.TimeoutExpired as exc:
+            except SubprocessTimeoutError as exc:
                 self._record_stage(
                     run=run,
                     stage_name="census_extraction",
@@ -240,7 +241,7 @@ class Command(BaseCommand):
         Returns:
             (failure_reason, timed_out)
         """
-        if isinstance(exc, subprocess.TimeoutExpired):
+        if isinstance(exc, SubprocessTimeoutError):
             return ("timeout", True)
         # Non-timeout subprocess errors (source unavailable from script)
         return ("unexpected_exception", False)

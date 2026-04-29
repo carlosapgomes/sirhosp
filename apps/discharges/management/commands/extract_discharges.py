@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from datetime import date
@@ -14,6 +13,10 @@ from django.utils import timezone
 
 from apps.discharges.models import DailyDischargeCount
 from apps.discharges.services import process_discharges
+from apps.ingestion.extractors.subprocess_utils import (
+    SubprocessTimeoutError,
+    run_subprocess,
+)
 from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
 
 
@@ -97,14 +100,12 @@ class Command(BaseCommand):
 
             self.stdout.write("Running discharge extraction...")
             try:
-                result = subprocess.run(
+                result = run_subprocess(
                     cmd,
-                    capture_output=True,
-                    text=True,
                     timeout=600,
                     check=False,
                 )
-            except subprocess.TimeoutExpired as exc:
+            except SubprocessTimeoutError as exc:
                 self._record_stage(
                     run,
                     "discharge_extraction",
