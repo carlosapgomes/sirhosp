@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
 from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
 from apps.ingestion.services import queue_demographics_only_run
 from apps.patients.models import Patient
@@ -126,7 +126,7 @@ class TestProcessDemographicsOnly:
     # Test cases
     # ------------------------------------------------------------------
 
-    @patch("subprocess.run")
+    @patch("apps.ingestion.extractors.subprocess_utils.run_subprocess")
     def test_successful_extraction_creates_patient(self, mock_run):
         """Successful demographics extraction → Patient created with
         full data."""
@@ -155,7 +155,7 @@ class TestProcessDemographicsOnly:
         assert patient.cpf == "12345678900"
         assert patient.city == "Sao Paulo"
 
-    @patch("subprocess.run")
+    @patch("apps.ingestion.extractors.subprocess_utils.run_subprocess")
     def test_successful_extraction_updates_existing_patient(self, mock_run):
         """Existing patient gets demographic data updated."""
         from apps.ingestion.management.commands.process_ingestion_runs import (
@@ -190,10 +190,10 @@ class TestProcessDemographicsOnly:
         assert patient.mother_name == "MARIA MERCES"
         assert patient.cpf == "12345678900"
 
-    @patch("subprocess.run")
+    @patch("apps.ingestion.extractors.subprocess_utils.run_subprocess")
     def test_subprocess_timeout_fails_run(self, mock_run):
         """Timeout → run failed with timeout reason."""
-        mock_run.side_effect = subprocess.TimeoutExpired(
+        mock_run.side_effect = SubprocessTimeoutError(
             cmd=["python", "script.py"], timeout=300
         )
 
@@ -212,7 +212,7 @@ class TestProcessDemographicsOnly:
         assert run.failure_reason == "timeout"
         assert run.timed_out is True
 
-    @patch("subprocess.run")
+    @patch("apps.ingestion.extractors.subprocess_utils.run_subprocess")
     def test_subprocess_nonzero_exit_fails_run(self, mock_run):
         """Non-zero exit code → run failed."""
         self._mock_subprocess_failure(mock_run, returncode=1,
@@ -232,7 +232,7 @@ class TestProcessDemographicsOnly:
         assert run.status == "failed"
         assert run.failure_reason == "source_unavailable"
 
-    @patch("subprocess.run")
+    @patch("apps.ingestion.extractors.subprocess_utils.run_subprocess")
     def test_invalid_json_output_fails_run(self, mock_run):
         """Invalid JSON in output file → run failed."""
         self._mock_subprocess_success(mock_run, json_data=None)
@@ -266,7 +266,7 @@ class TestProcessDemographicsOnly:
         run.refresh_from_db()
         assert run.status == "failed"
 
-    @patch("subprocess.run")
+    @patch("apps.ingestion.extractors.subprocess_utils.run_subprocess")
     def test_missing_patient_record_fails_early(self, mock_run):
         """Missing patient_record in parameters → fail without subprocess."""
         from apps.ingestion.management.commands.process_ingestion_runs import (
@@ -290,7 +290,7 @@ class TestProcessDemographicsOnly:
         # subprocess.run should NOT have been called
         mock_run.assert_not_called()
 
-    @patch("subprocess.run")
+    @patch("apps.ingestion.extractors.subprocess_utils.run_subprocess")
     def test_stage_metrics_recorded_on_success(self, mock_run):
         """Stage metrics are created for successful demographics extraction."""
         from apps.ingestion.management.commands.process_ingestion_runs import (

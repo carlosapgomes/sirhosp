@@ -11,6 +11,7 @@ This is a one-shot script — not intended for production scheduling.
 
 from __future__ import annotations
 
+import importlib
 import re
 import sys
 from datetime import date
@@ -91,13 +92,16 @@ class Command(BaseCommand):
         """
         try:
             # Try to use the full extraction pipeline
-            sys.path.insert(
-                0,
-                str(Path(__file__).resolve().parents[4] / "automation" / "source_system" / "discharges"),
+            automation_discharges_dir = (
+                Path(__file__).resolve().parents[4]
+                / "automation"
+                / "source_system"
+                / "discharges"
             )
-            from extract_discharges import extract_patients_from_pdf  # type: ignore[import-not-found]
+            sys.path.insert(0, str(automation_discharges_dir))
+            extract_discharges = importlib.import_module("extract_discharges")
 
-            patients = extract_patients_from_pdf(pdf_path)
+            patients = extract_discharges.extract_patients_from_pdf(pdf_path)
             return len(patients)
         except Exception:
             # Fallback: count prontuario patterns directly

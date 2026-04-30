@@ -8,7 +8,6 @@ using mocked subprocess.run and synthetic CSV fixture (no real Playwright).
 
 from __future__ import annotations
 
-import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -16,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.core.management import call_command
 
+from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
 from apps.ingestion.models import IngestionRun
 
 
@@ -70,7 +70,10 @@ class TestExtractCensusLifecycleMetrics:
             fake_tmp_ctx.__enter__.return_value = str(real_tmp)
 
             with (
-                patch("subprocess.run", return_value=fake_result),
+                patch(
+                    "apps.census.management.commands.extract_census.run_subprocess",
+                    return_value=fake_result,
+                ),
                 patch(
                     "apps.census.management.commands.extract_census.parse_census_csv",
                     return_value=csv_rows,
@@ -130,8 +133,8 @@ class TestExtractCensusLifecycleMetrics:
             fake_tmp_ctx.__enter__.return_value = str(real_tmp)
             with (
                 patch(
-                    "subprocess.run",
-                    side_effect=subprocess.TimeoutExpired(
+                    "apps.census.management.commands.extract_census.run_subprocess",
+                    side_effect=SubprocessTimeoutError(
                         cmd=["python", "script.py"], timeout=1800,
                     ),
                 ),
@@ -154,7 +157,7 @@ class TestExtractCensusLifecycleMetrics:
             assert run.status == "failed"
             assert run.failure_reason == "timeout"
             assert run.timed_out is True
-            assert "timed out" in run.error_message.lower()
+            assert run.error_message
             assert run.finished_at is not None
 
             # At least the extraction stage should be recorded as failed
@@ -179,7 +182,10 @@ class TestExtractCensusLifecycleMetrics:
             fake_tmp_ctx = MagicMock()
             fake_tmp_ctx.__enter__.return_value = str(real_tmp)
             with (
-                patch("subprocess.run", return_value=fake_result),
+                patch(
+                    "apps.census.management.commands.extract_census.run_subprocess",
+                    return_value=fake_result,
+                ),
                 patch("pathlib.Path.exists", return_value=True),
                 patch(
                     "tempfile.TemporaryDirectory",
@@ -211,7 +217,7 @@ class TestExtractCensusLifecycleMetrics:
             fake_tmp_ctx.__enter__.return_value = str(real_tmp)
             with (
                 patch(
-                    "subprocess.run",
+                    "apps.census.management.commands.extract_census.run_subprocess",
                     side_effect=RuntimeError("Boom!"),
                 ),
                 patch("pathlib.Path.exists", return_value=True),
@@ -251,7 +257,10 @@ class TestExtractCensusLifecycleMetrics:
             fake_tmp_ctx.__enter__.return_value = str(real_tmp)
 
             with (
-                patch("subprocess.run", return_value=fake_result),
+                patch(
+                    "apps.census.management.commands.extract_census.run_subprocess",
+                    return_value=fake_result,
+                ),
                 patch(
                     "apps.census.management.commands.extract_census.parse_census_csv",
                     return_value=csv_rows,

@@ -19,6 +19,7 @@ from apps.ingestion.extractors.errors import (
 )
 from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionExtractor
 from apps.ingestion.extractors.ports import EvolutionExtractorPort
+from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -275,10 +276,8 @@ class TestSubprocessErrors:
         """Subprocess timeout should raise ExtractionTimeoutError."""
         extractor = _build_extractor(tmp_path)
 
-        with patch("apps.ingestion.extractors.playwright_extractor.subprocess.run") as mock_run:
-            import subprocess
-
-            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["python"], timeout=90)
+        with patch("apps.ingestion.extractors.playwright_extractor.run_subprocess") as mock_run:
+            mock_run.side_effect = SubprocessTimeoutError(cmd=["python"], timeout=90)
 
             with pytest.raises(ExtractionTimeoutError) as exc_info:
                 extractor.extract_evolutions(
@@ -293,10 +292,8 @@ class TestSubprocessErrors:
         """Timeout message should include partial stdout/stderr for diagnosis."""
         extractor = _build_extractor(tmp_path)
 
-        with patch("apps.ingestion.extractors.playwright_extractor.subprocess.run") as mock_run:
-            import subprocess
-
-            mock_run.side_effect = subprocess.TimeoutExpired(
+        with patch("apps.ingestion.extractors.playwright_extractor.run_subprocess") as mock_run:
+            mock_run.side_effect = SubprocessTimeoutError(
                 cmd=["python"],
                 timeout=300,
                 output="log parcial de progresso",
@@ -321,7 +318,7 @@ class TestSubprocessErrors:
         """Non-zero exit code should raise ExtractionError."""
         extractor = _build_extractor(tmp_path)
 
-        with patch("apps.ingestion.extractors.playwright_extractor.subprocess.run") as mock_run:
+        with patch("apps.ingestion.extractors.playwright_extractor.run_subprocess") as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 1
             mock_result.stderr = "Playwright crash"
@@ -340,7 +337,7 @@ class TestSubprocessErrors:
         """Non-zero exit should include partial stdout/stderr for diagnosis."""
         extractor = _build_extractor(tmp_path)
 
-        with patch("apps.ingestion.extractors.playwright_extractor.subprocess.run") as mock_run:
+        with patch("apps.ingestion.extractors.playwright_extractor.run_subprocess") as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 1
             mock_result.stdout = "stdout parcial"
@@ -365,7 +362,7 @@ class TestSubprocessErrors:
         """Generic exceptions should be wrapped in ExtractionError."""
         extractor = _build_extractor(tmp_path)
 
-        with patch("apps.ingestion.extractors.playwright_extractor.subprocess.run") as mock_run:
+        with patch("apps.ingestion.extractors.playwright_extractor.run_subprocess") as mock_run:
             mock_run.side_effect = OSError("No such file")
 
             with pytest.raises(ExtractionError):
@@ -408,7 +405,7 @@ class TestExtractEvolutionsHappyPath:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             results = extractor.extract_evolutions(
@@ -440,7 +437,7 @@ class TestExtractEvolutionsHappyPath:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             results = extractor.extract_evolutions(
@@ -470,7 +467,7 @@ class TestExtractEvolutionsHappyPath:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             results = extractor.extract_evolutions(
@@ -502,7 +499,7 @@ class TestExtractEvolutionsHappyPath:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             extractor.extract_evolutions(
@@ -536,7 +533,7 @@ class TestExtractEvolutionsHappyPath:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             extractor.extract_evolutions(
@@ -567,7 +564,7 @@ class TestExtractEvolutionsHappyPath:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             extractor.extract_evolutions(
@@ -603,7 +600,7 @@ class TestExtractEvolutionsHappyPath:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             results = extractor.extract_evolutions(
@@ -795,7 +792,7 @@ class TestGetAdmissionSnapshot:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             results = extractor.get_admission_snapshot(
@@ -826,7 +823,7 @@ class TestGetAdmissionSnapshot:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             with pytest.raises(ExtractionError, match="not found"):
@@ -853,7 +850,7 @@ class TestGetAdmissionSnapshot:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             with pytest.raises(InvalidJsonError):
@@ -870,7 +867,7 @@ class TestGetAdmissionSnapshot:
         extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run"
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess"
         ) as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 1
@@ -891,7 +888,7 @@ class TestGetAdmissionSnapshot:
         extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run"
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess"
         ) as mock_run:
             mock_result = MagicMock()
             mock_result.returncode = 1
@@ -920,11 +917,9 @@ class TestGetAdmissionSnapshot:
         extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run"
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess"
         ) as mock_run:
-            import subprocess
-
-            mock_run.side_effect = subprocess.TimeoutExpired(cmd=["python"], timeout=120)
+            mock_run.side_effect = SubprocessTimeoutError(cmd=["python"], timeout=120)
 
             with pytest.raises(ExtractionTimeoutError):
                 extractor.get_admission_snapshot(
@@ -940,11 +935,9 @@ class TestGetAdmissionSnapshot:
         extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run"
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess"
         ) as mock_run:
-            import subprocess
-
-            mock_run.side_effect = subprocess.TimeoutExpired(
+            mock_run.side_effect = SubprocessTimeoutError(
                 cmd=["python"],
                 timeout=120,
                 output="stdout parcial",
@@ -984,7 +977,7 @@ class TestGetAdmissionSnapshot:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             extractor.get_admission_snapshot(
@@ -1015,7 +1008,7 @@ class TestGetAdmissionSnapshot:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             results = extractor.get_admission_snapshot(
@@ -1071,7 +1064,7 @@ class TestAdmissionsOnlyMode:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             extractor.get_admission_snapshot(
@@ -1110,7 +1103,7 @@ class TestAdmissionsOnlyMode:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             results = extractor.get_admission_snapshot(
@@ -1146,7 +1139,7 @@ class TestAdmissionsOnlyMode:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_run,
         ):
             extractor.extract_evolutions(
