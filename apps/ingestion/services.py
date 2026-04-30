@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from apps.clinical_docs.models import ClinicalEvent
 from apps.core.profession_types import to_canonical_profession_type
-from apps.ingestion.models import IngestionRun
+from apps.ingestion.models import CensusExecutionBatch, IngestionRun
 from apps.patients.models import Admission, Patient
 
 TZ_INSTITUTIONAL = ZoneInfo("America/Sao_Paulo")
@@ -383,6 +383,7 @@ def queue_ingestion_run(
     intent: str = "",
     admission_id: str = "",
     admission_source_key: str = "",
+    batch: CensusExecutionBatch | None = None,
 ) -> IngestionRun:
     """Create an IngestionRun in queued state for async processing.
 
@@ -393,6 +394,7 @@ def queue_ingestion_run(
         intent: Operational intent metadata (optional).
         admission_id: Local admission identifier (optional).
         admission_source_key: Source admission identifier (optional).
+        batch: Optional CensusExecutionBatch to link this run to.
 
     Returns:
         IngestionRun instance with status=queued.
@@ -414,12 +416,14 @@ def queue_ingestion_run(
         status="queued",
         intent=intent,
         parameters_json=parameters,
+        batch=batch,
     )
 
 
 def queue_admissions_only_run(
     *,
     patient_record: str,
+    batch: CensusExecutionBatch | None = None,
 ) -> IngestionRun:
     """Create an IngestionRun for admissions-only synchronization.
 
@@ -429,6 +433,7 @@ def queue_admissions_only_run(
 
     Args:
         patient_record: Patient record identifier (prontuário).
+        batch: Optional CensusExecutionBatch to link this run to.
 
     Returns:
         IngestionRun instance with status=queued and intent='admissions_only'.
@@ -440,12 +445,14 @@ def queue_admissions_only_run(
             "patient_record": patient_record,
             "intent": "admissions_only",
         },
+        batch=batch,
     )
 
 
 def queue_demographics_only_run(
     *,
     patient_record: str,
+    batch: CensusExecutionBatch | None = None,
 ) -> IngestionRun:
     """Create an IngestionRun for demographics-only extraction.
 
@@ -454,6 +461,7 @@ def queue_demographics_only_run(
 
     Args:
         patient_record: Patient record identifier (prontuário).
+        batch: Optional CensusExecutionBatch to link this run to.
 
     Returns:
         IngestionRun instance with status=queued and intent='demographics_only'.
@@ -465,6 +473,7 @@ def queue_demographics_only_run(
             "patient_record": patient_record,
             "intent": "demographics_only",
         },
+        batch=batch,
     )
 
 

@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from django.db.models import Max
+from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.ingestion.models import CensusExecutionBatch
 from apps.ingestion.services import (
     queue_admissions_only_run,
     queue_demographics_only_run,
@@ -104,12 +106,15 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
 
 def process_census_snapshot(
     run_id: int | None = None,
-) -> dict[str, int]:
+) -> dict[str, int | None]:
     """Process the most recent census snapshot and enqueue patient sync runs.
 
     For each occupied bed with a prontuario, creates or updates the
     corresponding Patient record and enqueues both admissions-only
     and demographics-only ingestion runs.
+
+    Creates a CensusExecutionBatch to group all runs from this cycle.
+    If no patients are found to process, no batch is created.
 
     Args:
         run_id: Optional IngestionRun ID to process a specific census run.
@@ -117,6 +122,7 @@ def process_census_snapshot(
 
     Returns:
         Dict with metrics:
+            batch_id: CensusExecutionBatch pk (None if no batch created)
             patients_total: Total unique prontuarios processed
             patients_new: Patients created (not previously in DB)
             patients_updated: Patients whose name was updated
@@ -133,6 +139,7 @@ def process_census_snapshot(
         )["latest"]
         if latest_captured is None:
             return {
+                "batch_id": None,
                 "patients_total": 0,
                 "patients_new": 0,
                 "patients_updated": 0,
@@ -159,6 +166,28 @@ def process_census_snapshot(
                 "nome": snap.nome.strip(),
             })
 
+    # No occupied beds with prontuario → no batch needed
+    if not patients_to_process:
+        return {
+            "batch_id": None,
+            "patients_total": 0,
+            "patients_new": 0,
+            "patients_updated": 0,
+            "runs_enqueued": 0,
+            "demographics_runs_enqueued": 0,
+            "patients_skipped": max(
+                0, occupied.count() - len(patients_to_process)
+            ),
+        }
+
+    # Create execution batch for this census cycle
+    batch = CensusExecutionBatch.objects.create(
+        status="running",
+        notes_json={
+            "patients_total": len(patients_to_process),
+        },
+    )
+
     new_count = 0
     updated_count = 0
     enqueued_count = 0
@@ -183,17 +212,32 @@ def process_census_snapshot(
             updated_count += 1
 
         # Enqueue admissions-only run for this patient
-        queue_admissions_only_run(patient_record=prontuario)
+        queue_admissions_only_run(patient_record=prontuario, batch=batch)
         enqueued_count += 1
 
         # Enqueue demographics-only run for this patient
-        queue_demographics_only_run(patient_record=prontuario)
+        queue_demographics_only_run(patient_record=prontuario, batch=batch)
+
+    # Mark enqueue phase as complete
+    batch.enqueue_finished_at = timezone.now()
+    batch.notes_json = {
+        **batch.notes_json,
+        "runs_enqueued": enqueued_count,
+        "demographics_runs_enqueued": len(patients_to_process),
+        "patients_skipped": max(
+            0, occupied.count() - len(patients_to_process)
+        ),
+    }
+    batch.save(update_fields=["enqueue_finished_at", "notes_json"])
 
     return {
+        "batch_id": batch.pk,
         "patients_total": len(patients_to_process),
         "patients_new": new_count,
         "patients_updated": updated_count,
         "runs_enqueued": enqueued_count,
         "demographics_runs_enqueued": len(patients_to_process),
-        "patients_skipped": max(0, occupied.count() - len(patients_to_process)),
+        "patients_skipped": max(
+            0, occupied.count() - len(patients_to_process)
+        ),
     }

@@ -24,6 +24,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 f"Census snapshot processed:\n"
+                f"  Batch ID:                   {result['batch_id']}\n"
                 f"  Patients total:             {result['patients_total']}\n"
                 f"  Patients new:               {result['patients_new']}\n"
                 f"  Patients updated:           {result['patients_updated']}\n"
