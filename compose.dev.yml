@@ -46,6 +46,9 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
+    # Necessário para reaper de processos filhos (Playwright/Chromium)
+    # e evitar acúmulo de processos defunct.
+    init: true
     volumes:
       - .:/app
     environment:
@@ -76,6 +79,9 @@ services:
       dockerfile: Dockerfile
       target: dev
     container_name: sirhosp-summary-worker
+    # Necessário para reaper de processos filhos (Playwright/Chromium)
+    # e evitar acúmulo de processos defunct.
+    init: true
     volumes:
       - .:/app
     environment:

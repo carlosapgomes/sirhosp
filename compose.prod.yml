@@ -52,6 +52,9 @@ services:
       target: prod
     container_name: sirhosp-worker
     # Produção: código já está na imagem, sem bind mount
+    # Necessário para reaper de processos filhos (Playwright/Chromium)
+    # e evitar acúmulo de processos defunct.
+    init: true
     environment:
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required in production}
       - DJANGO_DEBUG=${DJANGO_DEBUG:-false}
@@ -83,6 +86,9 @@ services:
       target: prod
     container_name: sirhosp-summary-worker
     # Produção: código já está na imagem, sem bind mount
+    # Necessário para reaper de processos filhos (Playwright/Chromium)
+    # e evitar acúmulo de processos defunct.
+    init: true
     environment:
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required in production}
       - DJANGO_DEBUG=${DJANGO_DEBUG:-false}
