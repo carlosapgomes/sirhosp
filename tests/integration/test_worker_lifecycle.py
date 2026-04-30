@@ -28,6 +28,7 @@ class TestWorkerLifecycle:
         """Helper to create a queued IngestionRun directly."""
         defaults = {
             "status": "queued",
+            "max_attempts": 1,
             "parameters_json": {
                 "patient_record": "12345",
                 "start_date": "2026-04-01",
@@ -275,6 +276,7 @@ class TestWorkerAdmissionSemantics:
     def _queue_run(self, **kwargs):
         defaults = {
             "status": "queued",
+            "max_attempts": 1,
             "parameters_json": {
                 "patient_record": "12345",
                 "start_date": "2026-04-01",
@@ -580,6 +582,7 @@ class TestWorkerVolatileKeyRegression:
     def _queue_run(self, patient_record="VOLATILE_P1"):
         return IngestionRun.objects.create(
             status="queued",
+            max_attempts=1,
             parameters_json={
                 "patient_record": patient_record,
                 "start_date": "2026-04-01",
@@ -754,6 +757,7 @@ class TestWorkerStageMetrics:
     def _queue_run(self, **kwargs):
         defaults = {
             "status": "queued",
+            "max_attempts": 1,
             "parameters_json": {
                 "patient_record": "STAGE_TEST",
                 "start_date": "2026-04-01",
@@ -1166,6 +1170,7 @@ class TestWorkerStageMetrics:
         run = IngestionRun.objects.create(
             status="queued",
             intent="admissions_only",
+            max_attempts=1,
             parameters_json={
                 "patient_record": "STAGE_ADM_ONLY_FAIL",
                 "intent": "admissions_only",
@@ -1285,6 +1290,7 @@ class TestAdmissionsOnlyWorker:
     def _queue_admissions_only_run(self, patient_record="12345"):
         return IngestionRun.objects.create(
             status="queued",
+            max_attempts=1,
             parameters_json={
                 "patient_record": patient_record,
                 "intent": "admissions_only",
@@ -1413,6 +1419,7 @@ class TestWorkerLifecycleTimestampsAndFailures:
     def _queue_run(self, **kwargs):
         defaults = {
             "status": "queued",
+            "max_attempts": 1,
             "parameters_json": {
                 "patient_record": "12345",
                 "start_date": "2026-04-01",

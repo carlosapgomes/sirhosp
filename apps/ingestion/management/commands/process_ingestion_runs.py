@@ -15,6 +15,7 @@ Slice S3 adds:
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
@@ -24,7 +25,7 @@ from django.utils import timezone
 
 from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionExtractor
 from apps.ingestion.gap_planner import plan_extraction_windows
-from apps.ingestion.models import IngestionRun
+from apps.ingestion.models import IngestionRun, IngestionRunAttempt
 from apps.ingestion.services import (
     _persist_event,
     _upsert_admission,
@@ -102,6 +103,29 @@ class Command(BaseCommand):
                 headless=headless,
             )
 
+    @staticmethod
+    def _claim_eligible_run() -> IngestionRun | None:
+        """Claim the next eligible queued run respecting next_retry_at.
+
+        Eligible = status='queued' AND (next_retry_at IS NULL OR next_retry_at <= now).
+        Uses select_for_update(skip_locked=True) for safe concurrent access.
+        """
+        now = timezone.now()
+        from django.db.models import Q
+
+        return (
+            IngestionRun.objects
+            .select_for_update(skip_locked=True)
+            .filter(
+                status="queued",
+            )
+            .filter(
+                Q(next_retry_at__isnull=True) | Q(next_retry_at__lte=now),
+            )
+            .order_by("pk")
+            .first()
+        )
+
     def _run_loop(
         self,
         script_path: str,
@@ -153,13 +177,7 @@ class Command(BaseCommand):
             # Claim and process runs atomically (safe for multiple workers)
             while True:
                 with transaction.atomic():
-                    run = (
-                        IngestionRun.objects
-                        .select_for_update(skip_locked=True)
-                        .filter(status="queued")
-                        .order_by("pk")
-                        .first()
-                    )
+                    run = self._claim_eligible_run()
                     if run is None:
                         break
                     run.status = "running"
@@ -182,13 +200,7 @@ class Command(BaseCommand):
         # Claim and process runs atomically (safe for multiple workers)
         while True:
             with transaction.atomic():
-                run = (
-                    IngestionRun.objects
-                    .select_for_update(skip_locked=True)
-                    .filter(status="queued")
-                    .order_by("pk")
-                    .first()
-                )
+                run = self._claim_eligible_run()
                 if run is None:
                     break
                 run.status = "running"
@@ -268,22 +280,81 @@ class Command(BaseCommand):
         }
 
     def _mark_run_failed(self, run: IngestionRun, exc: Exception) -> None:
-        """Transition run to failed with normalized failure fields."""
-        run.status = "failed"
-        run.error_message = str(exc)
-        run.finished_at = timezone.now()
+        """Transition run to failed with retry logic.
+
+        CQM-S3: On failure, if attempts remain, requeue with backoff.
+        Otherwise mark as terminally failed.
+
+        Note: attempt_count was already incremented in _process_run.
+        """
         failure_reason, timed_out = self._classify_failure_reason(exc)
-        run.failure_reason = failure_reason
-        run.timed_out = timed_out
-        run.save(
-            update_fields=[
-                "status",
-                "error_message",
-                "finished_at",
-                "failure_reason",
-                "timed_out",
-            ]
+        now = timezone.now()
+
+        # Update the existing attempt record (created in _process_run)
+        attempt = (
+            IngestionRunAttempt.objects
+            .filter(run=run)
+            .order_by("-attempt_number")
+            .first()
         )
+        if attempt is not None:
+            attempt.finished_at = now
+            attempt.status = "failed"
+            attempt.failure_reason = failure_reason
+            attempt.timed_out = timed_out
+            attempt.error_message = str(exc)
+            attempt.save(
+                update_fields=[
+                    "finished_at",
+                    "status",
+                    "failure_reason",
+                    "timed_out",
+                    "error_message",
+                ]
+            )
+
+        if run.attempt_count < run.max_attempts:
+            # Requeue with backoff (CQM-S3: 60s fixed)
+            run.status = "queued"
+            run.next_retry_at = now + timedelta(seconds=60)
+            run.failure_reason = failure_reason
+            run.timed_out = timed_out
+            run.error_message = str(exc)
+            run.save(
+                update_fields=[
+                    "status",
+                    "next_retry_at",
+                    "failure_reason",
+                    "timed_out",
+                    "error_message",
+                ]
+            )
+            self.stdout.write(
+                f"  Run #{run.pk} failed (attempt {run.attempt_count}/"
+                f"{run.max_attempts}), requeued at {run.next_retry_at}"
+            )
+        else:
+            # Terminal failure — no more retries
+            run.status = "failed"
+            run.error_message = str(exc)
+            run.finished_at = now
+            run.failure_reason = failure_reason
+            run.timed_out = timed_out
+            run.next_retry_at = None
+            run.save(
+                update_fields=[
+                    "status",
+                    "error_message",
+                    "finished_at",
+                    "failure_reason",
+                    "timed_out",
+                    "next_retry_at",
+                ]
+            )
+            self.stderr.write(
+                f"  Run #{run.pk} failed permanently "
+                f"(attempt {run.attempt_count}/{run.max_attempts}): {exc}"
+            )
 
     def _process_run(
         self,
@@ -299,11 +370,18 @@ class Command(BaseCommand):
         params = run.parameters_json or {}
         intent = params.get("intent", "") or run.intent
 
-        # Step 0: Transition to running
+        # Step 0: Transition to running + record attempt start (CQM-S3)
         run.status = "running"
+        run.attempt_count += 1
         if run.processing_started_at is None:
             run.processing_started_at = timezone.now()
-        run.save(update_fields=["status", "processing_started_at"])
+        run.save(update_fields=["status", "attempt_count", "processing_started_at"])
+
+        # Persist attempt start record
+        IngestionRunAttempt.objects.create(
+            run=run,
+            attempt_number=run.attempt_count,
+        )
 
         if intent == "admissions_only":
             self._process_admissions_only(
@@ -383,6 +461,9 @@ class Command(BaseCommand):
         run.failure_reason = ""
         run.timed_out = False
         run.save()
+
+        # Mark attempt as succeeded (CQM-S3)
+        self._mark_latest_attempt_succeeded(run)
 
         # Auto-enqueue full_sync for the most recent admission
         if patient is not None:
@@ -567,6 +648,9 @@ class Command(BaseCommand):
             "demographics_fields_extracted": fields_populated,
         }
         run.save()
+
+        # Mark attempt as succeeded (CQM-S3)
+        self._mark_latest_attempt_succeeded(run)
 
         self.stdout.write(
             f"  Run #{run.pk} demographics_only succeeded "
@@ -777,6 +861,9 @@ class Command(BaseCommand):
         run.timed_out = False
         run.save()
 
+        # Mark attempt as succeeded (CQM-S3)
+        self._mark_latest_attempt_succeeded(run)
+
         self.stdout.write(
             f"  Run #{run.pk} succeeded "
             f"(admissions_seen={adm_metrics['seen']}, "
@@ -928,8 +1015,24 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _mark_latest_attempt_succeeded(run: IngestionRun) -> None:
+        """Mark the latest attempt for this run as succeeded (CQM-S3)."""
+        attempt = (
+            IngestionRunAttempt.objects
+            .filter(run=run)
+            .order_by("-attempt_number")
+            .first()
+        )
+        if attempt is not None:
+            attempt.status = "succeeded"
+            attempt.finished_at = timezone.now()
+            attempt.save(update_fields=["status", "finished_at"])
+
+    @staticmethod
     def _enqueue_most_recent_full_sync(patient, run):
         """Enqueue a full_sync run for the patient's most recent admission.
+
+        CQM-S3: Inherits batch from the source run.
 
         Returns the created IngestionRun or None if no admission exists.
         """
@@ -956,6 +1059,7 @@ class Command(BaseCommand):
         return IngestionRun.objects.create(
             status="queued",
             intent="full_sync",
+            batch=run.batch,
             parameters_json={
                 "patient_record": patient.patient_source_key,
                 "admission_id": str(latest.pk),
