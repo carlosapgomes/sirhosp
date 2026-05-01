@@ -16,7 +16,11 @@ from django.shortcuts import render
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
-from apps.ingestion.models import IngestionRun
+from apps.ingestion.models import (
+    CensusExecutionBatch,
+    FinalRunFailure,
+    IngestionRun,
+)
 from apps.patients.models import Admission, Patient
 
 
@@ -328,6 +332,9 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
     Supports filtering by period (24h/7d/30d), status, intent and
     failure_reason via querystring. Renders aggregated summary cards
     and a detailed run table, both coherent with the filtered dataset.
+
+    CQM-S5: Also delivers batch_failure_stats for the latest finished
+    census execution batch.
     """
     periodo = request.GET.get("periodo", "24h").strip()
     status = request.GET.get("status", "").strip()
@@ -358,6 +365,8 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
         .values_list("failure_reason", flat=True).distinct()
     )
 
+    batch_failure_stats = _get_latest_batch_failure_stats()
+
     context = {
         "page_title": "Métricas de Ingestão",
         "ingestion_stats": result["stats"],
@@ -373,8 +382,77 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
             "intents": all_intents,
             "failure_reasons": all_failure_reasons,
         },
+        "batch_failure_stats": batch_failure_stats,
     }
     return render(request, "services_portal/ingestion_metrics.html", context)
+
+
+def _get_latest_batch_failure_stats() -> dict:
+    """Aggregate final-failure stats for the latest finished census batch.
+
+    Returns a dict with keys:
+        has_batch: bool — False when no finished batch exists.
+        batch_id, status, total_duration_seconds, started_at,
+        enqueue_finished_at, finished_at — batch metadata.
+        final_failures_total: int — number of FinalRunFailure rows.
+        failures_by_intent: dict[str, int] — count per operational intent.
+        failure_patients: list[dict] — sorted by failed_at descending;
+            each dict has patient_record, intent, failed_at,
+            attempts_exhausted.
+
+    CQM-S5: Safe fallback to empty structure when no batch is available.
+    """
+    batch = (
+        CensusExecutionBatch.objects
+        .filter(finished_at__isnull=False)
+        .order_by("-finished_at")
+        .first()
+    )
+
+    if batch is None:
+        return {
+            "has_batch": False,
+            "batch_id": None,
+            "status": None,
+            "total_duration_seconds": None,
+            "started_at": None,
+            "enqueue_finished_at": None,
+            "finished_at": None,
+            "final_failures_total": 0,
+            "failures_by_intent": {},
+            "failure_patients": [],
+        }
+
+    failures = FinalRunFailure.objects.filter(
+        batch=batch,
+    ).order_by("-failed_at")
+
+    failures_by_intent: dict[str, int] = {}
+    failure_patients: list[dict] = []
+
+    for f in failures:
+        failures_by_intent[f.intent] = (
+            failures_by_intent.get(f.intent, 0) + 1
+        )
+        failure_patients.append({
+            "patient_record": f.patient_record,
+            "intent": f.intent,
+            "failed_at": f.failed_at,
+            "attempts_exhausted": f.attempts_exhausted,
+        })
+
+    return {
+        "has_batch": True,
+        "batch_id": batch.pk,
+        "status": batch.status,
+        "total_duration_seconds": batch.total_duration_seconds,
+        "started_at": batch.started_at,
+        "enqueue_finished_at": batch.enqueue_finished_at,
+        "finished_at": batch.finished_at,
+        "final_failures_total": len(failure_patients),
+        "failures_by_intent": failures_by_intent,
+        "failure_patients": failure_patients,
+    }
 
 
 @login_required

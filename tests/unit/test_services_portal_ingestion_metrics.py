@@ -1,4 +1,6 @@
-"""Slice IRMD-S6 & S7: Ingestion metrics page route, filters, and run table tests."""
+"""Slice IRMD-S6 & S7: Ingestion metrics page route, filters, and run table tests.
+Slice CQM-S5: Backend data for latest batch final failures.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +11,11 @@ from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
 
-from apps.ingestion.models import IngestionRun
+from apps.ingestion.models import (
+    CensusExecutionBatch,
+    FinalRunFailure,
+    IngestionRun,
+)
 
 
 @pytest.mark.django_db
@@ -249,3 +255,146 @@ class TestIngestionMetricsRunTable:
         # Page should still render without error
         assert response.status_code == 200
         assert "Nenhum" in content or "vazio" in content or "nenhuma" in content
+
+
+# ── CQM-S5: Batch failure stats helpers ────────────────────────────────
+
+
+def _make_batch(**kwargs) -> CensusExecutionBatch:
+    """Create a CensusExecutionBatch with defaults suitable for metrics tests."""
+    now = timezone.now()
+    defaults: dict = {
+        "enqueue_finished_at": now - timedelta(hours=2),
+        "finished_at": now - timedelta(hours=1),
+        "status": "succeeded",
+    }
+    defaults.update(kwargs)
+    return CensusExecutionBatch.objects.create(**defaults)
+
+
+def _make_final_failure(batch: CensusExecutionBatch, **kwargs) -> FinalRunFailure:
+    """Create a FinalRunFailure linked to a batch and a run."""
+    run_kwargs = {
+        "status": "failed",
+        "batch": batch,
+    }
+    if "patient_record" in kwargs:
+        pass  # handled below
+    run = _make_run(**run_kwargs)
+    defaults: dict = {
+        "batch": batch,
+        "run": run,
+        "patient_record": "12345",
+        "intent": "full_sync",
+        "failed_at": timezone.now() - timedelta(minutes=30),
+        "attempts_exhausted": 3,
+    }
+    defaults.update(kwargs)
+    return FinalRunFailure.objects.create(**defaults)
+
+
+# ── CQM-S5: Backend batch failure stats tests ──────────────────────────
+
+
+@pytest.mark.django_db
+class TestIngestionMetricsBatchFailureStats:
+    """CQM-S5: Backend delivery of batch failure stats in ingestion_metrics."""
+
+    def _get_page(self, admin_client, **params):
+        url = reverse("services_portal:ingestion_metrics")
+        return admin_client.get(url, params)
+
+    def test_no_batch_returns_empty_failure_stats(self, admin_client):
+        """When no finished batch exists, batch_failure_stats has has_batch=False."""
+        response = self._get_page(admin_client)
+        assert response.status_code == 200
+        stats = response.context["batch_failure_stats"]
+        assert stats["has_batch"] is False
+        assert stats["batch_id"] is None
+        assert stats["final_failures_total"] == 0
+        assert stats["failures_by_intent"] == {}
+        assert stats["failure_patients"] == []
+
+    def test_batch_metadata_in_context(self, admin_client):
+        """Finished batch delivers id, status, duration, and timestamps."""
+        batch = _make_batch()
+        response = self._get_page(admin_client)
+        assert response.status_code == 200
+        stats = response.context["batch_failure_stats"]
+        assert stats["has_batch"] is True
+        assert stats["batch_id"] == batch.pk
+        assert stats["status"] == "succeeded"
+        assert stats["total_duration_seconds"] is not None
+        assert stats["total_duration_seconds"] >= 0
+        assert stats["started_at"] is not None
+        assert stats["enqueue_finished_at"] is not None
+        assert stats["finished_at"] is not None
+
+    def test_final_failures_total_and_by_intent(self, admin_client):
+        """Final failures are counted and grouped by operational intent."""
+        batch = _make_batch()
+        _make_final_failure(batch, patient_record="P1", intent="admissions_only")
+        _make_final_failure(batch, patient_record="P2", intent="admissions_only")
+        _make_final_failure(batch, patient_record="P3", intent="full_sync")
+        response = self._get_page(admin_client)
+        stats = response.context["batch_failure_stats"]
+        assert stats["final_failures_total"] == 3
+        assert stats["failures_by_intent"] == {
+            "admissions_only": 2,
+            "full_sync": 1,
+        }
+
+    def test_failure_patient_list_contains_required_fields(self, admin_client):
+        """Each entry in failure_patients includes patient_record, intent,
+        failed_at, and attempts_exhausted."""
+        batch = _make_batch()
+        _make_final_failure(batch, patient_record="P-ALPHA", intent="admissions_only")
+        _make_final_failure(batch, patient_record="P-BETA", intent="full_sync")
+        response = self._get_page(admin_client)
+        stats = response.context["batch_failure_stats"]
+        patients = stats["failure_patients"]
+        assert len(patients) == 2
+        records = {p["patient_record"] for p in patients}
+        assert records == {"P-ALPHA", "P-BETA"}
+        for p in patients:
+            assert "patient_record" in p
+            assert "intent" in p
+            assert "failed_at" in p
+            assert "attempts_exhausted" in p
+            assert p["intent"] in ("admissions_only", "full_sync")
+
+    def test_uses_latest_finished_batch_only(self, admin_client):
+        """Only the most recently finished batch is returned."""
+        old_batch = _make_batch(
+            finished_at=timezone.now() - timedelta(days=7),
+        )
+        new_batch = _make_batch(
+            finished_at=timezone.now() - timedelta(hours=1),
+        )
+        _make_final_failure(old_batch, patient_record="OLD", intent="full_sync")
+        _make_final_failure(new_batch, patient_record="NEW", intent="full_sync")
+        response = self._get_page(admin_client)
+        stats = response.context["batch_failure_stats"]
+        assert stats["batch_id"] == new_batch.pk
+        assert len(stats["failure_patients"]) == 1
+        assert stats["failure_patients"][0]["patient_record"] == "NEW"
+
+    def test_ignores_running_batch_without_finished_at(self, admin_client):
+        """A running batch (finished_at=null) is NOT the latest finished."""
+        _make_batch(finished_at=None, status="running")
+        response = self._get_page(admin_client)
+        stats = response.context["batch_failure_stats"]
+        assert stats["has_batch"] is False
+
+    def test_batch_duration_is_computed_between_enqueue_and_finish(self, admin_client):
+        """total_duration_seconds = finished_at - enqueue_finished_at."""
+        now = timezone.now()
+        _make_batch(
+            enqueue_finished_at=now - timedelta(hours=3),
+            finished_at=now - timedelta(hours=1),
+        )
+        response = self._get_page(admin_client)
+        stats = response.context["batch_failure_stats"]
+        # ~7200 seconds (2 hours)
+        assert stats["total_duration_seconds"] is not None
+        assert 7100 <= stats["total_duration_seconds"] <= 7300
