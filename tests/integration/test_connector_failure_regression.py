@@ -31,6 +31,7 @@ class TestConnectorOutputCorruptionRegression:
     def _queue_run(self) -> IngestionRun:
         return IngestionRun.objects.create(
             status="queued",
+            max_attempts=1,
             parameters_json={
                 "patient_record": "REG_CORRUP",
                 "start_date": "2026-04-01",
@@ -59,7 +60,7 @@ class TestConnectorOutputCorruptionRegression:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_subprocess_run,
         ):
             call_command("process_ingestion_runs")
@@ -92,7 +93,7 @@ class TestConnectorOutputCorruptionRegression:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_subprocess_run,
         ):
             call_command("process_ingestion_runs")
@@ -117,7 +118,7 @@ class TestConnectorOutputCorruptionRegression:
             return result
 
         with patch(
-            "apps.ingestion.extractors.playwright_extractor.subprocess.run",
+            "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_subprocess_run,
         ):
             call_command("process_ingestion_runs")

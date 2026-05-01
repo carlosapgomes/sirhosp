@@ -25,7 +25,12 @@ from django.utils import timezone
 
 from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionExtractor
 from apps.ingestion.gap_planner import plan_extraction_windows
-from apps.ingestion.models import IngestionRun, IngestionRunAttempt
+from apps.ingestion.models import (
+    CensusExecutionBatch,
+    FinalRunFailure,
+    IngestionRun,
+    IngestionRunAttempt,
+)
 from apps.ingestion.services import (
     _persist_event,
     _upsert_admission,
@@ -351,6 +356,25 @@ class Command(BaseCommand):
                     "next_retry_at",
                 ]
             )
+
+            # CQM-S4: Record final failure for operational analysis
+            params = run.parameters_json or {}
+            patient_record = params.get("patient_record", "")
+            intent = params.get("intent", "") or run.intent
+            if run.batch_id and patient_record:
+                FinalRunFailure.objects.get_or_create(
+                    run=run,
+                    defaults={
+                        "batch": run.batch,
+                        "patient_record": patient_record,
+                        "intent": intent,
+                        "attempts_exhausted": run.attempt_count,
+                    },
+                )
+
+            # CQM-S4: Attempt to close batch after terminal failure
+            self._try_close_batch(run.batch)
+
             self.stderr.write(
                 f"  Run #{run.pk} failed permanently "
                 f"(attempt {run.attempt_count}/{run.max_attempts}): {exc}"
@@ -474,6 +498,9 @@ class Command(BaseCommand):
                     f"for most recent admission"
                 )
 
+        # CQM-S4: Attempt to close batch after run success
+        self._try_close_batch(run.batch)
+
         self.stdout.write(
             f"  Run #{run.pk} admissions-only succeeded "
             f"(admissions_seen={adm_metrics['seen']}, "
@@ -562,12 +589,7 @@ class Command(BaseCommand):
                     started_at=ext_stage_start,
                     details_json={"returncode": result.returncode},
                 )
-                run.status = "failed"
-                run.error_message = err_msg
-                run.finished_at = timezone.now()
-                run.failure_reason = "source_unavailable"
-                run.timed_out = False
-                run.save()
+                self._mark_run_failed(run, RuntimeError(err_msg))
                 return
 
             # Stage: demographics_extraction succeeded
@@ -651,6 +673,9 @@ class Command(BaseCommand):
 
         # Mark attempt as succeeded (CQM-S3)
         self._mark_latest_attempt_succeeded(run)
+
+        # CQM-S4: Attempt to close batch after run success
+        self._try_close_batch(run.batch)
 
         self.stdout.write(
             f"  Run #{run.pk} demographics_only succeeded "
@@ -777,6 +802,13 @@ class Command(BaseCommand):
             run.failure_reason = ""
             run.timed_out = False
             run.save()
+
+            # Mark attempt as succeeded (CQM-S3)
+            self._mark_latest_attempt_succeeded(run)
+
+            # CQM-S4: Attempt to close batch after run success
+            self._try_close_batch(run.batch)
+
             self.stdout.write(
                 f"  Run #{run.pk} skipped extraction (full coverage)."
             )
@@ -863,6 +895,9 @@ class Command(BaseCommand):
 
         # Mark attempt as succeeded (CQM-S3)
         self._mark_latest_attempt_succeeded(run)
+
+        # CQM-S4: Attempt to close batch after run success
+        self._try_close_batch(run.batch)
 
         self.stdout.write(
             f"  Run #{run.pk} succeeded "
@@ -1009,6 +1044,38 @@ class Command(BaseCommand):
                     revised += 1
 
         return created, skipped, revised
+
+    # ------------------------------------------------------------------
+    # CQM-S4: Batch closure
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _try_close_batch(batch: CensusExecutionBatch | None) -> None:
+        """Close the batch if no queued/running runs remain.
+
+        Sets finished_at and status based on whether any terminally failed
+        runs exist for the batch. Idempotent: no-op if batch is None
+        or already closed.
+        """
+        if batch is None:
+            return
+        if batch.finished_at is not None:
+            return
+
+        active_runs = IngestionRun.objects.filter(
+            batch=batch,
+            status__in=["queued", "running"],
+        ).exists()
+        if active_runs:
+            return
+
+        has_failures = IngestionRun.objects.filter(
+            batch=batch,
+            status="failed",
+        ).exists()
+        batch.finished_at = timezone.now()
+        batch.status = "failed" if has_failures else "succeeded"
+        batch.save(update_fields=["finished_at", "status"])
 
     # ------------------------------------------------------------------
     # Slice S5: Auto-enqueue full_sync after admissions_only
