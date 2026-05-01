@@ -214,6 +214,15 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
                 ) from exc
 
             if result.returncode != 0:
+                # Best-effort: check if JSON output was produced despite
+                # non-zero exit (e.g. path2.py exits 1 on empty results).
+                # If valid JSON exists, use it instead of failing.
+                rescued = self._try_rescue_json_output(json_output_path)
+                if rescued is not None:
+                    return self._normalize_collection(
+                        rescued, patient_source_key=patient_record
+                    )
+
                 output_context = _build_process_output_context(
                     getattr(result, "stdout", None),
                     getattr(result, "stderr", None),
@@ -318,6 +327,22 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _try_rescue_json_output(self, json_path: Path) -> list[dict[str, Any]] | None:
+        """Attempt to read the JSON output file even after non-zero exit.
+
+        path2.py may exit with code 1 when there are zero evolutions in the
+        period (e.g. deceased patient with no clinical records). This method
+        tries to salvage a valid JSON array from the output file rather than
+        treating the run as a hard failure.
+
+        Returns:
+            Parsed list of items, or None if the file is missing/invalid.
+        """
+        try:
+            return self._parse_json_output(json_path)
+        except InvalidJsonError:
+            return None
 
     def _parse_json_output(self, json_path: Path) -> list[dict[str, Any]]:
         """Read and validate the JSON output file from path2."""
