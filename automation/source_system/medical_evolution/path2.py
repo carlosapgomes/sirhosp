@@ -516,9 +516,8 @@ def read_internacoes_rows(page: Page) -> list[dict[str, object]]:
         )
 
     if not parsed:
-        raise RuntimeError(
-            "Nenhuma internação válida foi encontrada na tabela #tabelaInternacoes:resultList."
-        )
+        print("Nenhuma internação válida foi encontrada na tabela #tabelaInternacoes:resultList.")
+        return []
 
     parsed.sort(key=lambda item: (item["admissionStart"], item["rowIndex"]))
     return parsed
