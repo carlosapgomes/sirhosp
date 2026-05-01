@@ -16,6 +16,30 @@
   </div>
 </div>
 
+<!-- Tabs -->
+<ul class="nav nav-tabs mb-4" role="tablist">
+  <li class="nav-item" role="presentation">
+    <a
+      class="nav-link {% if active_tab == 'runs' %}active{% endif %}"
+      href="?tab=runs&amp;periodo={{ filters.periodo }}&amp;status={{ filters.status }}&amp;intent={{ filters.intent }}&amp;failure_reason={{ filters.failure_reason }}"
+      role="tab"
+    >
+      <i class="bi bi-list-ul me-1"></i>Execuções
+    </a>
+  </li>
+  <li class="nav-item" role="presentation">
+    <a
+      class="nav-link {% if active_tab == 'patients' %}active{% endif %}"
+      href="?tab=patients"
+      role="tab"
+    >
+      <i class="bi bi-people me-1"></i>Pacientes com Falha Final
+    </a>
+  </li>
+</ul>
+
+{% if active_tab == 'runs' %}
+
 <!-- Resumo do período selecionado -->
 <div class="row g-3 mb-4">
   <div class="col-12 col-md-6 col-lg-3">
@@ -70,6 +94,7 @@
 <div class="card border-0 shadow-sm mb-4">
   <div class="card-body">
     <form method="get" class="row g-2 align-items-end">
+      <input type="hidden" name="tab" value="runs">
       <div class="col-6 col-md-2">
         <label for="periodo" class="form-label small fw-semibold">Período</label>
         <select name="periodo" id="periodo" class="form-select form-select-sm">
@@ -210,4 +235,151 @@
     {% endif %}
   </div>
 </div>
+
+{% elif active_tab == 'patients' %}
+
+<!-- Cards da última execução de censo -->
+{% if batch_failure_stats.has_batch %}
+<div class="row g-3 mb-4">
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: var(--bs-primary-lightest);">
+        <i class="bi bi-stopwatch" style="color: var(--bs-primary); font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">
+          {% if batch_failure_stats.total_duration_seconds %}
+            {{ batch_failure_stats.total_duration_seconds|floatformat:0 }}s
+          {% else %}
+            -
+          {% endif %}
+        </div>
+        <div class="sirhosp-stat-label">Duração Total do Censo</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FEE2E2;">
+        <i class="bi bi-exclamation-triangle" style="color: #DC2626; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.final_failures_total }}</div>
+        <div class="sirhosp-stat-label">Pacientes com Falha Final</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FFF7ED;">
+        <i class="bi bi-database" style="color: #EA580C; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.batch_id }}</div>
+        <div class="sirhosp-stat-label">ID do Lote</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
+        <i class="bi bi-flag" style="color: #0284C7; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">
+          {% if batch_failure_stats.status == 'succeeded' %}
+            <span class="badge bg-success">Sucesso</span>
+          {% elif batch_failure_stats.status == 'failed' %}
+            <span class="badge bg-danger">Falhou</span>
+          {% else %}
+            <span class="badge bg-secondary">{{ batch_failure_stats.status }}</span>
+          {% endif %}
+        </div>
+        <div class="sirhosp-stat-label">Status do Lote</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Falhas por intent -->
+{% if batch_failure_stats.failures_by_intent %}
+<div class="row g-3 mb-4">
+  {% for intent_name, count in batch_failure_stats.failures_by_intent.items %}
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
+        <i class="bi bi-tag" style="color: #D97706; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ count }}</div>
+        <div class="sirhosp-stat-label">{{ intent_name }}</div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% else %}
+<!-- Sem batch finalizado -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body text-center py-4">
+    <i class="bi bi-info-circle fs-3 text-muted mb-2 d-block"></i>
+    <h5 class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">Nenhum lote de censo finalizado</h5>
+    <p class="text-muted mb-0">Ainda não há execuções de censo concluídas com dados de falha final.</p>
+  </div>
+</div>
+{% endif %}
+
+<!-- Tabela de Pacientes com Falha Final -->
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-white border-bottom-0 d-flex justify-content-between align-items-center">
+    <h5 class="fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-people me-2"></i>Pacientes com Falha Final
+      {% if batch_failure_stats.has_batch %}
+      <span class="badge bg-secondary ms-2">{{ batch_failure_stats.failure_patients|length }}</span>
+      {% endif %}
+    </h5>
+  </div>
+  <div class="card-body p-0">
+    {% if batch_failure_stats.has_batch and batch_failure_stats.failure_patients %}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3 small">Prontuário</th>
+            <th class="small">Intenção</th>
+            <th class="small">Tentativas</th>
+            <th class="small">Falha em</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for patient in batch_failure_stats.failure_patients %}
+          <tr>
+            <td class="ps-3 fw-semibold small">{{ patient.patient_record }}</td>
+            <td><span class="badge bg-light text-dark small">{{ patient.intent }}</span></td>
+            <td class="small text-muted">{{ patient.attempts_exhausted }}</td>
+            <td class="small text-muted">{{ patient.failed_at|date:"d/m/Y H:i" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center py-5">
+      <i class="bi bi-inbox fs-1 text-muted mb-3 d-block"></i>
+      <h5 class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">Nenhum paciente com falha final</h5>
+      <p class="text-muted mb-0">
+        {% if batch_failure_stats.has_batch %}
+        A última execução de censo não registrou falhas finais.
+        {% else %}
+        Nenhum lote de censo finalizado disponível para consulta.
+        {% endif %}
+      </p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{% endif %}
 {% endblock %}

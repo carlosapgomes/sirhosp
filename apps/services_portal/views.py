@@ -340,6 +340,9 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
     status = request.GET.get("status", "").strip()
     intent = request.GET.get("intent", "").strip()
     failure_reason = request.GET.get("failure_reason", "").strip()
+    tab = request.GET.get("tab", "runs").strip()
+    if tab not in ("runs", "patients"):
+        tab = "runs"
 
     result = _build_filtered_queryset(
         periodo=periodo,
@@ -383,6 +386,7 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
             "failure_reasons": all_failure_reasons,
         },
         "batch_failure_stats": batch_failure_stats,
+        "active_tab": tab,
     }
     return render(request, "services_portal/ingestion_metrics.html", context)
 
