@@ -24,15 +24,17 @@ TZ_INSTITUTIONAL = ZoneInfo("America/Sao_Paulo")
 # ---------------------------------------------------------------------------
 
 
-def compute_event_identity_key(evolution: dict[str, Any]) -> str:
+def compute_event_identity_key(evolution: dict[str, Any], *, patient_id: int) -> str:
     """Compute a deterministic identity key for an evolution event.
 
-    Uses admission_key + happened_at + author_name to uniquely identify
-    an event occurrence within the source system.
+    Uses patient_id (Django PK, stable even across prontuário reassignments)
+    + happened_at + author_name to uniquely identify an event occurrence.
+    Does NOT use admission_key (proved volatile across extractions) or
+    patient_source_key (can change when TASY reissues prontuários).
     """
     raw = (
         f"{evolution.get('source_system', 'tasy')}"
-        f"|{evolution.get('admission_key', '')}"
+        f"|{patient_id}"
         f"|{evolution.get('happened_at', '')}"
         f"|{evolution.get('author_name', '')}"
     )
@@ -317,7 +319,7 @@ def _persist_event(
     Returns (event_or_none, action) where action is
     'created', 'skipped', or 'revised'.
     """
-    identity_key = compute_event_identity_key(evolution)
+    identity_key = compute_event_identity_key(evolution, patient_id=patient.pk)
     content_text = evolution.get("content_text", "")
     content_hash = compute_content_hash(content_text)
 

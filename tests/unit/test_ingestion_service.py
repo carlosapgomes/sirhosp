@@ -76,28 +76,33 @@ class TestComputeEventIdentityKey:
 
     def test_deterministic(self):
         evo = _make_evolution()
-        key1 = compute_event_identity_key(evo)
-        key2 = compute_event_identity_key(evo)
+        key1 = compute_event_identity_key(evo, patient_id=1)
+        key2 = compute_event_identity_key(evo, patient_id=1)
         assert key1 == key2
 
-    def test_changes_with_different_admission(self):
-        evo1 = _make_evolution(admission_key="ADM001")
-        evo2 = _make_evolution(admission_key="ADM002")
-        assert compute_event_identity_key(evo1) != compute_event_identity_key(evo2)
+    def test_different_patient_id_differs(self):
+        evo = _make_evolution()
+        k1 = compute_event_identity_key(evo, patient_id=1)
+        k2 = compute_event_identity_key(evo, patient_id=2)
+        assert k1 != k2
 
     def test_changes_with_different_timestamp(self):
         evo1 = _make_evolution(happened_at="2026-04-19 08:30:00")
         evo2 = _make_evolution(happened_at="2026-04-19 09:00:00")
-        assert compute_event_identity_key(evo1) != compute_event_identity_key(evo2)
+        k1 = compute_event_identity_key(evo1, patient_id=1)
+        k2 = compute_event_identity_key(evo2, patient_id=1)
+        assert k1 != k2
 
     def test_changes_with_different_author(self):
         evo1 = _make_evolution(author_name="DR. CARLOS")
         evo2 = _make_evolution(author_name="DRA. ANA")
-        assert compute_event_identity_key(evo1) != compute_event_identity_key(evo2)
+        k1 = compute_event_identity_key(evo1, patient_id=1)
+        k2 = compute_event_identity_key(evo2, patient_id=1)
+        assert k1 != k2
 
     def test_stable_key_length(self):
         evo = _make_evolution()
-        key = compute_event_identity_key(evo)
+        key = compute_event_identity_key(evo, patient_id=1)
         assert len(key) <= 512
 
 

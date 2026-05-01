@@ -61,7 +61,7 @@ def _create_event(
         "author_name": "DR. TEST",
         "source_system": patient.source_system,
     }
-    identity_key = compute_event_identity_key(evo_dict)
+    identity_key = compute_event_identity_key(evo_dict, patient_id=patient.pk)
     content = f"Event at {happened_at_str}"
     dt = datetime.strptime(happened_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_INST)
 
@@ -100,6 +100,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-12",
+            overlap_days=0,
         )
 
         assert gaps == []
@@ -112,6 +113,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-12",
+            overlap_days=0,
         )
 
         assert len(gaps) == 1
@@ -127,6 +129,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-12",
+            overlap_days=0,
         )
 
         assert len(gaps) == 1
@@ -142,6 +145,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-12",
+            overlap_days=0,
         )
 
         assert len(gaps) == 1
@@ -158,6 +162,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-14",
+            overlap_days=0,
         )
 
         assert len(gaps) == 1
@@ -174,6 +179,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-15",
+            overlap_days=0,
         )
 
         assert len(gaps) == 2
@@ -190,6 +196,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-10",
+            overlap_days=0,
         )
 
         assert gaps == []
@@ -201,6 +208,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-10",
+            overlap_days=0,
         )
 
         assert len(gaps) == 1
@@ -225,6 +233,7 @@ class TestComputeCoverageGaps:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-12",
+            overlap_days=0,
         )
 
         assert len(gaps) == 1
@@ -243,6 +252,40 @@ class TestComputeCoverageGaps:
             source_system="other_system",
             start_date="2026-04-10",
             end_date="2026-04-12",
+            overlap_days=0,
+        )
+
+        assert len(gaps) == 1
+        assert gaps[0] == {"start_date": "2026-04-10", "end_date": "2026-04-12"}
+
+    def test_overlap_extends_first_gap_backward(self):
+        """With overlap_days=1, the first gap extends 1 day backward."""
+        patient, admission = _create_patient_and_admission()
+        _create_event(patient=patient, admission=admission, happened_at_str="2026-04-10 08:00:00")
+        # Gap would be [04-11, 04-12]; overlap extends start to 04-10
+
+        gaps = compute_coverage_gaps(
+            patient_source_key="P001",
+            source_system="tasy",
+            start_date="2026-04-10",
+            end_date="2026-04-12",
+            overlap_days=1,
+        )
+
+        assert len(gaps) == 1
+        assert gaps[0] == {"start_date": "2026-04-10", "end_date": "2026-04-12"}
+
+    def test_overlap_clamped_to_window_start(self):
+        """Overlap cannot extend before the original window start_date."""
+        patient, admission = _create_patient_and_admission()
+        _create_event(patient=patient, admission=admission, happened_at_str="2026-04-10 08:00:00")
+
+        gaps = compute_coverage_gaps(
+            patient_source_key="P001",
+            source_system="tasy",
+            start_date="2026-04-10",
+            end_date="2026-04-12",
+            overlap_days=5,  # Would go back to 04-06, clamped to 04-10
         )
 
         assert len(gaps) == 1
@@ -269,6 +312,7 @@ class TestPlanExtractionWindows:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-11",
+            overlap_days=0,
         )
 
         assert plan["skip_extraction"] is True
@@ -282,6 +326,7 @@ class TestPlanExtractionWindows:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-15",
+            overlap_days=0,
         )
 
         assert plan["skip_extraction"] is False
@@ -300,6 +345,7 @@ class TestPlanExtractionWindows:
             source_system="tasy",
             start_date="2026-04-10",
             end_date="2026-04-15",
+            overlap_days=0,
         )
 
         assert plan["skip_extraction"] is False

@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+from django.utils import timezone as dj_timezone
+
 from apps.clinical_docs.models import ClinicalEvent
 from apps.patients.models import Patient
 
@@ -20,17 +22,21 @@ def compute_coverage_gaps(
     source_system: str,
     start_date: str,
     end_date: str,
+    overlap_days: int = 1,
 ) -> list[dict[str, str]]:
     """Compute date-ranges with no existing events for a patient.
 
-    Queries ClinicalEvent dates (day granularity) for the given patient
-    and returns contiguous gap windows where no events exist.
+    Queries ClinicalEvent dates (day granularity, institutional timezone)
+    for the given patient and returns contiguous gap windows where no
+    events exist.
 
     Args:
         patient_source_key: Patient record identifier.
         source_system: Source system identifier (e.g. "tasy").
         start_date: Requested window start (YYYY-MM-DD).
         end_date: Requested window end (YYYY-MM-DD).
+        overlap_days: Days to extend the first gap backward to capture
+            events registered after the last extraction (default: 1).
 
     Returns:
         List of dicts with "start_date" and "end_date" keys representing
@@ -56,7 +62,7 @@ def compute_coverage_gaps(
         ).values_list("happened_at", flat=True)
 
         for happened_at in events:
-            covered_dates.add(happened_at.date())
+            covered_dates.add(dj_timezone.localtime(happened_at).date())
 
     # Build all dates in the window
     all_dates: list[date] = []
@@ -68,7 +74,19 @@ def compute_coverage_gaps(
     # Find uncovered dates and group into contiguous gaps
     uncovered = [d for d in all_dates if d not in covered_dates]
 
-    return _group_contiguous_dates(uncovered)
+    gaps = _group_contiguous_dates(uncovered)
+
+    # Extend the first gap backward by overlap_days to capture events
+    # registered after the last extraction (e.g. census ran at 21:00 but
+    # events were created at 22:30 on a date already marked as covered).
+    if overlap_days > 0 and gaps:
+        extended_start = max(
+            window_start,
+            date.fromisoformat(gaps[0]["start_date"]) - timedelta(days=overlap_days),
+        )
+        gaps[0]["start_date"] = extended_start.isoformat()
+
+    return gaps
 
 
 def plan_extraction_windows(
@@ -77,6 +95,7 @@ def plan_extraction_windows(
     source_system: str,
     start_date: str,
     end_date: str,
+    overlap_days: int = 1,
 ) -> dict[str, Any]:
     """Determine extraction plan based on existing coverage.
 
@@ -85,6 +104,7 @@ def plan_extraction_windows(
         source_system: Source system identifier.
         start_date: Requested window start (YYYY-MM-DD).
         end_date: Requested window end (YYYY-MM-DD).
+        overlap_days: Days to extend the first gap backward.
 
     Returns:
         Dict with:
@@ -97,6 +117,7 @@ def plan_extraction_windows(
         source_system=source_system,
         start_date=start_date,
         end_date=end_date,
+        overlap_days=overlap_days,
     )
 
     return {

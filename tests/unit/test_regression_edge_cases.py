@@ -393,7 +393,9 @@ class TestIdentityKeyEdgeCases:
             "author_name": "Dr. José da Silva",
             "source_system": "tasy",
         }
-        assert compute_event_identity_key(evo1) == compute_event_identity_key(evo2)
+        key1 = compute_event_identity_key(evo1, patient_id=1)
+        key2 = compute_event_identity_key(evo2, patient_id=1)
+        assert key1 == key2
 
     def test_content_hash_stable_with_accents(self):
         text = "Paciente com dispneia e cefaleia."

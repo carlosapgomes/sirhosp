@@ -59,7 +59,7 @@ def _create_event(
         "author_name": "DR. TEST",
         "source_system": "tasy",
     }
-    identity_key = compute_event_identity_key(evo_dict)
+    identity_key = compute_event_identity_key(evo_dict, patient_id=patient.pk)
     content = f"Event at {happened_at_str}"
     dt = datetime.strptime(happened_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_INST)
 
