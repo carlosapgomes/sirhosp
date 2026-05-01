@@ -51,10 +51,26 @@ wait_for_db() {
     log "db is healthy"
 }
 
+preclean_test_db() {
+    # Defensive cleanup for aborted/overlapping runs that leave test DB sessions.
+    # Can be disabled with: SIRHOSP_TEST_PRE_CLEAN_DB=0
+    if [ "${SIRHOSP_TEST_PRE_CLEAN_DB:-1}" = "0" ]; then
+        return 0
+    fi
+
+    local base_db="${POSTGRES_DB:-sirhosp}"
+    local test_db="test_${base_db}"
+
+    log "Pre-cleaning lingering test database sessions (${test_db})..."
+    dc exec -T db psql -U "${POSTGRES_USER:-sirhosp}" -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${test_db}' AND pid <> pg_backend_pid();" >/dev/null
+    dc exec -T db psql -U "${POSTGRES_USER:-sirhosp}" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"${test_db}\";" >/dev/null
+}
+
 up_stack() {
     log "Starting db service on host port ${TEST_DB_PORT}..."
     dc up -d db
     wait_for_db
+    preclean_test_db
 }
 
 run_runner() {
