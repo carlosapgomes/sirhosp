@@ -1682,7 +1682,9 @@ def run(
                     last_chunk_had_report = True
 
             if not collected_records:
-                raise RuntimeError("Nenhuma evolução foi coletada para o intervalo solicitado.")
+                print("Nenhuma evolução foi coletada para o intervalo solicitado.")
+                salvar_evolucoes_json([], json_output_path)
+                return
 
             deduped_records, removed_count = dedupe_evolutions(collected_records)
             sorted_records = sort_records_chronologically(deduped_records)
