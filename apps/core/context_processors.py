@@ -45,6 +45,8 @@ def _default_title(path: str) -> str:
         return "Censo Hospitalar"
     if clean == "monitor":
         return "Monitor de Risco"
+    if clean == "beds":
+        return "Leitos"
     if clean in ("pacientes", "patients"):
         return "Pacientes"
     if clean == "admissions":

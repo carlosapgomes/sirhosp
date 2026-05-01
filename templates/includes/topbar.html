@@ -2,9 +2,14 @@
   <button class="sirhosp-topbar-toggle" id="sidebarToggle" aria-label="Abrir menu" title="Menu">
     <i class="bi bi-list"></i>
   </button>
+  <span class="sirhosp-topbar-brand">
+    <i class="bi bi-heart-pulse"></i>
+    SIRHosp
+    <span class="sirhosp-topbar-brand-sep">&middot;</span>
+  </span>
   <h1 class="sirhosp-topbar-title">{{ page_title|default:"SIRHOSP" }}</h1>
   <div class="sirhosp-topbar-sync">
     <span class="dot"></span>
-    Sincronizado: {{ sync_time|default:"--:--" }}
+    <span class="sirhosp-topbar-sync-label">Sincronizado: </span>{{ sync_time|default:"--:--" }}
   </div>
 </header>

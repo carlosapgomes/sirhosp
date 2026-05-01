@@ -19,6 +19,7 @@ def bed_status_view(request):
 
     if latest_captured is None:
         return render(request, "census/bed_status.html", {
+            "page_title": "Leitos",
             "sectors": [],
             "captured_at": None,
         })
@@ -101,6 +102,7 @@ def bed_status_view(request):
     sorted_sectors = sorted(sectors.values(), key=lambda s: s["name"])
 
     return render(request, "census/bed_status.html", {
+        "page_title": "Leitos",
         "sectors": sorted_sectors,
         "captured_at": latest_captured,
         "totals": totals,
