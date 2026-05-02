@@ -244,11 +244,25 @@
           </div>
 
           <div class="d-flex gap-2">
-            {% if summary.show_ler_resumo and summary.latest_run_id %}
-              <a href="{% url 'summaries:read' summary.latest_run_id %}"
-                 class="btn btn-outline-secondary btn-sm">
-                <i class="bi bi-book me-1"></i> Ler resumo
-              </a>
+            {% if summary.latest_run_id %}
+              {% if summary.is_processing %}
+                <a href="{% url 'summaries:run_status' summary.latest_run_id %}"
+                   class="btn btn-outline-secondary btn-sm">
+                  <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                  Acompanhar status
+                </a>
+              {% else %}
+                {% if summary.show_ler_resumo %}
+                  <a href="{% url 'summaries:read' summary.latest_run_id %}"
+                     class="btn btn-outline-secondary btn-sm">
+                    <i class="bi bi-book me-1"></i> Ler resumo
+                  </a>
+                {% endif %}
+                <a href="{% url 'summaries:run_status' summary.latest_run_id %}"
+                   class="btn btn-outline-secondary btn-sm">
+                  <i class="bi bi-info-circle me-1"></i> Status
+                </a>
+              {% endif %}
             {% endif %}
 
             <form method="post"
