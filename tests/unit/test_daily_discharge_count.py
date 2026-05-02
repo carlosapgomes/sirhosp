@@ -16,14 +16,13 @@ class TestRefreshDailyDischargeCounts:
 
     def test_command_populates_counts_from_admissions(self):
         """Command groups discharge_date by day and upserts counts."""
-        patient = Patient.objects.create(
-            patient_source_key="P1", source_system="tasy", name="A")
-
         today = timezone.localdate()
         yesterday = today - timedelta(days=1)
 
-        # 3 discharges today, 2 yesterday
+        # 3 unique patients discharged today, 2 yesterday
         for i in range(3):
+            patient = Patient.objects.create(
+                patient_source_key=f"PT{i}", source_system="tasy", name=f"P{i}")
             Admission.objects.create(
                 patient=patient,
                 source_admission_key=f"ADM-T{i}",
@@ -32,6 +31,8 @@ class TestRefreshDailyDischargeCounts:
                     datetime(today.year, today.month, today.day, 10 + i, 0, 0)),
             )
         for i in range(2):
+            patient = Patient.objects.create(
+                patient_source_key=f"PY{i}", source_system="tasy", name=f"Y{i}")
             Admission.objects.create(
                 patient=patient,
                 source_admission_key=f"ADM-Y{i}",
@@ -47,12 +48,12 @@ class TestRefreshDailyDischargeCounts:
 
     def test_command_upserts_existing_counts(self):
         """Re-running updates existing counts instead of duplicating."""
-        patient = Patient.objects.create(
-            patient_source_key="P1", source_system="tasy", name="A")
         today = timezone.localdate()
 
-        # First run: 2 discharges
+        # First run: 2 unique patients discharged
         for i in range(2):
+            patient = Patient.objects.create(
+                patient_source_key=f"PA{i}", source_system="tasy", name=f"A{i}")
             Admission.objects.create(
                 patient=patient,
                 source_admission_key=f"ADM-A{i}",
@@ -63,9 +64,11 @@ class TestRefreshDailyDischargeCounts:
         call_command("refresh_daily_discharge_counts")
         assert DailyDischargeCount.objects.get(date=today).count == 2
 
-        # Second run: 1 more discharge → should update to 3
+        # Second run: 1 more patient discharged → should update to 3
+        patient3 = Patient.objects.create(
+            patient_source_key="PA3", source_system="tasy", name="A3")
         Admission.objects.create(
-            patient=patient,
+            patient=patient3,
             source_admission_key="ADM-A3",
             source_system="tasy",
             discharge_date=timezone.make_aware(
