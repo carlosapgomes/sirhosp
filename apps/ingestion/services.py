@@ -479,6 +479,51 @@ def queue_demographics_only_run(
     )
 
 
+def find_active_full_admission_sync_run(
+    *,
+    patient_record: str,
+    admission_id: str,
+) -> IngestionRun | None:
+    """Return active full-admission-sync run for the same admission, if any."""
+    patient_record = patient_record.strip()
+    admission_id = admission_id.strip()
+
+    if not patient_record or not admission_id:
+        return None
+
+    return (
+        IngestionRun.objects.filter(
+            status__in=["queued", "running"],
+            intent="full_admission_sync",
+            parameters_json__patient_record=patient_record,
+            parameters_json__admission_id=admission_id,
+        )
+        .order_by("-queued_at", "-started_at")
+        .first()
+    )
+
+
+def get_admission_sync_context(admission: Admission) -> dict[str, Any]:
+    """Build UI context for sync CTA state on the admission page."""
+    active_run = find_active_full_admission_sync_run(
+        patient_record=admission.patient.patient_source_key,
+        admission_id=str(admission.pk),
+    )
+
+    if active_run is None:
+        return {
+            "is_processing": False,
+            "latest_run_id": None,
+            "badge_label": "",
+        }
+
+    return {
+        "is_processing": True,
+        "latest_run_id": active_run.pk,
+        "badge_label": "Sincronização em andamento",
+    }
+
+
 def ingest_evolution(
     evolutions: list[dict[str, Any]],
     parameters: dict[str, Any] | None = None,

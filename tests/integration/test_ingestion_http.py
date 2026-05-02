@@ -803,6 +803,55 @@ class TestFullAdmissionSyncRunHTTP:
         assert "2026-04-15" in content
         assert "2026-04-23" in content
 
+    def test_create_run_with_active_full_sync_redirects_to_existing_run(self):
+        """POST with same admission context reuses queued/running full-sync run."""
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            patient_source_key="12345",
+            source_system="tasy",
+            name="TEST DUPLICATE FULLSYNC",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-2026-88",
+            source_system="tasy",
+            admission_date=datetime(2026, 4, 15, 8, 0, tzinfo=TZ),
+            ward="UTI",
+        )
+
+        existing_run = IngestionRun.objects.create(
+            status="running",
+            intent="full_admission_sync",
+            parameters_json={
+                "patient_record": "12345",
+                "start_date": "2026-04-15",
+                "end_date": date.today().isoformat(),
+                "intent": "full_admission_sync",
+                "admission_id": str(admission.pk),
+                "admission_source_key": "ADM-2026-88",
+            },
+        )
+
+        client = Client()
+        self._login(client)
+        url = reverse("ingestion:create_run")
+        response = client.post(
+            url,
+            {
+                "patient_record": "12345",
+                "start_date": "2026-04-15",
+                "end_date": date.today().isoformat(),
+                "intent": "full_admission_sync",
+                "admission_id": str(admission.pk),
+                "admission_source_key": "ADM-2026-88",
+            },
+        )
+
+        assert response.status_code == 302
+        assert response.url == reverse("ingestion:run_status", args=[existing_run.pk])
+        assert IngestionRun.objects.count() == 1
+
 
 @pytest.mark.django_db
 class TestRunStatusProgressFeedback:

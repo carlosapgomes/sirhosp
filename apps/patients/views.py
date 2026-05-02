@@ -102,10 +102,13 @@ def admission_list_view(
 
     # --- APS-S6: Summary CTA context ---
     summary_context: dict = {}
+    sync_context: dict = {}
     if selected_admission:
+        from apps.ingestion.services import get_admission_sync_context
         from apps.summaries.services import get_admission_summary_context
 
         summary_context = get_admission_summary_context(selected_admission)
+        sync_context = get_admission_sync_context(selected_admission)
 
     context = {
         "patient": patient,
@@ -120,6 +123,7 @@ def admission_list_view(
         "page_title": patient.name,
         "today": date_mod.today().isoformat(),
         "summary": summary_context,
+        "sync": sync_context,
     }
     return render(request, "patients/admission_list.html", context)
 

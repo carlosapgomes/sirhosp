@@ -180,7 +180,15 @@
       </select>
 
       {% if selected_admission %}
-        <div class="d-flex gap-2">
+        <div class="d-flex gap-2 align-items-center flex-wrap">
+          {% if sync.is_processing and sync.latest_run_id %}
+            <span class="badge bg-info text-dark">{{ sync.badge_label }}</span>
+            <a href="{% url 'ingestion:run_status' sync.latest_run_id %}"
+               class="btn btn-outline-secondary btn-sm">
+              <i class="bi bi-hourglass-split me-1"></i> Acompanhar status
+            </a>
+          {% endif %}
+
           <form method="post" action="{% url 'ingestion:sync_demographics' %}" class="d-inline">
             {% csrf_token %}
             <input type="hidden" name="patient_record" value="{{ patient.patient_source_key }}">
@@ -197,8 +205,10 @@
               <input type="hidden" name="intent" value="full_admission_sync">
               <input type="hidden" name="admission_id" value="{{ selected_admission.pk }}">
               <input type="hidden" name="admission_source_key" value="{{ selected_admission.source_admission_key }}">
-              <button type="submit" class="btn btn-primary btn-sm">
-                <i class="bi bi-arrow-repeat me-1"></i> Sincronizar
+              <button type="submit" class="btn btn-primary btn-sm"
+                      {% if sync.is_processing %}disabled title="Já existe uma sincronização em andamento"{% endif %}>
+                <i class="bi bi-arrow-repeat me-1"></i>
+                {% if sync.is_processing %}Em sincronização...{% else %}Sincronizar{% endif %}
               </button>
             </form>
           {% endif %}

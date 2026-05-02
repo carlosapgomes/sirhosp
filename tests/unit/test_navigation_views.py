@@ -811,6 +811,61 @@ class TestAdmissionListFullSyncCTA:
         assert today_str in content
 
 
+class TestAdmissionListSyncInProgress:
+    """Sync CTA behavior when a full-sync run is already active."""
+
+    def test_shows_sync_in_progress_badge_and_status_link(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+    ) -> None:
+        """Admission page shows in-progress badge + status link."""
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="full_admission_sync",
+            parameters_json={
+                "patient_record": patient_maria.patient_source_key,
+                "admission_id": str(admission_maria_2.pk),
+                "intent": "full_admission_sync",
+            },
+        )
+
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/?admission_id={admission_maria_2.pk}"
+        )
+        content = response.content.decode()
+
+        assert "Sincronização em andamento" in content
+        assert f"/ingestao/status/{run.pk}/" in content
+
+    def test_disables_sync_button_when_active_run_exists(
+        self,
+        auth_client: Client,
+        patient_maria: Patient,
+        admission_maria_2: Admission,
+    ) -> None:
+        """Sync button is disabled while queued/running run exists."""
+        IngestionRun.objects.create(
+            status="running",
+            intent="full_admission_sync",
+            parameters_json={
+                "patient_record": patient_maria.patient_source_key,
+                "admission_id": str(admission_maria_2.pk),
+                "intent": "full_admission_sync",
+            },
+        )
+
+        response = auth_client.get(
+            f"/patients/{patient_maria.pk}/admissions/?admission_id={admission_maria_2.pk}"
+        )
+        content = response.content.decode()
+
+        assert "Em sincronização..." in content
+        assert "Já existe uma sincronização em andamento" in content
+        assert "disabled" in content
+
+
 class TestAdmissionListPostSyncRedirection:
     """S3: After admissions sync, user should be redirected to admission list."""
 

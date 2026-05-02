@@ -10,6 +10,7 @@ from django.shortcuts import redirect, render
 
 from apps.ingestion.models import IngestionRun
 from apps.ingestion.services import (
+    find_active_full_admission_sync_run,
     queue_admissions_only_run,
     queue_demographics_only_run,
     queue_ingestion_run,
@@ -110,6 +111,16 @@ def create_run(request: HttpRequest) -> HttpResponse:
                         )
 
         if not errors:
+            if intent == "full_admission_sync" and admission_id:
+                existing_run = find_active_full_admission_sync_run(
+                    patient_record=patient_record,
+                    admission_id=admission_id,
+                )
+                if existing_run is not None:
+                    return redirect(
+                        "ingestion:run_status", run_id=existing_run.pk
+                    )
+
             run = queue_ingestion_run(
                 patient_record=patient_record,
                 start_date=start_date,
