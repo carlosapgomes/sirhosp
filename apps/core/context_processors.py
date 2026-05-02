@@ -57,13 +57,20 @@ def _default_title(path: str) -> str:
 
 
 def sync_status(request: HttpRequest) -> dict:
-    """Inject sync status time and indicator.
+    """Inject sync status time from the latest succeeded IngestionRun."""
+    from django.utils import timezone
 
-    In a real implementation this would be read from the latest
-    successful IngestionRun, but for now returns a demo timestamp
-    to keep the UI functional while backend evolves.
-    """
-    # Demo sync time — will be replaced by real IngestionRun query later
-    return {
-        "sync_time": "12:45",
-    }
+    from apps.ingestion.models import IngestionRun
+
+    latest = (
+        IngestionRun.objects
+        .filter(status="succeeded", finished_at__isnull=False)
+        .order_by("-finished_at")
+        .first()
+    )
+
+    if latest is None:
+        return {"sync_time": "--:--"}
+
+    local_dt = timezone.localtime(latest.finished_at)
+    return {"sync_time": local_dt.strftime("%H:%M")}
