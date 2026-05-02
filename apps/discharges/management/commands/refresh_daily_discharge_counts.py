@@ -21,12 +21,15 @@ class Command(BaseCommand):
     )
 
     def handle(self, *args, **options):
+        # Count unique patients discharged per day, not total admission
+        # records (a patient may have duplicate Admission rows due to
+        # volatile admission keys from the source system).
         counts = (
             Admission.objects
             .filter(discharge_date__isnull=False)
             .annotate(day=TruncDate("discharge_date"))
             .values("day")
-            .annotate(count=Count("id"))
+            .annotate(count=Count("patient_id", distinct=True))
             .order_by("day")
         )
 
