@@ -7,7 +7,11 @@ from django.utils import timezone
 from apps.patients.models import Admission, Patient
 
 
-def process_discharges(patients: list[dict[str, str]]) -> dict[str, int]:
+def process_discharges(
+    patients: list[dict[str, str]],
+    *,
+    discharge_date: datetime | None = None,
+) -> dict[str, int]:
     """Process a list of discharged patients and update Admission.discharge_date.
 
     For each patient in the list:
@@ -17,8 +21,14 @@ def process_discharges(patients: list[dict[str, str]]) -> dict[str, int]:
          the most recent admission without discharge_date.
       3. If the exact matching admission was already discharged in the last
          24 hours, skip and count as already_discharged.
-      4. Set discharge_date = timezone.now() and count as discharge_set.
+      4. Set discharge_date and count as discharge_set.
+
+    Args:
+        patients: List of patient dicts from PDF extraction.
+        discharge_date: Explicit discharge datetime. If None, uses timezone.now().
+            Use this when reprocessing historical PDFs to preserve the correct date.
     """
+    effective_discharge_date = discharge_date or timezone.now()
     total_pdf = len(patients)
     patient_not_found = 0
     admission_not_found = 0
@@ -41,7 +51,10 @@ def process_discharges(patients: list[dict[str, str]]) -> dict[str, int]:
             patient_not_found += 1
             continue
 
-        admission = _find_admission(patient, data_internacao_str)
+        admission = _find_admission(
+            patient, data_internacao_str,
+            reference_datetime=effective_discharge_date,
+        )
         if admission is None:
             admission_not_found += 1
             continue
@@ -50,7 +63,7 @@ def process_discharges(patients: list[dict[str, str]]) -> dict[str, int]:
             already_discharged += 1
             continue
 
-        admission.discharge_date = timezone.now()
+        admission.discharge_date = effective_discharge_date
         admission.save(update_fields=["discharge_date", "updated_at"])
         discharge_set += 1
 
@@ -63,8 +76,14 @@ def process_discharges(patients: list[dict[str, str]]) -> dict[str, int]:
     }
 
 
-def _find_admission(patient: Patient, data_internacao_str: str) -> Admission | None:
+def _find_admission(
+    patient: Patient,
+    data_internacao_str: str,
+    *,
+    reference_datetime: datetime | None = None,
+) -> Admission | None:
     parsed_date = _parse_admission_date(data_internacao_str)
+    ref = reference_datetime or timezone.now()
 
     if parsed_date is not None:
         exact_admission = (
@@ -78,7 +97,7 @@ def _find_admission(patient: Patient, data_internacao_str: str) -> Admission | N
         if exact_admission is not None:
             if exact_admission.discharge_date is None:
                 return exact_admission
-            if exact_admission.discharge_date >= timezone.now() - timedelta(hours=24):
+            if exact_admission.discharge_date >= ref - timedelta(hours=24):
                 return exact_admission
 
     return (
