@@ -23,6 +23,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
+from apps.discharges.models import DailyDischargeCount
 from apps.discharges.services import process_discharges
 
 _FILENAME_DATE_RE = re.compile(r"altas-(\d{2})-(\d{2})-(\d{4})\.pdf$")
@@ -106,6 +107,17 @@ class Command(BaseCommand):
                 f"  Patient not found:    {metrics['patient_not_found']}\n"
                 f"  Admission not found:  {metrics['admission_not_found']}"
             )
+        )
+
+        # Update daily discharge count for the chart
+        discharge_day = discharge_date.date()
+        total_from_pdf = len(patients)
+        DailyDischargeCount.objects.update_or_create(
+            date=discharge_day,
+            defaults={"count": total_from_pdf},
+        )
+        self.stdout.write(
+            f"\nDailyDischargeCount updated: {discharge_day} → {total_from_pdf} altas"
         )
 
     @staticmethod
