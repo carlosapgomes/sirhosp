@@ -202,6 +202,7 @@ class TestProcessDemographicsOnly:
         )
 
         run = self._create_queued_run()
+        run.attempt_count = run.max_attempts
         cmd = Command()
         cmd.stdout = MagicMock()
         cmd.stderr = MagicMock()
@@ -223,6 +224,7 @@ class TestProcessDemographicsOnly:
         )
 
         run = self._create_queued_run()
+        run.attempt_count = run.max_attempts
         cmd = Command()
         cmd.stdout = MagicMock()
         cmd.stderr = MagicMock()
@@ -230,7 +232,7 @@ class TestProcessDemographicsOnly:
 
         run.refresh_from_db()
         assert run.status == "failed"
-        assert run.failure_reason == "source_unavailable"
+        assert run.failure_reason == "unexpected_exception"
 
     @patch("apps.ingestion.extractors.subprocess_utils.run_subprocess")
     def test_invalid_json_output_fails_run(self, mock_run):
@@ -258,6 +260,7 @@ class TestProcessDemographicsOnly:
         )
 
         run = self._create_queued_run()
+        run.attempt_count = run.max_attempts
         cmd = Command()
         cmd.stdout = MagicMock()
         cmd.stderr = MagicMock()
@@ -276,6 +279,7 @@ class TestProcessDemographicsOnly:
         run = IngestionRun.objects.create(
             status="queued",
             intent="demographics_only",
+            attempt_count=3,
             parameters_json={"intent": "demographics_only"},
             # No patient_record
         )

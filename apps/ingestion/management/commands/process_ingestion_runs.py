@@ -35,6 +35,7 @@ from apps.ingestion.services import (
     _persist_event,
     _upsert_admission,
     _upsert_patient,
+    queue_demographics_only_run,
 )
 from apps.patients.models import Admission
 
@@ -489,6 +490,17 @@ class Command(BaseCommand):
 
         # Mark attempt as succeeded (CQM-S3)
         self._mark_latest_attempt_succeeded(run)
+
+        # Auto-enqueue demographics for the patient
+        if patient is not None:
+            demo_run = queue_demographics_only_run(
+                patient_record=patient.patient_source_key,
+                batch=run.batch,
+            )
+            self.stdout.write(
+                f"  Auto-enqueued demographics_only run #{demo_run.pk} "
+                f"for patient {patient.patient_source_key}"
+            )
 
         # Auto-enqueue full_sync for the most recent admission
         if patient is not None:

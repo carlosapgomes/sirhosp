@@ -302,13 +302,33 @@ def censo(request: HttpRequest) -> HttpResponse:
             for p in Patient.objects.filter(patient_source_key__in=prontuarios)
         }
 
+    # Look up admission dates for current inpatients (no discharge yet)
+    patient_ids = list(patient_map.values())
+    admission_date_map: dict[int, str] = {}
+    if patient_ids:
+        admissions = (
+            Admission.objects
+            .filter(patient_id__in=patient_ids, discharge_date__isnull=True)
+            .order_by("patient_id", "-admission_date")
+        )
+        seen: set[int] = set()
+        for adm in admissions:
+            if adm.patient_id not in seen:
+                seen.add(adm.patient_id)
+                if adm.admission_date:
+                    admission_date_map[adm.patient_id] = (
+                        adm.admission_date.strftime("%d/%m/%Y")
+                    )
+
     pacientes = [
         {
             "leito": s.leito,
             "nome": s.nome,
             "registro": s.prontuario,
             "patient_id": patient_map.get(s.prontuario),
-            "admissao": "",
+            "admissao": admission_date_map.get(
+                patient_map.get(s.prontuario, -1), ""
+            ),
             "setor": s.setor,
         }
         for s in snapshots
@@ -419,6 +439,7 @@ def _get_latest_batch_failure_stats() -> dict:
             "batch_id": None,
             "status": None,
             "total_duration_seconds": None,
+            "total_duration_hours": None,
             "started_at": None,
             "enqueue_finished_at": None,
             "finished_at": None,
@@ -445,11 +466,16 @@ def _get_latest_batch_failure_stats() -> dict:
             "attempts_exhausted": f.attempts_exhausted,
         })
 
+    total_duration_hours: float | None = None
+    if batch.total_duration_seconds is not None:
+        total_duration_hours = round(batch.total_duration_seconds / 3600, 1)
+
     return {
         "has_batch": True,
         "batch_id": batch.pk,
         "status": batch.status,
         "total_duration_seconds": batch.total_duration_seconds,
+        "total_duration_hours": total_duration_hours,
         "started_at": batch.started_at,
         "enqueue_finished_at": batch.enqueue_finished_at,
         "finished_at": batch.finished_at,

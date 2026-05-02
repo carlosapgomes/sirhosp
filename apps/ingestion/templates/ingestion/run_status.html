@@ -18,12 +18,14 @@
 </nav>
 
 <h2 class="h5 fw-bold mb-3" style="color: var(--sirhosp-sidebar-bg);">
-  {% if intent == 'admissions_only' %}
-    Status: Sincronização de Internações #{{ run.pk }}
+  {% if intent == 'demographics_only' %}
+    Status: Dados Demogr&aacute;ficos #{{ run.pk }}
+  {% elif intent == 'admissions_only' %}
+    Status: Sincroniza&ccedil;&atilde;o de Interna&ccedil;&otilde;es #{{ run.pk }}
   {% elif intent == 'full_admission_sync' %}
-    Status: Sincronização Completa da Internação #{{ run.pk }}
+    Status: Sincroniza&ccedil;&atilde;o Completa da Interna&ccedil;&atilde;o #{{ run.pk }}
   {% else %}
-    Status da Extração #{{ run.pk }}
+    Status da Extra&ccedil;&atilde;o #{{ run.pk }}
   {% endif %}
 </h2>
 
@@ -50,7 +52,7 @@
           <span class="fw-medium">{% if admission_source_key %}{{ admission_source_key }}{% else %}#{{ admission_id }}{% endif %}</span>
         </div>
       {% endif %}
-      {% if intent != 'admissions_only' %}
+      {% if intent != 'admissions_only' and intent != 'demographics_only' %}
         <div class="col-sm-6">
           <span class="text-muted">Período:</span>
           <span class="fw-medium">{{ start_date }} a {{ end_date }}</span>
@@ -84,6 +86,14 @@
   <div class="card border-0 shadow-sm mb-3">
     <div class="card-body">
       <h5 class="card-title h6 fw-semibold mb-3" style="color: var(--sirhosp-sidebar-bg);">Resultados</h5>
+      {% if intent == 'demographics_only' and run.status == 'succeeded' %}
+        <div class="row text-center g-2">
+          <div class="col-12">
+            <div class="h4 mb-0 fw-bold" style="color: var(--bs-primary);">{{ demographics_fields }}</div>
+            <small class="text-muted">Campos demogr&aacute;ficos extra&iacute;dos</small>
+          </div>
+        </div>
+      {% else %}
       {% if run.admissions_seen > 0 %}
         <div class="row text-center mb-3 g-2">
           <div class="col-4">
@@ -119,6 +129,7 @@
           <small class="text-muted">Revisados</small>
         </div>
       </div>
+      {% endif %}
     </div>
   </div>
 {% endif %}
@@ -131,6 +142,15 @@
       <strong>Nenhuma internação encontrada.</strong>
       O registro informado não possui internações no sistema fonte.
       A extração de evoluções não está disponível sem internações conhecidas.
+    </div>
+  </div>
+{% elif run.status == 'succeeded' and intent == 'demographics_only' %}
+  <div class="alert d-flex align-items-center gap-2" role="alert"
+       style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker); border: none;">
+    <i class="bi bi-check-circle fs-5"></i>
+    <div>
+      <strong>Dados demogr&aacute;ficos sincronizados com sucesso!</strong>
+      {{ demographics_fields }} campo(s) extra&iacute;do(s).
     </div>
   </div>
 {% elif run.status == 'succeeded' and intent == 'admissions_only' %}
@@ -152,12 +172,12 @@
 {% elif run.status == 'queued' %}
   <div class="alert alert-info d-flex align-items-center gap-2" role="alert">
     <i class="bi bi-hourglass-split fs-5"></i>
-    <div><strong>Na fila:</strong> {% if intent == 'admissions_only' %}a sincronização de internações será processada em breve.{% else %}a extração será processada em breve pelo worker.{% endif %}</div>
+    <div><strong>Na fila:</strong> {% if intent == 'demographics_only' %}a sincroniza&ccedil;&atilde;o de dados demogr&aacute;ficos ser&aacute; processada em breve.{% elif intent == 'admissions_only' %}a sincronização de internações será processada em breve.{% else %}a extração será processada em breve pelo worker.{% endif %}</div>
   </div>
 {% elif run.status == 'running' %}
   <div class="alert alert-warning d-flex align-items-center gap-2" role="alert">
     <div class="spinner-border spinner-border-sm" role="status"></div>
-    <div><strong>Em execução:</strong> {% if intent == 'admissions_only' %}a sincronização de internações está em andamento.{% else %}a extração está em andamento.{% endif %} Esta página atualiza automaticamente.</div>
+    <div><strong>Em execução:</strong> {% if intent == 'demographics_only' %}a sincroniza&ccedil;&atilde;o de dados demogr&aacute;ficos est&aacute; em andamento.{% elif intent == 'admissions_only' %}a sincronização de internações está em andamento.{% else %}a extração está em andamento.{% endif %} Esta página atualiza automaticamente.</div>
   </div>
 {% elif run.status == 'succeeded' %}
   <div class="alert d-flex align-items-center gap-2" role="alert"
@@ -169,7 +189,7 @@
   <div class="alert alert-danger d-flex align-items-start gap-2" role="alert">
     <i class="bi bi-exclamation-triangle mt-1"></i>
     <div>
-      <strong>Falha na {% if intent == 'admissions_only' %}sincronização de internações{% else %}extração{% endif %}.</strong>
+      <strong>Falha na {% if intent == 'demographics_only' %}sincroniza&ccedil;&atilde;o de dados demogr&aacute;ficos{% elif intent == 'admissions_only' %}sincronização de internações{% else %}extração{% endif %}.</strong>
       {% if run.error_message %}
         <p class="mb-0 mt-2"><small>{{ run.error_message }}</small></p>
       {% endif %}

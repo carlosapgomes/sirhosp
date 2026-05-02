@@ -248,8 +248,8 @@
       </div>
       <div>
         <div class="sirhosp-stat-value">
-          {% if batch_failure_stats.total_duration_seconds %}
-            {{ batch_failure_stats.total_duration_seconds|floatformat:0 }}s
+          {% if batch_failure_stats.total_duration_hours is not None %}
+            {{ batch_failure_stats.total_duration_hours }}h
           {% else %}
             -
           {% endif %}

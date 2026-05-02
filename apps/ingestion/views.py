@@ -9,7 +9,11 @@ from django.http import Http404, HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 
 from apps.ingestion.models import IngestionRun
-from apps.ingestion.services import queue_admissions_only_run, queue_ingestion_run
+from apps.ingestion.services import (
+    queue_admissions_only_run,
+    queue_demographics_only_run,
+    queue_ingestion_run,
+)
 from apps.patients.models import Admission
 
 
@@ -241,7 +245,9 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
     }
 
     # Determine run type label
-    if intent == "admissions_only":
+    if intent == "demographics_only":
+        run_type_label = "Dados demográficos"
+    elif intent == "admissions_only":
         run_type_label = "Sincronização de internações"
     elif intent == "full_admission_sync":
         run_type_label = "Sincronização completa de internação"
@@ -256,6 +262,9 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         and run.status == "succeeded"
         and run.admissions_seen == 0
     )
+
+    # Demographics fields count
+    demographics_fields = params.get("demographics_fields_extracted", 0)
 
     admission_id = params.get("admission_id", "")
     admission_source_key = params.get("admission_source_key", "")
@@ -300,6 +309,7 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         "no_admissions": no_admissions,
         "patient_admissions_url": patient_admissions_url,
         "stage_metrics": stage_metrics,
+        "demographics_fields": demographics_fields,
     }
 
     return render(request, "ingestion/run_status.html", context)
@@ -323,3 +333,24 @@ def run_status_fragment(request: HttpRequest, run_id: int) -> HttpResponse:
         "run": run,
         "stage_metrics": stage_metrics,
     })
+
+
+@login_required
+def create_demographics_only(request: HttpRequest) -> HttpResponse:
+    """Enqueue a demographics-only run for a patient.
+
+    GET: reads patient_record from query param, creates run,
+         redirects to status.
+    POST: reads patient_record from form body, creates run,
+          redirects to status.
+    """
+    patient_record = (
+        request.POST.get("patient_record", "").strip()
+        or request.GET.get("patient_record", "").strip()
+    )
+
+    if not patient_record:
+        return redirect("patients:patient_list")
+
+    run = queue_demographics_only_run(patient_record=patient_record)
+    return redirect("ingestion:run_status", run_id=run.pk)
