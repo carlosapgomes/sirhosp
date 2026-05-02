@@ -40,7 +40,19 @@
       </div>
       <div class="col-sm-6">
         <span class="text-muted">Internação:</span>
-        <strong>{{ run.admission.source_admission_key }}</strong>
+        <strong>
+          {% if run.admission.admission_date %}
+            {{ run.admission.admission_date|date:"d/m/Y" }}
+          {% else %}
+            —
+          {% endif %}
+          →
+          {% if run.admission.discharge_date %}
+            {{ run.admission.discharge_date|date:"d/m/Y" }}
+          {% else %}
+            atual
+          {% endif %}
+        </strong>
       </div>
       <div class="col-sm-6">
         <span class="text-muted">Modo:</span>
@@ -49,10 +61,6 @@
       <div class="col-sm-6">
         <span class="text-muted">Data alvo:</span>
         <strong>{{ run.target_end_date|date:"d/m/Y" }}</strong>
-      </div>
-      <div class="col-sm-6">
-        <span class="text-muted">Progresso:</span>
-        <strong>Chunk {{ run.current_chunk_index }} / {{ run.total_chunks }}</strong>
       </div>
       {% if run.started_at %}
       <div class="col-sm-6">
