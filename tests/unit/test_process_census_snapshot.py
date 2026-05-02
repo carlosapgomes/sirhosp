@@ -4,9 +4,12 @@ import pytest
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
-from apps.census.services import process_census_snapshot
+from apps.census.services import (
+    _sync_admission_ward_bed,
+    process_census_snapshot,
+)
 from apps.ingestion.models import IngestionRun
-from apps.patients.models import Patient
+from apps.patients.models import Admission, Patient
 
 
 @pytest.mark.django_db
@@ -341,3 +344,165 @@ class TestProcessCensusSnapshot:
         assert not IngestionRun.objects.filter(
             intent="demographics_only"
         ).exists()
+
+    # --- Ward/bed sync tests (ward-from-census) ---
+
+    def test_sync_ward_updates_active_admission(self):
+        """Census processing updates ward/bed on active admission."""
+        patient = Patient.objects.create(
+            source_system="tasy",
+            patient_source_key="14160147",
+            name="JOSE MERCES",
+        )
+        # Create an active admission (no discharge date)
+        admission = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="adm-001",
+            admission_date=timezone.now() - timezone.timedelta(days=5),
+            discharge_date=None,
+            ward="",
+            bed="",
+        )
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        CensusSnapshot.objects.create(
+            captured_at=timezone.now(),
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        process_census_snapshot()
+
+        admission.refresh_from_db()
+        assert admission.ward == "UTI A"
+        assert admission.bed == "UG01A"
+
+    def test_sync_ward_does_not_update_discharged_admission(self):
+        """Census processing only updates admissions without discharge date."""
+        patient = Patient.objects.create(
+            source_system="tasy",
+            patient_source_key="14160147",
+            name="JOSE MERCES",
+        )
+        # Create a discharged admission
+        Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="adm-001",
+            admission_date=timezone.now() - timezone.timedelta(days=10),
+            discharge_date=timezone.now() - timezone.timedelta(days=3),
+            ward="OLD WARD",
+            bed="OLD BED",
+        )
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        CensusSnapshot.objects.create(
+            captured_at=timezone.now(),
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        process_census_snapshot()
+
+        # Discharged admission should keep its original ward
+        discharged = Admission.objects.get(source_admission_key="adm-001")
+        assert discharged.ward == "OLD WARD"
+        assert discharged.bed == "OLD BED"
+
+    def test_sync_ward_no_admission_no_error(self):
+        """Calling _sync_admission_ward_bed with no admissions is a no-op."""
+        patient = Patient.objects.create(
+            source_system="tasy",
+            patient_source_key="999",
+            name="NO ADMISSIONS",
+        )
+        # Should not raise
+        _sync_admission_ward_bed(patient, "UTI", "L01")
+
+    def test_sync_ward_empty_values_do_not_overwrite(self):
+        """Empty census ward/bed should not overwrite existing values."""
+        patient = Patient.objects.create(
+            source_system="tasy",
+            patient_source_key="14160147",
+            name="JOSE MERCES",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="adm-001",
+            admission_date=timezone.now() - timezone.timedelta(days=5),
+            discharge_date=None,
+            ward="EXISTING",
+            bed="B01",
+        )
+
+        _sync_admission_ward_bed(patient, "", "")
+
+        admission.refresh_from_db()
+        assert admission.ward == "EXISTING"
+        assert admission.bed == "B01"
+
+    def test_sync_ward_updates_most_recent_active_only(self):
+        """Only the most recent active admission gets ward/bed from census."""
+        patient = Patient.objects.create(
+            source_system="tasy",
+            patient_source_key="14160147",
+            name="JOSE MERCES",
+        )
+        # Older active admission (should NOT be updated)
+        old_adm = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="adm-old",
+            admission_date=timezone.now() - timezone.timedelta(days=30),
+            discharge_date=None,
+            ward="",
+            bed="",
+        )
+        # More recent active admission (SHOULD be updated)
+        new_adm = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="adm-new",
+            admission_date=timezone.now() - timezone.timedelta(days=5),
+            discharge_date=None,
+            ward="",
+            bed="",
+        )
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        CensusSnapshot.objects.create(
+            captured_at=timezone.now(),
+            ingestion_run=run,
+            setor="UTI B",
+            leito="L02",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        process_census_snapshot()
+
+        old_adm.refresh_from_db()
+        new_adm.refresh_from_db()
+        # Older admission should NOT get updated
+        assert old_adm.ward == ""
+        assert old_adm.bed == ""
+        # Most recent active admission SHOULD get updated
+        assert new_adm.ward == "UTI B"
+        assert new_adm.bed == "L02"

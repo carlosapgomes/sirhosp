@@ -13,7 +13,7 @@ from apps.ingestion.services import (
     queue_admissions_only_run,
     queue_demographics_only_run,
 )
-from apps.patients.models import Patient
+from apps.patients.models import Admission, Patient
 
 
 def classify_bed_status(prontuario: str, nome: str) -> str:
@@ -51,6 +51,50 @@ def classify_bed_status(prontuario: str, nome: str) -> str:
 
     # Fallback: empty bed (unknown non-patient label)
     return BedStatus.EMPTY
+
+
+def _sync_admission_ward_bed(
+    patient: Patient,
+    setor: str,
+    leito: str,
+) -> None:
+    """Sync ward/bed from census data to the most recent active admission.
+
+    The census is the authoritative source for a patient's current location.
+    This updates the Admission model so the patient page can display the
+    sector even before admissions are fully extracted from the source system.
+
+    Args:
+        patient: Patient whose admission may be updated.
+        setor: Ward/sector name from the census (may be empty).
+        leito: Bed identifier from the census (may be empty).
+    """
+    if not setor and not leito:
+        return
+
+    # Find most recent admission without discharge date
+    active = (
+        Admission.objects.filter(
+            patient=patient,
+            discharge_date__isnull=True,
+        )
+        .order_by("-admission_date")
+        .first()
+    )
+
+    if active is None:
+        return
+
+    changed = False
+    if setor and active.ward != setor:
+        active.ward = setor
+        changed = True
+    if leito and active.bed != leito:
+        active.bed = leito
+        changed = True
+
+    if changed:
+        active.save(update_fields=["ward", "bed", "updated_at"])
 
 
 def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
@@ -164,6 +208,8 @@ def process_census_snapshot(
             patients_to_process.append({
                 "prontuario": pront,
                 "nome": snap.nome.strip(),
+                "setor": snap.setor,
+                "leito": snap.leito,
             })
 
     # No occupied beds with prontuario → no batch needed
@@ -195,6 +241,8 @@ def process_census_snapshot(
     for entry in patients_to_process:
         prontuario = entry["prontuario"]
         nome = entry["nome"]
+        setor = entry["setor"]
+        leito = entry["leito"]
 
         # Create or get patient
         patient, created = Patient.objects.get_or_create(
@@ -210,6 +258,9 @@ def process_census_snapshot(
             patient.name = nome
             patient.save(update_fields=["name", "updated_at"])
             updated_count += 1
+
+        # Sync ward/bed from census to the most recent active admission
+        _sync_admission_ward_bed(patient, setor, leito)
 
         # Enqueue admissions-only run for this patient
         queue_admissions_only_run(patient_record=prontuario, batch=batch)

@@ -36,6 +36,7 @@ from apps.ingestion.services import (
     _upsert_admission,
     _upsert_patient,
 )
+from apps.patients.models import Admission
 
 # Default path to internalized legacy Playwright script (MVP path2).
 DEFAULT_SCRIPT_PATH = str(
@@ -937,6 +938,7 @@ class Command(BaseCommand):
         Side-effects:
             - Creates/updates Patient and Admission records.
             - Propagates extractor errors to caller.
+            - Syncs ward/bed from latest census data onto active admissions.
         """
         from apps.ingestion.services import upsert_admission_snapshot
         from apps.patients.models import Patient
@@ -970,6 +972,10 @@ class Command(BaseCommand):
             )
             adm_metrics["created"] = upsert_result.get("created", 0)
             adm_metrics["updated"] = upsert_result.get("updated", 0)
+
+            # Sync ward/bed from latest census data onto active admissions
+            # (path2.py does not extract ward/bed, so we backfill from census)
+            self._backfill_admission_ward_from_census(patient)
         else:
             # Snapshot empty but capture succeeded — still need patient record
             patient, _ = Patient.objects.get_or_create(
@@ -979,6 +985,51 @@ class Command(BaseCommand):
             )
 
         return patient, adm_metrics
+
+    @staticmethod
+    def _backfill_admission_ward_from_census(patient) -> None:
+        """Backfill ward/bed on active admissions from latest census data.
+
+        The admission snapshot extracted by path2.py does not include
+        ward/sector information. This method queries the latest
+        CensusSnapshot for the patient and updates any active
+        (discharge_date IS NULL) admission with the census ward/bed.
+        """
+        from apps.census.models import CensusSnapshot
+
+        latest_census = (
+            CensusSnapshot.objects.filter(
+                prontuario=patient.patient_source_key,
+                bed_status="occupied",
+            )
+            .order_by("-captured_at")
+            .first()
+        )
+
+        if latest_census is None:
+            return
+
+        setor = latest_census.setor
+        leito = latest_census.leito
+
+        if not setor and not leito:
+            return
+
+        active_admissions = Admission.objects.filter(
+            patient=patient,
+            discharge_date__isnull=True,
+        )
+
+        for admission in active_admissions:
+            changed = False
+            if setor and admission.ward != setor:
+                admission.ward = setor
+                changed = True
+            if leito and admission.bed != leito:
+                admission.bed = leito
+                changed = True
+            if changed:
+                admission.save(update_fields=["ward", "bed", "updated_at"])
 
     # ------------------------------------------------------------------
     # Ingestion helpers
