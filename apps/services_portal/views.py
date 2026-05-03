@@ -372,19 +372,21 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
     )
 
     # Collect distinct values for filter dropdowns from the full dataset
-    # (not filtered by status/intent so dropdowns always have options)
+    # (not filtered by status/intent so dropdowns always have options).
+    # .order_by() clears Meta.ordering so .distinct() works correctly;
+    # otherwise DISTINCT applies to (field, started_at) tuples.
     all_finished = IngestionRun.objects.filter(finished_at__isnull=False)
-    all_statues = sorted(
-        all_finished.values_list("status", flat=True).distinct()
+    all_statuses = sorted(
+        all_finished.order_by().values_list("status", flat=True).distinct()
     )
     all_intents = sorted(
         t for t in
-        all_finished.values_list("intent", flat=True).distinct()
+        all_finished.order_by().values_list("intent", flat=True).distinct()
         if t
     )
     all_failure_reasons = sorted(
         r for r in
-        all_finished.exclude(failure_reason="")
+        all_finished.order_by().exclude(failure_reason="")
         .values_list("failure_reason", flat=True).distinct()
     )
 
@@ -401,7 +403,7 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
             "failure_reason": failure_reason,
         },
         "filter_options": {
-            "statuses": all_statues,
+            "statuses": all_statuses,
             "intents": all_intents,
             "failure_reasons": all_failure_reasons,
         },
