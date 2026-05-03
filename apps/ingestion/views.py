@@ -280,6 +280,42 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
     admission_id = params.get("admission_id", "")
     admission_source_key = params.get("admission_source_key", "")
 
+    # Resolve admission for human-readable display
+    admission_display: dict[str, str] = {
+        "name": "",
+        "bed": "",
+        "period": "",
+    }
+    if admission_id:
+        try:
+            admission_obj = (
+                Admission.objects.select_related("patient")
+                .only(
+                    "admission_date",
+                    "discharge_date",
+                    "bed",
+                    "patient__name",
+                )
+                .get(pk=int(admission_id))
+            )
+            admission_display["name"] = admission_obj.patient.name
+            admission_display["bed"] = admission_obj.bed or ""
+            if admission_obj.admission_date:
+                adt_str = admission_obj.admission_date.strftime("%d/%m/%Y")
+                if admission_obj.discharge_date:
+                    ddt_str = admission_obj.discharge_date.strftime(
+                        "%d/%m/%Y"
+                    )
+                    admission_display["period"] = (
+                        f"{adt_str} → {ddt_str}"
+                    )
+                else:
+                    admission_display["period"] = (
+                        f"{adt_str} → atual"
+                    )
+        except (Admission.DoesNotExist, ValueError, TypeError):
+            pass
+
     # S3: Build patient admissions URL for successful admissions-only sync
     patient_admissions_url = ""
     if (
@@ -317,6 +353,7 @@ def run_status(request: HttpRequest, run_id: int) -> HttpResponse:
         "run_type_label": run_type_label,
         "admission_id": admission_id,
         "admission_source_key": admission_source_key,
+        "admission_display": admission_display,
         "no_admissions": no_admissions,
         "patient_admissions_url": patient_admissions_url,
         "stage_metrics": stage_metrics,

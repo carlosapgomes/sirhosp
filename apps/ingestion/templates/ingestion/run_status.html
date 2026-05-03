@@ -46,7 +46,18 @@
         <span class="text-muted">Registro:</span>
         <span class="fw-medium">{{ patient_record }}</span>
       </div>
-      {% if admission_source_key or admission_id %}
+      {% if admission_display.name %}
+        <div class="col-sm-6">
+          <span class="text-muted">Paciente:</span>
+          <span class="fw-medium">{{ admission_display.name }}{% if admission_display.bed %} — {{ admission_display.bed }}{% endif %}</span>
+        </div>
+      {% endif %}
+      {% if admission_display.period %}
+        <div class="col-sm-6">
+          <span class="text-muted">Período da internação:</span>
+          <span class="fw-medium">{{ admission_display.period }}</span>
+        </div>
+      {% elif admission_source_key or admission_id %}
         <div class="col-sm-6">
           <span class="text-muted">Internação:</span>
           <span class="fw-medium">{% if admission_source_key %}{{ admission_source_key }}{% else %}#{{ admission_id }}{% endif %}</span>
