@@ -5,7 +5,7 @@
 Define rastreamento diário de contagem de altas hospitalares, com tabela
 dedicada, management command de atualização e gráfico interativo no portal.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Daily discharge count is stored in a dedicated tracking table
 
@@ -84,24 +84,37 @@ navigating to the discharge chart page.
 ### Requirement: Discharge chart page shows daily bars with moving averages
 
 The system SHALL provide a chart page at `/painel/altas/` that displays a bar
-chart of daily discharge counts with three moving average lines (3-day, 10-day,
-and 30-day).
+chart of daily discharge counts with three moving average lines (SMA-7, EMA-7,
+and SMA-30), and SHALL visually distinguish weekend bars in the main series.
+
+#### Scenario: Weekend bars are visually differentiated
+
+- **WHEN** an authenticated user accesses `/painel/altas/`
+- **AND** the displayed period includes weekdays and weekend dates
+- **THEN** bars for Saturdays and Sundays use different tones from weekdays
+- **AND** the legend explains the weekend visual distinction
+
+#### Scenario: Existing moving-average overlays remain available
+
+- **WHEN** an authenticated user accesses `/painel/altas/`
+- **THEN** the bar chart still renders the existing moving-average datasets
+- **AND** weekend highlighting does not remove or hide these datasets
 
 #### Scenario: Chart renders with default 90-day period
 
 - **WHEN** an authenticated user accesses `/painel/altas/`
 - **AND** `DailyDischargeCount` has data for the last 90 days
 - **THEN** a bar chart is rendered with daily counts
-- **AND** three line datasets are overlaid: MA-3, MA-10, and MA-30
+- **AND** three line datasets are overlaid: SMA-7, EMA-7, and SMA-30
 - **AND** today's date is NOT included in the chart data
 
 #### Scenario: Moving averages are None for insufficient history
 
 - **WHEN** the chart shows day 2 of the series
-- **THEN** MA-3 shows no value (None/gap) for days 1-2
-- **AND** MA-3 shows a value starting from day 3
-- **AND** MA-10 shows a value starting from day 10
-- **AND** MA-30 shows a value starting from day 30
+- **THEN** SMA-7 shows no value (None/gap) for days 1-6
+- **AND** SMA-7 shows a value starting from day 7
+- **AND** EMA-7 shows a value starting from day 7 (seeded at index 6)
+- **AND** SMA-30 shows a value starting from day 30
 
 #### Scenario: Chart handles empty data gracefully
 
@@ -131,6 +144,34 @@ The system SHALL allow the user to customize the chart period through a
 - **WHEN** an authenticated user accesses `/painel/altas/`
 - **THEN** a period selector is rendered with options for 30, 60, 90, 180,
   and 365 days
+
+### Requirement: Discharge chart page includes weekday average chart
+
+The system SHALL render, below the main chart on `/painel/altas/`, a second
+chart with average discharges per weekday (Monday through Sunday) computed from
+the same selected period.
+
+#### Scenario: Weekday average chart is shown below the main chart
+
+- **WHEN** an authenticated user accesses `/painel/altas/?dias=90`
+- **AND** there are historical daily discharge records
+- **THEN** the page shows a second chart below the main chart
+- **AND** the X axis is ordered Monday to Sunday
+- **AND** each bar value corresponds to the weekday average in that period
+
+#### Scenario: Weekday average respects selected period
+
+- **WHEN** an authenticated user accesses `/painel/altas/?dias=30`
+- **AND** there are daily discharge records older than 30 days
+- **THEN** the weekday averages are computed only from the last 30 displayed
+  days (up to yesterday)
+
+#### Scenario: Weekday average chart handles sparse or empty data
+
+- **WHEN** an authenticated user accesses `/painel/altas/`
+- **AND** the period has no daily discharge records
+- **THEN** the page renders without error
+- **AND** the secondary chart area degrades gracefully without broken scripts
 
 ### Requirement: Chart page requires authentication
 
