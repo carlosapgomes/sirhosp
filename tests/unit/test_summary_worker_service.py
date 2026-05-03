@@ -40,8 +40,14 @@ def _stub_llm_response():
         "mudancas_da_rodada": ["Registro inicial"],
         "incertezas": [],
         "evidencias": [
-            {"event_id": "evt-001", "snippet": "dor abdominal há 2 dias"},
+            {
+                "event_id": "evt-001",
+                "happened_at": "2025-01-01T10:00:00+00:00",
+                "author_name": "Dr. Test",
+                "snippet": "dor abdominal há 2 dias",
+            },
         ],
+        "alertas_consistencia": [],
     }
 
 
@@ -355,6 +361,42 @@ class TestExecuteSummaryRunLifecycle:
         assert run.current_chunk_index == run.total_chunks
         assert run.total_chunks > 0
 
+    def test_llm_input_includes_author_and_signed_at(self):
+        """LLM payload includes author_name and signed_at per event."""
+        from apps.clinical_docs.models import ClinicalEvent
+        from apps.summaries.services import execute_summary_run
+
+        run, admission = _make_realistic_run()
+
+        ClinicalEvent.objects.create(
+            admission=admission,
+            patient=admission.patient,
+            ingestion_run_id=None,
+            event_identity_key="evt-s4-input-001",
+            content_hash="h-input-001",
+            happened_at=datetime(2025, 1, 2, 9, 0, tzinfo=UTC),
+            signed_at=datetime(2025, 1, 2, 10, 0, tzinfo=UTC),
+            author_name="Dra. Input",
+            profession_type="medica",
+            content_text="Evolução com autoria e assinatura",
+        )
+
+        with patch(
+            "apps.summaries.services.call_llm_gateway",
+            return_value=_stub_llm_response(),
+        ) as mocked_gateway:
+            execute_summary_run(run)
+
+        assert mocked_gateway.called
+        chamadas = mocked_gateway.call_args_list
+        primeira = chamadas[0].kwargs
+        novas = primeira["novas_evolucoes"]
+        assert len(novas) >= 1
+        assert "author_name" in novas[0]
+        assert "signed_at" in novas[0]
+        assert novas[0]["author_name"] == "Dra. Input"
+        assert novas[0]["signed_at"] == "2025-01-02T10:00:00+00:00"
+
 
 # ---------------------------------------------------------------------------
 # State and version persistence (unit)
@@ -442,6 +484,19 @@ class TestStateAndVersionPersistence:
         )
         for i, version in enumerate(versions):
             assert version.chunk_index == i
+
+    def test_version_stores_prompt_version_v2(self):
+        """AdmissionSummaryVersion persists the frozen prompt version."""
+        from apps.summaries.models import AdmissionSummaryVersion
+        from apps.summaries.services import execute_summary_run
+
+        run, admission = _make_realistic_run()
+
+        execute_summary_run(run)
+
+        version = AdmissionSummaryVersion.objects.filter(run=run).first()
+        assert version is not None
+        assert version.prompt_version == "aps-s9-v1"
 
 
 # ---------------------------------------------------------------------------

@@ -8,8 +8,9 @@ Required top-level keys:
   - resumo_markdown         (str)
   - mudancas_da_rodada      (list)
   - incertezas              (list)
-  - evidencias              (list of {event_id (non-empty str), snippet
-                             (non-empty str)})
+  - evidencias              (list of {event_id, happened_at, author_name,
+                             snippet})
+  - alertas_consistencia    (list of {tipo, descricao, evidencias[]})
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ _REQUIRED_KEYS = [
     "mudancas_da_rodada",
     "incertezas",
     "evidencias",
+    "alertas_consistencia",
 ]
 
 _TYPE_CHECKS = {
@@ -30,6 +32,7 @@ _TYPE_CHECKS = {
     "mudancas_da_rodada": list,
     "incertezas": list,
     "evidencias": list,
+    "alertas_consistencia": list,
 }
 
 
@@ -63,27 +66,75 @@ def validate_summary_output(data: dict[str, Any]) -> list[str]:
                 f"got {type(value).__name__}."
             )
 
+    def _validate_evidence_item(item: Any, *, path: str) -> None:
+        if not isinstance(item, dict):
+            errors.append(
+                f"{path} must be a dict, got {type(item).__name__}."
+            )
+            return
+
+        # event_id: required, non-empty string
+        event_id = item.get("event_id")
+        if not event_id or not isinstance(event_id, str):
+            errors.append(
+                f"{path} is missing a non-empty 'event_id'."
+            )
+
+        # happened_at: required, non-empty string
+        happened_at = item.get("happened_at")
+        if not happened_at or not isinstance(happened_at, str):
+            errors.append(
+                f"{path} is missing a non-empty 'happened_at'."
+            )
+
+        # author_name: required, non-empty string
+        author_name = item.get("author_name")
+        if not author_name or not isinstance(author_name, str):
+            errors.append(
+                f"{path} is missing a non-empty 'author_name'."
+            )
+
+        # snippet: required, non-empty string
+        snippet = item.get("snippet")
+        if not snippet or not isinstance(snippet, str):
+            errors.append(
+                f"{path} is missing a non-empty 'snippet'."
+            )
+
     # ---- Evidence validation ----
     evidencias = data.get("evidencias")
     if isinstance(evidencias, list):
         for idx, item in enumerate(evidencias):
-            if not isinstance(item, dict):
+            _validate_evidence_item(item, path=f"evidencias[{idx}]")
+
+    # ---- Consistency alerts validation ----
+    alertas = data.get("alertas_consistencia")
+    if isinstance(alertas, list):
+        for idx, alerta in enumerate(alertas):
+            path = f"alertas_consistencia[{idx}]"
+            if not isinstance(alerta, dict):
                 errors.append(
-                    f"evidencias[{idx}] must be a dict, "
-                    f"got {type(item).__name__}."
+                    f"{path} must be a dict, got {type(alerta).__name__}."
                 )
                 continue
-            # event_id: required, non-empty string
-            event_id = item.get("event_id")
-            if not event_id or not isinstance(event_id, str):
-                errors.append(
-                    f"evidencias[{idx}] is missing a non-empty 'event_id'."
-                )
-            # snippet: required, non-empty string
-            snippet = item.get("snippet")
-            if not snippet or not isinstance(snippet, str):
-                errors.append(
-                    f"evidencias[{idx}] is missing a non-empty 'snippet'."
+
+            tipo = alerta.get("tipo")
+            if not tipo or not isinstance(tipo, str):
+                errors.append(f"{path} is missing a non-empty 'tipo'.")
+
+            descricao = alerta.get("descricao")
+            if not descricao or not isinstance(descricao, str):
+                errors.append(f"{path} is missing a non-empty 'descricao'.")
+
+            alerta_evidencias = alerta.get("evidencias")
+            if not isinstance(alerta_evidencias, list):
+                errors.append(f"{path}.evidencias must be a list.")
+                continue
+
+            for ev_idx, item in enumerate(alerta_evidencias):
+                _validate_evidence_item(
+                    item,
+                    path=f"{path}.evidencias[{ev_idx}]",
                 )
 
     return errors

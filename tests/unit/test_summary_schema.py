@@ -43,9 +43,20 @@ def _valid_output() -> dict:
         "mudancas_da_rodada": ["Adicionado motivo da internação"],
         "incertezas": ["Diagnóstico diferencial pendente"],
         "evidencias": [
-            {"event_id": "evt-001", "snippet": "Paciente refere dor abdominal há 3 dias."},
-            {"event_id": "evt-002", "snippet": "Solicitado USG de abdome total."},
+            {
+                "event_id": "evt-001",
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+                "snippet": "Paciente refere dor abdominal há 3 dias.",
+            },
+            {
+                "event_id": "evt-002",
+                "happened_at": "2025-01-02T11:30:00-03:00",
+                "author_name": "Dra. Ana",
+                "snippet": "Solicitado USG de abdome total.",
+            },
         ],
+        "alertas_consistencia": [],
     }
 
 
@@ -123,6 +134,12 @@ class TestMissingFields:
         errors = _validate(data)
         assert any("evidencias" in e.lower() for e in errors)
 
+    def test_missing_alertas_consistencia(self):
+        data = _valid_output()
+        del data["alertas_consistencia"]
+        errors = _validate(data)
+        assert any("alertas_consistencia" in e.lower() for e in errors)
+
 
 # ---------------------------------------------------------------------------
 # Incorrect types
@@ -173,47 +190,125 @@ class TestEvidenceValidation:
 
     def test_evidence_missing_event_id(self):
         data = _valid_output()
-        data["evidencias"] = [{"snippet": "text without event id"}]
+        data["evidencias"] = [
+            {
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+                "snippet": "text without event id",
+            }
+        ]
         errors = _validate(data)
         assert any("event_id" in e.lower() for e in errors)
 
     def test_evidence_missing_snippet(self):
         data = _valid_output()
-        data["evidencias"] = [{"event_id": "evt-001"}]
+        data["evidencias"] = [
+            {
+                "event_id": "evt-001",
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+            }
+        ]
         errors = _validate(data)
         assert any("snippet" in e.lower() for e in errors)
 
+    def test_evidence_missing_happened_at(self):
+        data = _valid_output()
+        data["evidencias"] = [
+            {
+                "event_id": "evt-001",
+                "author_name": "Dr. Carlos",
+                "snippet": "texto",
+            }
+        ]
+        errors = _validate(data)
+        assert any("happened_at" in e.lower() for e in errors)
+
+    def test_evidence_missing_author_name(self):
+        data = _valid_output()
+        data["evidencias"] = [
+            {
+                "event_id": "evt-001",
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "snippet": "texto",
+            }
+        ]
+        errors = _validate(data)
+        assert any("author_name" in e.lower() for e in errors)
+
     def test_evidence_empty_event_id(self):
         data = _valid_output()
-        data["evidencias"] = [{"event_id": "", "snippet": "text"}]
+        data["evidencias"] = [
+            {
+                "event_id": "",
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+                "snippet": "text",
+            }
+        ]
         errors = _validate(data)
         assert any("event_id" in e.lower() for e in errors)
 
     def test_evidence_empty_snippet(self):
         data = _valid_output()
-        data["evidencias"] = [{"event_id": "evt-001", "snippet": ""}]
+        data["evidencias"] = [
+            {
+                "event_id": "evt-001",
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+                "snippet": "",
+            }
+        ]
         errors = _validate(data)
         assert any("snippet" in e.lower() for e in errors)
 
     def test_evidence_mixed_valid_and_invalid(self):
         data = _valid_output()
         data["evidencias"] = [
-            {"event_id": "evt-001", "snippet": "valid"},
-            {"snippet": "missing event_id"},
-            {"event_id": "evt-003", "snippet": "also valid"},
+            {
+                "event_id": "evt-001",
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+                "snippet": "valid",
+            },
+            {
+                "happened_at": "2025-01-02T10:00:00-03:00",
+                "author_name": "Dra. Ana",
+                "snippet": "missing event_id",
+            },
+            {
+                "event_id": "evt-003",
+                "happened_at": "2025-01-03T10:00:00-03:00",
+                "author_name": "Dr. Paulo",
+                "snippet": "also valid",
+            },
         ]
         errors = _validate(data)
         assert any("event_id" in e.lower() for e in errors)
 
     def test_evidence_null_event_id(self):
         data = _valid_output()
-        data["evidencias"] = [{"event_id": None, "snippet": "text"}]
+        data["evidencias"] = [
+            {
+                "event_id": None,
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+                "snippet": "text",
+            }
+        ]
         errors = _validate(data)
         assert any("event_id" in e.lower() for e in errors)
 
     def test_evidence_null_snippet(self):
         data = _valid_output()
-        data["evidencias"] = [{"event_id": "evt-001", "snippet": None}]
+        data["evidencias"] = [
+            {
+                "event_id": "evt-001",
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+                "snippet": None,
+            }
+        ]
         errors = _validate(data)
         assert any("snippet" in e.lower() for e in errors)
 
@@ -236,9 +331,22 @@ class TestMultipleErrors:
         """Each invalid evidence item produces an error."""
         data = _valid_output()
         data["evidencias"] = [
-            {"snippet": "no id"},           # missing event_id
-            {"event_id": "evt-002"},       # missing snippet
-            {"event_id": "", "snippet": ""},  # both empty
+            {
+                "snippet": "no id",
+                "happened_at": "2025-01-01T10:00:00-03:00",
+                "author_name": "Dr. Carlos",
+            },
+            {
+                "event_id": "evt-002",
+                "happened_at": "2025-01-02T10:00:00-03:00",
+                "author_name": "Dra. Ana",
+            },
+            {
+                "event_id": "",
+                "happened_at": "",
+                "author_name": "",
+                "snippet": "",
+            },
         ]
         errors = _validate(data)
         assert len(errors) >= 3

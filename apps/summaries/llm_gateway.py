@@ -71,6 +71,8 @@ Você recebe:
 - estado_estruturado_anterior: estado canônico atual do resumo (pode ser vazio).
 - resumo_markdown_anterior: narrativa Markdown atual (pode ser vazia).
 - novas_evolucoes: lista de novos eventos clínicos a incorporar.
+  Cada evento inclui: event_id, happened_at, signed_at, author_name,
+  profession_type e content_text.
 
 Sua tarefa é produzir um objeto JSON com os campos listados abaixo.
 
@@ -84,9 +86,18 @@ Sua tarefa é produzir um objeto JSON com os campos listados abaixo.
    nesta rodada (frases curtas).
 4. O campo `incertezas` deve listar pontos de incerteza ou ambiguidade
    identificados (pode ser vazio).
-5. O campo `evidencias` deve conter referências aos eventos usados, cada uma
-   com `event_id` (string) e `snippet` (trecho textual curto que fundamenta
-   a informação).
+5. O campo `evidencias` deve conter referências aos eventos usados. Cada
+   evidência deve incluir obrigatoriamente:
+   - `event_id` (string)
+   - `happened_at` (datetime ISO-8601 do evento)
+   - `author_name` (autor do evento)
+   - `snippet` (trecho textual curto que fundamenta a informação)
+6. O campo `alertas_consistencia` deve listar SUSPEITAS de inconsistência
+   clínica/documental (não afirme erro como fato). Cada alerta deve trazer:
+   - `tipo` (ex.: lateralidade_conflitante, possivel_paciente_errado,
+     cronologia_improvavel, dado_critico_sem_confirmacao)
+   - `descricao` (curta e objetiva)
+   - `evidencias` (lista no mesmo formato do campo evidencias).
 
 ## Seções fixas do resumo_markdown
 
@@ -135,7 +146,26 @@ Sua tarefa é produzir um objeto JSON com os campos listados abaixo.
   "mudancas_da_rodada": ["..."],
   "incertezas": [],
   "evidencias": [
-    {"event_id": "...", "snippet": "..."}
+    {
+      "event_id": "...",
+      "happened_at": "2026-05-03T08:15:00-03:00",
+      "author_name": "Dr(a). ...",
+      "snippet": "..."
+    }
+  ],
+  "alertas_consistencia": [
+    {
+      "tipo": "lateralidade_conflitante",
+      "descricao": "Há menções divergentes de lateralidade no prontuário.",
+      "evidencias": [
+        {
+          "event_id": "...",
+          "happened_at": "2026-05-03T08:15:00-03:00",
+          "author_name": "Dr(a). ...",
+          "snippet": "..."
+        }
+      ]
+    }
   ]
 }
 

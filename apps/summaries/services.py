@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 VALID_MODES = {"generate", "update", "regenerate"}
 
 MAX_RETRIES_PER_CHUNK = 3
+PROMPT_VERSION = "aps-s9-v1"
 
 # ---------------------------------------------------------------------------
 # UI context helper (APS-S6)
@@ -305,6 +306,12 @@ def execute_summary_run(
                     if hasattr(ev, "happened_at")
                     else ""
                 ),
+                "signed_at": (
+                    ev.signed_at.isoformat()
+                    if getattr(ev, "signed_at", None)
+                    else ""
+                ),
+                "author_name": getattr(ev, "author_name", ""),
                 "profession_type": getattr(
                     ev, "profession_type", ""
                 ),
@@ -422,12 +429,15 @@ def execute_summary_run(
                     )
                 },
                 uncertainties_json={
-                    "incertezas": llm_response.get("incertezas", [])
+                    "incertezas": llm_response.get("incertezas", []),
+                    "alertas_consistencia": llm_response.get(
+                        "alertas_consistencia", []
+                    ),
                 },
                 evidences_json=llm_response.get("evidencias", []),
                 llm_provider=llm_response.get("_meta", {}).get("provider", "stub"),
                 llm_model=llm_response.get("_meta", {}).get("model", "stub-v0"),
-                prompt_version="aps-s5-v1",
+                prompt_version=PROMPT_VERSION,
             )
 
         # ---- g. Mark chunk succeeded ----

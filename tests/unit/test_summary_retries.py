@@ -41,8 +41,14 @@ def _valid_llm_response():
         "mudancas_da_rodada": ["Registro inicial"],
         "incertezas": [],
         "evidencias": [
-            {"event_id": "evt-001", "snippet": "dor abdominal há 2 dias"},
+            {
+                "event_id": "evt-001",
+                "happened_at": "2025-01-01T10:00:00+00:00",
+                "author_name": "Dr. Test",
+                "snippet": "dor abdominal há 2 dias",
+            },
         ],
+        "alertas_consistencia": [],
     }
 
 
@@ -54,6 +60,7 @@ def _invalid_llm_response_missing_key():
         "mudancas_da_rodada": [],
         "incertezas": [],
         "evidencias": [],
+        "alertas_consistencia": [],
     }
 
 
