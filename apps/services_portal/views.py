@@ -100,17 +100,31 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
     labels = [e.date.strftime("%d/%m/%Y") for e in entries_recent]
     counts = [e.count for e in entries_recent]
 
+    # DWI-S1: weekend flags and weekday abbreviations for per-bar coloring
+    _WEEKDAY_ABBR = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+    weekend_flags = []
+    weekday_short = []
+    for e in entries_recent:
+        wd = e.date.weekday()  # 0=Mon … 6=Sun
+        weekend_flags.append(wd >= 5)
+        weekday_short.append(_WEEKDAY_ABBR[wd])
+
     chart_data = {
         "labels": labels,
         "counts": counts,
         "sma7": _moving_average(counts, 7),
         "ema7": _exponential_moving_average(counts, 7),
         "sma30": _moving_average(counts, 30),
+        "weekend_flags": weekend_flags,
+        "weekday_short": weekday_short,
     }
+
+    weekday_avg = _weekday_average(entries_recent)
 
     context = {
         "page_title": "Altas por Dia",
         "chart_data": chart_data,
+        "weekday_avg": weekday_avg,
         "dias": dias,
         "period_options": [30, 60, 90, 180, 365],
     }
@@ -161,6 +175,40 @@ def _exponential_moving_average(
         result[i] = round(ema, 1)
 
     return result
+
+
+def _weekday_average(entries: list) -> dict:
+    """Compute average discharge count per weekday (Seg..Dom).
+
+    Args:
+        entries: list of DailyDischargeCount (already filtered for period).
+
+    Returns:
+        dict with keys:
+            labels: ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom']
+            values: [float] average count per weekday (0.0 if no data).
+            counts: [int] number of observations per weekday.
+    """
+    weekday_labels = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+    sums = [0] * 7
+    n_days: list[int] = [0] * 7
+
+    for entry in entries:
+        wd = entry.date.weekday()  # 0=Mon … 6=Sun
+        sums[wd] += entry.count
+        n_days[wd] += 1
+
+    values = [
+        round(sums[i] / n_days[i], 1) if n_days[i] > 0 else 0.0
+        for i in range(7)
+    ]
+
+    return {
+        "labels": weekday_labels,
+        "values": values,
+        "counts": n_days,
+        "has_data": any(n > 0 for n in n_days),
+    }
 
 
 def _build_filtered_queryset(

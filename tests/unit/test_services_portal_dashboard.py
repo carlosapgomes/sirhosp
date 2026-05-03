@@ -4,7 +4,7 @@ Slice IRMD-S6: Ingestion metric cards on dashboard.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from django.urls import reverse
@@ -403,3 +403,204 @@ class TestDischargeChartView:
         chart_data = response.context["chart_data"]
         assert chart_data["labels"] == []
         assert chart_data["counts"] == []
+
+    # ── DWI-S1: Weekend highlight tests ──────────────────────────────
+
+    def test_chart_context_has_weekend_flags(self, admin_client):
+        """Context contains weekend_flags aligned with labels and counts."""
+        self._create_counts(10)
+        url = reverse("services_portal:discharge_chart") + "?dias=7"
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        assert "weekend_flags" in chart_data
+        n = len(chart_data["labels"])
+        assert len(chart_data["weekend_flags"]) == n
+        assert len(chart_data["weekend_flags"]) == len(chart_data["counts"])
+        # All values should be booleans
+        assert all(isinstance(f, bool) for f in chart_data["weekend_flags"])
+
+    def test_weekend_flags_correct_for_known_dates(self, admin_client):
+        """Weekend flags are True for Saturday/Sunday, False for Mon-Fri."""
+        today = timezone.localdate()
+        # Create entries for 8 days before today (oldest first after reverse):
+        # today=Sunday => sat,sun,mon,tue,wed,thu,fri,sat
+        for i in range(8, 0, -1):
+            day = today - timedelta(days=i)
+            DailyDischargeCount.objects.create(date=day, count=5)
+
+        url = reverse("services_portal:discharge_chart") + "?dias=8"
+        response = admin_client.get(url)
+        labels = response.context["chart_data"]["labels"]
+        flags = response.context["chart_data"]["weekend_flags"]
+
+        for label, flag in zip(labels, flags, strict=True):
+            d = datetime.strptime(label, "%d/%m/%Y").date()
+            is_weekend = d.weekday() >= 5  # 5=Saturday, 6=Sunday
+            assert flag == is_weekend, (
+                f"{label} weekday={d.weekday()} flag={flag}"
+            )
+
+    def test_page_html_uses_weekend_flags_for_coloring(self, admin_client):
+        """HTML/JS uses weekend_flags for per-bar coloring."""
+        self._create_counts(10)
+        url = reverse("services_portal:discharge_chart") + "?dias=7"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        # JSON data emitted by json_script includes weekend_flags
+        assert '"weekend_flags"' in content
+        # JS code must reference rawData.weekend_flags for per-bar colors
+        assert "weekend_flags" in content
+        # Updated legend references weekend colors
+        assert any(
+            term in content
+            for term in ["Sábado", "Domingo", "sábado", "domingo",
+                         "fim de semana", "dia útil"]
+        )
+
+    # ── DWI-S2: Weekday average chart tests ─────────────────────────
+
+    def test_chart_context_has_weekday_avg(self, admin_client):
+        """Context contains weekday_avg with labels, values, counts."""
+        self._create_counts(10)
+        url = reverse("services_portal:discharge_chart") + "?dias=7"
+        response = admin_client.get(url)
+        assert "weekday_avg" in response.context
+        wa = response.context["weekday_avg"]
+        assert "labels" in wa
+        assert "values" in wa
+        assert "counts" in wa
+
+    def test_weekday_avg_labels_are_fixed_order(self, admin_client):
+        """Weekday avg labels are in fixed Seg..Dom order regardless of data."""
+        self._create_counts(10)
+        url = reverse("services_portal:discharge_chart") + "?dias=7"
+        response = admin_client.get(url)
+        wa = response.context["weekday_avg"]
+        assert wa["labels"] == [
+            "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"
+        ]
+
+    def test_weekday_avg_values_and_counts_are_length_7(self, admin_client):
+        """Weekday avg values and counts are length 7."""
+        self._create_counts(10)
+        url = reverse("services_portal:discharge_chart") + "?dias=7"
+        response = admin_client.get(url)
+        wa = response.context["weekday_avg"]
+        assert len(wa["values"]) == 7
+        assert len(wa["counts"]) == 7
+        assert all(isinstance(v, float) for v in wa["values"])
+        assert all(v >= 0 for v in wa["values"])
+
+    def test_weekday_avg_correct_for_deterministic_fixture(self, admin_client):
+        """Weekday averages are correctly computed for known data.
+
+        Uses fixed 2024-01-01 (Mon) through 2024-01-14 dates with
+        known counts. Test runs with ?dias=365 so all entries are
+        included.
+        """
+        # 2024-01-01 is Monday
+        mon1 = date(2024, 1, 1)  # Mon
+        mon2 = date(2024, 1, 8)  # Mon
+        tue1 = date(2024, 1, 2)  # Tue
+        tue2 = date(2024, 1, 9)  # Tue
+        wed1 = date(2024, 1, 3)  # Wed
+        thu1 = date(2024, 1, 4)  # Thu
+        fri1 = date(2024, 1, 5)  # Fri
+        sat1 = date(2024, 1, 6)  # Sat
+        # No Sunday entry (test zero/empty bucket)
+
+        DailyDischargeCount.objects.create(date=mon1, count=10)
+        DailyDischargeCount.objects.create(date=mon2, count=20)  # avg=15
+        DailyDischargeCount.objects.create(date=tue1, count=5)
+        DailyDischargeCount.objects.create(date=tue2, count=15)  # avg=10
+        DailyDischargeCount.objects.create(date=wed1, count=8)   # avg=8
+        DailyDischargeCount.objects.create(date=thu1, count=12)  # avg=12
+        DailyDischargeCount.objects.create(date=fri1, count=2)   # avg=2
+        DailyDischargeCount.objects.create(date=sat1, count=4)   # avg=4
+
+        url = reverse("services_portal:discharge_chart") + "?dias=365"
+        response = admin_client.get(url)
+        wa = response.context["weekday_avg"]
+
+        # Seg  Ter  Qua  Qui  Sex  Sáb  Dom
+        assert wa["values"][0] == 15.0
+        assert wa["values"][1] == 10.0
+        assert wa["values"][2] == 8.0
+        assert wa["values"][3] == 12.0
+        assert wa["values"][4] == 2.0
+        assert wa["values"][5] == 4.0
+        assert wa["values"][6] == 0.0  # no Sunday data
+
+        assert wa["counts"] == [2, 2, 1, 1, 1, 1, 0]
+
+    def test_page_html_has_weekday_average_chart_canvas(self, admin_client):
+        """HTML contains canvas#weekdayAverageChart for the second chart."""
+        self._create_counts(10)
+        url = reverse("services_portal:discharge_chart") + "?dias=7"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert "weekdayAverageChart" in content
+
+    def test_weekday_avg_zero_when_no_data(self, admin_client):
+        """Weekday avg all zero when there are no discharge entries."""
+        url = reverse("services_portal:discharge_chart")
+        response = admin_client.get(url)
+        assert "weekday_avg" in response.context
+        wa = response.context["weekday_avg"]
+        assert wa["values"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        assert wa["counts"] == [0, 0, 0, 0, 0, 0, 0]
+        assert wa["has_data"] is False
+
+    # ── DWI-S3: Hardening de estados vazios / esparsos ─────────────
+
+    def test_empty_data_hides_weekday_chart_card(self, admin_client):
+        """When no DailyDischargeCount exists, weekday chart card is hidden."""
+        url = reverse("services_portal:discharge_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        # The second canvas should NOT be present when has_data=False
+        assert '<canvas id="weekdayAverageChart"' not in content
+        # But the json_script with weekday-avg-data still exists
+        assert "weekday-avg-data" in content
+
+    def test_short_period_missing_weekdays_no_break(self, admin_client):
+        """Short period (5 days Mon-Fri) without weekend entries still renders."""
+        # Create only Monday-Friday entries (no weekend)
+        mon = date(2024, 2, 5)  # Monday
+        for i in range(5):
+            day = mon + timedelta(days=i)
+            DailyDischargeCount.objects.create(date=day, count=3 + i)
+
+        url = reverse("services_portal:discharge_chart") + "?dias=5"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        content = response.content.decode()
+
+        # Weekday chart canvas IS present (has_data=True: Mon-Fri have counts)
+        assert "weekdayAverageChart" in content
+
+        # Weekend buckets (Sáb=5, Dom=6) should have zero avg and zero counts
+        wa = response.context["weekday_avg"]
+        assert wa["values"][5] == 0.0  # Sáb
+        assert wa["values"][6] == 0.0  # Dom
+        assert wa["counts"][5] == 0
+        assert wa["counts"][6] == 0
+        assert wa["has_data"] is True  # at least one weekday has data
+
+    def test_weekday_avg_counts_coherent_with_period(self, admin_client):
+        """Weekday avg counts reflect the actual number of observations in period."""
+        # 2024-03-04 is Monday
+        mon = date(2024, 3, 4)
+        # Create 14 days: 2 full weeks Mon-Sun
+        for i in range(14):
+            day = mon + timedelta(days=i)
+            DailyDischargeCount.objects.create(date=day, count=5)
+
+        url = reverse("services_portal:discharge_chart") + "?dias=14"
+        response = admin_client.get(url)
+        wa = response.context["weekday_avg"]
+        # Each weekday appears exactly twice in 14 days
+        assert wa["counts"] == [2, 2, 2, 2, 2, 2, 2]
+        # Each avg should be 5.0 (all entries have count=5)
+        assert all(v == 5.0 for v in wa["values"])
