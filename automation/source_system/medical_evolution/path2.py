@@ -62,7 +62,7 @@ DATETIME_LINE_RE: Final[re.Pattern[str]] = re.compile(
     r'^\d{2}/\d{2}/\d{4} \d{2}:\d{2}(?::\d{2})?$'
 )
 EVOLUTION_END_LINE_RE: Final[re.Pattern[str]] = re.compile(
-    r'^Elaborado\b.*\bem:?\s*\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}(?::\d{2})?$',
+    r'^Elaborado\b.*\bem:?\s*\d{2}/\d{2}/\d{4}(?:\s+\d{2}:\d{2}(?::\d{2})?)?$',
     re.IGNORECASE,
 )
 SIGNATURE_AUTHOR_RE: Final[re.Pattern[str]] = re.compile(
@@ -70,7 +70,7 @@ SIGNATURE_AUTHOR_RE: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 SIGNATURE_DATETIME_RE: Final[re.Pattern[str]] = re.compile(
-    r'\bem:?\s*(\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}(?::\d{2})?)\s*$',
+    r'\bem:?\s*(\d{2}/\d{2}/\d{4}(?:\s+\d{2}:\d{2}(?::\d{2})?)?)\s*$',
     re.IGNORECASE,
 )
 
@@ -992,7 +992,13 @@ def extract_signature_datetime(signature_line: str | None) -> str:
     if not match:
         return ""
 
-    raw_value = normalize_datetime_line(match.group(1).strip())
+    raw_value = match.group(1).strip()
+
+    if re.match(r"^\d{2}/\d{2}/\d{4}$", raw_value):
+        raw_value = f"{raw_value} 12:00:00"
+    else:
+        raw_value = normalize_datetime_line(raw_value)
+
     try:
         return datetime.strptime(raw_value, "%d/%m/%Y %H:%M:%S").isoformat()
     except ValueError:
@@ -1099,7 +1105,10 @@ def extrair_e_processar_pdf_pol(
     print(f"TXT ordenado salvo em: {sorted_txt_output_path}")
     print(f"JSON de evoluções salvo em: {json_output_path}")
     print(f"Linhas após limpeza: {len(cleaned_lines)}")
-    print(f"Marcadores de fim ('Elaborado ... em DD/MM/YYYY HH:MM'): {end_marker_lines}")
+    print(
+        "Marcadores de fim ('Elaborado ... em DD/MM/YYYY[ HH:MM]'): "
+        f"{end_marker_lines}"
+    )
     print(f"Evoluções identificadas: {len(evolutions)}")
 
 
