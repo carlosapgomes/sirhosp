@@ -3,6 +3,7 @@
 APS-S2: create_summary_run (POST enqueue) + run_status (GET status page).
 APS-S7: run_progress (HTMX fragment for chunk-level polling).
 APS-S8: summary_read (Markdown render + copy button + disclaimer).
+STP-S5: prompt_list, prompt_create, prompt_edit, prompt_delete (CRUD).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from apps.summaries import services
 from apps.summaries.models import (
     AdmissionSummaryState,
     SummaryRun,
+    UserPromptTemplate,
 )
 
 
@@ -184,3 +186,133 @@ def summary_read(
         "page_title": f"Resumo #{run.pk} — {run.admission.patient.name}",
     }
     return render(request, "summaries/summary_read.html", context)
+
+
+# ---------------------------------------------------------------------------
+# Prompt library CRUD (STP-S5)
+# ---------------------------------------------------------------------------
+
+
+@login_required
+def prompt_list(request: HttpRequest) -> HttpResponse:
+    """List own prompts and public prompts from other users."""
+    own = UserPromptTemplate.objects.filter(owner=request.user)  # type: ignore[misc]
+    public_others = UserPromptTemplate.objects.filter(
+        is_public=True,
+    ).exclude(owner=request.user).select_related("owner")  # type: ignore[misc]
+
+    context = {
+        "own_prompts": own,
+        "public_others": public_others,
+        "page_title": "Biblioteca de Prompts",
+    }
+    return render(request, "summaries/prompt_list.html", context)
+
+
+@login_required
+def prompt_create(request: HttpRequest) -> HttpResponse:
+    """Create a new prompt template."""
+    if request.method == "POST":
+        title = request.POST.get("title", "").strip()
+        content = request.POST.get("content", "").strip()
+        is_public = request.POST.get("is_public") == "on"
+
+        errors = {}
+        if not title:
+            errors["title"] = "Título é obrigatório."
+        if not content:
+            errors["content"] = "Conteúdo é obrigatório."
+
+        if errors:
+            return render(request, "summaries/prompt_form.html", {
+                "page_title": "Novo Prompt",
+                "is_create": True,
+                "errors": errors,
+                "title": title,
+                "content": content,
+                "is_public": is_public,
+            }, status=200)
+
+        UserPromptTemplate.objects.create(
+            owner=request.user,  # type: ignore[misc]
+            title=title,
+            content=content,
+            is_public=is_public,
+        )
+        return redirect("summaries:prompt_list")
+
+    return render(request, "summaries/prompt_form.html", {
+        "page_title": "Novo Prompt",
+        "is_create": True,
+        "errors": {},
+        "title": "",
+        "content": "",
+        "is_public": False,
+    })
+
+
+@login_required
+def prompt_edit(request: HttpRequest, pk: int) -> HttpResponse:
+    """Edit own prompt template only."""
+    prompt = get_object_or_404(UserPromptTemplate, pk=pk)
+
+    if prompt.owner_id != request.user.pk:
+        from django.http import HttpResponseForbidden
+        return HttpResponseForbidden("Você não pode editar este prompt.")
+
+    if request.method == "POST":
+        title = request.POST.get("title", "").strip()
+        content = request.POST.get("content", "").strip()
+        is_public = request.POST.get("is_public") == "on"
+
+        errors = {}
+        if not title:
+            errors["title"] = "Título é obrigatório."
+        if not content:
+            errors["content"] = "Conteúdo é obrigatório."
+
+        if errors:
+            return render(request, "summaries/prompt_form.html", {
+                "page_title": f"Editar: {prompt.title}",
+                "is_create": False,
+                "prompt": prompt,
+                "errors": errors,
+                "title": title,
+                "content": content,
+                "is_public": is_public,
+            }, status=200)
+
+        prompt.title = title
+        prompt.content = content
+        prompt.is_public = is_public
+        prompt.save()
+        return redirect("summaries:prompt_list")
+
+    return render(request, "summaries/prompt_form.html", {
+        "page_title": f"Editar: {prompt.title}",
+        "is_create": False,
+        "prompt": prompt,
+        "errors": {},
+        "title": prompt.title,
+        "content": prompt.content,
+        "is_public": prompt.is_public,
+    })
+
+
+@login_required
+def prompt_delete(request: HttpRequest, pk: int) -> HttpResponse:
+    """Delete own prompt template only (POST only)."""
+    prompt = get_object_or_404(UserPromptTemplate, pk=pk)
+
+    if prompt.owner_id != request.user.pk:
+        from django.http import HttpResponseForbidden
+        return HttpResponseForbidden("Você não pode apagar este prompt.")
+
+    if request.method == "POST":
+        prompt.delete()
+        return redirect("summaries:prompt_list")
+
+    return render(request, "summaries/prompt_confirm_delete.html", {
+        "page_title": f"Apagar: {prompt.title}",
+        "prompt": prompt,
+    })

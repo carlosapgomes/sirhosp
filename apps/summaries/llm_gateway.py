@@ -1,26 +1,51 @@
-"""LLM gateway abstraction layer (APS-S4).
+"""LLM gateway abstraction layer (APS-S4 / STP-S3 / STP-S6).
 
 Pluggable gateway for calling an LLM to generate progressive admission
 summary updates.  The built-in implementation uses the OpenAI chat
-completions API (or any OpenAI-compatible endpoint via ``LLM_BASE_URL``).
+completions API (or any OpenAI-compatible endpoint).
 
-Swap the implementation to a different provider (e.g. Anthropic) by
-replacing this module or injecting a different callable.
+Configuration is read from ``apps.summaries.llm_config`` (phase-1 env
+vars prefixed with ``SUMMARY_PHASE1_*``) with automatic fallback to
+legacy ``LLM_*`` / ``OPENAI_API_KEY`` environment variables for
+backward compatibility.
+
+Phase 2 render calls are made via ``call_llm_phase2_render``, which
+accepts an explicit ``GatewayConfig`` for provider/model selection.
+Costs are computed from token counts using configurable pricing
+(default approximate OpenAI rates).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
+import warnings
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any
 
 from openai import OpenAI
 
+from apps.summaries.llm_config import (
+    LLMConfigError,
+    Phase1Config,
+    load_phase1_config,
+)
+from apps.summaries.prompt_loader import load_phase1_prompt
+
+# ---------------------------------------------------------------------------
+# Approximate cost per 1k tokens (USD).  Used when the provider does not
+# return pricing metadata in the API response.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_INPUT_PRICE_PER_1K = Decimal("0.005")   # $5 / 1M tokens
+_DEFAULT_OUTPUT_PRICE_PER_1K = Decimal("0.015")  # $15 / 1M tokens
+
 
 @dataclass(frozen=True)
 class GatewayConfig:
-    """LLM gateway configuration read from environment variables."""
+    """LLM gateway configuration used at call time."""
 
     api_key: str
     base_url: str
@@ -29,25 +54,61 @@ class GatewayConfig:
     provider: str = "openai"
 
 
-def _load_config() -> GatewayConfig:
-    """Load LLM gateway configuration from environment.
+def _load_gateway_phase1_config() -> GatewayConfig:
+    """Load gateway configuration, preferring ``SUMMARY_PHASE1_*`` vars.
 
-    Required:
-        LLM_API_KEY — API key for the LLM provider.
+    Resolution order:
 
-    Optional:
-        LLM_BASE_URL  — override the API base URL (default: OpenAI).
-        LLM_MODEL     — model name (default: ``gpt-4o``).
-        LLM_TIMEOUT_SECONDS — request timeout in seconds (default: ``120``).
+    1. ``SUMMARY_PHASE1_*`` environment variables (new, preferred).
+    2. ``LLM_API_KEY`` (or ``OPENAI_API_KEY``) + ``LLM_BASE_URL`` +
+       ``LLM_MODEL`` (legacy, with deprecation warning).
+
+    Returns:
+        ``GatewayConfig`` with all required fields populated.
+
+    Raises:
+        RuntimeError: If no API key can be found through any path.
     """
+    try:
+        phase1 = load_phase1_config()
+    except LLMConfigError:
+        phase1 = None
+
+    if phase1 is not None:
+        return _phase1_to_gateway(phase1)
+
+    # Legacy fallback
+    warnings.warn(
+        "LLM configuration via LLM_API_KEY/LLM_BASE_URL/LLM_MODEL is "
+        "deprecated. Please migrate to SUMMARY_PHASE1_* environment "
+        "variables. See .env.example for the new format.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _load_legacy_config()
+
+
+def _phase1_to_gateway(config: Phase1Config) -> GatewayConfig:
+    """Convert a ``Phase1Config`` to a ``GatewayConfig``."""
+    timeout = float(os.environ.get("LLM_TIMEOUT_SECONDS", "120"))
+    return GatewayConfig(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        model=config.model,
+        timeout=timeout,
+        provider=config.provider,
+    )
+
+
+def _load_legacy_config() -> GatewayConfig:
+    """Load configuration from legacy LLM_* environment variables."""
     api_key = os.environ.get("LLM_API_KEY", "").strip()
     if not api_key:
-        # Fall back to OPENAI_API_KEY for convenience.
         api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError(
-            "LLM_API_KEY environment variable is required. "
-            "Set it in your .env file."
+            "No LLM API key found. Set SUMMARY_PHASE1_API_KEY or "
+            "LLM_API_KEY (or OPENAI_API_KEY) in your environment."
         )
 
     base_url = os.environ.get(
@@ -64,113 +125,17 @@ def _load_config() -> GatewayConfig:
     )
 
 
-_SYSTEM_PROMPT = """Você é um assistente clínico responsável por manter um
-resumo progressivo de internação hospitalar.
+def _load_config() -> GatewayConfig:
+    """Load LLM gateway configuration (delegates to phase-1 loader).
 
-Você recebe:
-- estado_estruturado_anterior: estado canônico atual do resumo (pode ser vazio).
-- resumo_markdown_anterior: narrativa Markdown atual (pode ser vazia).
-- novas_evolucoes: lista de novos eventos clínicos a incorporar.
-  Cada evento inclui: event_id, happened_at, signed_at, author_name,
-  profession_type e content_text.
+    Kept for backward compatibility with internal callers.
+    """
+    return _load_gateway_phase1_config()
 
-Sua tarefa é produzir um objeto JSON com os campos listados abaixo.
 
-## Regras
-
-1. O campo `estado_estruturado` deve conter o estado canônico ATUALIZADO,
-   incorporando as novas evoluções.
-2. O campo `resumo_markdown` deve ser a narrativa completa e atualizada em
-   Markdown, com as seções fixas listadas abaixo.
-3. O campo `mudancas_da_rodada` deve listar em linguagem natural o que mudou
-   nesta rodada (frases curtas).
-4. O campo `incertezas` deve listar pontos de incerteza ou ambiguidade
-   identificados (pode ser vazio).
-5. O campo `evidencias` deve conter referências aos eventos usados. Cada
-   evidência deve incluir obrigatoriamente:
-   - `event_id` (string)
-   - `happened_at` (datetime ISO-8601 do evento)
-   - `author_name` (autor do evento)
-   - `snippet` (trecho textual curto que fundamenta a informação)
-6. O campo `alertas_consistencia` deve listar SUSPEITAS de inconsistência
-   clínica/documental (não afirme erro como fato). Cada alerta deve trazer:
-   - `tipo` (ex.: lateralidade_conflitante, possivel_paciente_errado,
-     cronologia_improvavel, dado_critico_sem_confirmacao)
-   - `descricao` (curta e objetiva)
-   - `evidencias` (lista no mesmo formato do campo evidencias).
-
-## Seções fixas do resumo_markdown
-
-1. Motivo da internação
-2. Linha do tempo
-3. Problemas ativos
-4. Problemas resolvidos
-5. Procedimentos
-6. Antimicrobianos
-7. Exames relevantes
-8. Pendências
-9. Riscos / eventos adversos
-10. Situação atual
-
-## Campos do estado_estruturado
-
-- motivo_internacao (string)
-- linha_do_tempo (list de strings)
-- problemas_ativos (list de strings)
-- problemas_resolvidos (list de strings)
-- procedimentos (list de strings)
-- antimicrobianos (list de strings)
-- exames_relevantes (list de strings)
-- intercorrencias (list de strings)
-- pendencias (list de strings)
-- riscos_eventos_adversos (list de strings)
-- situacao_atual (string)
-
-## Exemplo de saída
-
-{
-  "estado_estruturado": {
-    "motivo_internacao": "...",
-    "linha_do_tempo": ["..."],
-    "problemas_ativos": ["..."],
-    "problemas_resolvidos": [],
-    "procedimentos": [],
-    "antimicrobianos": [],
-    "exames_relevantes": [],
-    "intercorrencias": [],
-    "pendencias": [],
-    "riscos_eventos_adversos": [],
-    "situacao_atual": "..."
-  },
-  "resumo_markdown": "# Resumo de Internação\\n\\n...",
-  "mudancas_da_rodada": ["..."],
-  "incertezas": [],
-  "evidencias": [
-    {
-      "event_id": "...",
-      "happened_at": "2026-05-03T08:15:00-03:00",
-      "author_name": "Dr(a). ...",
-      "snippet": "..."
-    }
-  ],
-  "alertas_consistencia": [
-    {
-      "tipo": "lateralidade_conflitante",
-      "descricao": "Há menções divergentes de lateralidade no prontuário.",
-      "evidencias": [
-        {
-          "event_id": "...",
-          "happened_at": "2026-05-03T08:15:00-03:00",
-          "author_name": "Dr(a). ...",
-          "snippet": "..."
-        }
-      ]
-    }
-  ]
-}
-
-Retorne SOMENTE o JSON, sem texto antes ou depois.
-"""
+def _get_system_prompt() -> str:
+    """Load the phase-1 canonical prompt from its versioned file."""
+    return load_phase1_prompt()
 
 
 def call_llm_gateway(
@@ -213,7 +178,7 @@ def call_llm_gateway(
     completion = client.chat.completions.create(
         model=config.model,
         messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": _get_system_prompt()},
             {"role": "user", "content": user_message},
         ],
         response_format={"type": "json_object"},
@@ -237,3 +202,151 @@ def call_llm_gateway(
     }
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 render gateway (STP-S6)
+# ---------------------------------------------------------------------------
+
+
+def _compute_phase2_cost(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    input_price_per_1k: Decimal = _DEFAULT_INPUT_PRICE_PER_1K,
+    output_price_per_1k: Decimal = _DEFAULT_OUTPUT_PRICE_PER_1K,
+) -> dict[str, Decimal]:
+    """Compute cost breakdown from token counts.
+
+    Returns a dict with ``cost_input``, ``cost_output``, and ``cost_total``
+    as ``Decimal`` values (USD).
+    """
+    cost_input = (Decimal(input_tokens) / Decimal(1000)) * input_price_per_1k
+    cost_output = (
+        Decimal(output_tokens) / Decimal(1000)
+    ) * output_price_per_1k
+    return {
+        "cost_input": cost_input,
+        "cost_output": cost_output,
+        "cost_total": cost_input + cost_output,
+    }
+
+
+def call_llm_phase2_render(
+    *,
+    canonical_narrative: str,
+    canonical_state: dict[str, Any],
+    prompt_text: str,
+    config: GatewayConfig,
+) -> dict[str, Any]:
+    """Call an LLM to render the canonical summary into a final Markdown.
+
+    Args:
+        canonical_narrative: Markdown narrative from phase 1.
+        canonical_state: Structured clinical state from phase 1.
+        prompt_text: System prompt to guide rendering style (loaded from
+            file or provided as custom text).
+        config: LLM provider/model/credentials for this call.
+
+    Returns:
+        A dict with keys:
+
+        * ``content`` (str): The rendered Markdown output.
+        * ``input_tokens`` (int)
+        * ``output_tokens`` (int)
+        * ``cached_tokens`` (int, default 0)
+        * ``cost_input`` (Decimal)
+        * ``cost_output`` (Decimal)
+        * ``cost_total`` (Decimal)
+        * ``request_payload`` (dict): Full request sent to the LLM.
+        * ``response_payload`` (dict): Full API response.
+
+    Raises:
+        RuntimeError: If the LLM call fails or returns invalid content.
+    """
+    client = OpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        timeout=config.timeout,
+    )
+
+    user_message = json.dumps(
+        {
+            "estado_estruturado": canonical_state,
+            "resumo_markdown_base": canonical_narrative,
+        },
+        ensure_ascii=False,
+    )
+
+    request_payload = {
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": prompt_text},
+            {"role": "user", "content": user_message},
+        ],
+        "temperature": 0.3,
+    }
+
+    start_time = time.monotonic()
+
+    try:
+        completion = client.chat.completions.create(**request_payload)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Phase 2 LLM call failed ({config.provider}/{config.model}): "
+            f"{exc}"
+        ) from exc
+
+    latency_ms = int((time.monotonic() - start_time) * 1000)
+
+    content = completion.choices[0].message.content or ""
+
+    usage = getattr(completion, "usage", None)
+    input_tokens = usage.prompt_tokens if usage else 0
+    output_tokens = usage.completion_tokens if usage else 0
+    cached_tokens = getattr(
+        usage, "prompt_tokens_details", {}
+    )
+    if isinstance(cached_tokens, dict):
+        cached_tokens = cached_tokens.get("cached_tokens", 0)
+    else:
+        cached_tokens = 0
+
+    costs = _compute_phase2_cost(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+    response_payload = {
+        "id": getattr(completion, "id", ""),
+        "model": getattr(completion, "model", config.model),
+        "choices": [
+            {
+                "index": choice.index,
+                "message": {
+                    "role": choice.message.role,
+                    "content": choice.message.content,
+                },
+                "finish_reason": choice.finish_reason,
+            }
+            for choice in completion.choices
+        ],
+        "usage": {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        } if usage else None,
+    }
+
+    return {
+        "content": content,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens,
+        "cost_input": costs["cost_input"],
+        "cost_output": costs["cost_output"],
+        "cost_total": costs["cost_total"],
+        "request_payload": request_payload,
+        "response_payload": response_payload,
+        "latency_ms": latency_ms,
+    }

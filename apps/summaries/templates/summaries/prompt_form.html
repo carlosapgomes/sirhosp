@@ -1,0 +1,73 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }} — SIRHOSP{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'summaries:prompt_list' %}">Biblioteca de Prompts</a></li>
+    <li class="breadcrumb-item active" aria-current="page">{{ page_title }}</li>
+  </ol>
+</nav>
+
+<!-- Page header -->
+<h5 class="mb-3 fw-bold" style="color: var(--sirhosp-sidebar-bg);">
+  {% if is_create %}
+    <i class="bi bi-plus-circle me-2"></i>{{ page_title }}
+  {% else %}
+    <i class="bi bi-pencil-square me-2"></i>{{ page_title }}
+  {% endif %}
+</h5>
+
+<div class="card border-0 shadow-sm">
+  <div class="card-body">
+    <form method="post">
+      {% csrf_token %}
+
+      <!-- Title -->
+      <div class="mb-3">
+        <label for="id_title" class="form-label small fw-semibold">Título *</label>
+        <input type="text" name="title" id="id_title"
+               class="form-control form-control-sm {% if errors.title %}is-invalid{% endif %}"
+               value="{{ title }}" maxlength="200" required
+               placeholder="Ex: Resumo jurídico objetivo">
+        {% if errors.title %}
+          <div class="invalid-feedback">{{ errors.title }}</div>
+        {% endif %}
+      </div>
+
+      <!-- Content -->
+      <div class="mb-3">
+        <label for="id_content" class="form-label small fw-semibold">Conteúdo do Prompt *</label>
+        <textarea name="content" id="id_content" rows="8"
+                  class="form-control form-control-sm {% if errors.content %}is-invalid{% endif %}"
+                  required placeholder="Instruções para o LLM gerar o resumo...">{{ content }}</textarea>
+        {% if errors.content %}
+          <div class="invalid-feedback">{{ errors.content }}</div>
+        {% endif %}
+      </div>
+
+      <!-- Visibility -->
+      <div class="form-check mb-3">
+        <input type="checkbox" name="is_public" id="id_is_public"
+               class="form-check-input" {% if is_public %}checked{% endif %}>
+        <label class="form-check-label small" for="id_is_public">
+          Tornar público (visível para outros usuários)
+        </label>
+      </div>
+
+      <!-- Actions -->
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary btn-sm">
+          <i class="bi bi-check-lg me-1"></i>Salvar
+        </button>
+        <a href="{% url 'summaries:prompt_list' %}" class="btn btn-outline-secondary btn-sm">
+          Cancelar
+        </a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

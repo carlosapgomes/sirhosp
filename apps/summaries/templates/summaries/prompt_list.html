@@ -1,0 +1,113 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }} — SIRHOSP{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item active" aria-current="page">{{ page_title }}</li>
+  </ol>
+</nav>
+
+<!-- Page header -->
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+  <div>
+    <h5 class="mb-1 fw-bold" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-collection me-2"></i>{{ page_title }}
+    </h5>
+    <p class="text-muted small mb-0">
+      Gerencie seus prompts reutilizáveis para resumos clínicos.
+    </p>
+  </div>
+  <a href="{% url 'summaries:prompt_create' %}" class="btn btn-primary btn-sm">
+    <i class="bi bi-plus-lg me-1"></i>Novo Prompt
+  </a>
+</div>
+
+<!-- Own Prompts -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header bg-transparent border-bottom-0 pt-3 pb-0">
+    <h6 class="fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-person me-1"></i>Meus Prompts
+    </h6>
+  </div>
+  <div class="card-body pt-2">
+    {% if own_prompts %}
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0 small">
+          <thead class="table-light">
+            <tr>
+              <th>Título</th>
+              <th>Visibilidade</th>
+              <th>Atualizado</th>
+              <th class="text-end">Ações</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for prompt in own_prompts %}
+              <tr>
+                <td class="fw-semibold">{{ prompt.title }}</td>
+                <td>
+                  {% if prompt.is_public %}
+                    <span class="badge bg-success">Público</span>
+                  {% else %}
+                    <span class="badge bg-secondary">Privado</span>
+                  {% endif %}
+                </td>
+                <td>{{ prompt.updated_at|date:"d/m/Y H:i" }}</td>
+                <td class="text-end">
+                  <a href="{% url 'summaries:prompt_edit' prompt.pk %}"
+                     class="btn btn-outline-secondary btn-sm me-1">
+                    <i class="bi bi-pencil"></i>
+                  </a>
+                  <a href="{% url 'summaries:prompt_delete' prompt.pk %}"
+                     class="btn btn-outline-danger btn-sm">
+                    <i class="bi bi-trash"></i>
+                  </a>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="text-muted small mb-0">Você ainda não tem prompts salvos.</p>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Public Prompts from Others -->
+{% if public_others %}
+<div class="card border-0 shadow-sm">
+  <div class="card-header bg-transparent border-bottom-0 pt-3 pb-0">
+    <h6 class="fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-people me-1"></i>Prompts Públicos (outros usuários)
+    </h6>
+  </div>
+  <div class="card-body pt-2">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0 small">
+        <thead class="table-light">
+          <tr>
+            <th>Título</th>
+            <th>Autor</th>
+            <th>Atualizado</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for prompt in public_others %}
+            <tr>
+              <td class="fw-semibold">{{ prompt.title }}</td>
+              <td>{{ prompt.owner.username }}</td>
+              <td>{{ prompt.updated_at|date:"d/m/Y H:i" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -16,3 +16,15 @@ config:
   # MD033/no-inline-html — permitido para diagramas ASCII em code blocks
   # e templates (ex: ADR template com placeholders).
   MD033: false
+
+  # MD041/first-line-heading — desabilitado porque o projeto contém
+  # arquivos .md que são textos de prompt LLM (apps/summaries/prompts/),
+  # não documentos Markdown tradicionais. A primeira linha desses
+  # arquivos é o início do prompt, não um heading.
+  MD041: false
+
+  # MD032/blanks-around-lists — desabilitado pela mesma razão do MD041.
+  # Os prompts LLM contêm listas que fazem parte do texto do prompt;
+  # adicionar blank lines alteraria o conteúdo enviado ao modelo.
+  MD032: false
+

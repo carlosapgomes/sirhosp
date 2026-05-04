@@ -1,0 +1,48 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }} — SIRHOSP{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'summaries:prompt_list' %}">Biblioteca de Prompts</a></li>
+    <li class="breadcrumb-item active" aria-current="page">{{ page_title }}</li>
+  </ol>
+</nav>
+
+<!-- Page header -->
+<h5 class="mb-3 fw-bold" style="color: var(--sirhosp-sidebar-bg);">
+  <i class="bi bi-exclamation-triangle me-2"></i>{{ page_title }}
+</h5>
+
+<div class="card border-0 shadow-sm">
+  <div class="card-body">
+    <p class="mb-3">
+      Tem certeza que deseja apagar o prompt
+      <strong>"{{ prompt.title }}"</strong>?
+      Esta ação não pode ser desfeita.
+    </p>
+
+    <div class="alert alert-secondary small mb-3">
+      <strong>Visibilidade:</strong>
+      {% if prompt.is_public %}Público{% else %}Privado{% endif %}
+      &middot;
+      <strong>Criado:</strong> {{ prompt.created_at|date:"d/m/Y H:i" }}
+    </div>
+
+    <form method="post">
+      {% csrf_token %}
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-danger btn-sm">
+          <i class="bi bi-trash me-1"></i>Sim, apagar
+        </button>
+        <a href="{% url 'summaries:prompt_list' %}" class="btn btn-outline-secondary btn-sm">
+          Cancelar
+        </a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

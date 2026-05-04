@@ -1,8 +1,11 @@
-"""Worker that processes queued SummaryRuns (APS-S4).
+"""Worker that processes queued SummaryRuns (APS-S4 / STP-S6).
 
-Picks up runs in 'queued' state using select_for_update(skip_locked=True),
-delegates execution to execute_summary_run(), and transitions runs to
-'succeeded' on success.
+Picks up runs in 'queued' state using select_for_update(skip_locked=True).
+
+Delegates execution to:
+
+  - ``execute_two_phase_pipeline`` (when ``--pipeline`` is set), or
+  - ``execute_summary_run`` (legacy, the default).
 
 Supports:
   - One-shot mode: process all queued runs once and exit.
@@ -19,7 +22,10 @@ from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
 from apps.summaries.models import SummaryRun
-from apps.summaries.services import execute_summary_run
+from apps.summaries.services import (
+    execute_summary_run,
+    execute_two_phase_pipeline,
+)
 
 
 class Command(BaseCommand):
@@ -37,17 +43,26 @@ class Command(BaseCommand):
             default=5,
             help="Seconds to sleep when no queued runs are found (default: 5).",
         )
+        parser.add_argument(
+            "--pipeline",
+            action="store_true",
+            help=(
+                "Run the two-phase pipeline (phase-1 canonical + phase-2 render) "
+                "instead of the legacy single-phase execution."
+            ),
+        )
 
     def handle(self, *args, **options):
         loop: bool = options["loop"]
         sleep_seconds: int = options["sleep_seconds"]
+        pipeline: bool = options["pipeline"]
 
         if loop:
-            self._run_loop(sleep_seconds=sleep_seconds)
+            self._run_loop(sleep_seconds=sleep_seconds, pipeline=pipeline)
         else:
-            self._process_once()
+            self._process_once(pipeline=pipeline)
 
-    def _run_loop(self, sleep_seconds: int) -> None:
+    def _run_loop(self, sleep_seconds: int, pipeline: bool = False) -> None:
         """Continuously poll and process queued runs until interrupted."""
         import signal
         import sys
@@ -117,12 +132,19 @@ class Command(BaseCommand):
                 # Process outside the atomic block so each run is
                 # independently handled.
                 try:
-                    execute_summary_run(run)
-                    self.stdout.write(
-                        f"  Run #{run.pk} succeeded "
-                        f"(mode={run.mode}, "
-                        f"chunks={run.total_chunks})"
-                    )
+                    if pipeline:
+                        execute_two_phase_pipeline(run)
+                        self.stdout.write(
+                            f"  Pipeline run for SummaryRun #{run.pk} succeeded "
+                            f"(mode={run.mode})"
+                        )
+                    else:
+                        execute_summary_run(run)
+                        self.stdout.write(
+                            f"  Run #{run.pk} succeeded "
+                            f"(mode={run.mode}, "
+                            f"chunks={run.total_chunks})"
+                        )
                 except Exception as exc:
                     self.stderr.write(f"  Run #{run.pk} failed: {exc}")
                     run.status = SummaryRun.Status.FAILED
@@ -136,7 +158,7 @@ class Command(BaseCommand):
                         ]
                     )
 
-    def _process_once(self) -> None:
+    def _process_once(self, pipeline: bool = False) -> None:
         """Process all queued runs once and exit."""
         runs = SummaryRun.objects.filter(status="queued")
         count = runs.count()
@@ -167,11 +189,18 @@ class Command(BaseCommand):
 
             # Process outside atomic block
             try:
-                execute_summary_run(run)
-                self.stdout.write(
-                    f"  Run #{run.pk} succeeded "
-                    f"(mode={run.mode}, chunks={run.total_chunks})"
-                )
+                if pipeline:
+                    execute_two_phase_pipeline(run)
+                    self.stdout.write(
+                        f"  Pipeline run for SummaryRun #{run.pk} succeeded "
+                        f"(mode={run.mode})"
+                    )
+                else:
+                    execute_summary_run(run)
+                    self.stdout.write(
+                        f"  Run #{run.pk} succeeded "
+                        f"(mode={run.mode}, chunks={run.total_chunks})"
+                    )
             except Exception as exc:
                 self.stderr.write(f"  Run #{run.pk} failed: {exc}")
                 run.status = SummaryRun.Status.FAILED

@@ -1,4 +1,4 @@
-"""URL routes for summary views (APS-S2)."""
+"""URL routes for summary views (APS-S2, STP-S5)."""
 
 from django.urls import path
 
@@ -26,5 +26,26 @@ urlpatterns = [
         "summaries/read/<int:run_id>/",
         views.summary_read,
         name="read",
+    ),
+    # Prompt library CRUD (STP-S5)
+    path(
+        "prompts/",
+        views.prompt_list,
+        name="prompt_list",
+    ),
+    path(
+        "prompts/create/",
+        views.prompt_create,
+        name="prompt_create",
+    ),
+    path(
+        "prompts/<int:pk>/edit/",
+        views.prompt_edit,
+        name="prompt_edit",
+    ),
+    path(
+        "prompts/<int:pk>/delete/",
+        views.prompt_delete,
+        name="prompt_delete",
     ),
 ]
