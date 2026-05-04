@@ -1,0 +1,204 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }} — SIRHOSP{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'patients:patient_list' %}">Pacientes</a></li>
+    <li class="breadcrumb-item active" aria-current="page">{{ page_title }}</li>
+  </ol>
+</nav>
+
+<!-- Page header -->
+<h5 class="mb-3 fw-bold" style="color: var(--sirhosp-sidebar-bg);">
+  <i class="bi bi-sliders me-2"></i>{{ page_title }}
+</h5>
+
+<div class="card border-0 shadow-sm">
+  <div class="card-body">
+    <dl class="row small mb-3">
+      <dt class="col-sm-3 text-muted fw-normal">Paciente</dt>
+      <dd class="col-sm-9 fw-semibold">{{ admission.patient.name }}</dd>
+      <dt class="col-sm-3 text-muted fw-normal">Interna&ccedil;&atilde;o</dt>
+      <dd class="col-sm-9">
+        {{ admission.admission_date|date:"d/m/Y"|default:"—" }}
+        {% if admission.discharge_date %}
+          &rarr; {{ admission.discharge_date|date:"d/m/Y" }}
+        {% else %}
+          &rarr; <em>atual</em>
+        {% endif %}
+        {% if admission.ward %}
+          &middot; {{ admission.ward }}
+        {% endif %}
+      </dd>
+    </dl>
+
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="mode" value="{{ mode }}">
+
+      <!-- LLM da Fase 2 -->
+      <div class="mb-3">
+        <label for="id_phase2_option" class="form-label small fw-semibold">
+          LLM da Fase 2 (renderiza&ccedil;&atilde;o)
+        </label>
+        {% if phase2_options %}
+          <select name="phase2_option_index" id="id_phase2_option"
+                  class="form-select form-select-sm">
+            {% for opt in phase2_options %}
+              <option value="{{ forloop.counter }}"
+                      {% if forloop.first %}selected{% endif %}>
+                {{ opt.label }}
+              </option>
+            {% endfor %}
+          </select>
+        {% else %}
+          <div class="alert alert-warning small mb-0">
+            Nenhuma op&ccedil;&atilde;o de LLM configurada para a fase 2.
+            O sistema usar&aacute; a configura&ccedil;&atilde;o padr&atilde;o.
+          </div>
+        {% endif %}
+      </div>
+
+      <!-- Modo do Prompt -->
+      <fieldset class="mb-3">
+        <legend class="form-label small fw-semibold mb-2">Modo do Prompt</legend>
+        <div class="form-check">
+          <input type="radio" name="prompt_mode" id="prompt_mode_padrao"
+                 value="padrao" class="form-check-input" checked
+                 onchange="onPromptModeChange()">
+          <label class="form-check-label small" for="prompt_mode_padrao">
+            <strong>Padr&atilde;o</strong> &mdash; prompt institucional versionado
+          </label>
+        </div>
+        <div class="form-check">
+          <input type="radio" name="prompt_mode" id="prompt_mode_custom"
+                 value="custom" class="form-check-input"
+                 onchange="onPromptModeChange()">
+          <label class="form-check-label small" for="prompt_mode_custom">
+            <strong>Customizado</strong> &mdash; prompt pr&oacute;prio ou salvo
+          </label>
+        </div>
+        {% if errors.prompt_mode %}
+          <div class="text-danger small mt-1">{{ errors.prompt_mode }}</div>
+        {% endif %}
+      </fieldset>
+
+      <!-- Custom Prompt Section -->
+      <div id="custom-prompt-section" class="ms-3 ps-3 border-start d-none">
+        <!-- Saved prompt selector -->
+        <div class="mb-3">
+          <label for="id_saved_prompt" class="form-label small fw-semibold">
+            Prompt salvo (opcional)
+          </label>
+          <select name="saved_prompt_id" id="id_saved_prompt"
+                  class="form-select form-select-sm"
+                  onchange="onSavedPromptChange()">
+            <option value="">— Digitar novo prompt —</option>
+            {% for p in own_prompts %}
+              <option value="{{ p.pk }}">{{ p.title }} (meu)</option>
+            {% endfor %}
+            {% for p in public_others %}
+              <option value="{{ p.pk }}">{{ p.title }} ({{ p.owner.username }})</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <!-- Custom prompt textarea -->
+        <div class="mb-3" id="custom-textarea-group">
+          <label for="id_custom_prompt_text" class="form-label small fw-semibold">
+            Texto do Prompt Customizado
+          </label>
+          <textarea name="custom_prompt_text" id="id_custom_prompt_text" rows="6"
+                    class="form-control form-control-sm"
+                    placeholder="Instru&ccedil;&otilde;es para o LLM gerar o resumo..."></textarea>
+        </div>
+
+        <!-- Salvar prompt -->
+        <div class="mb-3">
+          <div class="form-check mb-2">
+            <input type="checkbox" name="salvar_prompt" id="id_salvar_prompt"
+                   class="form-check-input" onchange="onSalvarPromptChange()">
+            <label class="form-check-label small" for="id_salvar_prompt">
+              Salvar este prompt para reutiliza&ccedil;&atilde;o
+            </label>
+          </div>
+          <div id="salvar-prompt-fields" class="ms-3 ps-3 d-none">
+            <div class="mb-2">
+              <label for="id_prompt_title" class="form-label small fw-semibold">
+                T&iacute;tulo *
+              </label>
+              <input type="text" name="prompt_title" id="id_prompt_title"
+                     class="form-control form-control-sm {% if errors.prompt_title %}is-invalid{% endif %}"
+                     maxlength="200" placeholder="Ex: Resumo jur&iacute;dico objetivo">
+              {% if errors.prompt_title %}
+                <div class="invalid-feedback">{{ errors.prompt_title }}</div>
+              {% endif %}
+            </div>
+            <div class="form-check mb-2">
+              <input type="checkbox" name="prompt_is_public" id="id_prompt_is_public"
+                     class="form-check-input">
+              <label class="form-check-label small" for="id_prompt_is_public">
+                Tornar p&uacute;blico (vis&iacute;vel para outros usu&aacute;rios)
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Error summary -->
+      {% if errors.mode %}
+        <div class="alert alert-danger small py-2">{{ errors.mode }}</div>
+      {% endif %}
+
+      <!-- Actions -->
+      <div class="d-flex gap-2 mt-3">
+        <button type="submit" class="btn btn-primary btn-sm">
+          <i class="bi bi-stars me-1"></i>Gerar Resumo
+        </button>
+        <a href="javascript:history.back()" class="btn btn-outline-secondary btn-sm">
+          Cancelar
+        </a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+  function onPromptModeChange() {
+    const custom = document.getElementById("prompt_mode_custom");
+    const section = document.getElementById("custom-prompt-section");
+    if (custom && custom.checked) {
+      section.classList.remove("d-none");
+    } else {
+      section.classList.add("d-none");
+    }
+  }
+
+  function onSavedPromptChange() {
+    const sel = document.getElementById("id_saved_prompt");
+    const textarea = document.getElementById("custom-textarea-group");
+    if (sel && sel.value) {
+      textarea.classList.add("d-none");
+    } else {
+      textarea.classList.remove("d-none");
+    }
+  }
+
+  function onSalvarPromptChange() {
+    const cb = document.getElementById("id_salvar_prompt");
+    const fields = document.getElementById("salvar-prompt-fields");
+    if (cb && cb.checked) {
+      fields.classList.remove("d-none");
+    } else {
+      fields.classList.add("d-none");
+    }
+  }
+</script>
+{% endblock %}

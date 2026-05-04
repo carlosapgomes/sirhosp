@@ -275,17 +275,14 @@
               {% endif %}
             {% endif %}
 
-            <form method="post"
-                  action="{% url 'summaries:create_summary_run' selected_admission.pk %}"
-                  class="d-inline">
-              {% csrf_token %}
-              <input type="hidden" name="mode" value="{{ summary.cta_mode }}">
-              <button type="submit" class="btn btn-primary btn-sm"
-                      {% if summary.is_processing %}disabled title="Já existe uma execução em andamento"{% endif %}>
-                <i class="bi bi-stars me-1"></i>
-                {% if summary.is_processing %}Em processamento...{% else %}{{ summary.cta_label }}{% endif %}
-              </button>
-            </form>
+            <a href="{% url 'summaries:summary_config' selected_admission.pk %}?mode={{ summary.cta_mode }}"
+               class="btn btn-primary btn-sm
+               {% if summary.is_processing %}disabled{% endif %}"
+               {% if summary.is_processing %}tabindex="-1" aria-disabled="true"
+               title="Já existe uma execução em andamento"{% endif %}>
+              <i class="bi bi-stars me-1"></i>
+              {% if summary.is_processing %}Em processamento...{% else %}{{ summary.cta_label }}{% endif %}
+            </a>
           </div>
         </div>
       </div>

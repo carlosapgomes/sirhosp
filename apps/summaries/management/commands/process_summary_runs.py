@@ -28,6 +28,52 @@ from apps.summaries.services import (
 )
 
 
+def _resolve_phase2_api_key(option_index: int | None) -> str:
+    """Resolve the phase-2 API key from environment at runtime.
+
+    Uses ``load_phase2_options()`` + the stored ``option_index`` to
+    look up the correct key.  Never reads API keys from the database.
+    """
+    from apps.summaries.llm_config import load_phase2_options
+
+    options = load_phase2_options()
+    if option_index is not None and 1 <= option_index <= len(options):
+        return options[option_index - 1].api_key
+    return ""
+
+
+def _execute_pipeline_with_config(run: SummaryRun, cmd: BaseCommand) -> None:
+    """Execute the two-phase pipeline, forwarding phase-2 config from
+    ``run.phase2_config_json`` when available (STP-S7-F1).
+
+    API keys are resolved at runtime from environment configuration
+    (NOT from the database) for security compliance (STP-S7-F2).
+    """
+    config: dict = getattr(run, "phase2_config_json", None) or {}
+
+    phase2_provider = config.get("phase2_provider", "")
+    phase2_model = config.get("phase2_model", "")
+    phase2_base_url = config.get("phase2_base_url", "")
+    phase2_prompt_text = config.get("prompt_text")
+    phase2_option_index = config.get("phase2_option_index")
+
+    # Resolve API key securely from env (never from DB)
+    phase2_api_key = _resolve_phase2_api_key(phase2_option_index)
+
+    execute_two_phase_pipeline(
+        run,
+        phase2_provider=phase2_provider,
+        phase2_model=phase2_model,
+        phase2_base_url=phase2_base_url,
+        phase2_api_key=phase2_api_key,
+        phase2_prompt_text=phase2_prompt_text,
+    )
+    cmd.stdout.write(
+        f"  Pipeline run for SummaryRun #{run.pk} succeeded "
+        f"(mode={run.mode})"
+    )
+
+
 class Command(BaseCommand):
     help = "Process queued summary runs (async worker without Celery)."
 
@@ -133,11 +179,7 @@ class Command(BaseCommand):
                 # independently handled.
                 try:
                     if pipeline:
-                        execute_two_phase_pipeline(run)
-                        self.stdout.write(
-                            f"  Pipeline run for SummaryRun #{run.pk} succeeded "
-                            f"(mode={run.mode})"
-                        )
+                        _execute_pipeline_with_config(run, self)
                     else:
                         execute_summary_run(run)
                         self.stdout.write(
@@ -190,11 +232,7 @@ class Command(BaseCommand):
             # Process outside atomic block
             try:
                 if pipeline:
-                    execute_two_phase_pipeline(run)
-                    self.stdout.write(
-                        f"  Pipeline run for SummaryRun #{run.pk} succeeded "
-                        f"(mode={run.mode})"
-                    )
+                    _execute_pipeline_with_config(run, self)
                 else:
                     execute_summary_run(run)
                     self.stdout.write(

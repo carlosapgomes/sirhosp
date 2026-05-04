@@ -8,6 +8,11 @@ app_name = "summaries"
 
 urlpatterns = [
     path(
+        "admissions/<int:admission_id>/summary/config/",
+        views.summary_config,
+        name="summary_config",
+    ),
+    path(
         "admissions/<int:admission_id>/summary/create/",
         views.create_summary_run,
         name="create_summary_run",

@@ -135,6 +135,9 @@ class SummaryRun(models.Model):
 
     Created by user action on the admission page.  Processed by the
     summary worker.
+
+    ``phase2_config_json`` stores the user's phase-2 choices from the
+    config page so the worker can apply them (STP-S7-F1).
     """
 
     class Status(models.TextChoices):
@@ -181,6 +184,9 @@ class SummaryRun(models.Model):
     total_chunks = models.IntegerField(default=0)
 
     error_message = models.TextField(default="")
+
+    # Phase-2 config from the UI (STP-S7-F1)
+    phase2_config_json = models.JSONField(default=dict)
 
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)

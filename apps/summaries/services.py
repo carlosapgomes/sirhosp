@@ -176,12 +176,16 @@ def queue_summary_run(
     admission: Admission,
     mode: str,
     requested_by: User | None = None,
+    phase2_config_json: dict | None = None,
 ) -> SummaryRun:
     """Create a queued SummaryRun for an admission.
 
     Calculates target_end_date:
       - open admission (no discharge_date): today
       - closed admission: min(today, discharge_date)
+
+    Optionally stores ``phase2_config_json`` for the worker to consume
+    (STP-S7-F1).
     """
     today = date.today()
 
@@ -191,13 +195,17 @@ def queue_summary_run(
     else:
         target_end_date = today
 
-    run = SummaryRun.objects.create(
-        admission=admission,
-        requested_by=requested_by,
-        mode=mode,
-        target_end_date=target_end_date,
-        status=SummaryRun.Status.QUEUED,
-    )
+    kwargs: dict = {
+        "admission": admission,
+        "requested_by": requested_by,
+        "mode": mode,
+        "target_end_date": target_end_date,
+        "status": SummaryRun.Status.QUEUED,
+    }
+    if phase2_config_json is not None:
+        kwargs["phase2_config_json"] = phase2_config_json
+
+    run = SummaryRun.objects.create(**kwargs)
     return run
 
 
