@@ -491,11 +491,13 @@ class Command(BaseCommand):
         # Mark attempt as succeeded (CQM-S3)
         self._mark_latest_attempt_succeeded(run)
 
-        # Auto-enqueue demographics for the patient
+        # Auto-enqueue demographics for the patient.
+        # NOTE: these follow-up runs are NOT attached to the census batch
+        # so that the census batch can close independently.
         if patient is not None:
             demo_run = queue_demographics_only_run(
                 patient_record=patient.patient_source_key,
-                batch=run.batch,
+                batch=None,
             )
             self.stdout.write(
                 f"  Auto-enqueued demographics_only run #{demo_run.pk} "
@@ -504,7 +506,10 @@ class Command(BaseCommand):
 
         # Auto-enqueue full_sync for the most recent admission
         if patient is not None:
-            full_sync_run = self._enqueue_most_recent_full_sync(patient, run)
+            full_sync_run = self._enqueue_most_recent_full_sync(
+                patient,
+                batch=run.batch,
+            )
             if full_sync_run:
                 self.stdout.write(
                     f"  Auto-enqueued full_sync run #{full_sync_run.pk} "
@@ -1159,12 +1164,12 @@ class Command(BaseCommand):
             attempt.save(update_fields=["status", "finished_at"])
 
     @staticmethod
-    def _enqueue_most_recent_full_sync(patient, run):
+    def _enqueue_most_recent_full_sync(patient, batch=None):
         """Enqueue a full_sync run for the patient's most recent admission.
 
-        CQM-S3: Inherits batch from the source run.
-
         Returns the created IngestionRun or None if no admission exists.
+        The run is optionally attached to a batch (pass None for auto-enqueued runs
+        so they don't block batch closure).
         """
         from django.utils import timezone
 
@@ -1189,7 +1194,7 @@ class Command(BaseCommand):
         return IngestionRun.objects.create(
             status="queued",
             intent="full_sync",
-            batch=run.batch,
+            batch=batch,
             parameters_json={
                 "patient_record": patient.patient_source_key,
                 "admission_id": str(latest.pk),

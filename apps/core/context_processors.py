@@ -57,20 +57,27 @@ def _default_title(path: str) -> str:
 
 
 def sync_status(request: HttpRequest) -> dict:
-    """Inject sync status time from the latest succeeded IngestionRun."""
-    from django.utils import timezone
+    """Inject sync status time from the latest succeeded IngestionRun.
 
-    from apps.ingestion.models import IngestionRun
+    Guards against database access failures (e.g. test environments without
+    django_db) by falling back to a safe default.
+    """
+    try:
+        from django.utils import timezone
 
-    latest = (
-        IngestionRun.objects
-        .filter(status="succeeded", finished_at__isnull=False)
-        .order_by("-finished_at")
-        .first()
-    )
+        from apps.ingestion.models import IngestionRun
 
-    if latest is None:
+        latest = (
+            IngestionRun.objects
+            .filter(status="succeeded", finished_at__isnull=False)
+            .order_by("-finished_at")
+            .first()
+        )
+
+        if latest is None:
+            return {"sync_time": "--:--"}
+
+        local_dt = timezone.localtime(latest.finished_at)
+        return {"sync_time": local_dt.strftime("%H:%M")}
+    except Exception:
         return {"sync_time": "--:--"}
-
-    local_dt = timezone.localtime(latest.finished_at)
-    return {"sync_time": local_dt.strftime("%H:%M")}

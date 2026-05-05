@@ -197,11 +197,12 @@ class TestWorkerGapPlanning:
         assert run.events_created == 1
         mock_ext.extract_evolutions.assert_called_once()
         call_args = mock_ext.extract_evolutions.call_args
-        # Should only extract the gap (2026-04-11 to 2026-04-12)
-        assert call_args.kwargs["start_date"] == "2026-04-11"
+        # With overlap_days=1, the first gap extends backward to capture
+        # late-registered events on the boundary day (2026-04-10).
+        assert call_args.kwargs["start_date"] == "2026-04-10"
         assert call_args.kwargs["end_date"] == "2026-04-12"
         assert len(run.gaps_json) == 1
-        assert run.gaps_json[0] == {"start_date": "2026-04-11", "end_date": "2026-04-12"}
+        assert run.gaps_json[0] == {"start_date": "2026-04-10", "end_date": "2026-04-12"}
 
     def test_gaps_persisted_on_run(self):
         """Gap information is persisted on the IngestionRun for audit."""
@@ -219,7 +220,8 @@ class TestWorkerGapPlanning:
             call_command("process_ingestion_runs")
 
         run.refresh_from_db()
-        assert run.gaps_json == [{"start_date": "2026-04-11", "end_date": "2026-04-14"}]
+        # With overlap_days=1, the first gap extends backward by 1 day.
+        assert run.gaps_json == [{"start_date": "2026-04-10", "end_date": "2026-04-14"}]
 
     def test_multiple_gap_windows(self):
         """Worker handles multiple non-contiguous gap windows."""
@@ -240,9 +242,10 @@ class TestWorkerGapPlanning:
 
         run.refresh_from_db()
         assert run.status == "succeeded"
-        # Two gap windows: 11-12 and 14-14
+        # With overlap_days=1, the first gap extends backward by 1 day:
+        # 10-12 and 14-14.
         assert len(run.gaps_json) == 2
-        assert run.gaps_json[0] == {"start_date": "2026-04-11", "end_date": "2026-04-12"}
+        assert run.gaps_json[0] == {"start_date": "2026-04-10", "end_date": "2026-04-12"}
         assert run.gaps_json[1] == {"start_date": "2026-04-14", "end_date": "2026-04-14"}
         # Extractor called twice (once per gap)
         assert mock_ext.extract_evolutions.call_count == 2
