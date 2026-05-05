@@ -27,6 +27,10 @@
       <i class="bi bi-exclamation-triangle"></i>
       Monitor de Risco
     </a>
+    <a href="{% url 'summaries:logs_public' %}" class="sirhosp-sidebar-link {% if active_menu == 'logs' %}active{% endif %}">
+      <i class="bi bi-journal-text"></i>
+      Logs de Resumos
+    </a>
   </nav>
 
   <!-- Footer -->

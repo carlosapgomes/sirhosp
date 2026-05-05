@@ -5,6 +5,8 @@ APS-S7: run_progress (HTMX fragment for chunk-level polling).
 APS-S8: summary_read (Markdown render + copy button + disclaimer).
 STP-S5: prompt_list, prompt_create, prompt_edit, prompt_delete (CRUD).
 STP-S7: summary_config (GET/POST config page for phase2 LLM + prompt).
+STP-S8: logs_public (operational logs for all users),
+        logs_admin (sensitive logs for staff/superuser).
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils.safestring import mark_safe
 
-from apps.summaries import services
+from apps.summaries import exchange_rates, services
 from apps.summaries.models import (
     AdmissionSummaryState,
     SummaryRun,
@@ -564,3 +566,142 @@ def prompt_delete(request: HttpRequest, pk: int) -> HttpResponse:
         "page_title": f"Apagar: {prompt.title}",
         "prompt": prompt,
     })
+
+
+# ---------------------------------------------------------------------------
+# Logs (STP-S8)
+# ---------------------------------------------------------------------------
+
+
+def _format_step_status(step_run) -> str:
+    """Return a user-friendly label for a step run status."""
+    mapping = {
+        "running": "Executando",
+        "succeeded": "Sucedido",
+        "failed": "Falhou",
+        "skipped": "Reutilizado",
+    }
+    return mapping.get(step_run.status, step_run.status)
+
+
+def _build_logs_context(
+    include_sensitive: bool,
+    page_title: str,
+    active_menu: str,
+) -> dict:
+    """Shared context builder for both public and admin log views.
+
+    Args:
+        include_sensitive: if True, include prompt/payload/response fields.
+        page_title: page title for the template.
+        active_menu: sidebar active menu identifier.
+
+    Returns:
+        Django template context dictionary.
+
+    Performance: loads the latest exchange rate once and reuses it for
+    all BRL formatting, avoiding repeated DB queries per row (STP-S8-F1).
+    """
+    from apps.summaries.models import SummaryPipelineRun
+
+    # Load exchange rate once for the whole page (STP-S8-F1 hardening)
+    latest_rate = exchange_rates.get_latest_rate()
+
+    runs = SummaryPipelineRun.objects.select_related(
+        "admission__patient",
+        "requested_by",
+    ).prefetch_related("step_runs").order_by("-created_at")[:200]
+
+    # Build enriched rows
+    rows: list[dict] = []
+    for run in runs:
+        steps = list(run.step_runs.order_by("started_at"))
+        for step in steps:
+            row: dict = {
+                "run": run,
+                "step": step,
+                "created_at": run.created_at,
+                "patient_name": run.admission.patient.name,
+                "username": (
+                    run.requested_by.username
+                    if run.requested_by else "—"
+                ),
+                "step_label": (
+                    "Fase 1"
+                    if step.step_type == "phase1_canonical"
+                    else "Fase 2"
+                ),
+                "status_label": _format_step_status(step),
+                "provider_model": (
+                    f"{step.provider_name}/{step.model_name}"
+                    if step.provider_name
+                    else "—"
+                ),
+                "cost_usd": str(step.cost_total),
+                "cost_brl": exchange_rates.format_brl_with_rate(
+                    step.cost_total, latest_rate
+                ),
+                "cost_input_usd": str(step.cost_input),
+                "cost_output_usd": str(step.cost_output),
+                "tokens_in": step.input_tokens or 0,
+                "tokens_out": step.output_tokens or 0,
+                "latency_ms": step.latency_ms or 0,
+                "run_total_usd": str(run.total_cost),
+                "run_total_brl": exchange_rates.format_brl_with_rate(
+                    run.total_cost, latest_rate
+                ),
+            }
+            if include_sensitive:
+                row["prompt_text_snapshot"] = step.prompt_text_snapshot
+                row["request_payload_json"] = json.dumps(
+                    step.request_payload_json, indent=2, ensure_ascii=False
+                )
+                row["response_payload_json"] = json.dumps(
+                    step.response_payload_json, indent=2, ensure_ascii=False
+                )
+            rows.append(row)
+
+    return {
+        "page_title": page_title,
+        "active_menu": active_menu,
+        "rows": rows,
+        "include_sensitive": include_sensitive,
+        "rate_available": latest_rate is not None,
+    }
+
+
+@login_required
+def logs_public(request: HttpRequest) -> HttpResponse:
+    """Operational logs visible to all authenticated users.
+
+    Shows run-level and phase-level metadata without sensitive
+    prompt/payload/response content.
+    """
+    context = _build_logs_context(
+        include_sensitive=False,
+        page_title="Logs de Resumos",
+        active_menu="logs",
+    )
+    return render(request, "summaries/logs_public.html", context)
+
+
+@login_required
+def logs_admin(request: HttpRequest) -> HttpResponse:
+    """Sensitive logs restricted to staff/superuser.
+
+    Shows full prompt text, request payload, and response payload
+    in addition to all public metadata.
+    """
+    from django.http import HttpResponseForbidden
+
+    if not (request.user.is_staff or request.user.is_superuser):
+        return HttpResponseForbidden(
+            "Acesso restrito a administradores."
+        )
+
+    context = _build_logs_context(
+        include_sensitive=True,
+        page_title="Logs de Resumos — Admin",
+        active_menu="logs",
+    )
+    return render(request, "summaries/logs_admin.html", context)

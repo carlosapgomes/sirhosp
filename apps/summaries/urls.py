@@ -1,4 +1,4 @@
-"""URL routes for summary views (APS-S2, STP-S5)."""
+"""URL routes for summary views (APS-S2, STP-S5, STP-S8)."""
 
 from django.urls import path
 
@@ -52,5 +52,16 @@ urlpatterns = [
         "prompts/<int:pk>/delete/",
         views.prompt_delete,
         name="prompt_delete",
+    ),
+    # Logs (STP-S8)
+    path(
+        "logs/",
+        views.logs_public,
+        name="logs_public",
+    ),
+    path(
+        "logs/admin/",
+        views.logs_admin,
+        name="logs_admin",
     ),
 ]

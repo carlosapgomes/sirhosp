@@ -1,0 +1,166 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }} — SIRHOSP{% endblock %}
+
+{% block content %}
+<!-- Breadcrumb -->
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item active" aria-current="page">{{ page_title }}</li>
+  </ol>
+</nav>
+
+<!-- Page header -->
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+  <div>
+    <h5 class="mb-1 fw-bold" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-journal-text me-2"></i>{{ page_title }}
+    </h5>
+    <p class="text-muted small mb-0">
+      Histórico operacional de execuções de resumo clínico.
+      {% if rate_available %}
+        <span class="text-success ms-2">
+          <i class="bi bi-check-circle"></i> Câmbio disponível (USD → BRL)
+        </span>
+      {% else %}
+        <span class="text-warning ms-2">
+          <i class="bi bi-exclamation-triangle"></i> Câmbio indisponível — custos apenas em USD
+        </span>
+      {% endif %}
+    </p>
+  </div>
+  {% if user.is_staff %}
+    <a href="{% url 'summaries:logs_admin' %}" class="btn btn-outline-danger btn-sm">
+      <i class="bi bi-shield-lock me-1"></i>Visão Admin
+    </a>
+  {% endif %}
+</div>
+
+<!-- Logs table -->
+{% if rows %}
+  <div class="card border-0 shadow-sm">
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0 small">
+        <thead class="table-light">
+          <tr>
+            <th>Data/Hora</th>
+            <th>Paciente</th>
+            <th>Usuário</th>
+            <th>Fase</th>
+            <th>Provider/Modelo</th>
+            <th>Status</th>
+            <th>Tokens In</th>
+            <th>Tokens Out</th>
+            <th>Latência</th>
+            <th class="text-end">Custo (USD)</th>
+            <th class="text-end">Custo (BRL)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr>
+              <td class="text-nowrap">{{ row.created_at|date:"d/m/Y H:i" }}</td>
+              <td class="fw-semibold">{{ row.patient_name }}</td>
+              <td>{{ row.username }}</td>
+              <td>
+                <span class="badge
+                  {% if row.step.step_type == 'phase1_canonical' %}bg-primary
+                  {% else %}bg-info text-dark
+                  {% endif %}">
+                  {{ row.step_label }}
+                </span>
+              </td>
+              <td><code class="small">{{ row.provider_model }}</code></td>
+              <td>
+                <span class="badge
+                  {% if row.step.status == 'succeeded' %}bg-success
+                  {% elif row.step.status == 'failed' %}bg-danger
+                  {% elif row.step.status == 'running' %}bg-warning text-dark
+                  {% elif row.step.status == 'skipped' %}bg-secondary
+                  {% endif %}">
+                  {{ row.status_label }}
+                </span>
+              </td>
+              <td>{{ row.tokens_in }}</td>
+              <td>{{ row.tokens_out }}</td>
+              <td>
+                {% if row.latency_ms %}
+                  {{ row.latency_ms }}ms
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td class="text-end font-monospace">$ {{ row.cost_usd }}</td>
+              <td class="text-end font-monospace">{{ row.cost_brl }}</td>
+            </tr>
+            <!-- Run total row (shown once per run, after its steps) -->
+            {% if forloop.last or rows|dictsort:"created_at" %}
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Run totals summary -->
+  <div class="card border-0 shadow-sm mt-3">
+    <div class="card-body">
+      <h6 class="fw-semibold mb-3" style="color: var(--sirhosp-sidebar-bg);">
+        <i class="bi bi-cash-stack me-1"></i>Totais por Execução
+      </h6>
+      <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0 small">
+          <thead class="table-light">
+            <tr>
+              <th>ID Run</th>
+              <th>Data/Hora</th>
+              <th>Paciente</th>
+              <th>Status</th>
+              <th>Modo</th>
+              <th class="text-end">Fase 1 (USD)</th>
+              <th class="text-end">Fase 2 (USD)</th>
+              <th class="text-end">Total (USD)</th>
+              <th class="text-end">Total (BRL)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% regroup rows by run.id as run_groups %}
+            {% for group in run_groups %}
+              <tr>
+                <td><code>#{{ group.grouper }}</code></td>
+                <td class="text-nowrap">{{ group.list.0.created_at|date:"d/m/Y H:i" }}</td>
+                <td class="fw-semibold">{{ group.list.0.patient_name }}</td>
+                <td>
+                  <span class="badge
+                    {% if group.list.0.run.status == 'succeeded' %}bg-success
+                    {% elif group.list.0.run.status == 'failed' %}bg-danger
+                    {% elif group.list.0.run.status == 'running' %}bg-warning text-dark
+                    {% elif group.list.0.run.status == 'partial' %}bg-warning text-dark
+                    {% elif group.list.0.run.status == 'queued' %}bg-secondary
+                    {% endif %}">
+                    {{ group.list.0.run.get_status_display }}
+                  </span>
+                </td>
+                <td>{{ group.list.0.run.get_mode_display }}</td>
+                <td class="text-end font-monospace">$ {{ group.list.0.run.phase1_cost_total }}</td>
+                <td class="text-end font-monospace">$ {{ group.list.0.run.phase2_cost_total }}</td>
+                <td class="text-end font-monospace fw-bold">$ {{ group.list.0.run.total_cost }}</td>
+                <td class="text-end font-monospace fw-bold">{{ group.list.0.run_total_brl }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+{% else %}
+  <div class="card border-0 shadow-sm">
+    <div class="card-body text-center py-5">
+      <i class="bi bi-journal-text text-muted" style="font-size: 3rem;"></i>
+      <p class="text-muted mt-3 mb-0">Nenhuma execução de resumo registrada ainda.</p>
+    </div>
+  </div>
+{% endif %}
+{% endblock %}
