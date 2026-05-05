@@ -17,7 +17,7 @@ from __future__ import annotations
 import time
 
 from django.core.management.base import BaseCommand
-from django.db import transaction
+from django.db import close_old_connections, transaction
 from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
@@ -131,6 +131,9 @@ class Command(BaseCommand):
 
         while True:
             try:
+                # Recover gracefully from dropped/terminated DB connections
+                # (e.g. postgres restart during long-running worker).
+                close_old_connections()
                 runs = SummaryRun.objects.filter(status="queued")
                 count = runs.count()
             except (OperationalError, ProgrammingError) as exc:
@@ -141,6 +144,7 @@ class Command(BaseCommand):
                         f"Retrying in {sleep_seconds}s..."
                     )
                 )
+                close_old_connections()
                 time.sleep(sleep_seconds)
                 continue
 
