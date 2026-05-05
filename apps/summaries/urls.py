@@ -28,6 +28,11 @@ urlpatterns = [
         name="run_progress",
     ),
     path(
+        "summaries/status/<int:run_id>/cancel/",
+        views.cancel_summary_run,
+        name="cancel_summary_run",
+    ),
+    path(
         "summaries/read/<int:run_id>/",
         views.summary_read,
         name="read",

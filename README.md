@@ -196,8 +196,8 @@ Após criado, acesse `http://localhost:8000/admin/`.
 # Construir imagens
 docker compose -f compose.yml -f compose.dev.yml build web worker
 
-# Subir stack (db + web + worker)
-docker compose -f compose.yml -f compose.dev.yml up -d db web worker
+# Subir stack (db + web + worker + summary_worker)
+docker compose -f compose.yml -f compose.dev.yml up -d db web worker summary_worker
 
 # Aplicar migrações
 docker compose -f compose.yml -f compose.dev.yml exec -T web uv run --no-sync python manage.py migrate
@@ -217,6 +217,7 @@ docker compose -f compose.yml -f compose.dev.yml down -v
 - Bind mount do código (`.:/app`) para hot-reload
 - Django runserver com DEBUG=1
 - Volumes para persistência de dados
+- `summary_worker` roda por padrão em pipeline de duas fases (`process_summary_runs --pipeline`)
 
 ### Modo Produção
 
@@ -224,8 +225,8 @@ docker compose -f compose.yml -f compose.dev.yml down -v
 # Construir imagens (target prod)
 docker compose -f compose.yml -f compose.prod.yml build web worker
 
-# Subir stack (db + web + worker)
-docker compose -f compose.yml -f compose.prod.yml up -d db web worker
+# Subir stack (db + web + worker + summary_worker)
+docker compose -f compose.yml -f compose.prod.yml up -d db web worker summary_worker
 
 # Aplicar migrações
 docker compose -f compose.yml -f compose.prod.yml exec -T web uv run --no-sync python manage.py migrate
@@ -246,6 +247,7 @@ docker compose -f compose.yml -f compose.prod.yml down -v
 - Gunicorn com 2 workers
 - `UV_NO_CACHE=1` para evitar escrita em runtime
 - Health checks robustos
+- `summary_worker` roda por padrão em pipeline de duas fases (`process_summary_runs --pipeline`)
 
 ### Smoke Test
 

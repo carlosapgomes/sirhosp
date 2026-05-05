@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Final
 
 NO_EVOLUTIONS_WARNING_SUMMARY: Final[str] = (
     "Não existem Evoluções registradas no período informado"
 )
-EMPTY_CHUNK_STOP_THRESHOLD: Final[int] = 2
+def _load_empty_chunk_stop_threshold() -> int:
+    """Load empty-chunk stop threshold from env, defaulting to 2."""
+    raw = os.getenv("EMPTY_CHUNK_STOP_THRESHOLD", "2").strip()
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 2
+
+
+EMPTY_CHUNK_STOP_THRESHOLD: Final[int] = _load_empty_chunk_stop_threshold()
 
 
 def is_no_evolutions_warning_message(message: str) -> bool:

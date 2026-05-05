@@ -177,5 +177,18 @@
   <a href="{% url 'patients:admission_list' run.admission.patient_id %}" class="btn btn-outline-secondary btn-sm">
     <i class="bi bi-arrow-left me-1"></i>Voltar para o paciente
   </a>
+
+  {% if can_cancel %}
+  <form method="post" action="{% url 'summaries:cancel_summary_run' run.pk %}" class="d-inline">
+    {% csrf_token %}
+    <button
+      type="submit"
+      class="btn btn-outline-danger btn-sm"
+      onclick="return confirm('Interromper este resumo e descartar os dados coletados até agora?')"
+    >
+      <i class="bi bi-stop-circle me-1"></i>Interromper resumo
+    </button>
+  </form>
+  {% endif %}
 </div>
 {% endblock %}

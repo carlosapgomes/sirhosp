@@ -45,6 +45,28 @@ VALID_MODES = {"generate", "update", "regenerate"}
 
 MAX_RETRIES_PER_CHUNK = 3
 PROMPT_VERSION = "aps-s9-v1"
+CANCELLED_BY_USER_MESSAGE = "Interrompido pelo usuário"
+
+
+def _empty_chunk_stop_threshold() -> int:
+    """Return empty-chunk early-stop threshold from env.
+
+    Uses the same env variable name adopted by the scraper guard.
+    Values <= 0 disable the heuristic.
+    """
+    raw = os.getenv("EMPTY_CHUNK_STOP_THRESHOLD", "2").strip()
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 2
+
+
+def _is_user_cancelled(run: SummaryRun) -> bool:
+    """Return True when run has been cancelled by user action."""
+    return (
+        run.status == SummaryRun.Status.FAILED
+        and run.error_message.startswith(CANCELLED_BY_USER_MESSAGE)
+    )
 
 # ---------------------------------------------------------------------------
 # UI context helper (APS-S6)
@@ -210,6 +232,74 @@ def queue_summary_run(
 
 
 # ---------------------------------------------------------------------------
+# Cancellation + rollback helpers
+# ---------------------------------------------------------------------------
+
+
+def _restore_or_delete_summary_state_for_admission(*, admission_id: int) -> None:
+    """Rebuild summary state from latest remaining version or delete it.
+
+    Used after discarding data from a cancelled run.
+    """
+    latest_version = (
+        AdmissionSummaryVersion.objects.filter(admission_id=admission_id)
+        .order_by("-created_at")
+        .first()
+    )
+
+    if latest_version is None:
+        AdmissionSummaryState.objects.filter(admission_id=admission_id).delete()
+        return
+
+    state, _ = AdmissionSummaryState.objects.get_or_create(
+        admission_id=admission_id,
+        defaults={
+            "coverage_start": latest_version.coverage_start,
+            "coverage_end": latest_version.coverage_end,
+            "structured_state_json": latest_version.structured_state_json,
+            "narrative_markdown": latest_version.narrative_markdown,
+            "status": AdmissionSummaryState.Status.DRAFT,
+        },
+    )
+    state.coverage_start = latest_version.coverage_start
+    state.coverage_end = latest_version.coverage_end
+    state.structured_state_json = latest_version.structured_state_json
+    state.narrative_markdown = latest_version.narrative_markdown
+    state.status = AdmissionSummaryState.Status.DRAFT
+    state.save(
+        update_fields=[
+            "coverage_start",
+            "coverage_end",
+            "structured_state_json",
+            "narrative_markdown",
+            "status",
+            "updated_at",
+        ]
+    )
+
+
+def discard_summary_run_data(run: SummaryRun) -> None:
+    """Discard all artifacts produced by a specific run.
+
+    Removes chunk tracking + summary versions tied to the run, then restores
+    admission canonical state from the latest remaining version (if any).
+    """
+    SummaryRunChunk.objects.filter(run=run).delete()
+    AdmissionSummaryVersion.objects.filter(run=run).delete()
+    _restore_or_delete_summary_state_for_admission(admission_id=run.admission_id)
+
+
+def cancel_summary_run(run: SummaryRun) -> SummaryRun:
+    """Cancel a summary run and discard data produced by it."""
+    run.status = SummaryRun.Status.FAILED
+    run.error_message = CANCELLED_BY_USER_MESSAGE
+    run.finished_at = django_timezone.now()
+    run.save(update_fields=["status", "error_message", "finished_at"])
+    discard_summary_run_data(run)
+    return run
+
+
+# ---------------------------------------------------------------------------
 # Worker execution (APS-S4)
 # ---------------------------------------------------------------------------
 
@@ -304,7 +394,15 @@ def execute_summary_run(
         },
     )
 
+    empty_chunk_streak = 0
+    stop_threshold = _empty_chunk_stop_threshold()
+
     for idx, (window_start, window_end) in enumerate(windows):
+        run.refresh_from_db(fields=["status", "error_message"])
+        if _is_user_cancelled(run):
+            discard_summary_run_data(run)
+            return run
+
         run.current_chunk_index = idx
         run.save(update_fields=["current_chunk_index"])
 
@@ -315,6 +413,11 @@ def execute_summary_run(
             window_start=window_start,
             window_end=window_end,
         )
+
+        if len(events) == 0:
+            empty_chunk_streak += 1
+        else:
+            empty_chunk_streak = 0
 
         # Build event dicts once (deterministic per window)
         novas_evolucoes = [
@@ -416,6 +519,12 @@ def execute_summary_run(
         # At this point we broke out of the retry loop with a valid
         # response, so llm_response is guaranteed to be a dict.
         assert llm_response is not None
+
+        run.refresh_from_db(fields=["status", "error_message"])
+        if _is_user_cancelled(run):
+            discard_summary_run_data(run)
+            return run
+
         with transaction.atomic():
             state.coverage_start = min(
                 state.coverage_start or window_start, window_start
@@ -463,6 +572,27 @@ def execute_summary_run(
         chunk.status = SummaryRunChunk.Status.SUCCEEDED
         chunk.error_message = ""
         chunk.save(update_fields=["status", "error_message"])
+
+        # Empty-chunk early-stop guard: if N consecutive windows had
+        # zero events, stop scanning remaining windows.
+        if (
+            stop_threshold > 0
+            and empty_chunk_streak >= stop_threshold
+            and idx < len(windows) - 1
+        ):
+            run.status = SummaryRun.Status.SUCCEEDED
+            run.current_chunk_index = idx + 1
+            run.total_chunks = idx + 1
+            run.finished_at = django_timezone.now()
+            run.save(
+                update_fields=[
+                    "status",
+                    "current_chunk_index",
+                    "total_chunks",
+                    "finished_at",
+                ]
+            )
+            return run
 
     # ---- 4. Finalise run -------
     run.status = SummaryRun.Status.SUCCEEDED

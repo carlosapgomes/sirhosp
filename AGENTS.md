@@ -89,11 +89,13 @@ uv run python manage.py sync_current_inpatients
 uv run python manage.py extract_medical_evolutions
 uv run python manage.py extract_prescriptions
 uv run python manage.py refresh_admission_summaries
+uv run python manage.py process_summary_runs --pipeline
 ```
 
 **Agendamento automático:** Configurar `systemd timer` conforme `deploy/README.md`.
 O timer executa `extract_census` + `process_census_snapshot` a cada 8h.
 O worker (`process_ingestion_runs --loop`) processa os runs enfileirados.
+Para sumários, o padrão operacional é `process_summary_runs --pipeline --loop`.
 
 ### Hooks
 

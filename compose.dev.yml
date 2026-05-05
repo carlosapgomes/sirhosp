@@ -114,5 +114,5 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["uv", "run", "--no-sync", "python", "manage.py", "process_summary_runs", "--loop", "--sleep-seconds", "5"]
+    command: ["uv", "run", "--no-sync", "python", "manage.py", "process_summary_runs", "--pipeline", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped

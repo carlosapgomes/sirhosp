@@ -334,3 +334,89 @@ class TestSummaryRunStatusView:
         assert response.status_code == 200
         content = response.content.decode("utf-8")
         assert "25/04/2026" in content or "2026-04-25" in content
+
+
+@pytest.mark.django_db
+class TestCancelSummaryRunView:
+    """HTTP tests for user-triggered cancellation of summary runs."""
+
+    def test_cancel_queued_run_marks_failed_and_redirects(self):
+        admission = _make_admission()
+        run = SummaryRun.objects.create(
+            admission=admission,
+            mode="generate",
+            target_end_date=date.today(),
+            status="queued",
+        )
+        client = Client()
+        _login(client)
+
+        url = reverse("summaries:cancel_summary_run", args=[run.pk])
+        response = client.post(url)
+
+        assert response.status_code == 302
+        assert response.url.endswith(reverse("summaries:run_status", args=[run.pk]))
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.error_message.startswith("Interrompido pelo usuário")
+        assert run.finished_at is not None
+
+    def test_cancel_discards_run_versions_chunks_and_state(self):
+        from apps.summaries.models import (
+            AdmissionSummaryState,
+            AdmissionSummaryVersion,
+            SummaryRunChunk,
+        )
+
+        admission = _make_admission()
+        run = SummaryRun.objects.create(
+            admission=admission,
+            mode="generate",
+            target_end_date=date.today(),
+            status="running",
+        )
+
+        state = AdmissionSummaryState.objects.create(
+            admission=admission,
+            coverage_start=date(2026, 4, 1),
+            coverage_end=date(2026, 4, 1),
+            structured_state_json={"k": "v"},
+            narrative_markdown="texto",
+            status=AdmissionSummaryState.Status.DRAFT,
+        )
+
+        AdmissionSummaryVersion.objects.create(
+            admission=admission,
+            summary_state=state,
+            run=run,
+            chunk_index=0,
+            coverage_start=date(2026, 4, 1),
+            coverage_end=date(2026, 4, 1),
+            structured_state_json={"k": "v"},
+            narrative_markdown="texto",
+            changes_json={"mudancas": []},
+            uncertainties_json={"incertezas": []},
+            evidences_json=[],
+            prompt_version="aps-s9-v1",
+        )
+
+        SummaryRunChunk.objects.create(
+            run=run,
+            chunk_index=0,
+            window_start=date(2026, 4, 1),
+            window_end=date(2026, 4, 1),
+            status="running",
+            input_event_count=1,
+        )
+
+        client = Client()
+        _login(client)
+
+        url = reverse("summaries:cancel_summary_run", args=[run.pk])
+        response = client.post(url)
+        assert response.status_code == 302
+
+        assert AdmissionSummaryVersion.objects.filter(run=run).count() == 0
+        assert SummaryRunChunk.objects.filter(run=run).count() == 0
+        assert not AdmissionSummaryState.objects.filter(admission=admission).exists()

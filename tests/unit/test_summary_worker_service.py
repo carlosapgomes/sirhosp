@@ -566,6 +566,32 @@ class TestChunkTracking:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
+class TestEmptyChunkEarlyStop:
+    """Run should stop early after consecutive empty chunks."""
+
+    def test_stops_after_two_consecutive_empty_chunks(self, monkeypatch):
+        from apps.summaries.models import SummaryRunChunk
+        from apps.summaries.services import execute_summary_run
+
+        monkeypatch.setenv("EMPTY_CHUNK_STOP_THRESHOLD", "2")
+
+        run, admission = _make_realistic_run()
+        run.target_end_date = date(2025, 1, 15)
+        run.save(update_fields=["target_end_date"])
+
+        execute_summary_run(run)
+
+        run.refresh_from_db()
+        chunks = list(SummaryRunChunk.objects.filter(run=run).order_by("chunk_index"))
+
+        # Should stop before scanning every planned window.
+        assert run.status == "succeeded"
+        assert len(chunks) == run.total_chunks
+        assert len(chunks) == 2
+        assert all(c.input_event_count == 0 for c in chunks)
+
+
 class TestQueueSummaryRunTypeHintCorrection:
     """Ensure the requested_by type hint has been corrected to User."""
 

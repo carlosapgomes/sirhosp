@@ -129,12 +129,33 @@ def run_status(
         "run": run,
         "chunks": run.chunks.all(),
         "terminal": terminal,
+        "can_cancel": run.status in {
+            SummaryRun.Status.QUEUED,
+            SummaryRun.Status.RUNNING,
+        },
         "pipeline_run": pipeline_run,
         "cost_brl": cost_brl,
         "rate_available": latest_rate is not None,
         "page_title": f"Resumo — Status #{run.pk}",
     }
     return render(request, "summaries/run_status.html", context)
+
+
+@login_required
+def cancel_summary_run(
+    request: HttpRequest,
+    run_id: int,
+) -> HttpResponse:
+    """Cancel a queued/running summary run and discard data collected so far."""
+    if request.method != "POST":
+        return HttpResponseBadRequest("Method not allowed")
+
+    run = get_object_or_404(SummaryRun, pk=run_id)
+
+    if run.status in {SummaryRun.Status.QUEUED, SummaryRun.Status.RUNNING}:
+        services.cancel_summary_run(run)
+
+    return redirect(reverse("summaries:run_status", args=[run.pk]))
 
 
 @login_required
