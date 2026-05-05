@@ -2,9 +2,11 @@
 
 import hashlib
 from datetime import datetime
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from django.db import IntegrityError
 
 from apps.clinical_docs.models import ClinicalEvent
 from apps.ingestion.models import IngestionRun
@@ -228,6 +230,51 @@ class TestDeduplication:
         result = ingest_evolution([evo_dup, evo_new])
         assert result["skipped"] == 1
         assert result["created"] == 1
+        assert ClinicalEvent.objects.count() == 2
+
+    def test_previously_seen_revision_hash_is_skipped(self):
+        evo_v1 = _make_evolution(content_text="Versão 1")
+        evo_v2 = _make_evolution(content_text="Versão 2 revisada")
+
+        ingest_evolution([evo_v1])
+        ingest_evolution([evo_v2])
+
+        result = ingest_evolution([evo_v1])
+
+        assert result["run"].status == "succeeded"
+        assert result["skipped"] == 1
+        assert result["revised"] == 0
+        assert ClinicalEvent.objects.count() == 2
+
+    def test_integrity_error_on_create_is_treated_as_skip_when_row_exists(self):
+        evo_v1 = _make_evolution(content_text="Versão 1")
+        evo_v2 = _make_evolution(content_text="Versão 2 revisada")
+
+        ingest_evolution([evo_v1])
+
+        target_hash = compute_content_hash(evo_v2["content_text"])
+        original_create = ClinicalEvent.objects.create
+        race_triggered = False
+
+        def create_with_race(*args, **kwargs):
+            nonlocal race_triggered
+            if kwargs.get("content_hash") == target_hash and not race_triggered:
+                race_triggered = True
+                original_create(*args, **kwargs)
+                raise IntegrityError(
+                    "duplicate key value violates unique constraint \"uq_evt_identity\""
+                )
+            return original_create(*args, **kwargs)
+
+        with patch(
+            "apps.ingestion.services.ClinicalEvent.objects.create",
+            side_effect=create_with_race,
+        ):
+            result = ingest_evolution([evo_v2])
+
+        assert race_triggered is True
+        assert result["run"].status == "succeeded"
+        assert result["skipped"] == 1
         assert ClinicalEvent.objects.count() == 2
 
 

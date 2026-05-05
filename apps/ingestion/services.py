@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
 from apps.clinical_docs.models import ClinicalEvent
@@ -329,22 +329,30 @@ def _persist_event(
         evolution.get("profession_type", "")
     )
 
-    # Check for existing event with same identity key
-    existing = ClinicalEvent.objects.filter(event_identity_key=identity_key).first()
+    # Exact duplicate (identity + content already persisted) — skip
+    if ClinicalEvent.objects.filter(
+        event_identity_key=identity_key,
+        content_hash=content_hash,
+    ).exists():
+        return None, "skipped"
 
-    if existing is not None:
-        if existing.content_hash == content_hash:
-            # Exact duplicate — skip
-            return None, "skipped"
-        else:
-            # Content changed — create revision
+    existing_identity = (
+        ClinicalEvent.objects
+        .filter(event_identity_key=identity_key)
+        .order_by("-happened_at", "-id")
+        .first()
+    )
+
+    if existing_identity is not None:
+        # Same logical event but new content hash — create revision
+        try:
             event = ClinicalEvent.objects.create(
                 admission=admission,
                 patient=patient,
                 ingestion_run=run,
                 event_identity_key=identity_key,
                 content_hash=content_hash,
-                happened_at=happened_at or existing.happened_at,
+                happened_at=happened_at or existing_identity.happened_at,
                 signed_at=signed_at,
                 author_name=evolution.get("author_name", ""),
                 profession_type=profession_type,
@@ -353,23 +361,40 @@ def _persist_event(
                 raw_payload_json=evolution,
             )
             return event, "revised"
+        except IntegrityError:
+            # Concurrent run may have inserted same revision in-between
+            if ClinicalEvent.objects.filter(
+                event_identity_key=identity_key,
+                content_hash=content_hash,
+            ).exists():
+                return None, "skipped"
+            raise
 
-    # New event
-    event = ClinicalEvent.objects.create(
-        admission=admission,
-        patient=patient,
-        ingestion_run=run,
-        event_identity_key=identity_key,
-        content_hash=content_hash,
-        happened_at=happened_at or timezone.now(),
-        signed_at=signed_at,
-        author_name=evolution.get("author_name", ""),
-        profession_type=profession_type,
-        content_text=content_text,
-        signature_line=evolution.get("signature_line", ""),
-        raw_payload_json=evolution,
-    )
-    return event, "created"
+    # New event identity
+    try:
+        event = ClinicalEvent.objects.create(
+            admission=admission,
+            patient=patient,
+            ingestion_run=run,
+            event_identity_key=identity_key,
+            content_hash=content_hash,
+            happened_at=happened_at or timezone.now(),
+            signed_at=signed_at,
+            author_name=evolution.get("author_name", ""),
+            profession_type=profession_type,
+            content_text=content_text,
+            signature_line=evolution.get("signature_line", ""),
+            raw_payload_json=evolution,
+        )
+        return event, "created"
+    except IntegrityError:
+        # Concurrent run may have inserted same new event in-between
+        if ClinicalEvent.objects.filter(
+            event_identity_key=identity_key,
+            content_hash=content_hash,
+        ).exists():
+            return None, "skipped"
+        raise
 
 
 # ---------------------------------------------------------------------------
