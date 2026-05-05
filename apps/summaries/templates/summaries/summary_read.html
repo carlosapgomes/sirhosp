@@ -97,6 +97,35 @@
       {{ html_content }}
     </div>
   </div>
+
+  <!-- STP-S9: Pipeline cost footer (shown when pipeline run exists) -->
+  {% if pipeline_run %}
+  <div class="card border-0 shadow-sm mt-3">
+    <div class="card-body">
+      <h6 class="fw-semibold mb-2 small" style="color: var(--sirhosp-sidebar-bg);">
+        <i class="bi bi-cash-stack me-1"></i>Informações da Execução
+      </h6>
+      <div class="row small">
+        <div class="col-sm-4">
+          <span class="text-muted">Custo total (USD):</span>
+          <strong>$ {{ pipeline_run.total_cost|floatformat:2 }}</strong>
+        </div>
+        <div class="col-sm-4">
+          <span class="text-muted">Custo total (BRL):</span>
+          <strong>{{ cost_brl_total }}</strong>
+        </div>
+        <div class="col-sm-4">
+          <span class="text-muted">Fase 1 (base clínica):</span>
+          {% if pipeline_run.phase1_reused %}
+            <span class="badge bg-info text-dark">Base clínica reutilizada</span>
+          {% else %}
+            <strong>$ {{ pipeline_run.phase1_cost_total|floatformat:2 }}</strong>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 {% endif %}
 {% endblock %}
 

@@ -105,6 +105,70 @@
   </div>
 </div>
 
+<!-- STP-S9: Pipeline cost card (shown when pipeline run exists) -->
+{% if pipeline_run %}
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <h6 class="card-subtitle mb-3 text-muted small" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-cash-stack me-1"></i>
+      Custo da Execução
+      {% if rate_available %}
+        <span class="text-success ms-1 small">(USD → BRL disponível)</span>
+      {% else %}
+        <span class="text-warning ms-1 small">(câmbio indisponível)</span>
+      {% endif %}
+    </h6>
+
+    <div class="row small g-3">
+      <!-- Fase 1 -->
+      <div class="col-md-4">
+        <div class="border rounded p-2 h-100">
+          <span class="text-muted d-block small">Fase 1 — Base clínica</span>
+          {% if pipeline_run.phase1_reused %}
+            <span class="badge bg-info text-dark mb-1">Reutilizado</span>
+          {% endif %}
+          <strong class="text-primary">
+            $ {{ pipeline_run.phase1_cost_total|floatformat:2 }}
+          </strong>
+          <br>
+          <span class="text-muted">
+            {{ cost_brl.phase1 }}
+          </span>
+        </div>
+      </div>
+
+      <!-- Fase 2 -->
+      <div class="col-md-4">
+        <div class="border rounded p-2 h-100">
+          <span class="text-muted d-block small">Fase 2 — Versão final</span>
+          <strong class="text-success">
+            $ {{ pipeline_run.phase2_cost_total|floatformat:2 }}
+          </strong>
+          <br>
+          <span class="text-muted">
+            {{ cost_brl.phase2 }}
+          </span>
+        </div>
+      </div>
+
+      <!-- Total -->
+      <div class="col-md-4">
+        <div class="border rounded p-2 h-100 bg-light">
+          <span class="text-muted d-block small">Total</span>
+          <strong class="fw-bold">
+            $ {{ pipeline_run.total_cost|floatformat:2 }} USD
+          </strong>
+          <br>
+          <span class="fw-semibold">
+            {{ cost_brl.total }}
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <!-- APS-S7: Chunk-level progress — HTMX polling managed by the fragment itself -->
 {% include "summaries/_summary_run_progress.html" %}
 

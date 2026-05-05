@@ -7,6 +7,7 @@ STP-S5: prompt_list, prompt_create, prompt_edit, prompt_delete (CRUD).
 STP-S7: summary_config (GET/POST config page for phase2 LLM + prompt).
 STP-S8: logs_public (operational logs for all users),
         logs_admin (sensitive logs for staff/superuser).
+STP-S9: run_status + summary_read cost visibility in USD/BRL.
 """
 
 from __future__ import annotations
@@ -81,6 +82,9 @@ def run_status(
     Non-terminal runs (queued/running) use HTMX polling to refresh
     chunk progress.  Terminal runs (succeeded/partial/failed) display
     final state without polling.
+
+    STP-S9: Also displays two-phase pipeline cost per phase in USD/BRL
+    when a SummaryPipelineRun exists for the same admission.
     """
     run = get_object_or_404(
         SummaryRun.objects.select_related(
@@ -96,10 +100,38 @@ def run_status(
         SummaryRun.Status.FAILED,
     }
 
+    # STP-S9: Load pipeline run cost info for the same admission
+    from apps.summaries.models import SummaryPipelineRun
+
+    pipeline_run = (
+        SummaryPipelineRun.objects.filter(
+            admission=run.admission
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    latest_rate = exchange_rates.get_latest_rate()
+
+    # Pre-compute BRL display strings for template (avoid custom filters)
+    cost_brl = {}
+    if pipeline_run is not None:
+        cost_brl["phase1"] = exchange_rates.format_brl_with_rate(
+            pipeline_run.phase1_cost_total, latest_rate
+        )
+        cost_brl["phase2"] = exchange_rates.format_brl_with_rate(
+            pipeline_run.phase2_cost_total, latest_rate
+        )
+        cost_brl["total"] = exchange_rates.format_brl_with_rate(
+            pipeline_run.total_cost, latest_rate
+        )
+
     context = {
         "run": run,
         "chunks": run.chunks.all(),
         "terminal": terminal,
+        "pipeline_run": pipeline_run,
+        "cost_brl": cost_brl,
+        "rate_available": latest_rate is not None,
         "page_title": f"Resumo — Status #{run.pk}",
     }
     return render(request, "summaries/run_status.html", context)
@@ -148,6 +180,9 @@ def summary_read(
     Loads the AdmissionSummaryState for the admission linked to the
     run, converts narrative_markdown to HTML, and renders the read
     page with AI disclaimer and client-side copy button.
+
+    STP-S9: Also displays two-phase pipeline total cost in USD/BRL
+    and phase-1 reuse indicator when a pipeline run exists.
     """
     run = get_object_or_404(
         SummaryRun.objects.select_related(
@@ -179,6 +214,25 @@ def summary_read(
         and state.status == AdmissionSummaryState.Status.INCOMPLETE
     )
 
+    # STP-S9: Load pipeline run cost info for the same admission
+    from apps.summaries.models import SummaryPipelineRun
+
+    pipeline_run = (
+        SummaryPipelineRun.objects.filter(
+            admission=run.admission
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    latest_rate = exchange_rates.get_latest_rate()
+
+    # Pre-compute BRL display strings for template
+    cost_brl_total = ""
+    if pipeline_run is not None:
+        cost_brl_total = exchange_rates.format_brl_with_rate(
+            pipeline_run.total_cost, latest_rate
+        )
+
     context = {
         "run": run,
         "state": state,
@@ -186,6 +240,9 @@ def summary_read(
         "raw_markdown": narrative_md,
         "raw_markdown_json": json.dumps(narrative_md),
         "incomplete": incomplete,
+        "pipeline_run": pipeline_run,
+        "cost_brl_total": cost_brl_total,
+        "rate_available": latest_rate is not None,
         "page_title": f"Resumo #{run.pk} — {run.admission.patient.name}",
     }
     return render(request, "summaries/summary_read.html", context)
