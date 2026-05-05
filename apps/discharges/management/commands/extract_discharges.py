@@ -178,6 +178,9 @@ class Command(BaseCommand):
                     "patient_not_found": 0,
                     "admission_not_found": 0,
                     "already_discharged": 0,
+                    "recovered_patients_created": 0,
+                    "recovered_admissions_created": 0,
+                    "demographics_runs_enqueued": 0,
                 }
                 self._record_stage(
                     run,
@@ -212,7 +215,10 @@ class Command(BaseCommand):
                     f"  Discharge set: {metrics['discharge_set']} | "
                     f"Already discharged: {metrics['already_discharged']} | "
                     f"Patient not found: {metrics['patient_not_found']} | "
-                    f"Admission not found: {metrics['admission_not_found']}"
+                    f"Admission not found: {metrics['admission_not_found']} | "
+                    f"Recovered patients: {metrics['recovered_patients_created']} | "
+                    f"Recovered admissions: {metrics['recovered_admissions_created']} | "
+                    f"Demographics enqueued: {metrics['demographics_runs_enqueued']}"
                 )
             except Exception as exc:
                 self._record_stage(

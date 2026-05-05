@@ -6,6 +6,7 @@ import pytest
 from django.utils import timezone
 
 from apps.discharges.services import process_discharges
+from apps.ingestion.models import IngestionRun
 from apps.patients.models import Admission, Patient
 
 
@@ -22,10 +23,13 @@ class TestProcessDischarges:
             "admission_not_found": 0,
             "already_discharged": 0,
             "discharge_set": 0,
+            "recovered_patients_created": 0,
+            "recovered_admissions_created": 0,
+            "demographics_runs_enqueued": 0,
         }
 
-    def test_patient_not_found_is_skipped(self):
-        """Patient not in DB is skipped, not created."""
+    def test_patient_not_found_is_recovered(self):
+        """Missing patient is recovered, demographics is enqueued, and discharge is set."""
         patients = [
             {
                 "prontuario": "99999",
@@ -38,9 +42,18 @@ class TestProcessDischarges:
         result = process_discharges(patients)
         assert result["total_pdf"] == 1
         assert result["patient_not_found"] == 1
-        assert result["discharge_set"] == 0
-        # Confirm patient was NOT created
-        assert not Patient.objects.filter(patient_source_key="99999").exists()
+        assert result["admission_not_found"] == 1
+        assert result["discharge_set"] == 1
+        assert result["recovered_patients_created"] == 1
+        assert result["recovered_admissions_created"] == 1
+        assert result["demographics_runs_enqueued"] == 1
+
+        patient = Patient.objects.get(patient_source_key="99999")
+        admission = Admission.objects.get(patient=patient)
+        assert admission.discharge_date is not None
+
+        demo_run = IngestionRun.objects.get(intent="demographics_only")
+        assert demo_run.parameters_json["patient_record"] == "99999"
 
     def test_discharge_set_with_data_internacao_match(self):
         """Matching by data_internacao sets discharge_date."""
@@ -150,8 +163,8 @@ class TestProcessDischarges:
         assert result["already_discharged"] == 1
         assert result["discharge_set"] == 0
 
-    def test_admission_not_found_when_all_discharged(self):
-        """When all admissions have discharge_date, count as not_found."""
+    def test_admission_not_found_when_all_discharged_recovers_new_period(self):
+        """When no open admission exists, service creates a recovery admission period."""
         patient = Patient.objects.create(
             patient_source_key="12345",
             source_system="tasy",
@@ -177,7 +190,13 @@ class TestProcessDischarges:
 
         result = process_discharges(patients)
         assert result["admission_not_found"] == 1
-        assert result["discharge_set"] == 0
+        assert result["discharge_set"] == 1
+        assert result["recovered_admissions_created"] == 1
+
+        assert Admission.objects.filter(patient=patient).count() == 2
+        recovered = Admission.objects.filter(patient=patient).order_by("-id").first()
+        assert recovered is not None
+        assert recovered.discharge_date is not None
 
     def test_invalid_date_format_falls_back(self):
         """Invalid data_internacao format should not crash, uses fallback."""
@@ -246,7 +265,36 @@ class TestProcessDischarges:
 
         result = process_discharges(patients)
         assert result["total_pdf"] == 4
-        assert result["discharge_set"] == 1      # P1
+        assert result["discharge_set"] == 2       # P1 + P3 recovered
         assert result["already_discharged"] == 1  # P2
         assert result["patient_not_found"] == 1   # P3
+        assert result["admission_not_found"] == 1
+        assert result["recovered_patients_created"] == 1
+        assert result["recovered_admissions_created"] == 1
+        assert result["demographics_runs_enqueued"] == 1
         # P4: prontuario vazio é ignorado, não conta como patient_not_found
+
+    def test_recovered_patient_is_idempotent_on_second_pass(self):
+        """Reprocessing the same row does not duplicate recovered patient/admission."""
+        row = {
+            "prontuario": "444",
+            "nome": "PACIENTE 444",
+            "leito": "B4",
+            "especialidade": "CLM",
+            "data_internacao": "10/04/2026",
+        }
+        discharge_dt = timezone.now()
+
+        first = process_discharges([row], discharge_date=discharge_dt)
+        second = process_discharges([row], discharge_date=discharge_dt)
+
+        assert first["discharge_set"] == 1
+        assert second["discharge_set"] == 0
+        assert second["already_discharged"] == 1
+
+        patient = Patient.objects.get(patient_source_key="444")
+        assert Admission.objects.filter(patient=patient).count() == 1
+        assert IngestionRun.objects.filter(
+            intent="demographics_only",
+            parameters_json__patient_record="444",
+        ).count() == 1

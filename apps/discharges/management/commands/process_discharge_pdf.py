@@ -105,7 +105,10 @@ class Command(BaseCommand):
                 f"  Discharge set:        {metrics['discharge_set']}\n"
                 f"  Already discharged:   {metrics['already_discharged']}\n"
                 f"  Patient not found:    {metrics['patient_not_found']}\n"
-                f"  Admission not found:  {metrics['admission_not_found']}"
+                f"  Admission not found:  {metrics['admission_not_found']}\n"
+                f"  Recovered patients:   {metrics['recovered_patients_created']}\n"
+                f"  Recovered admissions: {metrics['recovered_admissions_created']}\n"
+                f"  Demographics queued:  {metrics['demographics_runs_enqueued']}"
             )
         )
 
