@@ -1,6 +1,6 @@
 
 # dev-loop bootstrap rules
-prompts/
+/prompts/
 .env
 *.secret
 openspec/changes/*/
