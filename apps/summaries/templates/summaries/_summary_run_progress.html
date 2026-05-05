@@ -10,7 +10,7 @@
   <div class="card-body">
     <h6 class="card-subtitle mb-3 text-muted small">
       <i class="bi bi-list-check me-1"></i>
-      Progresso dos chunks
+      Progresso dos blocos
       <span class="text-muted">({{ run.current_chunk_index }} / {{ run.total_chunks }})</span>
     </h6>
 
@@ -19,22 +19,22 @@
       {% for chunk in chunks %}
         <div class="flex-fill"
              style="min-width: 60px;"
-             title="Chunk {{ chunk.chunk_index|add:1 }}: {{ chunk.get_status_display }}
+             title="Bloco {{ chunk.chunk_index|add:1 }}: {{ chunk.get_status_display }}
 Janela: {{ chunk.window_start|date:"d/m/Y" }} → {{ chunk.window_end|date:"d/m/Y" }}
 {% if chunk.error_message %}Erro: {{ chunk.error_message }}{% endif %}">
           <div class="d-flex align-items-center gap-1 mb-1">
             {% if chunk.status == "succeeded" %}
               <i class="bi bi-check-circle-fill text-success small"></i>
-              <small class="text-success fw-semibold">Chunk {{ chunk.chunk_index|add:1 }}</small>
+              <small class="text-success fw-semibold">Bloco {{ chunk.chunk_index|add:1 }}</small>
             {% elif chunk.status == "running" %}
               <span class="spinner-border spinner-border-sm text-primary" role="status"></span>
-              <small class="text-primary fw-semibold">Chunk {{ chunk.chunk_index|add:1 }}</small>
+              <small class="text-primary fw-semibold">Bloco {{ chunk.chunk_index|add:1 }}</small>
             {% elif chunk.status == "failed" %}
               <i class="bi bi-x-circle-fill text-danger small"></i>
-              <small class="text-danger fw-semibold">Chunk {{ chunk.chunk_index|add:1 }}</small>
+              <small class="text-danger fw-semibold">Bloco {{ chunk.chunk_index|add:1 }}</small>
             {% else %}
               <i class="bi bi-circle text-muted small"></i>
-              <small class="text-muted">Chunk {{ chunk.chunk_index|add:1 }}</small>
+              <small class="text-muted">Bloco {{ chunk.chunk_index|add:1 }}</small>
             {% endif %}
           </div>
           <div class="progress" style="height: 6px;">
@@ -58,7 +58,7 @@ Janela: {{ chunk.window_start|date:"d/m/Y" }} → {{ chunk.window_end|date:"d/m/
       {% empty %}
         <div class="text-muted small">
           <i class="bi bi-info-circle me-1"></i>
-          Nenhum chunk registrado ainda.
+          Nenhum bloco registrado ainda.
         </div>
       {% endfor %}
     </div>
@@ -69,7 +69,7 @@ Janela: {{ chunk.window_start|date:"d/m/Y" }} → {{ chunk.window_end|date:"d/m/
       <table class="table table-sm small mb-2">
         <thead class="table-light">
           <tr>
-            <th>Chunk</th>
+            <th>Bloco</th>
             <th>Janela</th>
             <th>Eventos</th>
             <th>Status</th>
