@@ -33,6 +33,11 @@ urlpatterns = [
         name="cancel_summary_run",
     ),
     path(
+        "summaries/status/<int:run_id>/pipeline-progress/",
+        views.pipeline_progress,
+        name="pipeline_progress",
+    ),
+    path(
         "summaries/read/<int:run_id>/",
         views.summary_read,
         name="read",

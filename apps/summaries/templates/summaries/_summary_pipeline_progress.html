@@ -1,0 +1,117 @@
+{# Pipeline phase progress partial — HTMX polling for two-phase pipeline status #}
+{% load static %}
+
+<div id="summary-pipeline-progress" class="card border-0 shadow-sm mb-3"
+     {% if not pipeline_terminal %}
+     hx-get="{% url 'summaries:pipeline_progress' run.pk %}"
+     hx-trigger="every 3s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  <div class="card-body">
+    <h6 class="card-subtitle mb-3 text-muted small">
+      <i class="bi bi-diagram-3 me-1"></i>
+      Progresso do Pipeline
+    </h6>
+
+    <div class="row small g-3">
+      {# --- Phase 1 --- #}
+      <div class="col-md-6">
+        <div class="border rounded p-3 h-100">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <span class="fw-semibold">Fase 1 — Base clínica</span>
+            {% if phase1_status == "succeeded" %}
+              <i class="bi bi-check-circle-fill text-success"></i>
+            {% elif phase1_status == "running" %}
+              <span class="spinner-border spinner-border-sm text-primary" role="status"></span>
+            {% elif phase1_status == "failed" %}
+              <i class="bi bi-x-circle-fill text-danger"></i>
+            {% elif phase1_status == "skipped" %}
+              <i class="bi bi-arrow-repeat text-info"></i>
+            {% else %}
+              <i class="bi bi-circle text-muted"></i>
+            {% endif %}
+          </div>
+
+          {% if phase1_status == "succeeded" %}
+            <span class="badge bg-success mb-1">Concluída</span>
+            <p class="text-muted small mb-0">Resumo canônico gerado com sucesso.</p>
+          {% elif phase1_status == "running" %}
+            <span class="badge bg-primary mb-1">
+              <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+              Em andamento
+            </span>
+            <p class="text-muted small mb-0">Extraindo e processando blocos de eventos clínicos.</p>
+          {% elif phase1_status == "failed" %}
+            <span class="badge bg-danger mb-1">Falhou</span>
+            <p class="text-muted small mb-0">Ocorreu um erro na geração da base clínica.</p>
+          {% elif phase1_status == "skipped" %}
+            <span class="badge bg-info text-dark mb-1">Reutilizada</span>
+            <p class="text-muted small mb-0">Base clínica existente reaproveitada.</p>
+          {% else %}
+            <span class="badge bg-secondary mb-1">Pendente</span>
+            <p class="text-muted small mb-0">Aguardando início do processamento.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      {# --- Phase 2 --- #}
+      <div class="col-md-6">
+        <div class="border rounded p-3 h-100">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <span class="fw-semibold">Fase 2 — Versão final</span>
+            {% if phase2_status == "succeeded" %}
+              <i class="bi bi-check-circle-fill text-success"></i>
+            {% elif phase2_status == "running" %}
+              <span class="spinner-border spinner-border-sm text-primary" role="status"></span>
+            {% elif phase2_status == "failed" %}
+              <i class="bi bi-x-circle-fill text-danger"></i>
+            {% else %}
+              <i class="bi bi-circle text-muted"></i>
+            {% endif %}
+          </div>
+
+          {% if phase2_status == "succeeded" %}
+            <span class="badge bg-success mb-1">Concluída</span>
+            <p class="text-muted small mb-0">Resumo final renderizado com sucesso.</p>
+          {% elif phase2_status == "running" %}
+            <span class="badge bg-primary mb-1">
+              <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+              Renderizando
+            </span>
+            <p class="text-muted small mb-0">O modelo de linguagem está gerando o resumo formatado.</p>
+          {% elif phase2_status == "failed" %}
+            <span class="badge bg-danger mb-1">Falhou</span>
+            <p class="text-muted small mb-0">Ocorreu um erro na renderização final do resumo.</p>
+          {% else %}
+            <span class="badge bg-secondary mb-1">Pendente</span>
+            <p class="text-muted small mb-0">
+              {% if phase1_status == "succeeded" or phase1_status == "skipped" %}
+                Aguardando início da renderização.
+              {% else %}
+                Aguardando conclusão da Fase 1.
+              {% endif %}
+            </p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {# --- Phase 2 running message --- #}
+    {% if phase2_status == "running" %}
+    <div class="alert alert-light border small mb-0 mt-3">
+      <i class="bi bi-hourglass-split me-1"></i>
+      A renderização do resumo final pode levar alguns segundos.
+      <strong>O processamento continua em segundo plano.</strong>
+    </div>
+    {% endif %}
+
+    {# --- Terminal success message --- #}
+    {% if pipeline_terminal and pipeline_run.status == "succeeded" %}
+    <div class="alert alert-success border small mb-0 mt-3">
+      <i class="bi bi-check-circle me-1"></i>
+      Pipeline concluído com sucesso.
+      <a href="{% url 'summaries:read' run.pk %}" class="alert-link">Ver resumo</a>.
+    </div>
+    {% endif %}
+  </div>
+</div>
