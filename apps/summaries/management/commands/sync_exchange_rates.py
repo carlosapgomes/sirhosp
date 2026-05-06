@@ -30,7 +30,7 @@ from apps.summaries.models import ExchangeRateSnapshot
 # Default endpoints
 # ---------------------------------------------------------------------------
 
-_DEFAULT_PRIMARY_URL = "https://api.frankfurter.dev/latest?from=USD&to=BRL"
+_DEFAULT_PRIMARY_URL = "https://api.frankfurter.dev/v1/latest?from=USD&to=BRL"
 _DEFAULT_FALLBACK_URL = "https://v6.exchangerate-api.com/v6/{api_key}/latest/USD"
 
 
@@ -63,7 +63,7 @@ def _fetch_from_exchangerate_api(url: str) -> Tuple[Optional[Decimal], Optional[
             data = resp.json()
             if data.get("result") != "success":
                 return None, None
-            rate_val = data["rates"]["BRL"]
+            rate_val = data["conversion_rates"]["BRL"]
             # exchangerate-api doesn't return a date per-rate in the free tier
             # response, so we use today's date as reference.
             ref_date = django_timezone.now().date()

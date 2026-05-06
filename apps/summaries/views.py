@@ -100,17 +100,44 @@ def run_status(
         SummaryRun.Status.FAILED,
     }
 
-    # STP-S9: Load pipeline run cost info for the same admission
-    from apps.summaries.models import SummaryPipelineRun
+    # STP-S9: Load pipeline run cost info for the same SummaryRun
+    # (STC-S4: use FK instead of admission+latest to avoid cross-run leak)
+    from apps.summaries.models import SummaryPipelineRun, SummaryPipelineStepRun
 
     pipeline_run = (
         SummaryPipelineRun.objects.filter(
-            admission=run.admission
+            summary_run=run
         )
         .order_by("-created_at")
         .first()
     )
     latest_rate = exchange_rates.get_latest_rate()
+    latest_rate_info = exchange_rates.get_latest_rate_info()
+
+    # STC-S6: Cost origin per phase (reported vs estimated)
+    phase1_is_reported = True
+    phase2_is_reported = True
+    pipeline_terminal = True
+    phase1_status = None
+    phase2_status = None
+    if pipeline_run is not None:
+        pipeline_terminal = pipeline_run.status in {
+            SummaryPipelineRun.Status.SUCCEEDED,
+            SummaryPipelineRun.Status.PARTIAL,
+            SummaryPipelineRun.Status.FAILED,
+        }
+        steps = list(
+            SummaryPipelineStepRun.objects.filter(
+                pipeline_run=pipeline_run
+            ).order_by("started_at")
+        )
+        for step in steps:
+            if step.step_type == "phase1_canonical":
+                phase1_is_reported = step.cost_is_reported
+                phase1_status = step.status
+            elif step.step_type == "phase2_render":
+                phase2_is_reported = step.cost_is_reported
+                phase2_status = step.status
 
     # Pre-compute BRL display strings for template (avoid custom filters)
     cost_brl = {}
@@ -134,8 +161,14 @@ def run_status(
             SummaryRun.Status.RUNNING,
         },
         "pipeline_run": pipeline_run,
+        "pipeline_terminal": pipeline_terminal,
+        "phase1_status": phase1_status,
+        "phase2_status": phase2_status,
         "cost_brl": cost_brl,
         "rate_available": latest_rate is not None,
+        "latest_rate_info": latest_rate_info,
+        "phase1_is_reported": phase1_is_reported,
+        "phase2_is_reported": phase2_is_reported,
         "page_title": f"Resumo — Status #{run.pk}",
     }
     return render(request, "summaries/run_status.html", context)
@@ -192,6 +225,66 @@ def run_progress(
 
 
 @login_required
+def pipeline_progress(
+    request: HttpRequest,
+    run_id: int,
+) -> HttpResponse:
+    """HTMX fragment endpoint — returns pipeline phase progress partial.
+
+    Shows Phase 1 (canonical base) and Phase 2 (render) status with
+    visual indicators. Polls while the pipeline is still running.
+    Returns 404 for nonexistent runs.
+    """
+    run = get_object_or_404(SummaryRun, pk=run_id)
+
+    from apps.summaries.models import (
+        SummaryPipelineRun,
+        SummaryPipelineStepRun,
+    )
+
+    pipeline_run = (
+        SummaryPipelineRun.objects.filter(summary_run=run)
+        .order_by("-created_at")
+        .first()
+    )
+
+    pipeline_terminal = True
+    phase1_status = None
+    phase2_status = None
+
+    if pipeline_run is not None:
+        pipeline_terminal = pipeline_run.status in {
+            SummaryPipelineRun.Status.SUCCEEDED,
+            SummaryPipelineRun.Status.PARTIAL,
+            SummaryPipelineRun.Status.FAILED,
+        }
+
+        steps = list(
+            SummaryPipelineStepRun.objects.filter(
+                pipeline_run=pipeline_run
+            ).order_by("started_at")
+        )
+        for step in steps:
+            if step.step_type == "phase1_canonical":
+                phase1_status = step.status
+            elif step.step_type == "phase2_render":
+                phase2_status = step.status
+
+    context = {
+        "run": run,
+        "pipeline_run": pipeline_run,
+        "pipeline_terminal": pipeline_terminal,
+        "phase1_status": phase1_status,
+        "phase2_status": phase2_status,
+    }
+    return render(
+        request,
+        "summaries/_summary_pipeline_progress.html",
+        context,
+    )
+
+
+@login_required
 def summary_read(
     request: HttpRequest,
     run_id: int,
@@ -235,12 +328,13 @@ def summary_read(
         and state.status == AdmissionSummaryState.Status.INCOMPLETE
     )
 
-    # STP-S9: Load pipeline run cost info for the same admission
+    # STP-S9: Load pipeline run cost info for the same SummaryRun
+    # (STC-S4: use FK instead of admission+latest to avoid cross-run leak)
     from apps.summaries.models import SummaryPipelineRun
 
     pipeline_run = (
         SummaryPipelineRun.objects.filter(
-            admission=run.admission
+            summary_run=run
         )
         .order_by("-created_at")
         .first()
@@ -264,6 +358,7 @@ def summary_read(
         "pipeline_run": pipeline_run,
         "cost_brl_total": cost_brl_total,
         "rate_available": latest_rate is not None,
+        "latest_rate_info": exchange_rates.get_latest_rate_info(),
         "page_title": f"Resumo #{run.pk} — {run.admission.patient.name}",
     }
     return render(request, "summaries/summary_read.html", context)
@@ -719,6 +814,7 @@ def _build_logs_context(
                 "cost_brl": exchange_rates.format_brl_with_rate(
                     step.cost_total, latest_rate
                 ),
+                "cost_is_reported": step.cost_is_reported,
                 "cost_input_usd": str(step.cost_input),
                 "cost_output_usd": str(step.cost_output),
                 "tokens_in": step.input_tokens or 0,

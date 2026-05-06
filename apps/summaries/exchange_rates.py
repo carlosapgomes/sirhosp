@@ -21,7 +21,15 @@ from apps.summaries.models import ExchangeRateSnapshot
 
 def get_latest_rate() -> Optional[Decimal]:
     """Return the most recent USD/BRL rate, or None if no snapshot exists."""
-    snapshot = (
+    snapshot = _latest_snapshot()
+    if snapshot is None:
+        return None
+    return snapshot.rate
+
+
+def _latest_snapshot() -> Optional[ExchangeRateSnapshot]:
+    """Return the most recent ExchangeRateSnapshot, or None."""
+    return (
         ExchangeRateSnapshot.objects.filter(
             base_currency="USD",
             quote_currency="BRL",
@@ -29,9 +37,25 @@ def get_latest_rate() -> Optional[Decimal]:
         .order_by("-reference_date")
         .first()
     )
+
+
+def get_latest_rate_info() -> dict[str, str]:
+    """Return metadata about the latest exchange rate for UI display.
+
+    Returns dict with keys:
+        - provider: str (e.g. "frankfurter")
+        - date: str (ISO date, e.g. "2026-05-05")
+        - rate: str (Decimal as string, e.g. "4.9525")
+    Returns empty dict when no snapshot exists.
+    """
+    snapshot = _latest_snapshot()
     if snapshot is None:
-        return None
-    return snapshot.rate
+        return {}
+    return {
+        "provider": snapshot.provider,
+        "date": str(snapshot.reference_date),
+        "rate": str(snapshot.rate),
+    }
 
 
 def _fmt_brl(amount: Decimal) -> str:

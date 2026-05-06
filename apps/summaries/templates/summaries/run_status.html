@@ -40,7 +40,7 @@
       </div>
       <div class="col-sm-6">
         <span class="text-muted">Registro:</span>
-        <strong>{{ run.admission.source_admission_key }}</strong>
+        <strong>{{ run.admission.patient.patient_source_key }}</strong>
       </div>
       <div class="col-sm-6">
         <span class="text-muted">Internação:</span>
@@ -113,7 +113,11 @@
       <i class="bi bi-cash-stack me-1"></i>
       Custo da Execução
       {% if rate_available %}
-        <span class="text-success ms-1 small">(USD → BRL disponível)</span>
+        <span class="text-success ms-1 small">
+          (USD → BRL: R$ {{ latest_rate_info.rate }}
+          via {{ latest_rate_info.provider }}
+          em {{ latest_rate_info.date }})
+        </span>
       {% else %}
         <span class="text-warning ms-1 small">(câmbio indisponível)</span>
       {% endif %}
@@ -126,6 +130,10 @@
           <span class="text-muted d-block small">Fase 1 — Base clínica</span>
           {% if pipeline_run.phase1_reused %}
             <span class="badge bg-info text-dark mb-1">Reutilizado</span>
+          {% elif phase1_is_reported %}
+            <span class="badge bg-success mb-1">Real (provider)</span>
+          {% else %}
+            <span class="badge bg-warning text-dark mb-1">Estimado</span>
           {% endif %}
           <strong class="text-primary">
             $ {{ pipeline_run.phase1_cost_total|floatformat:2 }}
@@ -141,6 +149,11 @@
       <div class="col-md-4">
         <div class="border rounded p-2 h-100">
           <span class="text-muted d-block small">Fase 2 — Versão final</span>
+          {% if phase2_is_reported %}
+            <span class="badge bg-success mb-1">Real (provider)</span>
+          {% else %}
+            <span class="badge bg-warning text-dark mb-1">Estimado</span>
+          {% endif %}
           <strong class="text-success">
             $ {{ pipeline_run.phase2_cost_total|floatformat:2 }}
           </strong>
@@ -167,6 +180,11 @@
     </div>
   </div>
 </div>
+{% endif %}
+
+<!-- Pipeline phase progress — HTMX polling managed by the fragment itself -->
+{% if pipeline_run %}
+  {% include "summaries/_summary_pipeline_progress.html" %}
 {% endif %}
 
 <!-- APS-S7: Chunk-level progress — HTMX polling managed by the fragment itself -->

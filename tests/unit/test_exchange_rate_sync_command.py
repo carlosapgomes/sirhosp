@@ -33,7 +33,7 @@ def _make_fallback_response(rate: float = 5.72) -> dict:
     return {
         "result": "success",
         "base_code": "USD",
-        "rates": {"BRL": rate},
+        "conversion_rates": {"BRL": rate},
     }
 
 

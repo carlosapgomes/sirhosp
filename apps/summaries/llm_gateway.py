@@ -194,12 +194,34 @@ def call_llm_gateway(
             f"Raw content (first 500 chars): {content[:500]}"
         ) from exc
 
+    # ---- Token usage and cost (STC-S3) ----
+    usage = getattr(completion, "usage", None)
+    input_tokens = usage.prompt_tokens if usage else 0
+    output_tokens = usage.completion_tokens if usage else 0
+
+    raw_cost = getattr(usage, "cost", None) if usage else None
+    cost_is_reported = raw_cost is not None
+    cost_usd_reported = (
+        Decimal(str(raw_cost)) if cost_is_reported else Decimal("0.00")
+    )
+    # Estimated cost (always computed for audit)
+    cost_usd_estimated = (
+        (Decimal(input_tokens) / Decimal(1000)) * _DEFAULT_INPUT_PRICE_PER_1K
+        + (Decimal(output_tokens) / Decimal(1000)) * _DEFAULT_OUTPUT_PRICE_PER_1K
+    )
+
     # Embed provider/model metadata so the service layer can record it
     # in AdmissionSummaryVersion without a separate side-channel.
     result["_meta"] = {
         "provider": config.provider,
         "model": config.model,
     }
+
+    result["input_tokens"] = input_tokens
+    result["output_tokens"] = output_tokens
+    result["cost_usd_reported"] = cost_usd_reported
+    result["cost_usd_estimated"] = cost_usd_estimated
+    result["cost_is_reported"] = cost_is_reported
 
     return result
 
@@ -312,9 +334,25 @@ def call_llm_phase2_render(
     else:
         cached_tokens = 0
 
-    costs = _compute_phase2_cost(
+    # Estimated cost from tokens (always computed as audit trail)
+    costs_estimated = _compute_phase2_cost(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+    )
+
+    # Real cost from provider (OpenRouter puts cost in usage.cost,
+    # a Pydantic model_extra field).
+    raw_cost = getattr(usage, "cost", None) if usage else None
+    cost_is_reported = raw_cost is not None
+    cost_usd_reported = (
+        Decimal(str(raw_cost)) if cost_is_reported else Decimal("0.00")
+    )
+
+    # Effective total: prefer reported, fall back to estimated.
+    cost_total = (
+        cost_usd_reported
+        if cost_is_reported and cost_usd_reported > Decimal("0")
+        else costs_estimated["cost_total"]
     )
 
     response_payload = {
@@ -343,9 +381,12 @@ def call_llm_phase2_render(
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_tokens": cached_tokens,
-        "cost_input": costs["cost_input"],
-        "cost_output": costs["cost_output"],
-        "cost_total": costs["cost_total"],
+        "cost_input": costs_estimated["cost_input"],
+        "cost_output": costs_estimated["cost_output"],
+        "cost_total": cost_total,
+        "cost_usd_reported": cost_usd_reported,
+        "cost_usd_estimated": costs_estimated["cost_total"],
+        "cost_is_reported": cost_is_reported,
         "request_payload": request_payload,
         "response_payload": response_payload,
         "latency_ms": latency_ms,

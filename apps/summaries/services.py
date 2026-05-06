@@ -566,6 +566,16 @@ def execute_summary_run(
                 llm_provider=llm_response.get("_meta", {}).get("provider", "stub"),
                 llm_model=llm_response.get("_meta", {}).get("model", "stub-v0"),
                 prompt_version=PROMPT_VERSION,
+                # STC-S3: Token usage and cost per chunk
+                input_tokens=llm_response.get("input_tokens", 0),
+                output_tokens=llm_response.get("output_tokens", 0),
+                cost_usd_reported=llm_response.get(
+                    "cost_usd_reported", Decimal("0.00")
+                ),
+                cost_usd_estimated=llm_response.get(
+                    "cost_usd_estimated", Decimal("0.00")
+                ),
+                cost_is_reported=llm_response.get("cost_is_reported", False),
             )
 
         # ---- g. Mark chunk succeeded ----
@@ -796,6 +806,7 @@ def execute_two_phase_pipeline(
     # ---- 1. Create pipeline run ----
     pipeline_run = SummaryPipelineRun.objects.create(
         admission_id=run.admission_id,
+        summary_run=run,
         requested_by=run.requested_by,
         mode=run.mode,
         status=SummaryPipelineRun.Status.RUNNING,
@@ -886,6 +897,28 @@ def execute_two_phase_pipeline(
         total_output = sum(
             (v.output_tokens or 0) for v in phase1_versions
         )
+
+        # STC-S3: Accumulate reported cost from all chunks.
+        # Prefer reported; if none had reported cost, use estimated.
+        total_reported = sum(
+            (v.cost_usd_reported or Decimal("0.00"))
+            for v in phase1_versions
+        )
+        total_estimated = sum(
+            (v.cost_usd_estimated or Decimal("0.00"))
+            for v in phase1_versions
+        )
+        any_reported = any(
+            v.cost_is_reported for v in phase1_versions
+        )
+        # Effective cost: reported if any chunk had it, else estimated.
+        phase1_cost_total = (
+            total_reported
+            if any_reported and total_reported > Decimal("0")
+            else total_estimated
+        )
+
+        # Legacy cost fields (preserved for backward compat)
         phase1_costs = _compute_phase1_cost_from_tokens(
             input_tokens=total_input,
             output_tokens=total_output,
@@ -916,7 +949,10 @@ def execute_two_phase_pipeline(
         phase1_step.output_tokens = total_output
         phase1_step.cost_input = phase1_costs["cost_input"]
         phase1_step.cost_output = phase1_costs["cost_output"]
-        phase1_step.cost_total = phase1_costs["cost_total"]
+        phase1_step.cost_total = phase1_cost_total
+        phase1_step.cost_usd_reported = total_reported
+        phase1_step.cost_usd_estimated = total_estimated
+        phase1_step.cost_is_reported = any_reported
         phase1_step.finished_at = django_timezone.now()
         phase1_step.save(
             update_fields=[
@@ -924,14 +960,21 @@ def execute_two_phase_pipeline(
                 "prompt_version", "prompt_text_snapshot",
                 "input_tokens", "output_tokens",
                 "cost_input", "cost_output", "cost_total",
+                "cost_usd_reported", "cost_usd_estimated",
+                "cost_is_reported",
                 "finished_at",
             ]
         )
 
-        pipeline_run.phase1_cost_total = phase1_costs["cost_total"]
+        pipeline_run.phase1_cost_total = phase1_cost_total
         pipeline_run.save(update_fields=["phase1_cost_total"])
 
     # ---- 4. Execute phase 2 ----
+    # Keep SummaryRun RUNNING so the UI shows Phase 2 progress.
+    # execute_summary_run set it to SUCCEEDED, but Phase 2 is still pending.
+    run.status = SummaryRun.Status.RUNNING
+    run.save(update_fields=["status"])
+
     phase2_start = django_timezone.now()
     phase2_step = SummaryPipelineStepRun.objects.create(
         pipeline_run=pipeline_run,
@@ -992,6 +1035,13 @@ def execute_two_phase_pipeline(
         phase2_step.cost_input = phase2_result["cost_input"]
         phase2_step.cost_output = phase2_result["cost_output"]
         phase2_step.cost_total = phase2_result["cost_total"]
+        phase2_step.cost_usd_reported = (
+            phase2_result["cost_usd_reported"]
+        )
+        phase2_step.cost_usd_estimated = (
+            phase2_result["cost_usd_estimated"]
+        )
+        phase2_step.cost_is_reported = phase2_result["cost_is_reported"]
         phase2_step.latency_ms = phase2_result.get("latency_ms", 0)
         phase2_step.finished_at = django_timezone.now()
         phase2_step.save(
@@ -1001,6 +1051,8 @@ def execute_two_phase_pipeline(
                 "request_payload_json", "response_payload_json",
                 "input_tokens", "output_tokens", "cached_tokens",
                 "cost_input", "cost_output", "cost_total",
+                "cost_usd_reported", "cost_usd_estimated",
+                "cost_is_reported",
                 "latency_ms", "finished_at",
             ]
         )

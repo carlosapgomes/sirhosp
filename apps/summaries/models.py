@@ -107,6 +107,20 @@ class AdmissionSummaryVersion(models.Model):
     input_tokens = models.IntegerField(null=True, blank=True)
     output_tokens = models.IntegerField(null=True, blank=True)
 
+    # STC-S3: Cost provenance per chunk
+    cost_usd_reported = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal("0.00"),
+        help_text="Provider-reported cost in USD for this chunk.",
+    )
+    cost_usd_estimated = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal("0.00"),
+        help_text="Token-based cost estimate for this chunk.",
+    )
+    cost_is_reported = models.BooleanField(
+        default=False,
+        help_text="True when cost_usd_reported comes from the provider.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -297,6 +311,14 @@ class SummaryPipelineRun(models.Model):
         related_name="pipeline_runs",
     )
 
+    # STC-S4: Direct link to originating SummaryRun
+    summary_run = models.ForeignKey(
+        "SummaryRun",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="pipeline_runs",
+    )
+
     mode = models.CharField(
         max_length=20,
         choices=Mode.choices,
@@ -414,6 +436,20 @@ class SummaryPipelineStepRun(models.Model):
     )
     cost_total = models.DecimalField(
         max_digits=12, decimal_places=6, default=Decimal("0.00")
+    )
+
+    # STC-S2: Cost provenance
+    cost_usd_reported = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal("0.00"),
+        help_text="Provider-reported cost in USD. 0 when provider omits cost.",
+    )
+    cost_usd_estimated = models.DecimalField(
+        max_digits=12, decimal_places=6, default=Decimal("0.00"),
+        help_text="Token-based cost estimate (always computed for audit).",
+    )
+    cost_is_reported = models.BooleanField(
+        default=False,
+        help_text="True when cost_usd_reported comes from the provider.",
     )
 
     # Observability

@@ -62,6 +62,12 @@ def _stub_phase1_response():
             "provider": "openai",
             "model": "gpt-4o",
         },
+        # STC-S3: Token usage and cost per chunk
+        "input_tokens": 500,
+        "output_tokens": 300,
+        "cost_usd_reported": Decimal("0.008"),
+        "cost_usd_estimated": Decimal("0.008"),
+        "cost_is_reported": True,
     }
 
 
@@ -75,6 +81,9 @@ def _stub_phase2_response():
         "cost_input": Decimal("0.005"),
         "cost_output": Decimal("0.003"),
         "cost_total": Decimal("0.008"),
+        "cost_usd_reported": Decimal("0.008"),
+        "cost_usd_estimated": Decimal("0.008"),
+        "cost_is_reported": True,
         "latency_ms": 1200,
         "request_payload": {
             "model": "gpt-4o",
@@ -102,6 +111,9 @@ def _stub_phase2_large_response():
         "cost_input": Decimal("0.020"),
         "cost_output": Decimal("0.012"),
         "cost_total": Decimal("0.032"),
+        "cost_usd_reported": Decimal("0.032"),
+        "cost_usd_estimated": Decimal("0.032"),
+        "cost_is_reported": True,
         "request_payload": {"model": "claude-sonnet"},
         "response_payload": {"id": "msg-abc"},
     }
