@@ -35,12 +35,12 @@ altas_24h = Admission.objects.filter(
 
 ## Arquivos que você vai tocar (limite: 4)
 
-| Arquivo | Ação |
-| --- | --- |
-| `apps/services_portal/views.py` | **Modificar** — query + context |
-| `apps/services_portal/templates/services_portal/dashboard.html` | **Modificar** — label + link |
-| `apps/services_portal/urls.py` | **Modificar** — nova rota placeholder |
-| `tests/unit/test_services_portal_dashboard.py` | **Modificar** — adaptar testes |
+| Arquivo                                                         | Ação                                  |
+| --------------------------------------------------------------- | ------------------------------------- |
+| `apps/services_portal/views.py`                                 | **Modificar** — query + context       |
+| `apps/services_portal/templates/services_portal/dashboard.html` | **Modificar** — label + link          |
+| `apps/services_portal/urls.py`                                  | **Modificar** — nova rota placeholder |
+| `tests/unit/test_services_portal_dashboard.py`                  | **Modificar** — adaptar testes        |
 
 **NÃO toque** em: models.py, management commands, outros apps, outros templates.
 
@@ -155,34 +155,47 @@ No context dict:
 
 ```html
 <!-- ANTES -->
-  <!-- Altas (24h) -->
-  <div class="col-12 col-md-6 col-lg-4">
-    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
-      <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
-        <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
-      </div>
-      <div>
-        <div class="sirhosp-stat-value">{{ stats.altas_24h }}</div>
-        <div class="sirhosp-stat-label">Altas (24h)</div>
-      </div>
+<!-- Altas (24h) -->
+<div class="col-12 col-md-6 col-lg-4">
+  <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+    <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
+      <i
+        class="bi bi-box-arrow-right"
+        style="color: #D97706; font-size: 1.25rem;"
+      ></i>
+    </div>
+    <div>
+      <div class="sirhosp-stat-value">{{ stats.altas_24h }}</div>
+      <div class="sirhosp-stat-label">Altas (24h)</div>
     </div>
   </div>
+</div>
 
 <!-- DEPOIS -->
-  <!-- Altas no dia -->
-  <div class="col-12 col-md-6 col-lg-4">
-    <a href="{% url 'services_portal:discharge_chart' %}" class="text-decoration-none">
-      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
-        <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
-          <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
+<!-- Altas no dia -->
+<div class="col-12 col-md-6 col-lg-4">
+  <a
+    href="{% url 'services_portal:discharge_chart' %}"
+    class="text-decoration-none"
+  >
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
+        <i
+          class="bi bi-box-arrow-right"
+          style="color: #D97706; font-size: 1.25rem;"
+        ></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value" style="color: inherit;">
+          {{ stats.altas_hoje }}
         </div>
-        <div>
-          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.altas_hoje }}</div>
-          <div class="sirhosp-stat-label" style="color: inherit;">Altas no dia</div>
+        <div class="sirhosp-stat-label" style="color: inherit;">
+          Altas no dia
         </div>
       </div>
-    </a>
-  </div>
+    </div>
+  </a>
+</div>
 ```
 
 **3. `apps/services_portal/urls.py`** — adicione a rota:
@@ -239,6 +252,7 @@ uv run pytest tests/unit/test_services_portal_dashboard.py -q
 
    Ou deixe a rota comentada e o subagent do S5 a descomenta.
    **Faça o que for mais limpo e testável.**
+
 2. **NÃO altere** outros cards do dashboard (internados, cadastrados,
    ingestion metrics).
 3. **NÃO modifique** `Admission` ou `Patient`.
@@ -255,9 +269,11 @@ Gere `/tmp/sirhosp-slice-S4-report.md`:
 # Slice S4 Report: Dashboard query + template + URL
 
 ## Resumo
+
 ...
 
 ## Checklist de Aceite
+
 - [ ] Query alterada para altas_hoje
 - [ ] Context dict atualizado
 - [ ] Template com label "Altas no dia" e link
@@ -266,21 +282,26 @@ Gere `/tmp/sirhosp-slice-S4-report.md`:
 - [ ] check + unit verdes
 
 ## Arquivos Alterados
+
 - apps/services_portal/views.py
 - apps/services_portal/templates/services_portal/dashboard.html
 - apps/services_portal/urls.py
 - tests/unit/test_services_portal_dashboard.py
 
 ## Fragmentos Antes/Depois
+
 (Colar antes/depois de CADA arquivo alterado — trechos relevantes)
 
 ## Comandos Executados
+
 (Colar outputs)
 
 ## Riscos e Pendências
+
 ...
 
 ## Próximo Slice
+
 S5: Página de gráfico: view + template Chart.js
 ```
 

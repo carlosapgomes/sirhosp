@@ -147,8 +147,7 @@ com dados passados como JSON no template.
 **Template approach**:
 
 ```html
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js">
-</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
   const data = {{ chart_data|safe }};
   // Render bar chart + 3 MA line datasets
@@ -198,8 +197,10 @@ entries = DailyDischargeCount.objects.filter(
 classes Bootstrap preservando a aparência visual.
 
 ```html
-<a href="{% url 'services_portal:discharge_chart' %}"
-   class="text-decoration-none">
+<a
+  href="{% url 'services_portal:discharge_chart' %}"
+  class="text-decoration-none"
+>
   <div class="sirhosp-stat-card d-flex align-items-center gap-3">
     <!-- ícone, valor, label -->
   </div>

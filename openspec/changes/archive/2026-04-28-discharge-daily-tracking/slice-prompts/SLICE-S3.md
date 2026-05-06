@@ -20,10 +20,10 @@ Se a extração falhar, o refresh NÃO é chamado.
 
 ## Arquivos que você vai tocar (limite: 2)
 
-| Arquivo | Ação |
-| --- | --- |
-| `tests/unit/test_daily_discharge_count.py` | **Modificar** — adicionar 2 testes de hook |
-| `apps/discharges/management/commands/extract_discharges.py` | **Modificar** — adicionar ~5 linhas |
+| Arquivo                                                     | Ação                                       |
+| ----------------------------------------------------------- | ------------------------------------------ |
+| `tests/unit/test_daily_discharge_count.py`                  | **Modificar** — adicionar 2 testes de hook |
+| `apps/discharges/management/commands/extract_discharges.py` | **Modificar** — adicionar ~5 linhas        |
 
 **NÃO toque** em: models.py, settings.py, views, templates, urls,
 `refresh_daily_discharge_counts.py`.
@@ -246,14 +246,14 @@ uv run pytest tests/unit/test_daily_discharge_count.py -q
 ## Critérios de Sucesso (Auto-Avaliação Obrigatória)
 
 - [ ] `call_command("refresh_daily_discharge_counts")` adicionado em ambos os
-  caminhos de sucesso do `handle()`
+      caminhos de sucesso do `handle()`
 - [ ] Hook posicionado APÓS `run.status = "succeeded"` / `run.save()`
 - [ ] Hook NÃO está em nenhum caminho de falha (`sys.exit(1)`)
 - [ ] Import movido para o topo do arquivo (não duplicado)
 - [ ] Testes passando (smoke test ou mock test)
 - [ ] `./scripts/test-in-container.sh check` sem erro
 - [ ] `./scripts/test-in-container.sh unit` passando (todos os testes,
-  não só os do slice)
+      não só os do slice)
 
 ## Anti-Alucinação / Stop Rules
 
@@ -275,9 +275,11 @@ Gere `/tmp/sirhosp-slice-S3-report.md`:
 # Slice S3 Report: Hook no extract_discharges
 
 ## Resumo
+
 ...
 
 ## Checklist de Aceite
+
 - [ ] Hook nos 2 caminhos de sucesso
 - [ ] Hook ausente nos caminhos de falha
 - [ ] Import no topo do arquivo
@@ -285,19 +287,24 @@ Gere `/tmp/sirhosp-slice-S3-report.md`:
 - [ ] check + unit verdes
 
 ## Arquivos Alterados
+
 - apps/discharges/management/commands/extract_discharges.py (modificado)
 - tests/unit/test_daily_discharge_count.py (modificado: +testes hook)
 
 ## Fragmentos Antes/Depois
+
 (Mostrar o antes/depois dos trechos modificados em extract_discharges.py)
 
 ## Comandos Executados
+
 (Colar outputs)
 
 ## Riscos e Pendências
+
 ...
 
 ## Próximo Slice
+
 S4: Dashboard: query + template + URL
 ```
 

@@ -22,10 +22,10 @@ e faz upsert em `DailyDischargeCount`.
 
 ## Arquivos que você vai tocar (limite: 2)
 
-| Arquivo | Ação |
-| --- | --- |
-| `tests/unit/test_daily_discharge_count.py` | **Criar** — testes do comando |
-| `apps/discharges/management/commands/refresh_daily_discharge_counts.py` | **Criar** |
+| Arquivo                                                                 | Ação                          |
+| ----------------------------------------------------------------------- | ----------------------------- |
+| `tests/unit/test_daily_discharge_count.py`                              | **Criar** — testes do comando |
+| `apps/discharges/management/commands/refresh_daily_discharge_counts.py` | **Criar**                     |
 
 **NÃO toque** em: models.py, settings.py, services.py, extract_discharges.py,
 views, templates, urls.
@@ -213,7 +213,7 @@ uv run pytest tests/unit/test_daily_discharge_count.py -q
 ## Critérios de Sucesso (Auto-Avaliação Obrigatória)
 
 - [ ] Comando `refresh_daily_discharge_counts` executável via
-  `uv run python manage.py refresh_daily_discharge_counts`
+      `uv run python manage.py refresh_daily_discharge_counts`
 - [ ] Agrupamento por dia usa `TruncDate` no timezone `America/Bahia`
 - [ ] Upsert via `update_or_create` (não duplica registros)
 - [ ] Comando lida com zero admissions sem erro
@@ -242,9 +242,11 @@ Gere `/tmp/sirhosp-slice-S2-report.md` com:
 # Slice S2 Report: refresh_daily_discharge_counts
 
 ## Resumo
+
 ...
 
 ## Checklist de Aceite
+
 - [ ] Comando executável
 - [ ] Agrupamento por dia correto
 - [ ] Upsert funciona
@@ -254,22 +256,27 @@ Gere `/tmp/sirhosp-slice-S2-report.md` com:
 - [ ] check + unit verdes
 
 ## Arquivos Alterados
+
 - tests/unit/test_daily_discharge_count.py (NOVO)
 - apps/discharges/management/commands/refresh_daily_discharge_counts.py (NOVO)
 
 ## Fragmentos Antes/Depois
+
 (Colar snippets relevantes — neste caso só "Depois" pois são arquivos novos)
 
 ## Comandos Executados
+
 - uv run pytest tests/unit/test_daily_discharge_count.py -q
 - ./scripts/test-in-container.sh check
 - ./scripts/test-in-container.sh unit
-(Colar outputs)
+  (Colar outputs)
 
 ## Riscos e Pendências
+
 ...
 
 ## Próximo Slice
+
 S3: Hook do comando no extract_discharges
 ```
 

@@ -7,9 +7,9 @@
 **TDD**: Teste de criação do modelo → implementação → migration.
 
 - [ ] 1.1 Alterar `TIME_ZONE` de `"America/Sao_Paulo"` para `"America/Bahia"`
-  em `config/settings.py`
+      em `config/settings.py`
 - [ ] 1.2 Criar `apps/discharges/models.py` com modelo `DailyDischargeCount`
-  (`date` DateField unique, `count` IntegerField default 0, timestamps)
+      (`date` DateField unique, `count` IntegerField default 0, timestamps)
 - [ ] 1.3 Registrar modelo no admin se aplicável
 - [ ] 1.4 Gerar migration: `uv run python manage.py makemigrations discharges`
 - [ ] 1.5 Rodar `./scripts/test-in-container.sh check`, `unit` — confirmar verde
@@ -44,8 +44,8 @@
   - NÃO é chamado quando extração falha
   - Usar `mock.patch` para verificar `call_command`
 - [ ] 3.2 Adicionar `call_command("refresh_daily_discharge_counts")` ao final
-  do `handle()` de `extract_discharges`, APÓS `run.status = "succeeded"`
-  e ANTES do `sys.exit(0)` implícito
+      do `handle()` de `extract_discharges`, APÓS `run.status = "succeeded"`
+      e ANTES do `sys.exit(0)` implícito
 - [ ] 3.3 Rodar `./scripts/test-in-container.sh check`, `unit` — confirmar verde
 
 ## 4. Slice S4 — Dashboard: query + template + URL
@@ -64,7 +64,7 @@
   - Teste: card contém link para `/painel/altas/`
   - Renomear referências de `altas_24h` para `altas_hoje`
 - [ ] 4.2 Alterar query no `dashboard()`:
-  `altas_24h` → `altas_hoje` com `discharge_date__date=timezone.localdate()`
+      `altas_24h` → `altas_hoje` com `discharge_date__date=timezone.localdate()`
 - [ ] 4.3 Atualizar context dict: `altas_24h` → `altas_hoje`
 - [ ] 4.4 Atualizar template `dashboard.html`:
   - Label `Altas (24h)` → `Altas no dia`
@@ -72,7 +72,7 @@
   - Envolver card em `<a>` com `{% url 'services_portal:discharge_chart' %}`
   - Preservar classes visuais (`text-decoration-none`)
 - [ ] 4.5 Adicionar rota `discharge_chart` em `services_portal/urls.py`
-  (placeholder — view implementada no Slice S5)
+      (placeholder — view implementada no Slice S5)
 - [ ] 4.6 Rodar `./scripts/test-in-container.sh check`, `unit` — confirmar verde
 
 ## 5. Slice S5 — Página de gráfico: view + template Chart.js
@@ -83,7 +83,7 @@
 **TDD**: Testes da view → implementação da view + template.
 
 - [ ] 5.1 Adicionar testes da view de gráfico em
-  `tests/unit/test_services_portal_dashboard.py`:
+      `tests/unit/test_services_portal_dashboard.py`:
   - View renderiza com dados de `DailyDischargeCount`
   - Período padrão 90 dias (`date__lt=today`; hoje não aparece)
   - Parâmetro `?dias=30` funciona
@@ -113,9 +113,9 @@
 ## 6. Slice S6 — Quality gate e validação final
 
 - [ ] 6.1 Rodar `./scripts/test-in-container.sh quality-gate` e garantir
-  tudo verde
+      tudo verde
 - [ ] 6.2 Rodar `./scripts/markdown-lint.sh` nos `.md` alterados/criados
-  (design.md, tasks.md, slice-prompts/*.md)
+      (design.md, tasks.md, slice-prompts/\*.md)
 - [ ] 6.3 Rodar `./scripts/test-in-container.sh typecheck` — zero novos erros
 - [ ] 6.4 Rodar `./scripts/markdown-format.sh` se necessário
 - [ ] 6.5 Verificar visualmente (após deploy):

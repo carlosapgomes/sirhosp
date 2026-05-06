@@ -24,7 +24,7 @@ dashboard, mas o campo nunca é populado de forma sistemática.
 
 ## Architecture Overview
 
-````text
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │ systemd timer: 11:00, 19:00, 23:55                           │
 │   │                                                          │
@@ -62,7 +62,7 @@ dashboard, mas o campo nunca é populado de forma sistemática.
 │                                                              │
 │ Registra métricas no IngestionRun                            │
 └──────────────────────────────────────────────────────────────┘
-````
+```
 
 ## Data Flow
 
@@ -116,13 +116,13 @@ Portanto, `discharge_date` é sempre a data/hora da execução.
 
 ### O que muda do `busca-altas-hoje.py` original
 
-| Elemento | Original (`pontelo/`) | Adaptado (SIRHOSP) |
-| --- | --- | --- |
+| Elemento               | Original (`pontelo/`)                                                    | Adaptado (SIRHOSP)                                                                            |
+| ---------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
 | Módulo `source_system` | `from source_system import ...` (com `config`, `processa_evolucoes_txt`) | `from source_system import aguardar_pagina_estavel, fechar_dialogos_iniciais` (bridge module) |
-| Seletor do ícone | `page.locator('[id="_icon_img_20352"]')` | `page.locator('.silk-new-internacao-altas-do-dia')` |
-| Variáveis de ambiente | `load_dotenv()` + `required_env()` | Lidas pelo management command e passadas via CLI args |
-| CLI | `--headless` apenas | `--headless`, `--output-dir`, `--source-url`, `--username`, `--password` |
-| Output | `downloads/altas-hoje-<ts>.json` | `downloads/discharges-<ts>.json` (via `--output-dir`) |
+| Seletor do ícone       | `page.locator('[id="_icon_img_20352"]')`                                 | `page.locator('.silk-new-internacao-altas-do-dia')`                                           |
+| Variáveis de ambiente  | `load_dotenv()` + `required_env()`                                       | Lidas pelo management command e passadas via CLI args                                         |
+| CLI                    | `--headless` apenas                                                      | `--headless`, `--output-dir`, `--source-url`, `--username`, `--password`                      |
+| Output                 | `downloads/altas-hoje-<ts>.json`                                         | `downloads/discharges-<ts>.json` (via `--output-dir`)                                         |
 
 ### O que NÃO muda
 

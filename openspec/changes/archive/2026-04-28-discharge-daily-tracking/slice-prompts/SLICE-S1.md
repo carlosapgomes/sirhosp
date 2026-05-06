@@ -24,11 +24,11 @@ hospitalares.
 
 ## Arquivos que você vai tocar (limite: 3)
 
-| Arquivo | Ação |
-| --- | --- |
-| `config/settings.py` | Alterar 1 linha: `TIME_ZONE` |
+| Arquivo                     | Ação                                     |
+| --------------------------- | ---------------------------------------- |
+| `config/settings.py`        | Alterar 1 linha: `TIME_ZONE`             |
 | `apps/discharges/models.py` | **Criar** — modelo `DailyDischargeCount` |
-| Migration (auto) | Gerada por `makemigrations` |
+| Migration (auto)            | Gerada por `makemigrations`              |
 
 **NÃO toque** em: `services.py`, `extract_discharges.py`, views, templates,
 urls, tests de outros apps.
@@ -122,7 +122,7 @@ uv run pytest tests/unit/test_daily_discharge_model.py -q
 
 - [ ] `TIME_ZONE = "America/Bahia"` em `config/settings.py`
 - [ ] `DailyDischargeCount` criado com campos: `date` (unique), `count`
-  (default 0), `created_at`, `updated_at`
+      (default 0), `created_at`, `updated_at`
 - [ ] Migration gerada e aplicável (`makemigrations` sem erro)
 - [ ] Testes passam: criação, unicidade, default count
 - [ ] `./scripts/test-in-container.sh check` sem erro
@@ -150,9 +150,11 @@ Ao final, gere `/tmp/sirhosp-slice-S1-report.md` contendo:
 # Slice S1 Report: TIME_ZONE + DailyDischargeCount
 
 ## Resumo
+
 (Uma frase sobre o que foi feito)
 
 ## Checklist de Aceite
+
 - [ ] TIME_ZONE alterado
 - [ ] Modelo criado
 - [ ] Migration gerada
@@ -160,26 +162,32 @@ Ao final, gere `/tmp/sirhosp-slice-S1-report.md` contendo:
 - [ ] check e unit verdes
 
 ## Arquivos Alterados
+
 (Lista com paths)
 
 ## Fragmentos Antes/Depois
 
 ### config/settings.py
+
 **Antes:**
 `TIME_ZONE = "America/Sao_Paulo"`
 **Depois:**
 `TIME_ZONE = "America/Bahia"`
 
 ### apps/discharges/models.py (NOVO)
+
 (Colar o arquivo completo)
 
 ## Comandos Executados e Resultados
+
 (Colar comandos e output resumido)
 
 ## Riscos e Pendências
+
 - Nenhum / (listar se houver)
 
 ## Próximo Slice
+
 S2: Criar management command refresh_daily_discharge_counts
 ```
 

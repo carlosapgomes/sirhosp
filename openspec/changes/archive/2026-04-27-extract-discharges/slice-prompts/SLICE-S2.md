@@ -266,7 +266,7 @@ Localize a tabela:
 Adicione a nova linha **antes** da linha `| Container não sobe`:
 
 ```markdown
-| Altas não extrai    | `journalctl -u sirhosp-discharges.service -n 30` — ver credenciais, PDF       |
+| Altas não extrai | `journalctl -u sirhosp-discharges.service -n 30` — ver credenciais, PDF |
 ```
 
 A tabela final deve ficar:
@@ -320,36 +320,45 @@ Gerar `/tmp/sirhosp-slice-DIS-S2-report.md` com:
 # Slice DIS-S2 Report
 
 ## Status
+
 [PASS / FAIL]
 
 ## Arquivos criados
+
 - deploy/discharges-scheduler.sh
 - deploy/systemd/sirhosp-discharges.service
 - deploy/systemd/sirhosp-discharges.timer
 
 ## Arquivos modificados
+
 - deploy/README.md (adicionada seção 4b + troubleshooting)
 
 ## Snippets before/after
+
 ### deploy/README.md — seção troubleshooting
+
 **Before:** (tabela com 3 linhas)
 **After:** (tabela com 4 linhas, incluindo "Altas não extrai")
 
 ### deploy/README.md — nova seção 4b
+
 (conteúdo completo da seção inserida)
 
 ## Comandos executados
+
 - chmod +x deploy/discharges-scheduler.sh: [OK]
 - ./scripts/markdown-lint.sh deploy/README.md: [output]
 - ./scripts/test-in-container.sh lint: [output]
 
 ## Riscos / Pendências
+
 - As units systemd NÃO foram testadas em produção (sem acesso ao servidor).
   Validação real será feita pelo operador seguindo as instruções do README.
 - O timer usa OnCalendar com 3 horários. Verificar se o fuso horário do
   servidor está correto (America/Sao_Paulo).
 
 ## Próximo passo sugerido
+
 Validação fim-a-fim: executar `extract_discharges` contra o sistema fonte real
 e verificar que o dashboard mostra altas > 0.
 ```

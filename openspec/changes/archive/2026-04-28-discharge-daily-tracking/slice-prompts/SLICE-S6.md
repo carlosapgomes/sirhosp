@@ -20,12 +20,12 @@ definidos no `AGENTS.md` e verificar se tudo passa. Se algo falhar, corrigir
 
 ## Arquivos que você PODE tocar (limite: 0 novos, apenas correções)
 
-| Situação | Ação permitida |
-| --- | --- |
-| Teste falha | Corrigir **apenas** o teste ou o código mínimo para passar |
-| Lint falha | Corrigir formatação |
-| Typecheck falha | Adicionar type annotation faltante |
-| Markdown falha | Corrigir formatação `.md` |
+| Situação        | Ação permitida                                             |
+| --------------- | ---------------------------------------------------------- |
+| Teste falha     | Corrigir **apenas** o teste ou o código mínimo para passar |
+| Lint falha      | Corrigir formatação                                        |
+| Typecheck falha | Adicionar type annotation faltante                         |
+| Markdown falha  | Corrigir formatação `.md`                                  |
 
 **NÃO crie** novos arquivos de código. **NÃO adicione** funcionalidade nova.
 
@@ -106,7 +106,7 @@ como "não relacionado a este change".
 
 - [ ] `uv run python manage.py refresh_daily_discharge_counts` executa sem erro
 - [ ] `uv run python manage.py extract_discharges --help` mostra o comando
-  (verificação de que o hook não quebrou o parser de argumentos)
+      (verificação de que o hook não quebrou o parser de argumentos)
 - [ ] Nenhum `print()` de debug deixado no código
 - [ ] Nenhum comentário `# TODO` ou `# FIXME` sem dono
 - [ ] Nenhum import não utilizado
@@ -140,45 +140,57 @@ Gere `/tmp/sirhosp-slice-S6-report.md`:
 # Slice S6 Report: Quality Gate Final
 
 ## Resumo
+
 Validação final do change discharge-daily-tracking.
 
 ## Resultados dos Gates
 
 ### check
+
 (Output do comando)
 
 ### unit
+
 (Output resumido — total de testes, falhas se houver)
 
 ### lint
+
 (Output — zero ou lista de erros)
 
 ### typecheck
+
 (Output — zero novos erros ou lista)
 
 ### markdown-lint
+
 (Output)
 
 ### quality-gate
+
 (Output final)
 
 ## Correções Feitas (se houver)
+
 (Listar correções pontuais com mini-snippets antes/depois)
 
 ## Verificações Manuais
+
 - [ ] refresh_daily_discharge_counts executa
 - [ ] extract_discharges --help OK
 - [ ] Sem prints de debug
 - [ ] Sem imports não usados
 
 ## Arquivos Alterados Neste Slice
+
 (Nenhum ou lista dos que foram corrigidos)
 
 ## Status Final
+
 - [ ] TUDO VERDE — change pronto para revisão
 - [ ] BLOQUEIOS — (descrever se houver)
 
 ## Resumo do Change (todos os slices)
+
 - S1: TIME_ZONE + DailyDischargeCount model
 - S2: refresh_daily_discharge_counts command
 - S3: Hook no extract_discharges

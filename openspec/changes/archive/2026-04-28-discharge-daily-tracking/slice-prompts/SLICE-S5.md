@@ -31,11 +31,11 @@
 
 ## Arquivos que você vai tocar (limite: 3)
 
-| Arquivo | Ação |
-| --- | --- |
-| `apps/services_portal/views.py` | **Modificar** — adicionar `discharge_chart()` + `_moving_average()` |
-| `apps/services_portal/templates/services_portal/discharge_chart.html` | **Criar** — template com Chart.js |
-| `tests/unit/test_services_portal_dashboard.py` | **Modificar** — adicionar testes da view |
+| Arquivo                                                               | Ação                                                                |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `apps/services_portal/views.py`                                       | **Modificar** — adicionar `discharge_chart()` + `_moving_average()` |
+| `apps/services_portal/templates/services_portal/discharge_chart.html` | **Criar** — template com Chart.js                                   |
+| `tests/unit/test_services_portal_dashboard.py`                        | **Modificar** — adicionar testes da view                            |
 
 **NÃO toque** em: models.py, management commands, dashboard.html, urls.py,
 outros apps.
@@ -248,15 +248,18 @@ ser adicionados ao topo. O import `date` já pode existir.
 **2. Template** `apps/services_portal/templates/services_portal/discharge_chart.html`:
 
 ```html
-{% extends "base_sidebar.html" %}
-
-{% block title %}Altas por Dia — SIRHOSP{% endblock %}
-
-{% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+{% extends "base_sidebar.html" %} {% block title %}Altas por Dia — SIRHOSP{%
+endblock %} {% block content %}
+<div
+  class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4"
+>
   <div>
-    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Altas por Dia</h2>
-    <p class="text-muted small mb-0">Contagem diária de altas com médias móveis</p>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">
+      Altas por Dia
+    </h2>
+    <p class="text-muted small mb-0">
+      Contagem diária de altas com médias móveis
+    </p>
   </div>
 </div>
 
@@ -264,10 +267,12 @@ ser adicionados ao topo. O import `date` já pode existir.
 <div class="d-flex gap-2 mb-4 flex-wrap">
   <span class="text-muted small align-self-center me-2">Período:</span>
   {% for option in period_options %}
-    <a href="?dias={{ option }}"
-       class="btn btn-sm {% if option == dias %}btn-primary{% else %}btn-outline-primary{% endif %}">
-      {{ option }} dias
-    </a>
+  <a
+    href="?dias={{ option }}"
+    class="btn btn-sm {% if option == dias %}btn-primary{% else %}btn-outline-primary{% endif %}"
+  >
+    {{ option }} dias
+  </a>
   {% endfor %}
 </div>
 
@@ -280,7 +285,9 @@ ser adicionados ao topo. O import `date` já pode existir.
     <div class="text-center py-5 text-muted">
       <i class="bi bi-bar-chart" style="font-size: 3rem;"></i>
       <p class="mt-3">Nenhum dado de alta disponível.</p>
-      <p class="small">Os dados começarão a aparecer após a primeira extração de altas.</p>
+      <p class="small">
+        Os dados começarão a aparecer após a primeira extração de altas.
+      </p>
     </div>
     {% endif %}
   </div>
@@ -289,25 +296,31 @@ ser adicionados ao topo. O import `date` já pode existir.
 <!-- Legend -->
 <div class="d-flex gap-4 flex-wrap small text-muted mb-4">
   <div class="d-flex align-items-center gap-2">
-    <span style="display:inline-block;width:12px;height:12px;background:#0D6EFD;border-radius:2px;"></span>
+    <span
+      style="display:inline-block;width:12px;height:12px;background:#0D6EFD;border-radius:2px;"
+    ></span>
     Barras: altas diárias
   </div>
   <div class="d-flex align-items-center gap-2">
-    <span style="display:inline-block;width:20px;height:2px;background:#0D6EFD;"></span>
+    <span
+      style="display:inline-block;width:20px;height:2px;background:#0D6EFD;"
+    ></span>
     MM 3 dias
   </div>
   <div class="d-flex align-items-center gap-2">
-    <span style="display:inline-block;width:20px;height:2px;background:#F59E0B;"></span>
+    <span
+      style="display:inline-block;width:20px;height:2px;background:#F59E0B;"
+    ></span>
     MM 10 dias
   </div>
   <div class="d-flex align-items-center gap-2">
-    <span style="display:inline-block;width:20px;height:2px;background:#DC2626;"></span>
+    <span
+      style="display:inline-block;width:20px;height:2px;background:#DC2626;"
+    ></span>
     MM 30 dias
   </div>
 </div>
-{% endblock %}
-
-{% block extra_js %}
+{% endblock %} {% block extra_js %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
   const rawData = {{ chart_data|safe }};
@@ -416,13 +429,13 @@ uv run pytest tests/unit/test_services_portal_dashboard.py -q
 - [ ] Parâmetro `?dias=N` funcional com fallback para 90
 - [ ] Query exclui hoje: `date__lt=today`
 - [ ] `_moving_average` calcula corretamente com `None` nos primeiros
-  `window-1` elementos
+      `window-1` elementos
 - [ ] Template renderiza Chart.js com 4 datasets (1 bar + 3 line)
 - [ ] `spanGaps: false` para linhas quebrarem nos `None`
 - [ ] Seletor de período com links e destaque visual
 - [ ] Fallback "Nenhum dado disponível" quando `counts` vazio
 - [ ] 8 testes passando (auth, acesso, default 90, ?dias=30, inválido,
-  keys, ma3 None, vazio)
+      keys, ma3 None, vazio)
 - [ ] `./scripts/test-in-container.sh check` sem erro
 - [ ] `./scripts/test-in-container.sh unit` passando
 - [ ] `./scripts/test-in-container.sh lint` sem erro
@@ -452,13 +465,15 @@ Gere `/tmp/sirhosp-slice-S5-report.md`:
 # Slice S5 Report: Gráfico view + template Chart.js
 
 ## Resumo
+
 ...
 
 ## Checklist de Aceite
+
 - [ ] View discharge_chart com @login_required
 - [ ] ?dias=N funcional
-- [ ] date__lt=today (hoje excluído)
-- [ ] _moving_average com None nos primeiros
+- [ ] date\_\_lt=today (hoje excluído)
+- [ ] \_moving_average com None nos primeiros
 - [ ] Template Chart.js com 4 datasets
 - [ ] spanGaps: false
 - [ ] Seletor de período
@@ -467,20 +482,25 @@ Gere `/tmp/sirhosp-slice-S5-report.md`:
 - [ ] check + unit + lint verdes
 
 ## Arquivos Alterados
+
 - apps/services_portal/views.py (adicionadas ~60 linhas)
 - apps/services_portal/templates/services_portal/discharge_chart.html (NOVO)
 - tests/unit/test_services_portal_dashboard.py (adicionados ~100 linhas)
 
 ## Fragmentos Antes/Depois
+
 (Colar trechos relevantes de cada arquivo)
 
 ## Comandos Executados
+
 (Colar outputs)
 
 ## Riscos e Pendências
+
 ...
 
 ## Próximo Slice
+
 S6: Quality gate e validação final
 ```
 

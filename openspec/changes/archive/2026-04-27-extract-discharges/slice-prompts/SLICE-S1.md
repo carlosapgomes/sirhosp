@@ -1046,47 +1046,58 @@ Gerar `/tmp/sirhosp-slice-DIS-S1-report.md` com:
 # Slice DIS-S1 Report
 
 ## Status
+
 [PASS / FAIL]
 
 ## Arquivos criados
-- automation/source_system/discharges/__init__.py
+
+- automation/source_system/discharges/**init**.py
 - automation/source_system/discharges/extract_discharges.py
-- apps/discharges/__init__.py
+- apps/discharges/**init**.py
 - apps/discharges/apps.py
 - apps/discharges/services.py
-- apps/discharges/management/commands/__init__.py
+- apps/discharges/management/commands/**init**.py
 - apps/discharges/management/commands/extract_discharges.py
 - tests/unit/test_discharge_service.py
 
 ## Arquivos modificados
+
 - config/settings.py (adicionado apps.discharges.DischargesConfig ao INSTALLED_APPS)
 
 ## Snippets before/after
+
 ### config/settings.py — INSTALLED_APPS
+
 **Before:** (últimas 3 linhas)
 **After:** (últimas 3 linhas + nova entrada)
 
 ### apps/discharges/services.py
+
 (conteúdo completo criado — snippet dos métodos principais)
 
 ### apps/discharges/management/commands/extract_discharges.py
+
 (conteúdo completo criado — snippet do handle())
 
 ## Comandos executados
+
 - ./scripts/test-in-container.sh check: [output resumido]
 - ./scripts/test-in-container.sh unit: [output resumido]
 - ./scripts/test-in-container.sh lint: [output resumido]
 
 ## Resultados dos testes
+
 - [X/Y] passed (test_discharge_service.py)
 
 ## Riscos / Pendências
+
 - Script Playwright NÃO foi testado contra o sistema fonte real (sem credenciais).
   Teste funcional será feito após deploy com credenciais reais.
 - O caminho `parents[4]` no script_path do management command deve ser validado
   em ambiente real.
 
 ## Próximo slice sugerido
+
 S2 — Agendamento systemd + deploy (discharges-scheduler.sh, units, README)
 ```
 

@@ -146,7 +146,7 @@ custos em USD.
 ## Slice STP-S7 — UI de configuração de resumo (origem: internações)
 
 **Objetivo vertical:** escolher LLM fase 2 e prompt (padrão/custom/salvo) antes
- de enfileirar.
+de enfileirar.
 
 **Escopo máximo:** 5 arquivos.
 
