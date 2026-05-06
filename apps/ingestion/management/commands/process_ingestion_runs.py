@@ -1170,11 +1170,17 @@ class Command(BaseCommand):
         Returns the created IngestionRun or None if no admission exists.
         The run is optionally attached to a batch (pass None for auto-enqueued runs
         so they don't block batch closure).
+
+        Backward compatibility: older callers/tests may still pass an IngestionRun
+        instance instead of a CensusExecutionBatch; in that case, inherit its batch.
         """
         from django.utils import timezone
 
         from apps.ingestion.models import IngestionRun
         from apps.patients.models import Admission
+
+        if isinstance(batch, IngestionRun):
+            batch = batch.batch
 
         latest = (
             Admission.objects.filter(patient=patient)

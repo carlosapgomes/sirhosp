@@ -1183,18 +1183,15 @@ class TestAdmissionPageSummaryCTA:
         admission_maria_2: Admission,
         db: object,
     ) -> None:
-        """The 'Gerar resumo' button posts to create_summary_run with
-        mode=generate."""
+        """The 'Gerar resumo' button links to summary_config with mode=generate."""
         response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        # Should have a form posting to summaries create endpoint
         assert (
-            f"/admissions/{admission_maria_2.pk}/summary/create/"
+            f"/admissions/{admission_maria_2.pk}/summary/config/?mode=generate"
             in content
         )
-        assert 'name="mode" value="generate"' in content
 
     def test_with_complete_summary_shows_regenerar(
         self,
@@ -1340,12 +1337,15 @@ class TestAdmissionPageSummaryCTA:
         summary_state_maria_2: AdmissionSummaryState,
         db: object,
     ) -> None:
-        """The 'Regenerar' CTA posts mode=regenerate."""
+        """The 'Regenerar' CTA links to summary_config with mode=regenerate."""
         response = auth_client.get(
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert 'name="mode" value="regenerate"' in content
+        assert (
+            f"/admissions/{admission_maria_2.pk}/summary/config/?mode=regenerate"
+            in content
+        )
 
     def test_atualizar_form_posts_mode_update(
         self,
@@ -1354,7 +1354,7 @@ class TestAdmissionPageSummaryCTA:
         admission_maria_2: Admission,
         db: object,
     ) -> None:
-        """The 'Atualizar' CTA posts mode=update."""
+        """The 'Atualizar' CTA links to summary_config with mode=update."""
         old_end = date.today() - timedelta(days=5)
 
         AdmissionSummaryState.objects.create(
@@ -1370,7 +1370,10 @@ class TestAdmissionPageSummaryCTA:
             f"/patients/{patient_maria.pk}/admissions/"
         )
         content = response.content.decode()
-        assert 'name="mode" value="update"' in content
+        assert (
+            f"/admissions/{admission_maria_2.pk}/summary/config/?mode=update"
+            in content
+        )
 
     def test_different_admission_no_summary_does_not_affect_other(
         self,

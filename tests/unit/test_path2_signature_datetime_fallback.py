@@ -24,16 +24,29 @@ _config_spec = importlib.util.spec_from_file_location(
 )
 _config_mod = importlib.util.module_from_spec(_config_spec)  # type: ignore[arg-type]
 _config_spec.loader.exec_module(_config_mod)  # type: ignore[union-attr]
-sys.modules["config"] = _config_mod
 
-_spec = importlib.util.spec_from_file_location("_path2", _PATH2_FILE)
-_mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-_spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+_previous_config_module = sys.modules.get("config")
+try:
+    sys.modules["config"] = _config_mod
+    _spec = importlib.util.spec_from_file_location("_path2", _PATH2_FILE)
+    _mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
+    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
+finally:
+    if _previous_config_module is not None:
+        sys.modules["config"] = _previous_config_module
+    else:
+        sys.modules.pop("config", None)
 
 
 extract_signature_datetime = _mod.extract_signature_datetime
 is_evolution_end_line = _mod.is_evolution_end_line
 build_evolutions_json_payload = _mod.build_evolutions_json_payload
+
+
+def test_import_does_not_pollute_global_config_module():
+    import config
+
+    assert getattr(config, "__file__", "").endswith("config/__init__.py")
 
 
 def test_signature_line_without_time_is_recognized_and_defaults_to_noon():
