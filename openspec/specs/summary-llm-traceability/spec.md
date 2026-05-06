@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change 2026-05-03-summary-two-phase-pipeline-traceability. Update Purpose after archive.
+TBD - created by archiving change 2026-05-03-summary-two-phase-pipeline-traceability. Updated by change real-provider-cost-and-exchange-fixes-2026-05-05.
 
 ## Requirements
 
@@ -29,18 +29,52 @@ summary pipeline run.
 
 ### Requirement: Cost is tracked by phase and total run
 
-The system SHALL compute and persist costs by phase and aggregate run total.
+The system SHALL persist costs by phase and aggregate run total, prioritizing
+real provider-reported cost in USD over token-based estimation.
 
-#### Scenario: Store cost by phase
+#### Scenario: Store real cost by phase
 
-- **WHEN** phase 1 and phase 2 complete
-- **THEN** phase 1 and phase 2 costs are persisted independently in USD
+- **WHEN** phase 1 and phase 2 complete and the provider returns cost in the
+  API response
+- **THEN** `cost_usd_reported` is persisted with the provider-returned value
+- **AND** `cost_usd_estimated` is persisted with the token-based calculation
+  for auditability
+- **AND** `phase1_cost_total` and `phase2_cost_total` on the pipeline run
+  reflect the reported cost (or estimated when reported is unavailable)
+
+#### Scenario: Store estimated cost when provider omits cost
+
+- **WHEN** phase 1 or phase 2 complete but the provider does NOT return
+  cost in the API response
+- **THEN** `cost_usd_reported` is persisted as `0.00`
+- **AND** `cost_usd_estimated` is used as the effective cost for the phase
+- **AND** the pipeline run total reflects the estimated cost
 
 #### Scenario: Full phase-1 reuse stores zero phase-1 cost
 
 - **WHEN** phase 1 is reused/skipped due to valid prior base
 - **THEN** phase 1 cost is stored as zero
 - **AND** total run cost equals phase 2 cost
+
+### Requirement: Pipeline run is linked to the originating SummaryRun
+
+The system SHALL maintain a direct reference from `SummaryPipelineRun` to the
+`SummaryRun` that triggered it.
+
+#### Scenario: Pipeline run references its SummaryRun
+
+- **WHEN** a two-phase pipeline is executed for a `SummaryRun`
+- **THEN** the resulting `SummaryPipelineRun` stores a FK to that
+  `SummaryRun`
+- **AND** views query the pipeline run by `summary_run` instead of
+  `admission + latest`
+
+#### Scenario: Legacy runs without pipeline
+
+- **WHEN** a `SummaryRun` was executed without two-phase pipeline
+  (legacy mode, no `--pipeline`)
+- **THEN** no `SummaryPipelineRun` is linked to it
+- **AND** the status page renders without cost card
 
 ### Requirement: BRL display uses latest available exchange rate
 
@@ -59,22 +93,22 @@ USD/BRL rate at view time.
 - **THEN** system uses latest previously stored USD/BRL rate
 - **AND** conversion remains available without blocking the page
 
-### Requirement: Exchange-rate provider fallback enforces API-key policy
+### Requirement: Exchange-rate provider endpoints are correct at time of implementation
 
-The system SHALL fetch daily USD/BRL from `frankfurter.dev` as primary source
-without API key, and use `exchangerate-api.com` as fallback only when its API
-key is configured.
+The system SHALL use verified, working endpoints for exchange rate providers.
 
-#### Scenario: Primary succeeds without API key
+#### Scenario: Primary endpoint returns valid rate
 
-- **WHEN** daily sync runs and `frankfurter.dev` is available
+- **WHEN** daily sync runs against `api.frankfurter.dev/v1/latest`
 - **THEN** rate is collected successfully without API key
+- **AND** response is parsed from `data["rates"]["BRL"]`
 
-#### Scenario: Fallback requires configured API key
+#### Scenario: Fallback parses correct response key
 
-- **WHEN** primary source fails and fallback API key is missing
-- **THEN** fallback call is not attempted
-- **AND** system keeps using latest stored rate until next successful sync
+- **WHEN** primary source fails and fallback is configured with valid API key
+- **THEN** fallback calls `exchangerate-api.com` and parses
+  `data["conversion_rates"]["BRL"]`
+- **AND** rate is persisted with `provider="exchangerate_api"`
 
 ### Requirement: Public and admin trace views are separated
 
