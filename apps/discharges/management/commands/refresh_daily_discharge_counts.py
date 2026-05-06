@@ -9,6 +9,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 from django.db.models import Count
 from django.db.models.functions import TruncDate
+from django.utils import timezone
 
 from apps.discharges.models import DailyDischargeCount
 from apps.patients.models import Admission
@@ -27,7 +28,12 @@ class Command(BaseCommand):
         counts = (
             Admission.objects
             .filter(discharge_date__isnull=False)
-            .annotate(day=TruncDate("discharge_date"))
+            .annotate(
+                day=TruncDate(
+                    "discharge_date",
+                    tzinfo=timezone.get_default_timezone(),
+                )
+            )
             .values("day")
             .annotate(count=Count("patient_id", distinct=True))
             .order_by("day")

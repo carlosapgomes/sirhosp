@@ -665,6 +665,91 @@ class TestUpsertAdmissionSnapshot:
         assert result2["created"] == 1  # ADM_D
         assert result2["updated"] == 1  # ADM_B
 
+    def test_same_day_period_match_with_different_hours_no_duplicate(
+        self, db: object
+    ) -> None:
+        """Same dates with different hours must not create duplicate.
+
+        Volatile-key scenario: second snapshot has same admission_date date
+        and same discharge_date date but different hours.  Period fallback
+        must find the existing row (by date) and update it, not create a new one.
+        """
+        patient = Patient.objects.create(
+            patient_source_key="P_SAME_DAY_HOUR",
+            source_system="tasy",
+            name="PACIENTE SAME DAY HOUR",
+        )
+        # First capture: admission_end at 10:00
+        snapshot_v1 = [
+            {
+                "admission_key": "ADM_H1",
+                "admission_start": "2026-05-01 08:00:00",
+                "admission_end": "2026-05-05 10:00:00",
+                "ward": "UTI",
+                "bed": "UTI-01",
+            },
+        ]
+        result1 = upsert_admission_snapshot(patient, snapshot_v1)
+        assert result1["created"] == 1
+
+        # Second capture: same dates, different hours, volatile key
+        snapshot_v2 = [
+            {
+                "admission_key": "ADM_H2",
+                "admission_start": "2026-05-01 09:00:00",
+                "admission_end": "2026-05-05 18:00:00",
+                "ward": "Clinica Medica",
+                "bed": "CM-03",
+            },
+        ]
+        result2 = upsert_admission_snapshot(patient, snapshot_v2)
+
+        # Must NOT create a duplicate
+        assert result2["created"] == 0
+        assert result2["updated"] == 1
+        assert Admission.objects.filter(patient=patient).count() == 1
+
+        # The ward/bed should have been updated
+        adm = Admission.objects.get(patient=patient)
+        assert adm.ward == "Clinica Medica"
+        assert adm.bed == "CM-03"
+
+    def test_same_day_period_match_null_discharge_date(
+        self, db: object
+    ) -> None:
+        """Null discharge_date period fallback with same admission-date works."""
+        patient = Patient.objects.create(
+            patient_source_key="P_NULL_DISC",
+            source_system="tasy",
+            name="PACIENTE NULL DISC",
+        )
+        # Active admission: no discharge
+        snapshot_v1 = [
+            {
+                "admission_key": "ADM_NULL1",
+                "admission_start": "2026-06-01 07:00:00",
+                "admission_end": None,
+                "ward": "UTI",
+                "bed": "",
+            },
+        ]
+        result1 = upsert_admission_snapshot(patient, snapshot_v1)
+        assert result1["created"] == 1
+
+        # Second capture: same admission_date date, different hour, null discharge
+        snapshot_v2 = [
+            {
+                "admission_key": "ADM_NULL2",
+                "admission_start": "2026-06-01 08:30:00",
+                "admission_end": None,
+                "ward": "Clinica Medica",
+                "bed": "CM-12",
+            },
+        ]
+        result2 = upsert_admission_snapshot(patient, snapshot_v2)
+        assert result2["created"] == 0
+        assert Admission.objects.filter(patient=patient).count() == 1
+
 
 # ---------------------------------------------------------------------------
 # S2 - Fallback determinístico de associação evento -> internação

@@ -13,7 +13,7 @@ from django.utils import timezone
 from apps.census.models import BedStatus, CensusSnapshot
 from apps.discharges.models import DailyDischargeCount
 from apps.ingestion.models import IngestionRun
-from apps.patients.models import Admission, Patient
+from apps.patients.models import Patient
 
 
 @pytest.mark.django_db
@@ -73,42 +73,14 @@ class TestDashboardRealStats:
         assert response.context["stats"]["cadastrados"] == 2
 
     def test_dashboard_shows_discharges_today(self, admin_client):
-        """Dashboard counts admissions discharged TODAY only, not last 24h."""
-        patient = Patient.objects.create(
-            patient_source_key="P1", source_system="tasy", name="A",
-        )
-        now = timezone.now()
+        """Dashboard uses DailyDischargeCount as source of truth for today."""
         today = timezone.localdate()
-
-        # Discharged today at 10:00
-        today_morning = timezone.make_aware(
-            datetime(today.year, today.month, today.day, 10, 0, 0),
-        )
-        Admission.objects.create(
-            patient=patient, source_admission_key="ADM1", source_system="tasy",
-            admission_date=now - timedelta(days=5),
-            discharge_date=today_morning,
-        )
-        # Discharged yesterday at 23:00 (within last 24h but NOT today)
-        yesterday = today - timedelta(days=1)
-        yesterday_night = timezone.make_aware(
-            datetime(yesterday.year, yesterday.month, yesterday.day, 23, 0, 0),
-        )
-        Admission.objects.create(
-            patient=patient, source_admission_key="ADM2", source_system="tasy",
-            admission_date=now - timedelta(days=10),
-            discharge_date=yesterday_night,
-        )
-        # Not discharged yet
-        Admission.objects.create(
-            patient=patient, source_admission_key="ADM3", source_system="tasy",
-            admission_date=now - timedelta(days=2),
-        )
+        DailyDischargeCount.objects.create(date=today, count=43)
 
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
         assert response.status_code == 200
-        assert response.context["stats"]["altas_hoje"] == 1  # only today
+        assert response.context["stats"]["altas_hoje"] == 43
 
     def test_dashboard_shows_sectors_and_timestamp(self, admin_client):
         """Dashboard shows sector count and last capture time."""

@@ -640,10 +640,10 @@ def _consolidate_period_duplicates(
     period_filter: dict[str, Any] = {
         "patient": patient,
         "source_system": source_system,
-        "admission_date": admission_date,
+        "admission_date__date": admission_date.date(),
     }
     if discharge_date is not None:
-        period_filter["discharge_date"] = discharge_date
+        period_filter["discharge_date__date"] = discharge_date.date()
     else:
         period_filter["discharge_date__isnull"] = True
 
@@ -726,11 +726,11 @@ def upsert_admission_snapshot(
             period_filter: dict[str, Any] = {
                 "patient": patient,
                 "source_system": source_system,
-                "admission_date": admission_date,
+                "admission_date__date": admission_date.date(),
             }
             # Only include discharge_date in the filter when both sides are non-null
             if discharge_date is not None:
-                period_filter["discharge_date"] = discharge_date
+                period_filter["discharge_date__date"] = discharge_date.date()
             else:
                 period_filter["discharge_date__isnull"] = True
             admission = Admission.objects.filter(**period_filter).first()

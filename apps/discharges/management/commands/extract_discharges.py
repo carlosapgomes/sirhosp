@@ -195,7 +195,7 @@ class Command(BaseCommand):
 
                 # Record zero discharges for today (source of truth: PDF)
                 DailyDischargeCount.objects.update_or_create(
-                    date=date.today(),
+                    date=timezone.localdate(),
                     defaults={"count": 0},
                 )
 
@@ -254,10 +254,10 @@ class Command(BaseCommand):
                 pdf_date = (
                     date.fromisoformat(pdf_date_str)
                     if pdf_date_str
-                    else date.today()
+                    else timezone.localdate()
                 )
             except ValueError:
-                pdf_date = date.today()
+                pdf_date = timezone.localdate()
 
             DailyDischargeCount.objects.update_or_create(
                 date=pdf_date,

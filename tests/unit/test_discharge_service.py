@@ -298,3 +298,89 @@ class TestProcessDischarges:
             intent="demographics_only",
             parameters_json__patient_record="444",
         ).count() == 1
+
+    def test_same_day_reprocess_with_different_hours_is_idempotent(self):
+        """Reprocessing same day with different time must not create duplicate.
+
+        Scenario: patient with known admission.
+        Pass 1 at 10:00 → discharge_set = 1.
+        Pass 2 at 11:30 (same day) → already_discharged = 1, discharge_set = 0.
+        """
+        patient = Patient.objects.create(
+            patient_source_key="SAME_DAY",
+            source_system="tasy",
+            name="PACIENTE SAME DAY",
+        )
+        data_int = date.today() - timedelta(days=10)
+        Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-SAME",
+            source_system="tasy",
+            admission_date=datetime.combine(data_int, datetime.min.time()),
+            discharge_date=None,
+        )
+        row = {
+            "prontuario": "SAME_DAY",
+            "nome": "PACIENTE SAME DAY",
+            "leito": "B4",
+            "especialidade": "CLM",
+            "data_internacao": data_int.strftime("%d/%m/%Y"),
+        }
+
+        # Pass 1: morning
+        morning = timezone.now().replace(hour=10, minute=0, second=0, microsecond=0)
+        result1 = process_discharges([row], discharge_date=morning)
+        assert result1["discharge_set"] == 1
+        assert result1["already_discharged"] == 0
+
+        # Pass 2: same day, different hour
+        later = morning.replace(hour=11, minute=30)
+        result2 = process_discharges([row], discharge_date=later)
+        assert result2["discharge_set"] == 0
+        assert result2["already_discharged"] == 1
+
+        # Only one admission should exist (no duplicate recovery)
+        assert Admission.objects.filter(patient=patient).count() == 1
+
+    def test_no_recovery_when_same_day_closed_admission_exists(self):
+        """Do not create recovery when admission closed on same day exists.
+
+        Patient has admission A (admission_date = day 1, discharge_date = today).
+        PDF row has data_internacao = day 5 (doesn't match day 1).
+        Process should find the closed admission by same-day discharge and count
+        it as already_discharged, not create a duplicate recovery.
+        """
+        patient = Patient.objects.create(
+            patient_source_key="CLOSED_SAME",
+            source_system="tasy",
+            name="PACIENTE CLOSED SAME",
+        )
+        today = timezone.now()
+        # Admission with different admission_date, but discharge_date = today
+        Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-CLOSED",
+            source_system="tasy",
+            admission_date=today - timedelta(days=15),
+            discharge_date=today,
+        )
+        # PDF row has data_internacao that does NOT match admission_date
+        row = {
+            "prontuario": "CLOSED_SAME",
+            "nome": "PACIENTE CLOSED SAME",
+            "leito": "B5",
+            "especialidade": "CIV",
+            # Different date from admission_date (today - 15 days)
+            "data_internacao": (today - timedelta(days=10)).strftime("%d/%m/%Y"),
+        }
+
+        result = process_discharges([row], discharge_date=today)
+
+        # Should be idempotent: admission already closed today
+        assert result["already_discharged"] == 1
+        assert result["discharge_set"] == 0
+        assert result["admission_not_found"] == 0
+        assert result["recovered_admissions_created"] == 0
+
+        # No new admission created
+        assert Admission.objects.filter(patient=patient).count() == 1

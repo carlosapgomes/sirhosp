@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from django.utils import timezone
 
@@ -107,6 +107,7 @@ def _find_admission(
 ) -> Admission | None:
     parsed_date = _parse_admission_date(data_internacao_str)
     ref = reference_datetime or timezone.now()
+    ref_date = _operational_date(ref)
 
     if parsed_date is not None:
         exact_admission = (
@@ -120,10 +121,12 @@ def _find_admission(
         if exact_admission is not None:
             if exact_admission.discharge_date is None:
                 return exact_admission
-            if exact_admission.discharge_date >= ref - timedelta(hours=24):
+            # Date-based idempotency: already closed on the same operational day
+            if _operational_date(exact_admission.discharge_date) == ref_date:
                 return exact_admission
 
-    return (
+    # Fallback: most recent still-open admission
+    open_admission = (
         Admission.objects.filter(
             patient=patient,
             discharge_date__isnull=True,
@@ -131,6 +134,21 @@ def _find_admission(
         .order_by("-admission_date")
         .first()
     )
+    if open_admission is not None:
+        return open_admission
+
+    # Final fallback: any admission closed on the same operational day.
+    # Prevents creating a recovery admission when an admission with a
+    # different admission_date was already closed on the same date.
+    same_day_closed = (
+        Admission.objects.filter(
+            patient=patient,
+            discharge_date__date=ref_date,
+        )
+        .order_by("-admission_date")
+        .first()
+    )
+    return same_day_closed
 
 
 def _parse_admission_date(raw_date: str) -> date | None:
@@ -187,6 +205,13 @@ def _get_or_create_recovery_admission(
     return admission, created
 
 
+def _operational_date(value: datetime) -> date:
+    operational_tz = timezone.get_default_timezone()
+    if timezone.is_naive(value):
+        value = timezone.make_aware(value, operational_tz)
+    return timezone.localdate(value, timezone=operational_tz)
+
+
 def _build_recovery_admission_date(
     *,
     parsed_admission_date: date | None,
@@ -196,7 +221,7 @@ def _build_recovery_admission_date(
         return discharge_datetime
 
     naive = datetime.combine(parsed_admission_date, datetime.min.time())
-    return timezone.make_aware(naive, timezone.get_current_timezone())
+    return timezone.make_aware(naive, timezone.get_default_timezone())
 
 
 def _build_recovery_admission_key(
@@ -210,7 +235,7 @@ def _build_recovery_admission_key(
         if parsed_admission_date is not None
         else "unknown"
     )
-    discharge_part = discharge_datetime.date().isoformat()
+    discharge_part = _operational_date(discharge_datetime).isoformat()
     raw = f"recovery|tasy|{patient_record}|{admission_part}|{discharge_part}"
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
     return f"recovery-{patient_record}-{admission_part}-{discharge_part}-{digest}"

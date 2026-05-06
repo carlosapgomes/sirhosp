@@ -16,6 +16,7 @@ from django.shortcuts import render
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.discharges.models import DailyDischargeCount
 from apps.ingestion.models import (
     CensusExecutionBatch,
     FinalRunFailure,
@@ -44,9 +45,13 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         ultima_varredura = "Nenhum dado disponível"
 
     cadastrados = Patient.objects.count()
-    altas_hoje = Admission.objects.filter(
-        discharge_date__date=timezone.localdate(),
-    ).count()
+    today = timezone.localdate()
+    altas_hoje = (
+        DailyDischargeCount.objects.filter(date=today)
+        .values_list("count", flat=True)
+        .first()
+        or 0
+    )
 
     # ── IRMD-S6: Ingestion metrics for last 24h ──────────────────────
     ingestion_stats = _compute_ingestion_stats()

@@ -17,7 +17,7 @@ from __future__ import annotations
 import importlib
 import re
 import sys
-from datetime import date, datetime, time
+from datetime import datetime, time
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
@@ -113,7 +113,7 @@ class Command(BaseCommand):
         )
 
         # Update daily discharge count for the chart
-        discharge_day = discharge_date.date()
+        discharge_day = timezone.localdate(discharge_date)
         total_from_pdf = len(patients)
         DailyDischargeCount.objects.update_or_create(
             date=discharge_day,
@@ -145,7 +145,7 @@ class Command(BaseCommand):
             dt = datetime(year, month, day, 12, 0, 0)
             return timezone.make_aware(dt)
 
-        # Fallback: today at noon
-        today = date.today()
+        # Fallback: today at noon in the operational timezone
+        today = timezone.localdate()
         dt = datetime.combine(today, time(12, 0, 0))
         return timezone.make_aware(dt)
