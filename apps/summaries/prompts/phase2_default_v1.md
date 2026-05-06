@@ -85,6 +85,7 @@ Produzir uma versão MAIS CONCISA do resumo, mantendo:
 ## PROBLEMAS ATIVOS VS RESOLVIDOS
 
 Classifique como **problema ativo** quando:
+
 - ainda estiver em tratamento
 - ainda exigir vigilância
 - ainda tiver impacto na alta
@@ -92,6 +93,7 @@ Classifique como **problema ativo** quando:
 - houver risco de recorrência relevante
 
 Classifique como **problema resolvido** apenas quando:
+
 - houver resolução explícita
 - a conduta tiver sido encerrada
 - não houver necessidade atual de vigilância específica
