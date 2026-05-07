@@ -190,6 +190,64 @@ docker compose -f compose.yml -f compose.dev.yml exec web \
 
 Após criado, acesse `http://localhost:8000/admin/`.
 
+### Comandos operacionais úteis
+
+**Fluxo de detecção de pacientes com provável alta não registrada:**
+
+```bash
+# 1. Gerar relatório de pacientes suspeitos (admissão ativa, sem evolução
+#    em 72h, e que NÃO aparecem mais no último censo como ocupados)
+uv run python manage.py report_suspected_stale_inpatients
+
+# Opcional: incluir também pacientes que ainda estão no censo
+uv run python manage.py report_suspected_stale_inpatients --include-census-present
+
+# 2. Enfileirar atualização de admissão para cada paciente do relatório
+#    (o worker process_ingestion_runs --loop irá processá-las)
+uv run python manage.py refresh_suspected_admissions
+
+# 3. Após o worker processar, re-gerar o relatório (lista deve diminuir)
+uv run python manage.py report_suspected_stale_inpatients
+```
+
+No modo Docker dev:
+
+```bash
+# 1. Relatório
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py report_suspected_stale_inpatients
+
+# Copiar CSV para o host
+docker compose -f compose.yml -f compose.dev.yml cp \
+  web:/tmp/suspected_stale_inpatients.csv ./suspeitos.csv
+
+# 2. Enfileirar atualizações
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py refresh_suspected_admissions
+
+# 3. Aguardar worker processar e re-gerar
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py report_suspected_stale_inpatients
+docker compose -f compose.yml -f compose.dev.yml cp \
+  web:/tmp/suspected_stale_inpatients.csv ./suspeitos_final.csv
+```
+
+**Sincronização em massa de prováveis altas não registradas:**
+
+```bash
+# Listar todos os pacientes com admissão ativa que NÃO estão no censo (dry-run)
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py sync_missing_discharges --dry-run
+
+# Enfileirar atualização para todos eles
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py sync_missing_discharges
+
+# Aguardar worker processar e re-gerar relatório
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py report_suspected_stale_inpatients
+```
+
 ### Modo Desenvolvimento
 
 ```bash
