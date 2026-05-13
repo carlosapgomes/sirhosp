@@ -129,6 +129,8 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
                 f"Found: {actual}"
             )
 
+        has_setor_codigo = "setor_codigo" in actual
+
         for row in reader:
             prontuario = (row.get("prontuario") or "").strip()
             nome = (row.get("nome") or "").strip()
@@ -136,6 +138,9 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
 
             rows.append(
                 {
+                    "setor_codigo": (row.get("setor_codigo") or "").strip()
+                    if has_setor_codigo
+                    else "",
                     "setor": (row.get("setor") or "").strip(),
                     "leito": (row.get("qrt_leito") or "").strip(),
                     "prontuario": prontuario,

@@ -177,10 +177,12 @@ class Command(BaseCommand):
 
                 # Bulk create CensusSnapshot rows
                 captured_at = timezone.now()
+                snaps_with_codigo = 0
                 snapshots = [
                     CensusSnapshot(
                         captured_at=captured_at,
                         ingestion_run=run,
+                        setor_codigo=row.get("setor_codigo", ""),
                         setor=row["setor"],
                         leito=row["leito"],
                         prontuario=row["prontuario"],

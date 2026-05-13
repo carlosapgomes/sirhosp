@@ -175,7 +175,8 @@ def click_censo_icon(page: Page) -> None:
         raise RuntimeError("Não foi possível abrir o Censo.")
 
 
-def extract_setores(frame: Frame, page: Page) -> list[str]:
+def extract_setores(frame: Frame, page: Page) -> list[dict]:
+    """Extrai setores do dropdown. Retorna [{codigo, nome}, ...]."""
     print("[i] Extraindo setores...")
     btn = frame.locator('[id="unidadeFuncional:unidadeFuncional:suggestion_button"]')
     if not safe_click(btn, "abrir dropdown de setores"):
@@ -188,20 +189,21 @@ def extract_setores(frame: Frame, page: Page) -> list[str]:
         """
         () => {
             const panel = document.querySelector('[id="unidadeFuncional:unidadeFuncional:suggestion_panel"]');
-            const roots = panel ? [panel] : [document];
+            if (!panel) return [];
+            const rows = panel.querySelectorAll('tr[data-item-label]');
             const found = [];
-            const seen = new Set();
-
-            for (const root of roots) {
-                const nodes = root.querySelectorAll('[role="cell"], td, li');
-                for (const n of nodes) {
-                    const t = (n.textContent || '').replace(/\\s+/g, ' ').trim();
-                    if (!t || t.length < 6) continue;
-                    if (!t.includes(' - ')) continue;
-                    if (seen.has(t)) continue;
-                    seen.add(t);
-                    found.push(t);
-                }
+            const seenNames = new Set();
+            for (const row of rows) {
+                const code = row.getAttribute('data-item-label') || '';
+                const tds = row.querySelectorAll('td');
+                const name = tds.length >= 2
+                    ? (tds[1].textContent || '').replace(/\\s+/g, ' ').trim()
+                    : '';
+                if (!code || !name) continue;
+                if (!name.includes(' - ')) continue;
+                if (seenNames.has(name)) continue;
+                seenNames.add(name);
+                found.push({ codigo: code, nome: name });
             }
             return found;
         }
@@ -214,17 +216,11 @@ def extract_setores(frame: Frame, page: Page) -> list[str]:
     except Exception:
         pass
 
-    return [s for s in setores if isinstance(s, str)]
+    return [s for s in setores if isinstance(s, dict) and s.get("codigo") and s.get("nome")]
 
 
-def clear_setor(frame: Frame, page: Page) -> None:
-    clear_btn = frame.locator('[id="unidadeFuncional:unidadeFuncional:sgClear"]')
-    if clear_btn.count() > 0 and wait_visible(clear_btn, timeout=2000):
-        safe_click(clear_btn, "limpar setor", timeout=4000)
-        wait_ajax_idle(frame, page, timeout_ms=6000)
-
-
-def select_setor(frame: Frame, page: Page, setor: str) -> bool:
+def select_setor(frame: Frame, page: Page, setor_codigo: str) -> bool:
+    """Seleciona setor pelo código (data-item-label)."""
     clear_setor(frame, page)
 
     btn = frame.locator('[id="unidadeFuncional:unidadeFuncional:suggestion_button"]')
@@ -236,30 +232,27 @@ def select_setor(frame: Frame, page: Page, setor: str) -> bool:
 
     result = frame.evaluate(
         """
-        (setor) => {
+        (codigo) => {
             const panel = document.querySelector('[id="unidadeFuncional:unidadeFuncional:suggestion_panel"]');
             if (!panel) return 'panel-not-found';
 
-            const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-            const nodes = Array.from(panel.querySelectorAll('[role="cell"], td, li'));
+            const row = panel.querySelector('tr[data-item-label="' + codigo + '"]');
+            if (!row) return 'not-found';
 
-            let target = nodes.find((n) => norm(n.textContent) === setor);
-            if (!target) {
-                target = nodes.find((n) => norm(n.textContent).includes(setor));
-            }
-            if (!target) return 'not-found';
+            const cell = row.querySelector('td:nth-child(2)');
+            if (!cell) return 'cell-not-found';
 
-            target.scrollIntoView({ block: 'center' });
-            target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            target.click();
+            cell.scrollIntoView({ block: 'center' });
+            cell.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            cell.click();
             return 'ok';
         }
         """,
-        setor,
+        setor_codigo,
     )
 
     if result != "ok":
-        print(f"  [!] Falha seleção setor '{setor}': {result}")
+        print(f"  [!] Falha seleção setor código '{setor_codigo}': {result}")
         return False
 
     wait_ajax_idle(frame, page, timeout_ms=10000)
@@ -508,13 +501,14 @@ def save_results(results: list[dict], csv_only: bool = False) -> tuple[Path, Pat
         json_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["setor", "qrt_leito", "prontuario", "nome", "esp"])
+        w = csv.DictWriter(f, fieldnames=["setor_codigo", "setor", "qrt_leito", "prontuario", "nome", "esp"])
         w.writeheader()
         for entry in results:
             setor = entry.get("setor", "")
             for p in entry.get("pacientes", []):
                 w.writerow(
                     {
+                        "setor_codigo": entry.get("setor_codigo", ""),
                         "setor": setor,
                         "qrt_leito": p.get("qrt_leito", ""),
                         "prontuario": p.get("prontuario", ""),
@@ -591,11 +585,13 @@ def run(
 
             results: list[dict] = []
 
-            for i, setor in enumerate(setores, start=1):
-                print(f"\n[{i}/{len(setores)}] {setor}")
+            for i, setor_info in enumerate(setores, start=1):
+                setor_codigo = setor_info["codigo"]
+                setor_nome = setor_info["nome"]
+                print(f"\n[{i}/{len(setores)}] [{setor_codigo}] {setor_nome}")
 
                 try:
-                    if not select_setor(frame, page, setor):
+                    if not select_setor(frame, page, setor_codigo):
                         raise RuntimeError("não conseguiu selecionar setor")
 
                     page.wait_for_timeout(pause_ms)
@@ -628,10 +624,10 @@ def run(
                         if tentativa < tentativas:
                             print("    [!] resultado suspeito (0 pacientes sem mensagem explícita de vazio).")
 
-                    results.append({"setor": setor, "pacientes": pacientes})
+                    results.append({"setor_codigo": setor_codigo, "setor": setor_nome, "pacientes": pacientes})
                 except Exception as e:
                     print(f"    [ERRO] {e}")
-                    results.append({"setor": setor, "pacientes": [], "erro": str(e)})
+                    results.append({"setor_codigo": setor_codigo, "setor": setor_nome, "pacientes": [], "erro": str(e)})
 
             json_path, csv_path = save_results(results, csv_only=csv_only)
 

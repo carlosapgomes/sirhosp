@@ -13,12 +13,12 @@ class TestParseCensusCsv:
     def test_parse_valid_csv(self):
         """Parse a valid CSV with mixed bed statuses."""
         csv_content = (
-            "setor,qrt_leito,prontuario,nome,esp\n"
-            "UTI A,UG01A,14160147,JOSE MERCES,NEF\n"
-            "UTI A,UG02B,,DESOCUPADO,\n"
-            "UTI A,UG03C,,RESERVA INTERNA,\n"
-            "ENF B,E01A,99999,MARIA SILVA,CME\n"
-            "ENF B,E02B,,LIMPEZA,\n"
+            "setor_codigo,setor,qrt_leito,prontuario,nome,esp\n"
+            "640,UTI A,UG01A,14160147,JOSE MERCES,NEF\n"
+            "630,UTI A,UG02B,,DESOCUPADO,\n"
+            "654,UTI A,UG03C,,RESERVA INTERNA,\n"
+            "642,ENF B,E01A,99999,MARIA SILVA,CME\n"
+            "651,ENF B,E02B,,LIMPEZA,\n"
         )
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".csv", delete=False, encoding="utf-8"
@@ -31,6 +31,8 @@ class TestParseCensusCsv:
             assert len(rows) == 5
             assert rows[0]["bed_status"] == BedStatus.OCCUPIED
             assert rows[0]["prontuario"] == "14160147"
+            assert rows[0]["setor_codigo"] == "640"
+            assert rows[0]["setor"] == "UTI A"
             assert rows[1]["bed_status"] == BedStatus.EMPTY
             assert rows[2]["bed_status"] == BedStatus.RESERVED
             assert rows[3]["bed_status"] == BedStatus.OCCUPIED
@@ -43,7 +45,7 @@ class TestParseCensusCsv:
             parse_census_csv(Path("/nonexistent/census.csv"))
 
     def test_parse_missing_columns(self):
-        csv_content = "setor,qrt_leito\nUTI A,UG01A\n"
+        csv_content = "setor_codigo,setor,qrt_leito\n640,UTI A,UG01A\n"
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".csv", delete=False, encoding="utf-8"
         ) as f:

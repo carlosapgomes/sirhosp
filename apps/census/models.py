@@ -35,6 +35,12 @@ class CensusSnapshot(models.Model):
         max_length=255,
         help_text="Sector/ward name as it appears in the source system",
     )
+    setor_codigo = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        help_text="Numeric ward code from the source system (e.g. '640').",
+    )
     leito = models.CharField(
         max_length=50,
         help_text="Bed identifier (e.g. I10CA, CV01A)",
