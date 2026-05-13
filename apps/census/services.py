@@ -292,3 +292,73 @@ def process_census_snapshot(
             0, occupied.count() - len(patients_to_process)
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Ward/Bed registry parser
+# ---------------------------------------------------------------------------
+
+
+def parse_wards_beds_pdf_text(pdf_text):
+    """Parse ward/bed catalog PDF text into a list of unit dicts.
+
+    Each dict: {source_code, name, beds: [{code, status, accommodation,
+    is_active}]}
+
+    Strategy: split the text by "Unidade" markers, then parse each block.
+    """
+    HEADER = ('Leito', 'Status', 'Acomodação', 'Ativo')
+
+    # Split into blocks: each "Unidade" starts a new unit
+    raw_blocks = pdf_text.split('Unidade')
+    units = []
+
+    for block in raw_blocks:
+        block_lines = [line.strip() for line in block.split('\n') if line.strip()]
+        if not block_lines:
+            continue
+
+        # First line is the code (e.g. "640")
+        code = block_lines[0]
+        if not code.isdigit() or len(code) > 6:
+            continue
+
+        # Find unit name: scan until header
+        name = ''
+        header_idx = None
+        for j in range(1, len(block_lines)):
+            if block_lines[j] in HEADER:
+                header_idx = j
+                break
+            name = block_lines[j]
+
+        if header_idx is None:
+            continue
+
+        # Collect bed values from after header (skip 4 header lines) until Total
+        bed_values = []
+        for j in range(header_idx + 4, len(block_lines)):
+            line = block_lines[j]
+            if line == 'Total':
+                break
+            bed_values.append(line)
+
+        # Every 4 lines = one bed
+        beds = []
+        for i in range(0, len(bed_values), 4):
+            if i + 3 < len(bed_values):
+                beds.append({
+                    'code': bed_values[i],
+                    'status': bed_values[i + 1],
+                    'accommodation': bed_values[i + 2],
+                    'is_active': bed_values[i + 3] == 'A',
+                })
+
+        units.append({
+            'source_code': code,
+            'name': name,
+            'beds': beds,
+        })
+
+    return units
+

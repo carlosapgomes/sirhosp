@@ -84,3 +84,82 @@ class CensusSnapshot(models.Model):
             f"{self.prontuario or '-'} "
             f"@ {self.captured_at:%Y-%m-%d %H:%M}"
         )
+
+
+class Ward(models.Model):
+    """Hospital unit/ward registry from the official bed catalog.
+
+    Extracted from the 'Cadastro de leitos por Clínica / Unidade' PDF.
+    The source_code matches the numeric codes used in the official census.
+    """
+
+    source_code = models.CharField(
+        max_length=50,
+        unique=True,
+        help_text="Numeric unit code from source system (e.g. '640').",
+    )
+    name = models.CharField(
+        max_length=255,
+        help_text="Unit display name (e.g. '01 6 - 1A - CIRURGIA GERAL - HGRS').",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["source_code"]
+        verbose_name = "Ward"
+        verbose_name_plural = "Wards"
+
+    def __str__(self) -> str:
+        return f"[{self.source_code}] {self.name}"
+
+
+class Bed(models.Model):
+    """Hospital bed registry from the official bed catalog.
+
+    Each bed belongs to a Ward. Beds can be activated/deactivated
+    across catalog updates.
+    """
+
+    ward = models.ForeignKey(
+        Ward,
+        on_delete=models.CASCADE,
+        related_name="beds",
+    )
+    code = models.CharField(
+        max_length=50,
+        help_text="Bed identifier (e.g. '101AA', 'UC01A').",
+    )
+    status = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="Status code from source system (meaning TBD).",
+    )
+    accommodation = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text="Accommodation type (e.g. 'ENFERMARIA', 'UTI').",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="True if Ativo='A', False if Ativo='I'.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["ward", "code"],
+                name="uq_bed_ward_code",
+            ),
+        ]
+        ordering = ["ward", "code"]
+        verbose_name = "Bed"
+        verbose_name_plural = "Beds"
+
+    def __str__(self) -> str:
+        active = "A" if self.is_active else "I"
+        return f"{self.code} [{active}] @ {self.ward.name}"
