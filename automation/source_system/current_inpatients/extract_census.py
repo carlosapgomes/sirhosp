@@ -617,14 +617,11 @@ def run(
 
                     page.wait_for_timeout(pause_ms)
 
-                    # Extrair código e nome completo do setor após seleção
-                    setor_info = get_current_setor_info(frame)
-                    setor_codigo = setor_info.get("codigo", "")
-                    setor_nome_completo = setor_info.get("nome") or setor
-
                     linhas = 0
                     pacientes: list[dict[str, str]] = []
                     tentativas = max(0, search_retries) + 1
+                    setor_codigo = ""
+                    setor_nome_completo = setor
 
                     for tentativa in range(1, tentativas + 1):
                         if tentativa > 1:
@@ -633,6 +630,12 @@ def run(
                         before = table_state(frame)
                         if not click_pesquisar(frame):
                             raise RuntimeError("falha no clique de pesquisar")
+
+                        # Extrair código e nome completo APÓS pesquisar (só então aparecem)
+                        if tentativa == 1:
+                            setor_info = get_current_setor_info(frame)
+                            setor_codigo = setor_info.get("codigo", "")
+                            setor_nome_completo = setor_info.get("nome") or setor
 
                         wait_table_change(frame, page, before, timeout_ms=20000)
                         wait_ajax_idle(frame, page, timeout_ms=max(45000, min(table_timeout_ms, 120000)))
