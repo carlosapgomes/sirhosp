@@ -501,8 +501,8 @@ def get_current_setor_info(frame: Frame) -> dict[str, str]:
     return frame.evaluate(
         """
         () => {
-            const input = document.querySelector('#unidadeFuncional\\:unidadeFuncional\\:suggestion_input');
-            const label = document.querySelector('#unidadeFuncional\\:unidadeFuncional\\:sgDescricaoLabel');
+            const input = document.querySelector('#unidadeFuncional\\\\:unidadeFuncional\\\\:suggestion_input');
+            const label = document.querySelector('#unidadeFuncional\\\\:unidadeFuncional\\\\:sgDescricaoLabel');
             return {
                 codigo: (input?.value || '').trim(),
                 nome: (label?.textContent || '').replace(/\\s+/g, ' ').trim(),
