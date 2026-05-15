@@ -1,4 +1,5 @@
 {% extends "base_sidebar.html" %}
+{% load dict_extras %}
 
 {% block title %}{{ page_title }} — SIRHOSP{% endblock %}
 
@@ -20,17 +21,17 @@
   <table class="table table-sm table-hover">
     <thead class="table-light">
       <tr>
-        <th>Registro</th>
-        <th>Nome</th>
-        <th>Data Internação</th>
+        {% for col in columns %}
+        <th>{{ col }}</th>
+        {% endfor %}
       </tr>
     </thead>
     <tbody>
       {% for r in records %}
       <tr>
-        <td>{{ r.prontuario }}</td>
-        <td>{{ r.nome }}</td>
-        <td>{{ r.data_internacao }}</td>
+        {% for col in columns %}
+        <td>{{ r|dict_key:col|default:"—" }}</td>
+        {% endfor %}
       </tr>
       {% endfor %}
     </tbody>

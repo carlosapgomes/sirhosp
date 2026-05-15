@@ -1,4 +1,5 @@
 {% extends "base_sidebar.html" %}
+{% load dict_extras %}
 
 {% block title %}{{ page_title }} — SIRHOSP{% endblock %}
 
@@ -30,11 +31,11 @@
     <tbody>
       {% for r in records %}
       <tr>
-        <td>{{ r.raw_data.PRONTUARIO|default:"—" }}</td>
-        <td>{{ r.raw_data.NOME|default:"—" }}</td>
-        <td>{{ r.raw_data.UNIDADE|default:"—" }}</td>
-        <td>{{ r.raw_data.QUARTO_LEITO|default:r.raw_data.QUARTO|default:"—" }}</td>
-        <td>{{ r.raw_data.DATA_INTERNACAO|default:"—" }}</td>
+        <td>{{ r.raw_data|dict_key:"PRONTUARIO"|default:"—" }}</td>
+        <td>{{ r.raw_data|dict_key:"NOME"|default:"—" }}</td>
+        <td>{{ r.raw_data|dict_key:"UNIDADE"|default:"—" }}</td>
+        <td>{{ r.raw_data|dict_key:"QUARTO/LEITO"|default:"—" }}</td>
+        <td>{{ r.raw_data|dict_key:"DATA INTERNACAO"|default:"—" }}</td>
       </tr>
       {% endfor %}
     </tbody>

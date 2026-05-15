@@ -112,11 +112,13 @@ def discharge_list(request: HttpRequest) -> HttpResponse:
         selected_date = entry.date if entry else timezone.localdate()
 
     records = entry.raw_data if entry else []
+    columns = list(records[0].keys()) if records else []
     return render(request, "services_portal/discharge_list.html", {
         "page_title": "Altas",
         "date": selected_date,
         "count": entry.count if entry else 0,
         "records": records,
+        "columns": columns,
     })
 
 
@@ -138,11 +140,13 @@ def admission_list(request: HttpRequest) -> HttpResponse:
         selected_date = entry.date if entry else timezone.localdate()
 
     records = entry.raw_data if entry else []
+    columns = list(records[0].keys()) if records else []
     return render(request, "services_portal/admission_list.html", {
         "page_title": "Admissões",
         "date": selected_date,
         "count": entry.count if entry else 0,
         "records": records,
+        "columns": columns,
     })
 
 
@@ -164,11 +168,13 @@ def death_list(request: HttpRequest) -> HttpResponse:
         selected_date = entry.date if entry else timezone.localdate()
 
     records = entry.raw_data if entry else []
+    columns = list(records[0].keys()) if records else []
     return render(request, "services_portal/death_list.html", {
         "page_title": "Óbitos",
         "date": selected_date,
         "count": entry.count if entry else 0,
         "records": records,
+        "columns": columns,
     })
 
 
@@ -187,14 +193,21 @@ def official_census_list(request: HttpRequest) -> HttpResponse:
         records = OfficialCensusRecord.objects.filter(date=selected_date).order_by("id")
     else:
         latest = OfficialCensusRecord.objects.order_by("-date").first()
-        selected_date = latest.date if latest else timezone.localdate()
-        records = OfficialCensusRecord.objects.filter(date=selected_date).order_by("id") if latest else []
+        if latest:
+            selected_date = latest.date
+            records = OfficialCensusRecord.objects.filter(date=selected_date).order_by("id")
+        else:
+            selected_date = timezone.localdate()
+            records = OfficialCensusRecord.objects.none()
+
+    columns = ["PRONTUARIO", "NOME", "UNIDADE", "QUARTO/LEITO", "DATA INTERNACAO"]
 
     return render(request, "services_portal/official_census_list.html", {
         "page_title": "Censo Oficial",
         "date": selected_date,
-        "count": records.count() if hasattr(records, "count") else len(records),
+        "count": records.count(),
         "records": records,
+        "columns": columns,
     })
 
 
