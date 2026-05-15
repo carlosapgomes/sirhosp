@@ -13,6 +13,8 @@
 <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">{{ page_title }}</h2>
 <p class="text-muted small mb-3">{{ date|date:"d/m/Y" }} — {{ count }} paciente(s)</p>
 
+{% include "services_portal/_date_selector.html" %}
+
 {% if records %}
 <div class="table-responsive">
   <table class="table table-sm table-hover">

@@ -45,7 +45,7 @@
 
   <!-- Altas no dia -->
   <div class="col-12 col-md-6 col-lg-3">
-    <a href="{% url 'services_portal:discharge_list' %}" class="text-decoration-none">
+    <a href="{% url 'services_portal:discharge_list' %}?date={{ stats.altas_date|date:'Y-m-d' }}" class="text-decoration-none">
       <div class="sirhosp-stat-card d-flex align-items-center gap-3">
         <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
           <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
@@ -61,7 +61,7 @@
 
   <!-- Admissões no dia -->
   <div class="col-12 col-md-6 col-lg-3">
-    <a href="{% url 'services_portal:admission_list' %}" class="text-decoration-none">
+    <a href="{% url 'services_portal:admission_list' %}?date={{ stats.admissoes_date|date:'Y-m-d' }}" class="text-decoration-none">
       <div class="sirhosp-stat-card d-flex align-items-center gap-3">
         <div class="sirhosp-stat-icon" style="background: #DCFCE7;">
           <i class="bi bi-person-plus" style="color: #16A34A; font-size: 1.25rem;"></i>
@@ -77,7 +77,7 @@
 
   <!-- Óbitos no dia -->
   <div class="col-12 col-md-6 col-lg-3">
-    <a href="{% url 'services_portal:death_list' %}" class="text-decoration-none">
+    <a href="{% url 'services_portal:death_list' %}?date={{ stats.obitos_date|date:'Y-m-d' }}" class="text-decoration-none">
       <div class="sirhosp-stat-card d-flex align-items-center gap-3">
         <div class="sirhosp-stat-icon" style="background: #FEE2E2;">
           <i class="bi bi-heartbreak" style="color: #DC2626; font-size: 1.25rem;"></i>
@@ -93,7 +93,7 @@
 
   <!-- Censo Oficial -->
   <div class="col-12 col-md-6 col-lg-3">
-    <a href="{% url 'services_portal:official_census_list' %}" class="text-decoration-none">
+    <a href="{% url 'services_portal:official_census_list' %}?date={{ stats.censo_oficial_date|date:'Y-m-d' }}" class="text-decoration-none">
       <div class="sirhosp-stat-card d-flex align-items-center gap-3">
         <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
           <i class="bi bi-clipboard-data" style="color: #0284C7; font-size: 1.25rem;"></i>

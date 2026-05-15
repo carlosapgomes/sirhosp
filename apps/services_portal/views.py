@@ -7,7 +7,7 @@ Slice IRMD-S6: Ingestion metric cards on dashboard and metrics page route.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from django.contrib.auth.decorators import login_required
 from django.db.models import Max, Q
@@ -40,7 +40,7 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         snapshots = CensusSnapshot.objects.filter(captured_at=latest)
         internados = snapshots.filter(bed_status=BedStatus.OCCUPIED).count()
         setores = snapshots.values("setor").distinct().count()
-        ultima_varredura = latest.strftime("%d/%m/%Y %H:%M")
+        ultima_varredura = timezone.localtime(latest).strftime("%d/%m/%Y %H:%M")
     else:
         internados = 0
         setores = 0
@@ -96,12 +96,25 @@ def dashboard(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def discharge_list(request: HttpRequest) -> HttpResponse:
-    today = timezone.localdate()
-    entry = DailyDischargeCount.objects.filter(date=today).first()
+    date_str = request.GET.get("date", "").strip()
+    if date_str:
+        try:
+            selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            selected_date = None
+    else:
+        selected_date = None
+
+    if selected_date:
+        entry = DailyDischargeCount.objects.filter(date=selected_date).first()
+    else:
+        entry = DailyDischargeCount.objects.order_by("-date").first()
+        selected_date = entry.date if entry else timezone.localdate()
+
     records = entry.raw_data if entry else []
     return render(request, "services_portal/discharge_list.html", {
-        "page_title": "Altas no dia",
-        "date": today,
+        "page_title": "Altas",
+        "date": selected_date,
         "count": entry.count if entry else 0,
         "records": records,
     })
@@ -109,12 +122,25 @@ def discharge_list(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def admission_list(request: HttpRequest) -> HttpResponse:
-    today = timezone.localdate()
-    entry = DailyAdmissionCount.objects.filter(date=today).first()
+    date_str = request.GET.get("date", "").strip()
+    if date_str:
+        try:
+            selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            selected_date = None
+    else:
+        selected_date = None
+
+    if selected_date:
+        entry = DailyAdmissionCount.objects.filter(date=selected_date).first()
+    else:
+        entry = DailyAdmissionCount.objects.order_by("-date").first()
+        selected_date = entry.date if entry else timezone.localdate()
+
     records = entry.raw_data if entry else []
     return render(request, "services_portal/admission_list.html", {
-        "page_title": "Admissões no dia",
-        "date": today,
+        "page_title": "Admissões",
+        "date": selected_date,
         "count": entry.count if entry else 0,
         "records": records,
     })
@@ -122,12 +148,25 @@ def admission_list(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def death_list(request: HttpRequest) -> HttpResponse:
-    today = timezone.localdate()
-    entry = DailyDeathCount.objects.filter(date=today).first()
+    date_str = request.GET.get("date", "").strip()
+    if date_str:
+        try:
+            selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            selected_date = None
+    else:
+        selected_date = None
+
+    if selected_date:
+        entry = DailyDeathCount.objects.filter(date=selected_date).first()
+    else:
+        entry = DailyDeathCount.objects.order_by("-date").first()
+        selected_date = entry.date if entry else timezone.localdate()
+
     records = entry.raw_data if entry else []
     return render(request, "services_portal/death_list.html", {
-        "page_title": "Óbitos no dia",
-        "date": today,
+        "page_title": "Óbitos",
+        "date": selected_date,
         "count": entry.count if entry else 0,
         "records": records,
     })
@@ -135,12 +174,26 @@ def death_list(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def official_census_list(request: HttpRequest) -> HttpResponse:
-    today = timezone.localdate()
-    records = OfficialCensusRecord.objects.filter(date=today).order_by("id")
+    date_str = request.GET.get("date", "").strip()
+    if date_str:
+        try:
+            selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            selected_date = None
+    else:
+        selected_date = None
+
+    if selected_date:
+        records = OfficialCensusRecord.objects.filter(date=selected_date).order_by("id")
+    else:
+        latest = OfficialCensusRecord.objects.order_by("-date").first()
+        selected_date = latest.date if latest else timezone.localdate()
+        records = OfficialCensusRecord.objects.filter(date=selected_date).order_by("id") if latest else []
+
     return render(request, "services_portal/official_census_list.html", {
         "page_title": "Censo Oficial",
-        "date": today,
-        "count": records.count(),
+        "date": selected_date,
+        "count": records.count() if hasattr(records, "count") else len(records),
         "records": records,
     })
 
