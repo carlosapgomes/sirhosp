@@ -11,6 +11,11 @@ class DailyDischargeCount(models.Model):
 
     date = models.DateField(unique=True)
     count = models.IntegerField(default=0)
+    raw_data = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Patient records (prontuario, nome, data_internacao) for this day.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -117,7 +117,10 @@ class Command(BaseCommand):
         total_from_pdf = len(patients)
         DailyDischargeCount.objects.update_or_create(
             date=discharge_day,
-            defaults={"count": total_from_pdf},
+            defaults={
+                "count": total_from_pdf,
+                "raw_data": patients,
+            },
         )
         self.stdout.write(
             f"\nDailyDischargeCount updated: {discharge_day} → {total_from_pdf} altas"

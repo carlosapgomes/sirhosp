@@ -177,7 +177,6 @@ class Command(BaseCommand):
 
                 # Bulk create CensusSnapshot rows
                 captured_at = timezone.now()
-                snaps_with_codigo = 0
                 snapshots = [
                     CensusSnapshot(
                         captured_at=captured_at,
