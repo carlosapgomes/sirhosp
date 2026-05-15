@@ -251,6 +251,37 @@ docker compose -f compose.yml -f compose.dev.yml exec -T web \
   uv run --no-sync python manage.py report_suspected_stale_inpatients
 ```
 
+### Coleta diária de dados oficiais (retroativo — executar no dia seguinte)
+
+```bash
+# Extrair censo oficial do dia (arquivo TXT via ZIP)
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py extract_official_census --date 14/05/2026
+
+# Extrair relatório de admissões do dia (XLS)
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py extract_admissions --date 14/05/2026
+
+# Extrair relatório de óbitos do dia (CSV)
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py extract_deaths --date 14/05/2026
+
+# Extrair e processar altas do dia (PDF)
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py extract_discharges --date 14/05/2026
+
+# Processar PDF de altas já baixado
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py process_discharge_pdf \
+  downloads/altas-14-05-2026.pdf
+
+# Importar cadastro de leitos (PDF do sistema fonte)
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py import_wards_beds_registry \
+  --input /tmp/leitos-cadastrados.pdf \
+  --filter-name HGRS
+```
+
 ### Modo Desenvolvimento
 
 ```bash
