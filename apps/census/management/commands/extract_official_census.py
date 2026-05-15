@@ -240,6 +240,7 @@ class Command(BaseCommand):
                             especialidade=record.get("ESPECIALIDADE", ""),
                         )
                     )
+                OfficialCensusRecord.objects.filter(date=ref_date).delete()
                 OfficialCensusRecord.objects.bulk_create(snapshot_batch)
 
                 metrics = {"total_records": len(snapshot_batch)}
