@@ -153,6 +153,7 @@ def wait_census_frame_ready(page: Page, timeout_ms: int = 60000) -> FrameLocator
 
 def fill_date_field(
     frame_locator: FrameLocator,
+    page: Page,
     field_id: str,
     date_value: str,
     label: str,
@@ -168,7 +169,6 @@ def fill_date_field(
 
     date_input.click()
     date_input.fill("")
-    page = frame_locator.page
     page.wait_for_timeout(200)
 
     date_input.type(date_value, delay=50)
@@ -341,6 +341,7 @@ def run(
             # Preencher campos de data (inicial e final com a mesma data)
             fill_date_field(
                 frame_locator,
+                page,
                 "data_inicial:data_inicial:inputId_input",
                 date_value,
                 "data inicial",
@@ -349,6 +350,7 @@ def run(
 
             fill_date_field(
                 frame_locator,
+                page,
                 "data_fim:data_fim:inputId_input",
                 date_value,
                 "data final",
