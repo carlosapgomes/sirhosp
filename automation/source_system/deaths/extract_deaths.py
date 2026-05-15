@@ -157,6 +157,7 @@ def wait_deaths_frame_ready(page: Page, timeout_ms: int = 60000) -> FrameLocator
 
 def fill_date_field(
     frame_locator: FrameLocator,
+    page: Page,
     field_id: str,
     date_value: str,
     label: str,
@@ -174,7 +175,6 @@ def fill_date_field(
 
     date_input.click()
     date_input.fill("")
-    page = frame_locator.page
     page.wait_for_timeout(200)
 
     # Type the date character by character to ensure PrimeFaces registers it
