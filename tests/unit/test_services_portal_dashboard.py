@@ -101,7 +101,7 @@ class TestDashboardRealStats:
         assert response.status_code == 200
         ctx = response.context
         assert ctx["coleta"]["setores"] == 2
-        assert ctx["coleta"]["ultima_varredura"] == now.strftime("%d/%m/%Y %H:%M")
+        assert ctx["coleta"]["ultima_varredura"] == timezone.localtime(now).strftime("%d/%m/%Y %H:%M")
 
     def test_dashboard_no_census_shows_fallback(self, admin_client):
         """Without CensusSnapshot, shows informative message."""
