@@ -24,3 +24,30 @@ class DailyDischargeCount(models.Model):
 
     def __str__(self) -> str:
         return f"{self.date}: {self.count} altas"
+
+
+class DischargeRecord(models.Model):
+    """Individual discharge record extracted from the source system."""
+
+    daily_count = models.ForeignKey(
+        DailyDischargeCount,
+        on_delete=models.CASCADE,
+        related_name="records",
+    )
+    date = models.DateField()
+    prontuario = models.CharField(max_length=50, blank=True, default="")
+    nome = models.CharField(max_length=255, blank=True, default="")
+    data_internacao = models.CharField(max_length=20, blank=True, default="")
+    raw_extra = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Additional fields from the source PDF.",
+    )
+
+    class Meta:
+        ordering = ["prontuario"]
+        verbose_name = "Discharge Record"
+        verbose_name_plural = "Discharge Records"
+
+    def __str__(self) -> str:
+        return f"{self.date} {self.prontuario} — {self.nome}"

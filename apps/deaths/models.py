@@ -26,3 +26,30 @@ class DailyDeathCount(models.Model):
 
     def __str__(self) -> str:
         return f"{self.date}: {self.count} óbitos"
+
+
+class DeathRecord(models.Model):
+    """Individual death record extracted from the source system."""
+
+    daily_count = models.ForeignKey(
+        DailyDeathCount,
+        on_delete=models.CASCADE,
+        related_name="records",
+    )
+    date = models.DateField()
+    prontuario = models.CharField(max_length=50, blank=True, default="")
+    nome = models.CharField(max_length=255, blank=True, default="")
+    data_obito = models.CharField(max_length=20, blank=True, default="")
+    raw_extra = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Additional fields from the source CSV.",
+    )
+
+    class Meta:
+        ordering = ["prontuario"]
+        verbose_name = "Death Record"
+        verbose_name_plural = "Death Records"
+
+    def __str__(self) -> str:
+        return f"{self.date} {self.prontuario} — {self.nome}"
