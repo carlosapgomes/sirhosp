@@ -35,6 +35,8 @@ INSTALLED_APPS = [
     "apps.services_portal",
     "apps.census",
     "apps.discharges.DischargesConfig",
+    "apps.deaths.DeathsConfig",
+    "apps.admissions.AdmissionsConfig",
 ]
 
 MIDDLEWARE = [

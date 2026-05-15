@@ -306,7 +306,8 @@ def test_refresh_suspected_admissions_enqueues_runs(tmp_path: Path):
     with input_csv.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["nome", "prontuario", "setor", "leito",
+            fieldnames=["nome", "prontuario", "data_internacao",
+                        "setor", "leito",
                         "especialidade", "esta_no_censo",
                         "ultima_evolucao_em", "horas_desde_ultima_evolucao",
                         "profissao_ultima_evolucao", "status_suspeita"],

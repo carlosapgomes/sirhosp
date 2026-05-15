@@ -431,15 +431,15 @@ Para os indicadores principais de internação, esses casos precisam ser excluí
 
 ## Matriz de suficiência atual
 
-| Indicador | Dá para calcular hoje? | Confiabilidade |
-| --- | --- | --- |
-| Média pacientes/dia | Parcialmente | Média/baixa, falta censo diário oficial |
-| Média permanência | Parcialmente | Média, falta tipo de saída e óbito |
-| Taxa ocupação hospitalar instalada | Não plenamente | Baixa, falta leitos instalados oficiais |
-| Taxa ocupação operacional | Parcialmente | Baixa/média, falta status oficial de bloqueio/extra |
-| Taxa ocupação planejada | Não | Falta capacidade planejada |
-| Mortalidade hospitalar | Não corretamente | Falta óbito estruturado |
-| Mortalidade institucional | Não corretamente | Falta óbito estruturado e regra de 24 horas |
+| Indicador                          | Dá para calcular hoje? | Confiabilidade                                      |
+| ---------------------------------- | ---------------------- | --------------------------------------------------- |
+| Média pacientes/dia                | Parcialmente           | Média/baixa, falta censo diário oficial             |
+| Média permanência                  | Parcialmente           | Média, falta tipo de saída e óbito                  |
+| Taxa ocupação hospitalar instalada | Não plenamente         | Baixa, falta leitos instalados oficiais             |
+| Taxa ocupação operacional          | Parcialmente           | Baixa/média, falta status oficial de bloqueio/extra |
+| Taxa ocupação planejada            | Não                    | Falta capacidade planejada                          |
+| Mortalidade hospitalar             | Não corretamente       | Falta óbito estruturado                             |
+| Mortalidade institucional          | Não corretamente       | Falta óbito estruturado e regra de 24 horas         |
 
 ## Prioridade sugerida de coleta
 

@@ -32,9 +32,16 @@ class Command(BaseCommand):
             default=False,
             help=(
                 "Inclui também pacientes que ainda aparecem no último "
-                "censo como ocupados. Por padrão, apenas pacientes que "
-                "NÃO estão no censo são listados (prováveis altas não "
-                "registradas)."
+                "censo como ocupados (mostra todos: dentro e fora)."
+            ),
+        )
+        parser.add_argument(
+            "--only-census-present",
+            action="store_true",
+            default=False,
+            help=(
+                "Lista APENAS pacientes que estão no censo mas sem "
+                "evolução há 72h — relatório para enviar à TI do hospital."
             ),
         )
 
@@ -120,8 +127,10 @@ class Command(BaseCommand):
             .filter(has_recent_event=False)
         )
 
-        # 6) Filtro opcional: apenas pacientes que NÃO estão no censo
-        if not include_census:
+        # 6) Filtro por presença no censo
+        if options["only_census_present"]:
+            suspects = suspects.filter(in_census=True)
+        elif not include_census:
             suspects = suspects.filter(in_census=False)
 
         output_path = Path(options["output"])
@@ -133,6 +142,7 @@ class Command(BaseCommand):
                 fieldnames=[
                     "nome",
                     "prontuario",
+                    "data_internacao",
                     "setor",
                     "leito",
                     "especialidade",
@@ -161,10 +171,16 @@ class Command(BaseCommand):
                     status = "STALE_72H"
                     last_str = last.isoformat()
 
+                data_internacao = (
+                    adm.admission_date.strftime("%d/%m/%Y")
+                    if adm.admission_date
+                    else ""
+                )
                 writer.writerow(
                     {
                         "nome": adm.patient.name,
                         "prontuario": adm.patient.patient_source_key,
+                        "data_internacao": data_internacao,
                         "setor": adm.census_setor or adm.ward,
                         "leito": adm.census_leito or adm.bed,
                         "especialidade": adm.census_especialidade or "",

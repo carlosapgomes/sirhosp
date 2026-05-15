@@ -199,8 +199,11 @@ Após criado, acesse `http://localhost:8000/admin/`.
 #    em 72h, e que NÃO aparecem mais no último censo como ocupados)
 uv run python manage.py report_suspected_stale_inpatients
 
-# Opcional: incluir também pacientes que ainda estão no censo
+# Incluir também pacientes que estão no censo (mostra todos)
 uv run python manage.py report_suspected_stale_inpatients --include-census-present
+
+# Apenas pacientes no censo sem evolução (relatório para TI do hospital)
+uv run python manage.py report_suspected_stale_inpatients --only-census-present
 
 # 2. Enfileirar atualização de admissão para cada paciente do relatório
 #    (o worker process_ingestion_runs --loop irá processá-las)
