@@ -227,7 +227,17 @@ class Command(BaseCommand):
                         OfficialCensusRecord(
                             date=ref_date,
                             ingestion_run=run,
-                            raw_data=record,
+                            prontuario=record.get("PRONTUARIO", ""),
+                            nome=record.get("NOME", ""),
+                            data_internacao=record.get("DATA INTERNACAO", ""),
+                            tempo_internacao=record.get("TEMPO INT", ""),
+                            quarto_leito=record.get("QUARTO/LEITO", ""),
+                            cid=record.get("CID INT", ""),
+                            descricao=record.get("DESCRICAO", ""),
+                            unidade=record.get("UNIDADE", ""),
+                            area_funcional=record.get("AREA FUNCIONAL", ""),
+                            sigla=record.get("SIGLA", ""),
+                            especialidade=record.get("ESPECIALIDADE", ""),
                         )
                     )
                 OfficialCensusRecord.objects.bulk_create(snapshot_batch)

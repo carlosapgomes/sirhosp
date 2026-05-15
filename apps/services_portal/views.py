@@ -111,8 +111,7 @@ def discharge_list(request: HttpRequest) -> HttpResponse:
         entry = DailyDischargeCount.objects.order_by("-date").first()
         selected_date = entry.date if entry else timezone.localdate()
 
-    records = entry.raw_data if entry else []
-    columns = list(records[0].keys()) if records else []
+    records, columns = _discharge_records_for_template(entry)
     return render(request, "services_portal/discharge_list.html", {
         "page_title": "Altas",
         "date": selected_date,
@@ -139,8 +138,7 @@ def admission_list(request: HttpRequest) -> HttpResponse:
         entry = DailyAdmissionCount.objects.order_by("-date").first()
         selected_date = entry.date if entry else timezone.localdate()
 
-    records = entry.raw_data if entry else []
-    columns = list(records[0].keys()) if records else []
+    records, columns = _admission_records_for_template(entry)
     return render(request, "services_portal/admission_list.html", {
         "page_title": "Admissões",
         "date": selected_date,
@@ -167,8 +165,7 @@ def death_list(request: HttpRequest) -> HttpResponse:
         entry = DailyDeathCount.objects.order_by("-date").first()
         selected_date = entry.date if entry else timezone.localdate()
 
-    records = entry.raw_data if entry else []
-    columns = list(records[0].keys()) if records else []
+    records, columns = _death_records_for_template(entry)
     return render(request, "services_portal/death_list.html", {
         "page_title": "Óbitos",
         "date": selected_date,
@@ -200,7 +197,7 @@ def official_census_list(request: HttpRequest) -> HttpResponse:
             selected_date = timezone.localdate()
             records = OfficialCensusRecord.objects.none()
 
-    columns = ["PRONTUARIO", "NOME", "UNIDADE", "QUARTO/LEITO", "DATA INTERNACAO"]
+    columns = ["prontuario", "nome", "unidade", "quarto_leito", "data_internacao"]
 
     return render(request, "services_portal/official_census_list.html", {
         "page_title": "Censo Oficial",
@@ -807,3 +804,67 @@ def _demo_resultados(termos: str) -> list[dict]:
             ],
         },
     ]
+
+
+# ── Template record helpers (normalized → dict fallback) ──────────────
+
+
+def _admission_records_for_template(entry) -> tuple[list[dict], list[str]]:
+    """Build template-friendly records from AdmissionRecord or raw_data."""
+    if entry and hasattr(entry, "records"):
+        record_objs = list(entry.records.all())
+        if record_objs:
+            recs = []
+            for r in record_objs:
+                d = {
+                    "prontuario": r.prontuario,
+                    "nome": r.nome,
+                    "data_internacao": r.data_internacao,
+                }
+                d.update(r.raw_extra)
+                recs.append(d)
+            return recs, list(recs[0].keys())
+    # Fallback to raw_data
+    records = entry.raw_data if entry else []
+    columns = list(records[0].keys()) if records else []
+    return records, columns
+
+
+def _death_records_for_template(entry) -> tuple[list[dict], list[str]]:
+    """Build template-friendly records from DeathRecord or raw_data."""
+    if entry and hasattr(entry, "records"):
+        record_objs = list(entry.records.all())
+        if record_objs:
+            recs = []
+            for r in record_objs:
+                d = {
+                    "prontuario": r.prontuario,
+                    "nome": r.nome,
+                    "data_obito": r.data_obito,
+                }
+                d.update(r.raw_extra)
+                recs.append(d)
+            return recs, list(recs[0].keys())
+    records = entry.raw_data if entry else []
+    columns = list(records[0].keys()) if records else []
+    return records, columns
+
+
+def _discharge_records_for_template(entry) -> tuple[list[dict], list[str]]:
+    """Build template-friendly records from DischargeRecord or raw_data."""
+    if entry and hasattr(entry, "records"):
+        record_objs = list(entry.records.all())
+        if record_objs:
+            recs = []
+            for r in record_objs:
+                d = {
+                    "prontuario": r.prontuario,
+                    "nome": r.nome,
+                    "data_internacao": r.data_internacao,
+                }
+                d.update(r.raw_extra)
+                recs.append(d)
+            return recs, list(recs[0].keys())
+    records = entry.raw_data if entry else []
+    columns = list(records[0].keys()) if records else []
+    return records, columns

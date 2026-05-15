@@ -115,7 +115,7 @@ class Command(BaseCommand):
         # Update daily discharge count for the chart
         discharge_day = timezone.localdate(discharge_date)
         total_from_pdf = len(patients)
-        DailyDischargeCount.objects.update_or_create(
+        daily_count, _created = DailyDischargeCount.objects.update_or_create(
             date=discharge_day,
             defaults={
                 "count": total_from_pdf,
@@ -124,6 +124,23 @@ class Command(BaseCommand):
         )
         self.stdout.write(
             f"\nDailyDischargeCount updated: {discharge_day} → {total_from_pdf} altas"
+        )
+
+        # Persist individual DischargeRecord rows
+        from apps.discharges.models import DischargeRecord
+
+        daily_count.records.all().delete()
+        for p in patients:
+            DischargeRecord.objects.create(
+                daily_count=daily_count,
+                date=discharge_day,
+                prontuario=p.get("prontuario", ""),
+                nome=p.get("nome", ""),
+                data_internacao=p.get("data_internacao", ""),
+            )
+
+        self.stdout.write(
+            f"  DischargeRecord: {total_from_pdf} registros individuais persistidos."
         )
 
     @staticmethod

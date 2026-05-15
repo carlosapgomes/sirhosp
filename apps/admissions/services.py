@@ -12,7 +12,7 @@ def process_admissions(
 ) -> dict[str, int]:
     """Process admission records from the XLS extraction.
 
-    Currently persists the raw records as a DailyAdmissionCount snapshot.
+    Persists both the daily aggregate and individual AdmissionRecord rows.
 
     Args:
         records: List of dicts with admission record data from the XLS.
@@ -21,9 +21,9 @@ def process_admissions(
     Returns:
         A dict with metrics counters.
     """
-    from apps.admissions.models import DailyAdmissionCount
+    from apps.admissions.models import AdmissionRecord, DailyAdmissionCount
 
-    DailyAdmissionCount.objects.update_or_create(
+    daily_count, _created = DailyAdmissionCount.objects.update_or_create(
         date=reference_date,
         defaults={
             "count": len(records),
@@ -31,6 +31,66 @@ def process_admissions(
         },
     )
 
+    # Delete old individual records and recreate
+    daily_count.records.all().delete()
+
+    for rec in records:
+        prontuario = _find_value(rec, "PRONTUARIO", "prontuario", "Prontuário")
+        nome = _find_value(rec, "NOME", "nome", "Paciente")
+        data_internacao = _find_value(
+            rec,
+            "DATA INTERNACAO",
+            "DATA_INTERNACAO",
+            "DATA INTERNAÇÃO",
+            "data_internacao",
+            "Data Internação",
+        )
+
+        extra = {
+            k: v
+            for k, v in rec.items()
+            if k
+            not in {
+                "PRONTUARIO",
+                "NOME",
+                "DATA INTERNACAO",
+                "DATA_INTERNACAO",
+                "DATA INTERNAÇÃO",
+                "prontuario",
+                "nome",
+                "data_internacao",
+                "Prontuário",
+                "Paciente",
+                "Data Internação",
+            }
+            and v
+        }
+
+        AdmissionRecord.objects.create(
+            daily_count=daily_count,
+            date=reference_date,
+            prontuario=str(prontuario or ""),
+            nome=str(nome or ""),
+            data_internacao=str(data_internacao or ""),
+            raw_extra=extra,
+        )
+
     return {
         "total_records": len(records),
     }
+
+
+def _find_value(record: dict, *keys: str) -> str | None:
+    """Try multiple possible key names for a field (case-insensitive fallback)."""
+    # Direct match first
+    for key in keys:
+        if key in record:
+            return record[key]
+
+    # Case-insensitive fallback
+    for key in keys:
+        for rk in record:
+            if rk.upper().replace(" ", "_") == key.upper().replace(" ", "_"):
+                return record[rk]
+
+    return None
