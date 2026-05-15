@@ -51,8 +51,9 @@
           <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
         </div>
         <div>
-          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.altas_hoje }}</div>
-          <div class="sirhosp-stat-label" style="color: inherit;">Altas no dia</div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.altas }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Altas</div>
+          <div class="small text-muted">{{ stats.altas_date|date:"d/m" }}</div>
         </div>
       </div>
     </a>
@@ -66,8 +67,9 @@
           <i class="bi bi-person-plus" style="color: #16A34A; font-size: 1.25rem;"></i>
         </div>
         <div>
-          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.admissoes_hoje }}</div>
-          <div class="sirhosp-stat-label" style="color: inherit;">Admissões hoje</div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.admissoes }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Admissões</div>
+          <div class="small text-muted">{{ stats.admissoes_date|date:"d/m" }}</div>
         </div>
       </div>
     </a>
@@ -81,8 +83,9 @@
           <i class="bi bi-heartbreak" style="color: #DC2626; font-size: 1.25rem;"></i>
         </div>
         <div>
-          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.obitos_hoje }}</div>
-          <div class="sirhosp-stat-label" style="color: inherit;">Óbitos hoje</div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.obitos }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Óbitos</div>
+          <div class="small text-muted">{{ stats.obitos_date|date:"d/m" }}</div>
         </div>
       </div>
     </a>
@@ -96,8 +99,9 @@
           <i class="bi bi-clipboard-data" style="color: #0284C7; font-size: 1.25rem;"></i>
         </div>
         <div>
-          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.censo_oficial_hoje }}</div>
-          <div class="sirhosp-stat-label" style="color: inherit;">Censo Oficial hoje</div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.censo_oficial }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Censo Oficial</div>
+          <div class="small text-muted">{{ stats.censo_oficial_date|date:"d/m" }}</div>
         </div>
       </div>
     </a>

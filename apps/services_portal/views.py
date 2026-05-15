@@ -55,37 +55,36 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         or 0
     )
 
-    admissoes_hoje = (
-        DailyAdmissionCount.objects.filter(date=today)
-        .values_list("count", flat=True)
-        .first()
-        or 0
-    )
+    # Daily stats (collected retroactively — latest available date)
+    adm_entry = DailyAdmissionCount.objects.order_by("-date").first()
+    death_entry = DailyDeathCount.objects.order_by("-date").first()
+    discharge_entry = DailyDischargeCount.objects.order_by("-date").first()
+    ofcensus_entry = OfficialCensusRecord.objects.order_by("-date").first()
 
-    obitos_hoje = (
-        DailyDeathCount.objects.filter(date=today)
-        .values_list("count", flat=True)
-        .first()
-        or 0
-    )
-
-    censo_oficial_hoje = OfficialCensusRecord.objects.filter(
-        date=today
-    ).count()
+    stats = {
+        "internados": internados,
+        "cadastrados": cadastrados,
+        "altas_hoje": altas_hoje,
+        "admissoes": adm_entry.count if adm_entry else 0,
+        "admissoes_date": adm_entry.date if adm_entry else today,
+        "obitos": death_entry.count if death_entry else 0,
+        "obitos_date": death_entry.date if death_entry else today,
+        "altas": discharge_entry.count if discharge_entry else 0,
+        "altas_date": discharge_entry.date if discharge_entry else today,
+        "censo_oficial": (
+            OfficialCensusRecord.objects.filter(
+                date=ofcensus_entry.date
+            ).count() if ofcensus_entry else 0
+        ),
+        "censo_oficial_date": ofcensus_entry.date if ofcensus_entry else today,
+    }
 
     # ── IRMD-S6: Ingestion metrics for last 24h ──────────────────────
     ingestion_stats = _compute_ingestion_stats()
 
     context = {
         "page_title": "Dashboard",
-        "stats": {
-            "internados": internados,
-            "cadastrados": cadastrados,
-            "altas_hoje": altas_hoje,
-            "admissoes_hoje": admissoes_hoje,
-            "obitos_hoje": obitos_hoje,
-            "censo_oficial_hoje": censo_oficial_hoje,
-        },
+        "stats": stats,
         "coleta": {
             "setores": setores,
             "ultima_varredura": ultima_varredura,
