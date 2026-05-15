@@ -74,6 +74,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Senha do sistema fonte",
     )
+    parser.add_argument(
+        "--reference-date",
+        type=str,
+        default=None,
+        help="Data de referência no formato YYYY-MM-DD (default: hoje)",
+    )
     return parser.parse_args()
 
 
@@ -529,8 +535,9 @@ def main() -> None:
             output_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d-%H%M%S")
             json_path = output_dir / f"discharges-{ts}.json"
+            ref_date = args.reference_date or time.strftime("%Y-%m-%d")
             data = {
-                "data": time.strftime("%Y-%m-%d"),
+                "data": ref_date,
                 "total": len(patients),
                 "pacientes": patients,
             }

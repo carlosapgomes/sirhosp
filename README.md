@@ -266,9 +266,13 @@ docker compose -f compose.yml -f compose.dev.yml exec -T web \
 docker compose -f compose.yml -f compose.dev.yml exec -T web \
   uv run --no-sync python manage.py extract_deaths --date 14/05/2026
 
-# Extrair e processar altas do dia (PDF)
+# Extrair e processar altas do dia (PDF via Playwright)
 docker compose -f compose.yml -f compose.dev.yml exec -T web \
-  uv run --no-sync python manage.py extract_discharges --date 14/05/2026
+  uv run --no-sync python manage.py extract_discharges --headless
+
+# Extrair altas de uma data específica
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py extract_discharges --headless --date 13/05/2026
 
 # Processar PDF de altas já baixado
 docker compose -f compose.yml -f compose.dev.yml exec -T web \

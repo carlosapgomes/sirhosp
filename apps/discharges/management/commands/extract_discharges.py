@@ -21,7 +21,9 @@ from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
 
 
 class Command(BaseCommand):
-    help = "Extract today's discharges from source system and update Admission records."
+    help = (
+        "Extract discharges from source system and update Admission records."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -36,9 +38,37 @@ class Command(BaseCommand):
             action="store_false",
             help="Run Playwright with visible browser.",
         )
+        parser.add_argument(
+            "--date",
+            type=str,
+            default=None,
+            help="Reference date in DD/MM/AAAA format (default: today).",
+        )
 
     def handle(self, *args, **options):
         headless: bool = options["headless"]
+        raw_date: str | None = options.get("date")
+
+        # Resolve reference date
+        from datetime import datetime
+
+        today = timezone.localdate()
+        date_value = today.strftime("%d/%m/%Y")
+        if raw_date:
+            try:
+                ref_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
+                date_value = raw_date
+            except ValueError:
+                self.stderr.write(
+                    f"Invalid date format: {raw_date}. Use DD/MM/AAAA."
+                )
+                sys.exit(1)
+        else:
+            ref_date = today
+
+        ref_date_iso = ref_date.isoformat()
+
+        self.stdout.write(f"Extracting discharges for {date_value}...")
 
         # Resolve credentials from settings/environment
         from django.conf import settings
@@ -97,6 +127,7 @@ class Command(BaseCommand):
             ]
             if headless:
                 cmd.append("--headless")
+            cmd.extend(["--reference-date", ref_date_iso])
 
             self.stdout.write("Running discharge extraction...")
             try:
@@ -193,13 +224,15 @@ class Command(BaseCommand):
                 run.finished_at = timezone.now()
                 run.save()
 
-                # Record zero discharges for today (source of truth: PDF)
+                # Record zero discharges for the reference date
                 DailyDischargeCount.objects.update_or_create(
-                    date=timezone.localdate(),
-                    defaults={"count": 0},
+                    date=ref_date,
+                    defaults={"count": 0, "raw_data": []},
                 )
 
-                self.stdout.write(self.style.SUCCESS("No discharges found today."))
+                self.stdout.write(
+                    self.style.SUCCESS(f"No discharges found for {date_value}.")
+                )
                 return
 
             json_path = json_files[0]
@@ -210,6 +243,7 @@ class Command(BaseCommand):
                 patients = data.get("pacientes", [])
                 self.stdout.write(f"  Patients in PDF: {len(patients)}")
 
+                # Reconcile admissions
                 metrics = process_discharges(patients)
                 self.stdout.write(
                     f"  Discharge set: {metrics['discharge_set']} | "
@@ -219,6 +253,44 @@ class Command(BaseCommand):
                     f"Recovered patients: {metrics['recovered_patients_created']} | "
                     f"Recovered admissions: {metrics['recovered_admissions_created']} | "
                     f"Demographics enqueued: {metrics['demographics_runs_enqueued']}"
+                )
+
+                # Persist DailyDischargeCount with raw_data
+                pdf_date_str = data.get("data", "")
+                try:
+                    pdf_date = (
+                        date.fromisoformat(pdf_date_str)
+                        if pdf_date_str
+                        else ref_date
+                    )
+                except ValueError:
+                    pdf_date = ref_date
+
+                daily_count, _created = DailyDischargeCount.objects.update_or_create(
+                    date=pdf_date,
+                    defaults={
+                        "count": len(patients),
+                        "raw_data": patients,
+                    },
+                )
+                self.stdout.write(
+                    f"  DailyDischargeCount updated: {pdf_date} → {len(patients)} altas"
+                )
+
+                # Persist individual DischargeRecord rows
+                from apps.discharges.models import DischargeRecord
+
+                daily_count.records.all().delete()
+                for p in patients:
+                    DischargeRecord.objects.create(
+                        daily_count=daily_count,
+                        date=pdf_date,
+                        prontuario=p.get("prontuario", ""),
+                        nome=p.get("nome", ""),
+                        data_internacao=p.get("data_internacao", ""),
+                    )
+                self.stdout.write(
+                    f"  DischargeRecord: {len(patients)} registros individuais."
                 )
             except Exception as exc:
                 self._record_stage(
@@ -247,22 +319,6 @@ class Command(BaseCommand):
             run.status = "succeeded"
             run.finished_at = timezone.now()
             run.save()
-
-            # Record discharge count from PDF (source of truth)
-            pdf_date_str = data.get("data", "")
-            try:
-                pdf_date = (
-                    date.fromisoformat(pdf_date_str)
-                    if pdf_date_str
-                    else timezone.localdate()
-                )
-            except ValueError:
-                pdf_date = timezone.localdate()
-
-            DailyDischargeCount.objects.update_or_create(
-                date=pdf_date,
-                defaults={"count": len(patients)},
-            )
 
             self.stdout.write(
                 self.style.SUCCESS(
