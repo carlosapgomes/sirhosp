@@ -157,6 +157,7 @@ def wait_admissions_frame_ready(page: Page, timeout_ms: int = 60000) -> FrameLoc
 
 def fill_date_field(
     frame_locator: FrameLocator,
+    page: Page,
     field_id: str,
     date_value: str,
     label: str,
@@ -172,7 +173,6 @@ def fill_date_field(
 
     date_input.click()
     date_input.fill("")
-    page = frame_locator.page
     page.wait_for_timeout(200)
 
     # Type the date to ensure PrimeFaces registers it
@@ -186,7 +186,7 @@ def fill_date_field(
     print(f"  [i] {label} preenchido com: {date_value}")
 
 
-def click_pesquisar(frame_locator: FrameLocator) -> None:
+def click_pesquisar(frame_locator: FrameLocator, page: Page) -> None:
     """Clica no botão Pesquisar dentro do iframe."""
     btn = frame_locator.get_by_role("button", name="Pesquisar")
     if not wait_visible(btn, timeout=15000):
@@ -194,8 +194,7 @@ def click_pesquisar(frame_locator: FrameLocator) -> None:
     print("[i] Clicando em Pesquisar...")
     btn.click(timeout=15000)
     # Aguarda resultados carregarem
-    if frame_locator.page:
-        frame_locator.page.wait_for_timeout(3000)
+    page.wait_for_timeout(3000)
     print("[i] Pesquisa concluída.")
 
 
@@ -353,6 +352,7 @@ def run(
             # Preencher campos de data
             fill_date_field(
                 frame_locator,
+                page,
                 "dataInicial:dataInicial:inputId_input",
                 start_date,
                 "data inicial",
@@ -361,6 +361,7 @@ def run(
 
             fill_date_field(
                 frame_locator,
+                page,
                 "dataFinal:dataFinal:inputId_input",
                 end_date,
                 "data final",
@@ -368,7 +369,7 @@ def run(
             page.wait_for_timeout(500)
 
             # Pesquisar
-            click_pesquisar(frame_locator)
+            click_pesquisar(frame_locator, page)
             page.wait_for_timeout(2000)
 
             # Exportar XLS

@@ -307,6 +307,7 @@ def run(
             # Preencher campos de data
             fill_date_field(
                 frame_locator,
+                page,
                 "dtInicial:dtInicial:inputId_input",
                 start_date,
                 "data inicial",
@@ -315,6 +316,7 @@ def run(
 
             fill_date_field(
                 frame_locator,
+                page,
                 "dtFinal:dtFinal:inputId_input",
                 end_date,
                 "data final",
