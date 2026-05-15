@@ -1,0 +1,48 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }} — SIRHOSP{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item active" aria-current="page">{{ page_title }}</li>
+  </ol>
+</nav>
+
+<h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">{{ page_title }}</h2>
+<p class="text-muted small mb-3">{{ date|date:"d/m/Y" }} — {{ count }} paciente(s)</p>
+
+{% if records %}
+<div class="table-responsive">
+  <table class="table table-sm table-hover">
+    <thead class="table-light">
+      <tr>
+        <th>Registro</th>
+        <th>Nome</th>
+        <th>Setor</th>
+        <th>Leito</th>
+        <th>Data Internação</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in records %}
+      <tr>
+        <td>{{ r.raw_data.PRONTUARIO|default:"—" }}</td>
+        <td>{{ r.raw_data.NOME|default:"—" }}</td>
+        <td>{{ r.raw_data.UNIDADE|default:"—" }}</td>
+        <td>{{ r.raw_data.QUARTO_LEITO|default:r.raw_data.QUARTO|default:"—" }}</td>
+        <td>{{ r.raw_data.DATA_INTERNACAO|default:"—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="alert alert-info">Nenhum registro para esta data.</div>
+{% endif %}
+
+<a href="{% url 'services_portal:dashboard' %}" class="btn btn-sm btn-outline-secondary mt-2">
+  <i class="bi bi-arrow-left me-1"></i> Voltar ao Dashboard
+</a>
+{% endblock %}

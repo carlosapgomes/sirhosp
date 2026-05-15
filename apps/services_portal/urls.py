@@ -12,4 +12,8 @@ urlpatterns = [
     path("monitor/", views.monitor_risco, name="monitor_risco"),
     path("metrica-ingestao/", views.ingestion_metrics, name="ingestion_metrics"),
     path("painel/altas/", views.discharge_chart, name="discharge_chart"),
+    path("altas/", views.discharge_list, name="discharge_list"),
+    path("admissoes/", views.admission_list, name="admission_list"),
+    path("obitos/", views.death_list, name="death_list"),
+    path("censo-oficial/", views.official_census_list, name="official_census_list"),
 ]

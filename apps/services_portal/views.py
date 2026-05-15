@@ -15,8 +15,10 @@ from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
 from django.utils import timezone
 
-from apps.census.models import BedStatus, CensusSnapshot
+from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord
 from apps.discharges.models import DailyDischargeCount
+from apps.admissions.models import DailyAdmissionCount
+from apps.deaths.models import DailyDeathCount
 from apps.ingestion.models import (
     CensusExecutionBatch,
     FinalRunFailure,
@@ -53,6 +55,24 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         or 0
     )
 
+    admissoes_hoje = (
+        DailyAdmissionCount.objects.filter(date=today)
+        .values_list("count", flat=True)
+        .first()
+        or 0
+    )
+
+    obitos_hoje = (
+        DailyDeathCount.objects.filter(date=today)
+        .values_list("count", flat=True)
+        .first()
+        or 0
+    )
+
+    censo_oficial_hoje = OfficialCensusRecord.objects.filter(
+        date=today
+    ).count()
+
     # ── IRMD-S6: Ingestion metrics for last 24h ──────────────────────
     ingestion_stats = _compute_ingestion_stats()
 
@@ -62,6 +82,9 @@ def dashboard(request: HttpRequest) -> HttpResponse:
             "internados": internados,
             "cadastrados": cadastrados,
             "altas_hoje": altas_hoje,
+            "admissoes_hoje": admissoes_hoje,
+            "obitos_hoje": obitos_hoje,
+            "censo_oficial_hoje": censo_oficial_hoje,
         },
         "coleta": {
             "setores": setores,
@@ -70,6 +93,57 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         "ingestion_stats": ingestion_stats,
     }
     return render(request, "services_portal/dashboard.html", context)
+
+
+@login_required
+def discharge_list(request: HttpRequest) -> HttpResponse:
+    today = timezone.localdate()
+    entry = DailyDischargeCount.objects.filter(date=today).first()
+    records = entry.raw_data if entry else []
+    return render(request, "services_portal/discharge_list.html", {
+        "page_title": "Altas no dia",
+        "date": today,
+        "count": entry.count if entry else 0,
+        "records": records,
+    })
+
+
+@login_required
+def admission_list(request: HttpRequest) -> HttpResponse:
+    today = timezone.localdate()
+    entry = DailyAdmissionCount.objects.filter(date=today).first()
+    records = entry.raw_data if entry else []
+    return render(request, "services_portal/admission_list.html", {
+        "page_title": "Admissões no dia",
+        "date": today,
+        "count": entry.count if entry else 0,
+        "records": records,
+    })
+
+
+@login_required
+def death_list(request: HttpRequest) -> HttpResponse:
+    today = timezone.localdate()
+    entry = DailyDeathCount.objects.filter(date=today).first()
+    records = entry.raw_data if entry else []
+    return render(request, "services_portal/death_list.html", {
+        "page_title": "Óbitos no dia",
+        "date": today,
+        "count": entry.count if entry else 0,
+        "records": records,
+    })
+
+
+@login_required
+def official_census_list(request: HttpRequest) -> HttpResponse:
+    today = timezone.localdate()
+    records = OfficialCensusRecord.objects.filter(date=today).order_by("id")
+    return render(request, "services_portal/official_census_list.html", {
+        "page_title": "Censo Oficial",
+        "date": today,
+        "count": records.count(),
+        "records": records,
+    })
 
 
 @login_required

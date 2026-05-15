@@ -147,12 +147,12 @@ class TestDashboardRealStats:
         assert 'census:bed_status' in content or '/beds/' in content
 
     def test_dashboard_discharge_card_links_to_chart(self, admin_client):
-        """The discharge stat card is clickable and links to /painel/altas/."""
+        """The discharge stat card is clickable and links to /altas/."""
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
         content = response.content.decode()
         assert response.status_code == 200
-        chart_url = reverse("services_portal:discharge_chart")
+        chart_url = reverse("services_portal:discharge_list")
         assert chart_url in content
         assert '<a href="' in content
 

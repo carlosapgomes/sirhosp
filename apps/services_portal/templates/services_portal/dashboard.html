@@ -44,8 +44,8 @@
   </div>
 
   <!-- Altas no dia -->
-  <div class="col-12 col-md-6 col-lg-4">
-    <a href="{% url 'services_portal:discharge_chart' %}" class="text-decoration-none">
+  <div class="col-12 col-md-6 col-lg-3">
+    <a href="{% url 'services_portal:discharge_list' %}" class="text-decoration-none">
       <div class="sirhosp-stat-card d-flex align-items-center gap-3">
         <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
           <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
@@ -53,6 +53,51 @@
         <div>
           <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.altas_hoje }}</div>
           <div class="sirhosp-stat-label" style="color: inherit;">Altas no dia</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Admissões no dia -->
+  <div class="col-12 col-md-6 col-lg-3">
+    <a href="{% url 'services_portal:admission_list' %}" class="text-decoration-none">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #DCFCE7;">
+          <i class="bi bi-person-plus" style="color: #16A34A; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.admissoes_hoje }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Admissões hoje</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Óbitos no dia -->
+  <div class="col-12 col-md-6 col-lg-3">
+    <a href="{% url 'services_portal:death_list' %}" class="text-decoration-none">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #FEE2E2;">
+          <i class="bi bi-heartbreak" style="color: #DC2626; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.obitos_hoje }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Óbitos hoje</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Censo Oficial -->
+  <div class="col-12 col-md-6 col-lg-3">
+    <a href="{% url 'services_portal:official_census_list' %}" class="text-decoration-none">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
+          <i class="bi bi-clipboard-data" style="color: #0284C7; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.censo_oficial_hoje }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Censo Oficial hoje</div>
         </div>
       </div>
     </a>
