@@ -39,6 +39,7 @@ def process_deaths(
         nome = _find_value(rec, "NOME", "nome", "Paciente")
         data_obito = _find_value(
             rec,
+            "OBITO",
             "DATA OBITO",
             "DATA_OBITO",
             "DATA ÓBITO",
@@ -53,6 +54,7 @@ def process_deaths(
             not in {
                 "PRONTUARIO",
                 "NOME",
+                "OBITO",
                 "DATA OBITO",
                 "DATA_OBITO",
                 "DATA ÓBITO",

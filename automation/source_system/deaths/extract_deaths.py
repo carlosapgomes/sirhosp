@@ -216,7 +216,7 @@ def click_export_csv(frame_locator: FrameLocator, page: Page) -> bytes:
 def parse_csv_content(content: bytes) -> list[dict[str, str]]:
     """Converte o conteúdo CSV em lista de dicionários."""
     text = content.decode("utf-8-sig", errors="replace")
-    reader = csv.DictReader(io.StringIO(text))
+    reader = csv.DictReader(io.StringIO(text), delimiter=";")
     return [row for row in reader]
 
 
