@@ -187,6 +187,8 @@ class Command(BaseCommand):
                         prontuario=row["prontuario"],
                         nome=row["nome"],
                         especialidade=row["especialidade"],
+                        data_internacao=row.get("data_internacao", ""),
+                        tempo_internacao=row.get("tempo_internacao"),
                         bed_status=row["bed_status"],
                     )
                     for row in parsed_rows

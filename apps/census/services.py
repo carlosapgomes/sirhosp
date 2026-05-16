@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 from typing import Any
 
@@ -97,16 +98,59 @@ def _sync_admission_ward_bed(
         active.save(update_fields=["ward", "bed", "updated_at"])
 
 
+def _parse_dt_int(raw: str) -> str:
+    """Parse admission date from DD/MM format, inferring the year.
+
+    Rule:
+    - If the date (with current year) is in the future, assume previous year.
+    - Otherwise use current year.
+    - If already DD/MM/AAAA, return as-is.
+
+    Returns a normalized string in DD/MM/AAAA format (or empty on failure).
+    """
+    from datetime import date as date_mod
+
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+
+    # Already full format?
+    if re.match(r"^\d{2}/\d{2}/\d{4}$", raw):
+        return raw
+
+    # Expect DD/MM
+    m = re.match(r"^(\d{2})/(\d{2})$", raw)
+    if not m:
+        return raw  # keep as-is if unrecognized
+
+    day, month = int(m.group(1)), int(m.group(2))
+    today = date_mod.today()
+    year = today.year
+
+    try:
+        parsed = date_mod(year, month, day)
+    except ValueError:
+        return raw
+
+    if parsed > today:
+        # Future date → use previous year
+        parsed = date_mod(year - 1, month, day)
+
+    return parsed.strftime("%d/%m/%Y")
+
+
 def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
     """Parse a census CSV file and classify bed status for each row.
 
     Args:
         csv_path: Path to CSV file with columns:
             setor, qrt_leito, prontuario, nome, esp
+            plus optional: dt_int, tempo, idade, convenio
 
     Returns:
         List of dicts with keys:
-            setor, leito, prontuario, nome, especialidade, bed_status
+            setor, leito, prontuario, nome, especialidade, bed_status,
+            data_internacao (str DD/MM/AAAA), tempo_internacao (int or None)
 
     Raises:
         FileNotFoundError: If csv_path does not exist.
@@ -130,11 +174,24 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
             )
 
         has_setor_codigo = "setor_codigo" in actual
+        has_dt_int = "dt_int" in actual
+        has_tempo = "tempo" in actual
 
         for row in reader:
             prontuario = (row.get("prontuario") or "").strip()
             nome = (row.get("nome") or "").strip()
             bed_status = classify_bed_status(prontuario, nome)
+
+            dt_int_raw = (row.get("dt_int") or "").strip() if has_dt_int else ""
+            data_internacao = _parse_dt_int(dt_int_raw)
+
+            tempo_raw = (row.get("tempo") or "").strip() if has_tempo else ""
+            tempo_internacao = None
+            if tempo_raw:
+                try:
+                    tempo_internacao = int(float(tempo_raw))
+                except (ValueError, TypeError):
+                    pass
 
             rows.append(
                 {
@@ -146,6 +203,8 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
                     "prontuario": prontuario,
                     "nome": nome,
                     "especialidade": (row.get("esp") or "").strip(),
+                    "data_internacao": data_internacao,
+                    "tempo_internacao": tempo_internacao,
                     "bed_status": bed_status,
                 }
             )

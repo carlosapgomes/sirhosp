@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Versão enxuta para extrair pacientes de todos os setores do Censo.
+Extrai pacientes de todos os setores do Censo via download XLSX.
 
-Fluxo essencial:
+Fluxo:
 1) login
 2) abrir Censo
 3) listar setores
-4) para cada setor: selecionar -> pesquisar -> extrair pacientes (com paginação)
-5) salvar JSON/CSV
+4) para cada setor: selecionar -> pesquisar -> exportar XLSX -> parse
+5) salvar CSV consolidado
+
+Vantagens sobre o scraping HTML antigo:
+- Captura todas as 13 colunas da tabela (incluindo Dt Int e Tempo numérico)
+- Sem paginação (XLS (Tudo) exporta todas as linhas)
+- Mais rápido e estável
 """
 
 from __future__ import annotations
@@ -16,55 +21,43 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
-from playwright.sync_api import Frame, Locator, Page, sync_playwright
+from openpyxl import load_workbook
+from playwright.sync_api import Frame, Page, sync_playwright
 
 # Add parent automation/source_system so we can import shared helpers
 _CURRENT_DIR = Path(__file__).resolve().parent
 _SOURCE_SYSTEM_DIR = _CURRENT_DIR.parent
 sys.path.insert(0, str(_SOURCE_SYSTEM_DIR))
 
-# Shared helpers from medical_evolution connector
 from source_system import aguardar_pagina_estavel, fechar_dialogos_iniciais  # noqa: E402
 
-# Configurar timeout — mesmo valor do original
 DEFAULT_TIMEOUT_MS = 180000
 
 CENSO_FRAME_NAME = "i_frame_censo_diário_dos_pacientes"
 
-# Diretórios relativos à raiz do projeto sirhosp
-# extract_census.py está em automation/source_system/current_inpatients/
-# raiz do projeto = 4 níveis acima
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DOWNLOADS_DIR = _PROJECT_ROOT / "downloads"
 DEBUG_DIR = _PROJECT_ROOT / "debug"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extrai pacientes de todos os setores (versão slim).")
+    parser = argparse.ArgumentParser(
+        description="Extrai pacientes de todos os setores via XLSX."
+    )
     parser.add_argument("--headless", action="store_true", help="Executa sem UI")
     parser.add_argument("--max-setores", type=int, default=0, help="Limita setores (0 = todos)")
     parser.add_argument("--pause-ms", type=int, default=250, help="Pausa curta entre ações")
     parser.add_argument(
-        "--table-timeout-ms",
-        type=int,
-        default=90000,
-        help="Timeout para carga da tabela após Pesquisar (padrão: 90000)",
-    )
-    parser.add_argument(
-        "--search-retries",
-        type=int,
-        default=2,
-        help="Repetições do Pesquisar quando a tabela vem vazia/suspeita (padrão: 2)",
-    )
-    parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
-        help="Diretório de saída para CSV/JSON (default: <project_root>/downloads)",
+        help="Diretório de saída (default: <project_root>/downloads)",
     )
     parser.add_argument(
         "--csv-only",
@@ -74,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def wait_visible(locator: Locator, timeout: int = 10000) -> bool:
+def wait_visible(locator, timeout: int = 10000) -> bool:
     try:
         locator.first.wait_for(state="visible", timeout=timeout)
         return True
@@ -82,7 +75,7 @@ def wait_visible(locator: Locator, timeout: int = 10000) -> bool:
         return False
 
 
-def safe_click(locator: Locator, label: str, timeout: int = 10000) -> bool:
+def safe_click(locator, label: str, timeout: int = 10000) -> bool:
     if not wait_visible(locator, timeout=timeout):
         print(f"  [!] Não visível para clique: {label}")
         return False
@@ -271,231 +264,6 @@ def click_pesquisar(frame: Frame) -> bool:
     return safe_click(btn, "botão Pesquisar", timeout=12000)
 
 
-def table_state(frame: Frame) -> dict[str, object]:
-    try:
-        return frame.evaluate(
-            """
-            () => {
-                const isVisible = (el) => {
-                    if (!el) return false;
-                    const style = window.getComputedStyle(el);
-                    const rect = el.getBoundingClientRect();
-                    const ariaHidden = (el.getAttribute('aria-hidden') || '').toLowerCase() === 'true';
-                    return !ariaHidden && style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-                };
-
-                const tbody = document.querySelector('[id="tabelaCensoDiario:resultList_data"]');
-                const rows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
-                const firstRow = rows[0] || null;
-                const firstProntuario = firstRow?.querySelector('span[id$="outProntuario"]')?.textContent || '';
-                const firstNome = firstRow?.querySelector('span[id$="outNomeSituacao"]')?.textContent || '';
-                const pag = document.querySelector('.ui-paginator-current')?.textContent || '';
-                const loading = document.querySelector('#form_loading');
-                const emptyRow = tbody?.querySelector('td.ui-datatable-empty-message');
-                const hasPatientSpan = !!tbody?.querySelector('span[id$="outProntuario"], span[id$="outNomeSituacao"]');
-                const tbodyText = (tbody?.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                const emptyByText = rows.length <= 1 && !hasPatientSpan && (
-                    tbodyText.includes('nenhum registro') ||
-                    tbodyText.includes('não há registro') ||
-                    tbodyText.includes('nao ha registro') ||
-                    tbodyText.includes('nenhum paciente')
-                );
-
-                return {
-                    tbodyExists: !!tbody,
-                    rowCount: rows.length,
-                    paginator: pag.replace(/\\s+/g, ' ').trim(),
-                    firstProntuario: (firstProntuario || '').replace(/\\s+/g, ' ').trim(),
-                    firstNome: (firstNome || '').replace(/\\s+/g, ' ').trim(),
-                    loadingVisible: isVisible(loading),
-                    emptyMessage: !!emptyRow || emptyByText,
-                };
-            }
-            """
-        )
-    except Exception:
-        return {
-            "tbodyExists": False,
-            "rowCount": 0,
-            "paginator": "",
-            "firstProntuario": "",
-            "firstNome": "",
-            "loadingVisible": False,
-            "emptyMessage": False,
-        }
-
-
-def wait_table_change(frame: Frame, page: Page, before: dict[str, object], timeout_ms: int = 15000) -> None:
-    deadline = time.time() + timeout_ms / 1000
-    before_sig = (
-        before.get("rowCount"),
-        before.get("paginator"),
-        before.get("firstProntuario"),
-        before.get("firstNome"),
-        before.get("emptyMessage"),
-    )
-
-    while time.time() < deadline:
-        now = table_state(frame)
-        now_sig = (
-            now.get("rowCount"),
-            now.get("paginator"),
-            now.get("firstProntuario"),
-            now.get("firstNome"),
-            now.get("emptyMessage"),
-        )
-        if now_sig != before_sig or now.get("loadingVisible"):
-            return
-        page.wait_for_timeout(250)
-
-
-def wait_table_ready(frame: Frame, page: Page, timeout_ms: int = 90000, min_stable_ms: int = 2500) -> int:
-    """
-    Espera a tabela estabilizar de forma conservadora.
-    Mais lento, porém mais confiável para setores grandes.
-    """
-    deadline = time.time() + timeout_ms / 1000
-    last_sig: tuple[object, ...] | None = None
-    stable_since: float | None = None
-    last_rows = 0
-
-    while time.time() < deadline:
-        state = table_state(frame)
-        row_count = int(state.get("rowCount") or 0)
-        last_rows = row_count
-
-        sig = (
-            state.get("rowCount"),
-            state.get("paginator"),
-            state.get("firstProntuario"),
-            state.get("firstNome"),
-            state.get("emptyMessage"),
-            state.get("loadingVisible"),
-        )
-
-        if sig != last_sig:
-            last_sig = sig
-            stable_since = time.time()
-        else:
-            ready_surface = bool(state.get("tbodyExists"))
-            done_loading = not bool(state.get("loadingVisible"))
-            stable_for = (time.time() - stable_since) * 1000 if stable_since else 0
-
-            if ready_surface and done_loading and stable_for >= min_stable_ms:
-                return row_count
-
-        page.wait_for_timeout(350)
-
-    return last_rows
-
-
-def extract_current_page(frame: Frame) -> list[dict[str, str]]:
-    rows = frame.evaluate(
-        """
-        () => {
-            const tbody = document.querySelector('[id="tabelaCensoDiario:resultList_data"]');
-            if (!tbody) return [];
-
-            const getSpan = (row, suffix) => {
-                const span = row.querySelector('span[id$="' + suffix + '"]');
-                return (span?.textContent || '').replace(/\\u00a0/g, '').replace(/\\s+/g, ' ').trim();
-            };
-
-            const out = [];
-            for (const tr of tbody.querySelectorAll('tr')) {
-                let qrt = getSpan(tr, 'outQrtoLto');
-                if (!qrt) qrt = getSpan(tr, 'outQrtoLtoSpacer');
-
-                const p = {
-                    qrt_leito: qrt,
-                    prontuario: getSpan(tr, 'outProntuario'),
-                    nome: getSpan(tr, 'outNomeSituacao'),
-                    esp: getSpan(tr, 'outSiglaEsp'),
-                };
-
-                if (p.prontuario || p.nome) out.push(p);
-            }
-            return out;
-        }
-        """
-    )
-    return rows if isinstance(rows, list) else []
-
-
-def paginator_state(frame: Frame) -> dict[str, str | bool]:
-    return frame.evaluate(
-        """
-        () => {
-            const active = document.querySelector('.ui-paginator-page.ui-state-active');
-            const next = document.querySelector('.ui-paginator-next');
-            const current = document.querySelector('.ui-paginator-current');
-
-            const nextDisabled = !next || (next.className || '').includes('ui-state-disabled') || next.getAttribute('aria-disabled') === 'true';
-            return {
-                page: (active?.textContent || '').trim(),
-                current: (current?.textContent || '').replace(/\\s+/g, ' ').trim(),
-                hasNext: !nextDisabled,
-            };
-        }
-        """
-    )
-
-
-def click_next_page(frame: Frame, page: Page, timeout_ms: int = 15000) -> bool:
-    before = paginator_state(frame)
-    if not before.get("hasNext"):
-        return False
-
-    clicked = frame.evaluate(
-        """
-        () => {
-            const next = document.querySelector('.ui-paginator-next');
-            if (!next) return false;
-            const disabled = (next.className || '').includes('ui-state-disabled') || next.getAttribute('aria-disabled') === 'true';
-            if (disabled) return false;
-            next.click();
-            return true;
-        }
-        """
-    )
-    if not clicked:
-        return False
-
-    wait_ajax_idle(frame, page, timeout_ms=timeout_ms)
-
-    # Espera troca de página ativa
-    deadline = time.time() + timeout_ms / 1000
-    while time.time() < deadline:
-        now = paginator_state(frame)
-        if now.get("page") != before.get("page"):
-            return True
-        page.wait_for_timeout(250)
-
-    return True
-
-
-def extract_all_pages(frame: Frame, page: Page, max_pages: int = 60) -> list[dict[str, str]]:
-    all_rows: list[dict[str, str]] = []
-    seen: set[str] = set()
-
-    for _ in range(max_pages):
-        rows = extract_current_page(frame)
-        for r in rows:
-            key = f"{r.get('prontuario','')}|{r.get('nome','')}|{r.get('qrt_leito','')}"
-            if key not in seen:
-                seen.add(key)
-                all_rows.append(r)
-
-        state = paginator_state(frame)
-        if state.get("current"):
-            print(f"    paginador: {state.get('current')}")
-
-        if not click_next_page(frame, page):
-            break
-
-    return all_rows
-
-
 def get_current_setor_info(frame: Frame) -> dict[str, str]:
     """Extract current sector code and full name from the results page."""
     return frame.evaluate(
@@ -512,33 +280,183 @@ def get_current_setor_info(frame: Frame) -> dict[str, str]:
     )
 
 
+# ── XLSX export helpers ─────────────────────────────────────────────
+
+
+def export_setor_xlsx(frame: Frame, page: Page) -> Path:
+    """Clica em Exportar para Arquivo → XLS (Tudo) e retorna o path do XLSX baixado.
+
+    O arquivo é baixado para o diretório temporário do navegador.
+    Retorna o caminho do arquivo no disco.
+    """
+    # Clica no botão "Exportar para Arquivo"
+    export_btn = frame.get_by_role("button", name="Exportar para Arquivo")
+    if not safe_click(export_btn, "Exportar para Arquivo", timeout=15000):
+        raise RuntimeError("Não foi possível clicar em Exportar para Arquivo.")
+
+    page.wait_for_timeout(500)
+
+    # Prepara o download e clica em "XLS (Tudo)"
+    with page.expect_download(timeout=120000) as download_info:
+        xls_link = frame.locator("a").filter(has_text="XLS (Tudo)")
+        xls_link.first.click(timeout=10000)
+
+    download = download_info.value
+    download_path = download.path()
+    if download_path is None:
+        raise RuntimeError("Download não produziu arquivo no disco.")
+
+    print(f"    [i] XLSX baixado: {download.suggested_filename} ({download_path.stat().st_size} bytes)")
+    return download_path
+
+
+def parse_setor_xlsx(
+    xlsx_path: Path,
+    setor_codigo: str,
+    setor_nome: str,
+) -> list[dict[str, Any]]:
+    """Parseia um XLSX exportado do AGHU e retorna lista de pacientes.
+
+    Mapeamento de colunas do AGHU:
+        Qrt/Leito → qrt_leito
+        Prontuário → prontuario
+        Nome/Situação → nome
+        Idade → idade
+        Dt Int → dt_int (DD/MM)
+        Esp → esp
+        Médico → medico
+        Dt Mvt → dt_mvt
+        Alta → alta
+        Origem → origem
+        Tempo → tempo (numérico)
+        Convênio → convenio
+        Transferência → transferencia
+    """
+    wb = load_workbook(xlsx_path, read_only=True, data_only=True)
+    ws = wb.active
+    if ws is None:
+        raise RuntimeError("XLSX sem sheet ativa.")
+
+    rows_iter = ws.iter_rows(values_only=True)
+    headers = [str(h).strip() if h else "" for h in next(rows_iter)]
+
+    # Build column index mapping
+    col_map: dict[str, int] = {}
+    col_aliases = {
+        "Qrt/Leito": "qrt_leito",
+        "Prontuário": "prontuario",
+        "Prontuario": "prontuario",
+        "Nome/Situação": "nome",
+        "Nome": "nome",
+        "Idade": "idade",
+        "Dt Int": "dt_int",
+        "Esp": "esp",
+        "Médico": "medico",
+        "Dt Mvt": "dt_mvt",
+        "Alta": "alta",
+        "Origem": "origem",
+        "Tempo": "tempo",
+        "Convênio": "convenio",
+        "ConvÃªnio": "convenio",
+        "Transferência": "transferencia",
+    }
+
+    for i, h in enumerate(headers):
+        if h in col_aliases:
+            col_map[col_aliases[h]] = i
+
+    required = {"qrt_leito", "prontuario", "nome"}
+    missing = required - set(col_map.keys())
+    if missing:
+        print(f"    [A] Colunas encontradas: {headers}")
+        raise ValueError(f"Colunas obrigatórias ausentes no XLSX: {missing}")
+
+    pacientes: list[dict[str, Any]] = []
+    for row in rows_iter:
+        prontuario = str(row[col_map["prontuario"]]).strip() if col_map["prontuario"] < len(row) and row[col_map["prontuario"]] is not None else ""
+        nome = str(row[col_map["nome"]]).strip() if col_map["nome"] < len(row) and row[col_map["nome"]] is not None else ""
+
+        if not prontuario and not nome:
+            continue
+
+        qrt_leito = str(row[col_map["qrt_leito"]]).strip() if col_map["qrt_leito"] < len(row) and row[col_map["qrt_leito"]] is not None else ""
+
+        dt_int = ""
+        if "dt_int" in col_map and col_map["dt_int"] < len(row) and row[col_map["dt_int"]] is not None:
+            dt_int = str(row[col_map["dt_int"]]).strip()
+
+        tempo = None
+        if "tempo" in col_map and col_map["tempo"] < len(row) and row[col_map["tempo"]] is not None:
+            val = row[col_map["tempo"]]
+            try:
+                tempo = int(float(val))
+            except (ValueError, TypeError):
+                pass
+
+        esp = str(row[col_map["esp"]]).strip() if col_map["esp"] < len(row) and row[col_map["esp"]] is not None else ""
+
+        idade = ""
+        if "idade" in col_map and col_map["idade"] < len(row) and row[col_map["idade"]] is not None:
+            idade = str(int(float(row[col_map["idade"]]))) if isinstance(row[col_map["idade"]], (int, float)) else str(row[col_map["idade"]]).strip()
+
+        convenio = ""
+        if "convenio" in col_map and col_map["convenio"] < len(row) and row[col_map["convenio"]] is not None:
+            convenio = str(row[col_map["convenio"]]).strip()
+
+        pacientes.append({
+            "setor_codigo": setor_codigo,
+            "setor": setor_nome,
+            "qrt_leito": qrt_leito,
+            "prontuario": prontuario,
+            "nome": nome,
+            "esp": esp,
+            "dt_int": dt_int,
+            "tempo": tempo,
+            "idade": idade,
+            "convenio": convenio,
+        })
+
+    wb.close()
+    return pacientes
+
+
+# ── Output helpers ──────────────────────────────────────────────────
+
+
 def save_results(results: list[dict], csv_only: bool = False) -> tuple[Path, Path | None]:
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
 
     json_path = None
-    csv_path = DOWNLOADS_DIR / f"censo-todos-pacientes-slim-{ts}.csv"
+    csv_path = DOWNLOADS_DIR / f"censo-todos-pacientes-xlsx-{ts}.csv"
 
     if not csv_only:
-        json_path = DOWNLOADS_DIR / f"censo-todos-pacientes-slim-{ts}.json"
+        json_path = DOWNLOADS_DIR / f"censo-todos-pacientes-xlsx-{ts}.json"
         json_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
 
     with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["setor_codigo", "setor", "qrt_leito", "prontuario", "nome", "esp"])
+        fieldnames = [
+            "setor_codigo", "setor", "qrt_leito", "prontuario", "nome", "esp",
+            "dt_int", "tempo", "idade", "convenio",
+        ]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         for entry in results:
             setor = entry.get("setor", "")
             for p in entry.get("pacientes", []):
-                w.writerow(
-                    {
-                        "setor_codigo": entry.get("setor_codigo", ""),
-                        "setor": setor,
-                        "qrt_leito": p.get("qrt_leito", ""),
-                        "prontuario": p.get("prontuario", ""),
-                        "nome": p.get("nome", ""),
-                        "esp": p.get("esp", ""),
-                    }
-                )
+                row = {
+                    "setor_codigo": entry.get("setor_codigo", ""),
+                    "setor": setor,
+                    "qrt_leito": p.get("qrt_leito", ""),
+                    "prontuario": p.get("prontuario", ""),
+                    "nome": p.get("nome", ""),
+                    "esp": p.get("esp", ""),
+                    "dt_int": p.get("dt_int", ""),
+                    "tempo": p.get("tempo", ""),
+                    "idade": p.get("idade", ""),
+                    "convenio": p.get("convenio", ""),
+                }
+                w.writerow(row)
 
     return json_path, csv_path
 
@@ -547,14 +465,17 @@ def save_debug(page: Page) -> None:
     DEBUG_DIR.mkdir(exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
     try:
-        page.screenshot(path=str(DEBUG_DIR / f"censo-slim-{ts}.png"), full_page=True)
-        (DEBUG_DIR / f"censo-slim-{ts}.html").write_text(page.content(), encoding="utf-8")
+        page.screenshot(path=str(DEBUG_DIR / f"censo-xlsx-{ts}.png"), full_page=True)
+        (DEBUG_DIR / f"censo-xlsx-{ts}.html").write_text(page.content(), encoding="utf-8")
         frame = page.frame(name=CENSO_FRAME_NAME)
         if frame:
-            (DEBUG_DIR / f"censo-slim-{ts}-iframe.html").write_text(frame.content(), encoding="utf-8")
-        print(f"[i] Debug salvo em debug/censo-slim-{ts}.*")
+            (DEBUG_DIR / f"censo-xlsx-{ts}-iframe.html").write_text(frame.content(), encoding="utf-8")
+        print(f"[i] Debug salvo em debug/censo-xlsx-{ts}.*")
     except Exception as e:
         print(f"[!] Falha ao salvar debug: {e}")
+
+
+# ── Main flow ───────────────────────────────────────────────────────
 
 
 def run(
@@ -564,12 +485,8 @@ def run(
     headless: bool,
     max_setores: int,
     pause_ms: int,
-    table_timeout_ms: int,
-    search_retries: int,
     csv_only: bool = False,
 ) -> None:
-    global DOWNLOADS_DIR  # noqa: PLW0603
-
     with sync_playwright() as pw:
         browser = context = page = None
         try:
@@ -578,7 +495,6 @@ def run(
             context = browser.new_context(ignore_https_errors=True)
             page = context.new_page()
             page.set_default_timeout(DEFAULT_TIMEOUT_MS)
-            page.set_default_navigation_timeout(DEFAULT_TIMEOUT_MS)
 
             print(f"[i] Acessando {source_system_url}...")
             page.goto(source_system_url)
@@ -617,46 +533,42 @@ def run(
 
                     page.wait_for_timeout(pause_ms)
 
-                    linhas = 0
-                    pacientes: list[dict[str, str]] = []
-                    tentativas = max(0, search_retries) + 1
                     setor_codigo = ""
                     setor_nome_completo = setor
 
-                    for tentativa in range(1, tentativas + 1):
-                        if tentativa > 1:
-                            print(f"    [i] nova tentativa de pesquisa ({tentativa}/{tentativas})...")
+                    if not click_pesquisar(frame):
+                        raise RuntimeError("falha no clique de pesquisar")
 
-                        before = table_state(frame)
-                        if not click_pesquisar(frame):
-                            raise RuntimeError("falha no clique de pesquisar")
+                    # Extrair código e nome completo após pesquisar
+                    setor_info = get_current_setor_info(frame)
+                    setor_codigo = setor_info.get("codigo", "")
+                    setor_nome_completo = setor_info.get("nome") or setor
 
-                        # Extrair código e nome completo APÓS pesquisar (só então aparecem)
-                        if tentativa == 1:
-                            setor_info = get_current_setor_info(frame)
-                            setor_codigo = setor_info.get("codigo", "")
-                            setor_nome_completo = setor_info.get("nome") or setor
+                    # Aguarda a tabela carregar antes de exportar
+                    wait_ajax_idle(frame, page, timeout_ms=60000)
+                    page.wait_for_timeout(1000)
 
-                        wait_table_change(frame, page, before, timeout_ms=20000)
-                        wait_ajax_idle(frame, page, timeout_ms=max(45000, min(table_timeout_ms, 120000)))
-                        linhas = wait_table_ready(frame, page, timeout_ms=table_timeout_ms)
-                        estado = table_state(frame)
+                    # Exporta XLSX
+                    xlsx_path = export_setor_xlsx(frame, page)
 
-                        print(f"    linhas detectadas: {linhas}")
-                        pacientes = extract_all_pages(frame, page)
-                        print(f"    pacientes extraídos: {len(pacientes)}")
+                    # Parseia o XLSX
+                    pacientes = parse_setor_xlsx(xlsx_path, setor_codigo, setor_nome_completo)
+                    print(f"    pacientes extraídos: {len(pacientes)}")
 
-                        # Aceita resultado quando há pacientes ou quando a tabela sinaliza vazio explícito.
-                        if pacientes or bool(estado.get("emptyMessage")):
-                            break
+                    results.append({
+                        "setor_codigo": setor_codigo,
+                        "setor": setor_nome_completo,
+                        "pacientes": pacientes,
+                    })
 
-                        if tentativa < tentativas:
-                            print("    [!] resultado suspeito (0 pacientes sem mensagem explícita de vazio).")
-
-                    results.append({"setor_codigo": setor_codigo, "setor": setor_nome_completo, "pacientes": pacientes})
                 except Exception as e:
                     print(f"    [ERRO] {e}")
-                    results.append({"setor_codigo": "", "setor": setor, "pacientes": [], "erro": str(e)})
+                    results.append({
+                        "setor_codigo": "",
+                        "setor": setor,
+                        "pacientes": [],
+                        "erro": str(e),
+                    })
 
             json_path, csv_path = save_results(results, csv_only=csv_only)
 
@@ -687,7 +599,6 @@ def run(
 def main() -> None:
     args = parse_args()
 
-    # Respect --output-dir if given
     if args.output_dir:
         global DOWNLOADS_DIR  # noqa: PLW0603
         DOWNLOADS_DIR = Path(args.output_dir)
@@ -699,8 +610,6 @@ def main() -> None:
         headless=args.headless,
         max_setores=args.max_setores,
         pause_ms=args.pause_ms,
-        table_timeout_ms=args.table_timeout_ms,
-        search_retries=args.search_retries,
         csv_only=args.csv_only,
     )
 
