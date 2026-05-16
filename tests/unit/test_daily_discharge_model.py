@@ -43,34 +43,61 @@ class TestDailyDischargeCountModel:
 class TestDischargeRecordModel:
     """Tests for DischargeRecord model with leito and especialidade."""
 
-    def test_create_with_leito_especialidade(self):
+    def test_create_with_alta_saida(self):
         daily = DailyDischargeCount.objects.create(
             date=date(2026, 5, 15), count=3,
         )
+        from datetime import datetime
+        alta = datetime(2026, 5, 15, 10, 8)
+        saida = datetime(2026, 5, 15, 11, 5)
         record = DischargeRecord.objects.create(
             daily_count=daily,
-            date=date(2026, 5, 15),
+            alta_em=alta,
+            saida_em=saida,
             prontuario="1234567",
             nome="PACIENTE TESTE",
             data_internacao="10/05/2026",
             leito="UG01A",
             especialidade="NEF",
         )
+        assert record.alta_em == alta
+        assert record.saida_em == saida
         assert record.leito == "UG01A"
         assert record.especialidade == "NEF"
         assert record.prontuario == "1234567"
 
-    def test_str_includes_fields(self):
+    def test_alta_saida_nullable(self):
         daily = DailyDischargeCount.objects.create(
-            date=date(2026, 5, 15), count=2,
+            date=date(2026, 5, 15), count=1,
         )
         record = DischargeRecord.objects.create(
             daily_count=daily,
-            date=date(2026, 5, 15),
             prontuario="7654321",
-            nome="OUTRO PACIENTE",
-            leito="A01",
-            especialidade="CLM",
+            nome="PACIENTE SEM ALTA",
+            data_internacao="10/05/2026",
         )
+        assert record.alta_em is None
+        assert record.saida_em is None
         assert "7654321" in str(record)
-        assert "OUTRO PACIENTE" in str(record)
+
+    def test_unique_together_constraint(self):
+        daily = DailyDischargeCount.objects.create(
+            date=date(2026, 5, 15), count=2,
+        )
+        DischargeRecord.objects.create(
+            daily_count=daily,
+            alta_em=None,
+            prontuario="9999999",
+            nome="TESTE",
+            data_internacao="10/05/2026",
+        )
+        from django.db.utils import IntegrityError
+        import pytest
+        with pytest.raises(IntegrityError):
+            DischargeRecord.objects.create(
+                daily_count=daily,
+                alta_em=None,
+                prontuario="9999999",
+                nome="TESTE DUPLICADO",
+                data_internacao="10/05/2026",
+            )

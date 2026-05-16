@@ -1,12 +1,13 @@
-"""Extract discharged patients from the source system.
+"""Extract discharged patients from source system as XLS and upsert records.
 
-Supports date selection so any historical date can be queried, not only today.
-When --date is omitted, defaults to today.
+Downloads an XLS report from "Pesquisar Pacientes Com Alta" for a given date,
+parses it with openpyxl, and upserts DischargeRecord rows by
+(prontuario, data_internacao).  Fields that were empty in a previous run
+(e.g. saida_em) are updated when they become available.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import tempfile
@@ -18,7 +19,6 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from apps.discharges.models import DailyDischargeCount, DischargeRecord
-from apps.discharges.services import process_discharges
 from apps.ingestion.extractors.subprocess_utils import (
     SubprocessTimeoutError,
     run_subprocess,
@@ -26,9 +26,98 @@ from apps.ingestion.extractors.subprocess_utils import (
 from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
 
 
+def _parse_xls_row(
+    row: tuple,
+) -> dict[str, Any] | None:
+    """Convert an openpyxl row tuple into a patient dict.
+
+    Column layout (0-indexed, from the XLS):
+      A(0): JSF internal ID   → ignored
+      B(1): Prontuario         → float, convert to int → str
+      C(2): Nome               → str
+      D(3): Internacao         → DD/MM/YYYY
+      E(4): Equipe             → ignored
+      F(5): Esp                → str
+      G(6): Alta Medica        → DD/MM/YYYY HH:MM or ''
+      H(7): Local              → 'L:UN08H' or 'U:0 T'
+      I(8): Saida              → DD/MM/YYYY HH:MM or ''
+    """
+    if len(row) < 9:
+        return None
+
+    pront_raw = row[1]
+    nome = (row[2] or "").strip()
+    data_int = (row[3] or "").strip()
+    esp = (row[5] or "").strip()
+    alta_str = (row[6] or "").strip()
+    local_raw = (row[7] or "").strip()
+    saida_str = (row[8] or "").strip()
+
+    # Prontuario
+    if pront_raw is None:
+        return None
+    try:
+        prontuario = str(int(float(pront_raw)))
+    except (ValueError, TypeError):
+        prontuario = str(pront_raw).strip()
+
+    if not prontuario:
+        return None
+
+    # Leito: remove "L:" prefix; "U:0 T" → empty
+    leito = ""
+    if local_raw.startswith("L:"):
+        leito = local_raw[2:].strip()
+    elif local_raw in ("U:0 T",):
+        leito = ""  # unidade inteira, leito nao especificado
+
+    # Datetime fields
+    alta_em = _parse_datetime(alta_str)
+    saida_em = _parse_datetime(saida_str)
+
+    return {
+        "prontuario": prontuario,
+        "nome": nome,
+        "data_internacao": data_int,
+        "especialidade": esp,
+        "leito": leito,
+        "alta_em": alta_em,
+        "saida_em": saida_em,
+    }
+
+
+def _make_aware(dt: datetime | None) -> datetime | None:
+    """Convert a naive datetime to timezone-aware."""
+    if dt is None:
+        return None
+    if timezone.is_naive(dt):
+        return timezone.make_aware(dt)
+    return dt
+
+
+def _patient_for_raw(p: dict) -> dict:
+    """Build a JSON-serializable copy of a patient dict."""
+    d = dict(p)
+    for key in ("alta_em", "saida_em"):
+        val = d.get(key)
+        if isinstance(val, datetime):
+            d[key] = val.isoformat()
+    return d
+
+
+def _parse_datetime(raw: str) -> datetime | None:
+    """Parse 'DD/MM/YYYY HH:MM' or return None."""
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%d/%m/%Y %H:%M")
+    except (ValueError, OverflowError):
+        return None
+
+
 class Command(BaseCommand):
     help = (
-        "Extract discharges from source system and update Admission records. "
+        "Extract discharge XLS from source system and upsert DischargeRecord. "
         "Use --date DD/MM/AAAA for historical dates."
     )
 
@@ -71,6 +160,7 @@ class Command(BaseCommand):
             raw_date = ref_date.strftime("%d/%m/%Y")
 
         ref_date_iso = ref_date.isoformat()
+        safe_date = raw_date.replace("/", "-")
 
         self.stdout.write(f"Extracting discharges for {raw_date}...")
 
@@ -80,12 +170,12 @@ class Command(BaseCommand):
         source_url = getattr(settings, "SOURCE_SYSTEM_URL", "") or os.getenv(
             "SOURCE_SYSTEM_URL", ""
         )
-        username = getattr(
-            settings, "SOURCE_SYSTEM_USERNAME", ""
-        ) or os.getenv("SOURCE_SYSTEM_USERNAME", "")
-        password = getattr(
-            settings, "SOURCE_SYSTEM_PASSWORD", ""
-        ) or os.getenv("SOURCE_SYSTEM_PASSWORD", "")
+        username = getattr(settings, "SOURCE_SYSTEM_USERNAME", "") or os.getenv(
+            "SOURCE_SYSTEM_USERNAME", ""
+        )
+        password = getattr(settings, "SOURCE_SYSTEM_PASSWORD", "") or os.getenv(
+            "SOURCE_SYSTEM_PASSWORD", ""
+        )
 
         if not all([source_url, username, password]):
             self.stderr.write("Missing source system credentials in settings.")
@@ -131,205 +221,221 @@ class Command(BaseCommand):
                 password,
                 "--date",
                 raw_date,
-                "--reference-date",
-                ref_date_iso,
             ]
+            cmd.extend(["--reference-date", ref_date_iso])
             if headless:
                 cmd.append("--headless")
 
-            self.stdout.write("Running discharge extraction by date...")
+            self.stdout.write("Running XLS discharge extraction...")
             try:
-                result = run_subprocess(
-                    cmd,
-                    timeout=600,
-                    check=False,
-                )
+                result = run_subprocess(cmd, timeout=600, check=False)
             except SubprocessTimeoutError as exc:
                 self._record_stage(
-                    run,
-                    "discharge_extraction",
-                    "failed",
-                    ext_stage_start,
+                    run, "discharge_extraction", "failed", ext_stage_start,
                     details_json={"error": str(exc)},
                 )
-                self._mark_run_failed(
-                    run,
-                    str(exc),
-                    failure_reason="timeout",
-                    timed_out=True,
-                )
+                self._mark_run_failed(run, str(exc), "timeout", timed_out=True)
                 self.stderr.write(f"Discharge extraction timed out: {exc}")
                 sys.exit(1)
             except Exception as exc:
                 self._record_stage(
-                    run,
-                    "discharge_extraction",
-                    "failed",
-                    ext_stage_start,
+                    run, "discharge_extraction", "failed", ext_stage_start,
                     details_json={"error": str(exc)},
                 )
-                self._mark_run_failed(
-                    run,
-                    str(exc),
-                    failure_reason="unexpected_exception",
-                )
+                self._mark_run_failed(run, str(exc), "unexpected_exception")
                 self.stderr.write(f"Discharge extraction failed: {exc}")
                 sys.exit(1)
 
             if result.returncode != 0:
-                err_msg = (
-                    result.stderr[:500] if result.stderr else "Unknown error"
-                )
+                err_msg = result.stderr[:500] if result.stderr else "Unknown error"
                 self._record_stage(
-                    run,
-                    "discharge_extraction",
-                    "failed",
-                    ext_stage_start,
+                    run, "discharge_extraction", "failed", ext_stage_start,
                     details_json={"returncode": result.returncode},
                 )
-                self._mark_run_failed(
-                    run,
-                    err_msg,
-                    failure_reason="source_unavailable",
-                )
+                self._mark_run_failed(run, err_msg, "source_unavailable")
                 self.stderr.write(result.stderr)
                 sys.exit(1)
 
             self._record_stage(
-                run,
-                "discharge_extraction",
-                "succeeded",
-                ext_stage_start,
+                run, "discharge_extraction", "succeeded", ext_stage_start,
             )
 
-            # -- Stage: discharge_persistence (process JSON) --------------
+            # -- Stage: discharge_persistence (XLS parse + upsert) --------
             persist_stage_start = timezone.now()
 
-            # Find JSON output
-            safe_date = raw_date.replace("/", "-")
-            json_files = sorted(
-                tmpdir_path.glob(f"discharges-{safe_date}-*.json"),
+            xls_files = sorted(
+                tmpdir_path.glob(f"altas-{safe_date}-*.xlsx"),
                 key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
-            if not json_files:
+            if not xls_files:
                 metrics = {
-                    "total_pdf": 0,
-                    "discharge_set": 0,
-                    "patient_not_found": 0,
-                    "admission_not_found": 0,
-                    "already_discharged": 0,
-                    "recovered_patients_created": 0,
-                    "recovered_admissions_created": 0,
-                    "demographics_runs_enqueued": 0,
+                    "total_xls": 0, "created": 0, "updated": 0, "errors": 0,
                 }
                 self._record_stage(
-                    run,
-                    "discharge_persistence",
-                    "succeeded",
-                    persist_stage_start,
-                    details_json=metrics,
+                    run, "discharge_persistence", "succeeded",
+                    persist_stage_start, details_json=metrics,
                 )
                 run.status = "succeeded"
                 run.finished_at = timezone.now()
                 run.save()
-
                 DailyDischargeCount.objects.update_or_create(
-                    date=ref_date,
-                    defaults={"count": 0, "raw_data": []},
+                    date=ref_date, defaults={"count": 0, "raw_data": []},
                 )
-
-                self.stdout.write(
-                    self.style.SUCCESS(
-                        f"No discharges found for {raw_date}."
-                    )
-                )
+                self.stdout.write(self.style.SUCCESS(
+                    f"No XLS found for {raw_date}."
+                ))
                 return
 
-            json_path = json_files[0]
-            self.stdout.write(f"  JSON output: {json_path}")
+            xls_path = xls_files[0]
+            self.stdout.write(f"  XLS output: {xls_path}")
 
             try:
-                data = json.loads(json_path.read_text(encoding="utf-8"))
-                patients = data.get("pacientes", [])
-                self.stdout.write(
-                    f"  Patients in PDF: {len(patients)}"
-                )
+                import openpyxl  # noqa: PLC0415
 
-                # Reconcile admissions
-                metrics = process_discharges(patients)
-                self.stdout.write(
-                    f"  Discharge set: {metrics['discharge_set']} | "
-                    f"Already discharged: {metrics['already_discharged']} | "
-                    f"Patient not found: {metrics['patient_not_found']} | "
-                    f"Admission not found: {metrics['admission_not_found']} | "
-                    f"Recovered patients: {metrics['recovered_patients_created']} | "
-                    f"Recovered admissions: {metrics['recovered_admissions_created']} | "
-                    f"Demographics enqueued: {metrics['demographics_runs_enqueued']}"
-                )
+                wb = openpyxl.load_workbook(xls_path, read_only=True)
+                ws = wb.active
 
-                # Persist DailyDischargeCount with raw_data
-                daily_count, _created = (
+                rows = list(ws.iter_rows(values_only=True))
+                wb.close()
+
+                if not rows:
+                    self.stdout.write("  XLS is empty.")
+                    metrics = {
+                        "total_xls": 0, "created": 0, "updated": 0, "errors": 0,
+                    }
+                    self._record_stage(
+                        run, "discharge_persistence", "succeeded",
+                        persist_stage_start, details_json=metrics,
+                    )
+                    run.status = "succeeded"
+                    run.finished_at = timezone.now()
+                    run.save()
                     DailyDischargeCount.objects.update_or_create(
-                        date=ref_date,
-                        defaults={
-                            "count": len(patients),
-                            "raw_data": patients,
-                        },
+                        date=ref_date, defaults={"count": 0, "raw_data": []},
                     )
-                )
+                    return
+
+                # Skip header row (first row)
+                data_rows = rows[1:] if rows else []
+                patients: list[dict[str, Any]] = []
+                parse_errors = 0
+
+                for row in data_rows:
+                    parsed = _parse_xls_row(row)
+                    if parsed is None:
+                        parse_errors += 1
+                        continue
+                    patients.append(parsed)
+
                 self.stdout.write(
-                    f"  DailyDischargeCount updated: {ref_date} -> "
-                    f"{len(patients)} altas"
+                    f"  Rows: {len(data_rows)} | "
+                    f"Parsed: {len(patients)} | "
+                    f"Errors: {parse_errors}"
                 )
 
-                # Persist individual DischargeRecord rows
-                daily_count.records.all().delete()
+                # Upsert DischargeRecords
+                created = 0
+                updated = 0
+
                 for p in patients:
-                    DischargeRecord.objects.create(
-                        daily_count=daily_count,
-                        date=ref_date,
-                        prontuario=p.get("prontuario", ""),
-                        nome=p.get("nome", ""),
-                        data_internacao=p.get("data_internacao", ""),
-                        leito=p.get("leito", ""),
-                        especialidade=p.get("especialidade", ""),
-                    )
+                    prontuario = p["prontuario"]
+                    data_int = p["data_internacao"]
+
+                    existing = DischargeRecord.objects.filter(
+                        prontuario=prontuario,
+                        data_internacao=data_int,
+                    ).first()
+
+                    # Make datetimes timezone-aware
+                    alta_em = _make_aware(p["alta_em"])
+                    saida_em = _make_aware(p["saida_em"])
+
+                    if existing:
+                        changed = False
+                        for field, new_val in (
+                            ("alta_em", alta_em),
+                            ("saida_em", saida_em),
+                            ("leito", p["leito"]),
+                            ("especialidade", p["especialidade"]),
+                            ("nome", p["nome"]),
+                        ):
+                            old_val = getattr(existing, field)
+                            if new_val is not None and new_val != old_val:
+                                setattr(existing, field, new_val)
+                                changed = True
+                        if changed:
+                            existing.save()
+                            updated += 1
+                    else:
+                        # Need a daily_count — find or create by alta date
+                        count_date = (
+                            alta_em.date()
+                            if alta_em
+                            else ref_date
+                        )
+                        daily_count, _ = (
+                            DailyDischargeCount.objects.get_or_create(
+                                date=count_date,
+                                defaults={"count": 0, "raw_data": []},
+                            )
+                        )
+                        DischargeRecord.objects.create(
+                            daily_count=daily_count,
+                            alta_em=alta_em,
+                            saida_em=saida_em,
+                            prontuario=prontuario,
+                            nome=p["nome"],
+                            data_internacao=data_int,
+                            leito=p["leito"],
+                            especialidade=p["especialidade"],
+                        )
+                        created += 1
+
+                metrics = {
+                    "total_xls": len(patients),
+                    "created": created,
+                    "updated": updated,
+                    "errors": parse_errors,
+                }
+
                 self.stdout.write(
-                    f"  DischargeRecord: {len(patients)} registros individuais."
+                    f"  Created: {created} | Updated: {updated} | "
+                    f"Errors: {parse_errors}"
                 )
+
+                # Persist DailyDischargeCount with JSON-serializable raw_data
+                raw_patients = [_patient_for_raw(p) for p in patients]
+                DailyDischargeCount.objects.update_or_create(
+                    date=ref_date,
+                    defaults={
+                        "count": len(patients),
+                        "raw_data": raw_patients,
+                    },
+                )
+
             except Exception as exc:
                 self._record_stage(
-                    run,
-                    "discharge_persistence",
-                    "failed",
-                    persist_stage_start,
-                    details_json={"error": str(exc)},
+                    run, "discharge_persistence", "failed",
+                    persist_stage_start, details_json={"error": str(exc)},
                 )
-                self._mark_run_failed(
-                    run, str(exc), failure_reason="unexpected_exception"
-                )
+                self._mark_run_failed(run, str(exc), "unexpected_exception")
                 self.stderr.write(f"Discharge processing failed: {exc}")
                 sys.exit(1)
 
             self._record_stage(
-                run,
-                "discharge_persistence",
-                "succeeded",
-                persist_stage_start,
-                details_json=metrics,
+                run, "discharge_persistence", "succeeded",
+                persist_stage_start, details_json=metrics,
             )
 
             run.status = "succeeded"
             run.finished_at = timezone.now()
             run.save()
 
-            self.stdout.write(
-                self.style.SUCCESS(
-                    f"Discharge extraction by date complete. "
-                    f"{metrics['discharge_set']} discharges set."
-                )
-            )
+            self.stdout.write(self.style.SUCCESS(
+                f"Discharge extraction complete. "
+                f"{created} created, {updated} updated."
+            ))
 
     # ------------------------------------------------------------------
     # Internal helpers

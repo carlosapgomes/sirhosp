@@ -74,11 +74,11 @@ class Command(BaseCommand):
             / "discharges"
         )
         sys.path.insert(0, str(automation_discharges_dir))
-        extract_discharges = importlib.import_module("extract_discharges")
+        pdf_utils = importlib.import_module("pdf_utils")
 
         self.stdout.write(f"Extracting patients from {pdf_path}...")
         try:
-            patients = extract_discharges.extract_patients_from_pdf(pdf_path)
+            patients = pdf_utils.extract_patients_from_pdf(pdf_path)
         except Exception as exc:
             self.stderr.write(f"Failed to extract patients: {exc}")
             sys.exit(1)
@@ -133,10 +133,12 @@ class Command(BaseCommand):
         for p in patients:
             DischargeRecord.objects.create(
                 daily_count=daily_count,
-                date=discharge_day,
+                alta_em=discharge_day,
                 prontuario=p.get("prontuario", ""),
                 nome=p.get("nome", ""),
                 data_internacao=p.get("data_internacao", ""),
+                leito=p.get("leito", ""),
+                especialidade=p.get("especialidade", ""),
             )
 
         self.stdout.write(

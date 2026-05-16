@@ -34,13 +34,20 @@ class DischargeRecord(models.Model):
         on_delete=models.CASCADE,
         related_name="records",
     )
-    date = models.DateField()
+    alta_em = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Datetime when the discharge was registered in the system.",
+    )
+    saida_em = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Datetime when the patient left the hospital/bed.",
+    )
     prontuario = models.CharField(max_length=50, blank=True, default="")
     nome = models.CharField(max_length=255, blank=True, default="")
     data_internacao = models.CharField(max_length=20, blank=True, default="")
     leito = models.CharField(
         max_length=20, blank=True, default="",
-        help_text="Bed/leito at discharge.",
+        help_text="Bed/leito at discharge (without L: prefix).",
     )
     especialidade = models.CharField(
         max_length=20, blank=True, default="",
@@ -49,13 +56,14 @@ class DischargeRecord(models.Model):
     raw_extra = models.JSONField(
         default=dict,
         blank=True,
-        help_text="Additional fields from the source PDF.",
+        help_text="Additional fields from the source.",
     )
 
     class Meta:
         ordering = ["prontuario"]
         verbose_name = "Discharge Record"
         verbose_name_plural = "Discharge Records"
+        unique_together = [("prontuario", "data_internacao")]
 
     def __str__(self) -> str:
-        return f"{self.date} {self.prontuario} — {self.nome}"
+        return f"{self.prontuario} — {self.nome} ({self.alta_em or '?'})"

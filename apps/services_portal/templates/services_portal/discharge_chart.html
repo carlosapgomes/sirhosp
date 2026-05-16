@@ -91,30 +91,146 @@
   </div>
 </div>
 {% endif %}
+
+<!-- ── Distribuicao Horaria por Especialidade ────────────────── -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header bg-white border-0">
+    <h5 class="card-title mb-1">Distribuição Horária das Altas por Especialidade</h5>
+    <p class="text-muted small mb-0">
+      Altas registradas por hora do dia, empilhadas por especialidade.
+      Especialidades com alta concentração após as 16h podem indicar
+      dificuldade na desocupação de leitos.
+    </p>
+  </div>
+  <div class="card-body">
+    <!-- Date range selector for hourly data -->
+    <form method="GET" class="row g-2 align-items-end mb-3">
+      <!-- Preserve existing ?dias= if present -->
+      {% if dias %}<input type="hidden" name="dias" value="{{ dias }}">{% endif %}
+      <div class="col-auto">
+        <label for="h_start" class="form-label small text-muted">Data inicial</label>
+        <input type="date" id="h_start" name="h_start"
+               class="form-control form-control-sm"
+               value="{{ h_start }}" style="width:160px;">
+      </div>
+      <div class="col-auto">
+        <label for="h_end" class="form-label small text-muted">Data final</label>
+        <input type="date" id="h_end" name="h_end"
+               class="form-control form-control-sm"
+               value="{{ h_end }}" style="width:160px;">
+      </div>
+      <div class="col-auto">
+        <button type="submit" class="btn btn-sm btn-outline-primary">
+          <i class="bi bi-search me-1"></i>Filtrar
+        </button>
+      </div>
+    </form>
+    {% if sorted_specialties %}
+    <div style="position: relative; height: 400px;">
+      <canvas id="hourlyStackedChart"></canvas>
+    </div>
+    {% else %}
+    <div class="text-center py-4 text-muted">
+      <i class="bi bi-clock-history" style="font-size: 2rem;"></i>
+      <p class="mt-2 small">Nenhum dado horário disponível no período.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ── Tabela Resumo por Especialidade ───────────────────────── -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header bg-white border-0">
+    <h5 class="card-title mb-1">Resumo por Especialidade</h5>
+    <p class="text-muted small mb-0">
+      Total de altas no período e proporção após as 16h.
+      Ordenado do maior percentual de altas tardias para o menor.
+    </p>
+  </div>
+  <div class="card-body p-0">
+    {% if hourly_table %}
+    <div class="table-responsive">
+      <table class="table table-hover table-sm mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Especialidade</th>
+            <th class="text-center">Total Altas</th>
+            <th class="text-center">Após 16h</th>
+            <th class="text-center">% Tardias</th>
+            <th class="d-none d-md-table-cell">Indicador</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in hourly_table %}
+          <tr>
+            <td><strong>{{ row.especialidade }}</strong></td>
+            <td class="text-center">{{ row.total }}</td>
+            <td class="text-center">{{ row.after_16 }}</td>
+            <td class="text-center">{{ row.pct }}%</td>
+            <td class="d-none d-md-table-cell">
+              {% if row.pct > 50 %}
+              <span class="badge bg-danger">Crítico</span>
+              {% elif row.pct > 30 %}
+              <span class="badge bg-warning text-dark">Atenção</span>
+              {% else %}
+              <span class="badge bg-success">OK</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center py-4 text-muted">
+      <p class="small mb-0">Nenhum dado disponível no período.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 {{ chart_data|json_script:"chart-data" }}
 {{ weekday_avg|json_script:"weekday-avg-data" }}
+{{ hour_labels|json_script:"hour-labels" }}
+{{ sorted_specialties|json_script:"hour-specialties" }}
+{{ hour_dist|json_script:"hour-dist" }}
 <script>
-  const rawData = JSON.parse(document.getElementById('chart-data').textContent);
+  'use strict';
 
-  if (rawData.labels && rawData.labels.length > 0) {
-    const ctx = document.getElementById('dischargeChart').getContext('2d');
+  function safeJSON(id, fallback) {
+    var el = document.getElementById(id);
+    if (!el) return fallback;
+    try { return JSON.parse(el.textContent); }
+    catch(e) {
+      console.warn('SIRHOSP: JSON parse error ' + id, e);
+      return fallback;
+    }
+  }
 
-    // DWI-S1: per-bar colors based on weekend flags
-    const bgColors = rawData.counts.map((_, i) => {
-      if (rawData.weekend_flags && rawData.weekend_flags[i]) {
-        const wd = rawData.weekday_short[i];
-        return wd === 'sáb' ? '#F59E0B33' : '#DC262633';
+  if (typeof Chart === 'undefined') {
+    console.error('SIRHOSP: Chart.js nao carregou');
+  } else {
+
+  /* ════════ Chart 1: Altas por Dia ════════ */
+  (function() {
+    var data = safeJSON('chart-data', {});
+    if (!data.labels || !data.labels.length) return;
+    var canvas = document.getElementById('dischargeChart');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+
+    var bgColors = data.counts.map(function(_, i) {
+      if (data.weekend_flags && data.weekend_flags[i]) {
+        return data.weekday_short[i] === 'sáb' ? '#F59E0B33' : '#DC262633';
       }
       return '#0D6EFD33';
     });
-    const bdColors = rawData.counts.map((_, i) => {
-      if (rawData.weekend_flags && rawData.weekend_flags[i]) {
-        const wd = rawData.weekday_short[i];
-        return wd === 'sáb' ? '#F59E0B' : '#DC2626';
+    var bdColors = data.counts.map(function(_, i) {
+      if (data.weekend_flags && data.weekend_flags[i]) {
+        return data.weekday_short[i] === 'sáb' ? '#F59E0B' : '#DC2626';
       }
       return '#0D6EFD';
     });
@@ -122,138 +238,109 @@
     new Chart(ctx, {
       type: 'bar',
       data: {
-        labels: rawData.labels,
+        labels: data.labels,
         datasets: [
-          {
-            label: 'Altas',
-            data: rawData.counts,
-            backgroundColor: bgColors,
-            borderColor: bdColors,
-            borderWidth: 1,
-            order: 2,
-          },
-          {
-            label: 'SMA 7 dias',
-            data: rawData.sma7,
-            type: 'line',
-            borderColor: '#0D6EFD',
-            backgroundColor: 'transparent',
-            borderWidth: 2,
-            pointRadius: 0,
-            tension: 0.3,
-            spanGaps: false,
-            order: 1,
-          },
-          {
-            label: 'EMA 7 dias',
-            data: rawData.ema7,
-            type: 'line',
-            borderColor: '#16A34A',
-            backgroundColor: 'transparent',
-            borderWidth: 2,
-            borderDash: [5, 3],
-            pointRadius: 0,
-            tension: 0.3,
-            spanGaps: false,
-            order: 1,
-          },
-          {
-            label: 'SMA 30 dias',
-            data: rawData.sma30,
-            type: 'line',
-            borderColor: '#DC2626',
-            backgroundColor: 'transparent',
-            borderWidth: 2,
-            pointRadius: 0,
-            tension: 0.3,
-            spanGaps: false,
-            order: 1,
-          },
+          { label: 'Altas', data: data.counts, backgroundColor: bgColors, borderColor: bdColors, borderWidth: 1, order: 2 },
+          { label: 'SMA 7 dias', data: data.sma7, type: 'line', borderColor: '#0D6EFD', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, spanGaps: false, order: 1 },
+          { label: 'EMA 7 dias', data: data.ema7, type: 'line', borderColor: '#16A34A', backgroundColor: 'transparent', borderWidth: 2, borderDash: [5, 3], pointRadius: 0, tension: 0.3, spanGaps: false, order: 1 },
+          { label: 'SMA 30 dias', data: data.sma30, type: 'line', borderColor: '#DC2626', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 0, tension: 0.3, spanGaps: false, order: 1 },
         ],
       },
       options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: {
-          mode: 'index',
-          intersect: false,
-        },
-        plugins: {
-          legend: {
-            display: false,
-          },
-        },
-        scales: {
-          y: {
-            beginAtZero: true,
-            ticks: {
-              stepSize: 1,
-            },
-          },
-        },
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } },
       },
     });
-  }
+  })();
 
-  // DWI-S2: Weekday average chart
-  const avgEl = document.getElementById('weekday-avg-data');
-  if (avgEl) {
-    const avgRaw = JSON.parse(avgEl.textContent);
-    if (avgRaw.values && avgRaw.values.length > 0) {
-      const avgBgColors = avgRaw.values.map((_, i) => {
-        if (i === 5) return '#F59E0B33'; // Saturday
-        if (i === 6) return '#DC262633'; // Sunday
-        return '#0D6EFD33'; // Weekday
-      });
-      const avgBdColors = avgRaw.values.map((_, i) => {
-        if (i === 5) return '#F59E0B';
-        if (i === 6) return '#DC2626';
-        return '#0D6EFD';
-      });
+  /* ════════ Chart 2: Media por Dia da Semana ════════ */
+  (function() {
+    var data = safeJSON('weekday-avg-data', {});
+    if (!data.values || !data.values.length) return;
+    var canvas = document.getElementById('weekdayAverageChart');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
 
-      const ctx2 = document.getElementById('weekdayAverageChart');
-      if (ctx2) {
-        new Chart(ctx2.getContext('2d'), {
-        type: 'bar',
-        data: {
-          labels: avgRaw.labels,
-          datasets: [{
-            label: 'Média de Altas',
-            data: avgRaw.values,
-            backgroundColor: avgBgColors,
-            borderColor: avgBdColors,
-            borderWidth: 1,
-          }],
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label: function(context) {
-                  const idx = context.dataIndex;
-                  const avg = avgRaw.values[idx];
-                  const n = avgRaw.counts[idx];
-                  return 'Média: ' + avg + ' (n=' + n + ')';
-                }
+    var bgColors = data.values.map(function(_, i) {
+      return i === 5 ? '#F59E0B33' : i === 6 ? '#DC262633' : '#0D6EFD33';
+    });
+    var bdColors = data.values.map(function(_, i) {
+      return i === 5 ? '#F59E0B' : i === 6 ? '#DC2626' : '#0D6EFD';
+    });
+
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: data.labels,
+        datasets: [{ label: 'Média de Altas', data: data.values, backgroundColor: bgColors, borderColor: bdColors, borderWidth: 1 }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                var idx = context.dataIndex;
+                return 'Média: ' + data.values[idx] + ' (n=' + data.counts[idx] + ')';
               }
             }
-          },
-          scales: {
-            y: {
-              beginAtZero: true,
-              title: {
-                display: true,
-                text: 'Média de Altas',
+          }
+        },
+        scales: { y: { beginAtZero: true, title: { display: true, text: 'Média de Altas' } } },
+      },
+    });
+  })();
+
+  /* ════════ Chart 3: Distribuicao Horaria ════════ */
+  (function() {
+    var labels = safeJSON('hour-labels', []);
+    var specialties = safeJSON('hour-specialties', []);
+    var dist = safeJSON('hour-dist', {});
+    if (!labels.length) return;
+    var canvas = document.getElementById('hourlyStackedChart');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+
+    var palette = [
+      '#4E79A7','#F28E2B','#E15759','#76B7B2','#59A14F',
+      '#EDC948','#B07AA1','#FF9DA7','#9C755F','#BAB0AC',
+      '#86BCB6','#8CD17D','#B6992D','#499894','#D37295',
+      '#F1CE63','#A0CBE8','#FFBE7D','#FF7F0E','#1F77B4',
+      '#2CA02C','#D62728','#9467BD','#8C564B','#E377C2',
+      '#7F7F7F','#BCBD22','#17BECF','#AEC7E8','#FFBB78',
+    ];
+
+    var datasets = specialties.map(function(esp, i) {
+      return { label: esp, data: dist[esp] || [], backgroundColor: palette[i % palette.length], borderWidth: 0 };
+    });
+
+    new Chart(ctx, {
+      type: 'bar',
+      data: { labels: labels, datasets: datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'nearest', axis: 'y', intersect: true },
+        plugins: {
+          legend: { position: 'top', labels: { boxWidth: 12, padding: 8, font: { size: 10 } } },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                return context.dataset.label + ': ' + context.raw;
               },
             },
           },
         },
-      });
-    }
-  }
-}
+        scales: {
+          x: { stacked: true, title: { display: true, text: 'Hora do Dia' } },
+          y: { stacked: true, beginAtZero: true, ticks: { stepSize: 1 }, title: { display: true, text: 'Número de Altas' } },
+        },
+      },
+    });
+  })();
+
+  } /* end if Chart defined */
 </script>
 {% endblock %}

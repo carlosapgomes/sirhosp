@@ -99,9 +99,9 @@ class Command(BaseCommand):
                 / "discharges"
             )
             sys.path.insert(0, str(automation_discharges_dir))
-            extract_discharges = importlib.import_module("extract_discharges")
+            pdf_utils = importlib.import_module("pdf_utils")
 
-            patients = extract_discharges.extract_patients_from_pdf(pdf_path)
+            patients = pdf_utils.extract_patients_from_pdf(pdf_path)
             return len(patients)
         except Exception:
             # Fallback: count prontuario patterns directly

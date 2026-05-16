@@ -10,15 +10,16 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 
 from django.contrib.auth.decorators import login_required
-from django.db.models import Max, Q
+from django.db.models import Count, Max, Q
+from django.db.models.functions import ExtractHour
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
 from django.utils import timezone
 
-from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord
-from apps.discharges.models import DailyDischargeCount
 from apps.admissions.models import DailyAdmissionCount
+from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord
 from apps.deaths.models import DailyDeathCount
+from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.ingestion.models import (
     CensusExecutionBatch,
     FinalRunFailure,
@@ -262,12 +263,88 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
 
     weekday_avg = _weekday_average(entries_recent)
 
+    # ── Distribuicao horaria por especialidade ─────────────────────
+    # Parse separate date range for hourly data
+    raw_hour_start = request.GET.get("h_start", "")
+    raw_hour_end = request.GET.get("h_end", "")
+
+    try:
+        h_start = datetime.strptime(raw_hour_start, "%Y-%m-%d").date() if raw_hour_start else None
+    except (ValueError, TypeError):
+        h_start = None
+
+    try:
+        h_end = datetime.strptime(raw_hour_end, "%Y-%m-%d").date() if raw_hour_end else None
+    except (ValueError, TypeError):
+        h_end = None
+
+    if not h_start:
+        h_start = today - timedelta(days=14)
+    if not h_end:
+        h_end = today
+
+    # Format for the date inputs
+    h_start_str = h_start.isoformat()
+    h_end_str = h_end.isoformat()
+
+    hourly_qs = (
+        DischargeRecord.objects
+        .filter(
+            alta_em__isnull=False,
+            alta_em__date__gte=h_start,
+            alta_em__date__lte=h_end,
+        )
+        .annotate(hora=ExtractHour("alta_em"))
+        .values("hora", "especialidade")
+        .annotate(total=Count("id"))
+        .order_by("hora", "especialidade")
+    )
+
+    # Build hour × specialty matrix
+    specialties: set[str] = set()
+    hour_data: list[dict] = list(hourly_qs)
+    for row in hour_data:
+        if row["especialidade"]:
+            specialties.add(row["especialidade"])
+
+    sorted_specialties = sorted(specialties)
+    hour_dist: dict[str, list[int]] = {esp: [0] * 24 for esp in sorted_specialties}
+    for row in hour_data:
+        esp = row["especialidade"]
+        h = row["hora"]
+        if esp and h is not None and 0 <= h <= 23:
+            hour_dist[esp][h] = row["total"]
+
+    # Hour labels
+    hour_labels = [f"{h:02d}h" for h in range(24)]
+
+    # Build table: total, after 16h, % after 16h
+    hourly_table = []
+    for esp in sorted_specialties:
+        vals = hour_dist[esp]
+        total = sum(vals)
+        after_16 = sum(vals[16:])
+        pct = round(after_16 / total * 100, 1) if total else 0.0
+        hourly_table.append({
+            "especialidade": esp,
+            "total": total,
+            "after_16": after_16,
+            "pct": pct,
+        })
+    hourly_table.sort(key=lambda r: -r["pct"])
+
     context = {
         "page_title": "Altas por Dia",
         "chart_data": chart_data,
         "weekday_avg": weekday_avg,
         "dias": dias,
         "period_options": [30, 60, 90, 180, 365],
+        "hour_labels": hour_labels,
+        "hour_dist": hour_dist,
+        "sorted_specialties": sorted_specialties,
+        "hourly_table": hourly_table,
+        "h_start": h_start_str,
+        "h_end": h_end_str,
     }
     return render(request, "services_portal/discharge_chart.html", context)
 
