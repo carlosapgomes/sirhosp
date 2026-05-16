@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from apps.census.models import CensusSnapshot
+from apps.census.models import CensusSnapshot, Specialty
 
 
 @admin.register(CensusSnapshot)
@@ -29,3 +29,10 @@ class CensusSnapshotAdmin(admin.ModelAdmin):
     ]
     date_hierarchy = "captured_at"
     ordering = ["-captured_at", "setor", "leito"]
+
+
+@admin.register(Specialty)
+class SpecialtyAdmin(admin.ModelAdmin):
+    list_display = ["code", "name"]
+    search_fields = ["code", "name"]
+    ordering = ["code"]
