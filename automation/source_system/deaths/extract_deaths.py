@@ -214,8 +214,19 @@ def click_export_csv(frame_locator: FrameLocator, page: Page) -> bytes:
 
 
 def parse_csv_content(content: bytes) -> list[dict[str, str]]:
-    """Converte o conteúdo CSV em lista de dicionários."""
-    text = content.decode("utf-8-sig", errors="replace")
+    """Converte o conteúdo CSV em lista de dicionários.
+
+    O sistema fonte envia CSV em ISO-8859-1 (Latin-1).
+    Tentamos UTF-8 primeiro, com fallback para Latin-1.
+    """
+    for encoding in ("utf-8-sig", "iso-8859-1", "cp1252"):
+        try:
+            text = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = content.decode("iso-8859-1", errors="replace")
     reader = csv.DictReader(io.StringIO(text), delimiter=";")
     return [row for row in reader]
 
