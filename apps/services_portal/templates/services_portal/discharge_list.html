@@ -12,7 +12,11 @@
 </nav>
 
 <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">{{ page_title }}</h2>
-<p class="text-muted small mb-3">{{ date|date:"d/m/Y" }} — {{ count }} registro(s)</p>
+<p class="text-muted small mb-2">{{ date|date:"d/m/Y" }} — {{ count }} registro(s)</p>
+
+<a href="{% url 'services_portal:discharge_chart' %}" class="btn btn-sm btn-outline-secondary mb-3">
+  <i class="bi bi-bar-chart me-1"></i> Ver gráfico de altas
+</a>
 
 {% include "services_portal/_date_selector.html" %}
 
