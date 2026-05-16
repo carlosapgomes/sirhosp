@@ -133,7 +133,7 @@ Seguindo a Portaria 312/2002:
 
 ### 4.4 Pipeline de geração de relatórios
 
-```text
+````text
 ┌────────────────────┐
 │ extract_census     │  8/8h — scraping amplo
 │ (amplo)            │
@@ -284,7 +284,7 @@ Flags:
 
 ```text
 Extrai pacientes do PDF de altas e atualiza discharge_date.
-```
+````
 
 ---
 

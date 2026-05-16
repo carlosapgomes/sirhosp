@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract today's discharged patients from the source system."""
+"""Extract discharged patients from the source system for a specific date."""
 
 from __future__ import annotations
 
@@ -38,23 +38,26 @@ ALTAS_ICON_SELECTOR = ".silk-new-internacao-altas-do-dia"
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DOWNLOADS_DIR = _PROJECT_ROOT / "downloads"
 DEBUG_DIR = _PROJECT_ROOT / "debug"
-PDF_OUTPUT_NAME = "altas-hoje.pdf"
+
+
+def _today_dd_mm_yyyy() -> str:
+    return time.strftime("%d/%m/%Y")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extrai lista de pacientes com alta hoje do sistema fonte."
+        description="Extrai lista de pacientes com alta em data especifica do sistema fonte."
     )
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="Executa sem interface gráfica",
+        help="Executa sem interface grafica",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
-        help="Diretório de saída para o JSON",
+        help="Diretorio de saida para o JSON",
     )
     parser.add_argument(
         "--source-url",
@@ -66,7 +69,7 @@ def parse_args() -> argparse.Namespace:
         "--username",
         type=str,
         required=True,
-        help="Nome de usuário do sistema fonte",
+        help="Nome de usuario do sistema fonte",
     )
     parser.add_argument(
         "--password",
@@ -78,7 +81,13 @@ def parse_args() -> argparse.Namespace:
         "--reference-date",
         type=str,
         default=None,
-        help="Data de referência no formato YYYY-MM-DD (default: hoje)",
+        help="Data de referencia no formato YYYY-MM-DD (padrao: hoje)",
+    )
+    parser.add_argument(
+        "--date",
+        type=str,
+        default=None,
+        help="Data das altas no formato DD/MM/AAAA (padrao: hoje)",
     )
     return parser.parse_args()
 
@@ -114,8 +123,8 @@ def esperar_locator_com_retry(
     raise ultimo_erro
 
 
-def wait_visible(locator, timeout: int = 10000) -> bool:
-    """Aguarda elemento ficar visível."""
+def wait_visible(locator: Locator, timeout: int = 10000) -> bool:
+    """Aguarda elemento ficar visivel."""
     try:
         locator.first.wait_for(state="visible", timeout=timeout)
         return True
@@ -123,10 +132,10 @@ def wait_visible(locator, timeout: int = 10000) -> bool:
         return False
 
 
-def safe_click(locator, label: str, timeout: int = 15000) -> bool:
+def safe_click(locator: Locator, label: str, timeout: int = 15000) -> bool:
     """Clica em um locator com fallback (force click e DOM click)."""
     if not wait_visible(locator, timeout=timeout):
-        print(f"  [!] Não visível para clique: {label}")
+        print(f"  [!] Nao visivel para clique: {label}")
         return False
 
     target = locator.first
@@ -169,11 +178,39 @@ def wait_altas_frame_ready(page: Page, timeout_ms: int = 60000) -> FrameLocator:
 
 
 def click_altas_icon(page: Page) -> None:
-    """Clica no ícone de Altas do Dia usando classe CSS estável."""
+    """Clica no icone de Altas do Dia usando classe CSS estavel."""
     icon = page.locator(ALTAS_ICON_SELECTOR)
-    if not safe_click(icon, "ícone Altas do Dia", timeout=20000):
-        raise RuntimeError("Não foi possível clicar no ícone de Altas do Dia.")
-    print("[i] Ícone Altas do Dia clicado.")
+    if not safe_click(icon, "icone Altas do Dia", timeout=20000):
+        raise RuntimeError("Nao foi possivel clicar no icone de Altas do Dia.")
+    print("[i] icone Altas do Dia clicado.")
+
+
+def fill_date_field(frame_locator: FrameLocator, page: Page, date_value: str) -> None:
+    """Preenche o campo de data de alta no iframe."""
+    print(f"[i] Preenchendo data de alta: {date_value}")
+
+    # O campo de data tem id: dataAlta:dataAlta:inputId_input (PrimeFaces)
+    date_input_selector = 'input[id="dataAlta:dataAlta:inputId_input"]'
+    date_input = frame_locator.locator(date_input_selector)
+
+    if not wait_visible(date_input, timeout=10000):
+        raise RuntimeError(
+            f"Campo de data nao encontrado: {date_input_selector}"
+        )
+
+    date_input.click()
+    date_input.fill("")
+    page.wait_for_timeout(200)
+
+    # Digita caractere por caractere para o PrimeFaces registrar
+    date_input.type(date_value, delay=50)
+    page.wait_for_timeout(300)
+
+    # Tab out para triggerar validacao/blur do PrimeFaces
+    date_input.press("Tab")
+    page.wait_for_timeout(500)
+
+    print(f"  [i] Data de alta preenchida: {date_value}")
 
 
 def click_visualizar_impressao(frame_locator: FrameLocator) -> None:
@@ -206,14 +243,14 @@ def get_pdf_url_from_frame(frame_locator: FrameLocator, page: Page) -> str:
         ultimo_data = pdf_url
         if tentativa < 3:
             print(
-                f"  [!] Tentativa {tentativa}/3: atributo 'data' não disponível. "
+                f"  [!] Tentativa {tentativa}/3: atributo 'data' nao disponivel. "
                 "Aguardando..."
             )
             page.wait_for_timeout(2000)
 
     raise RuntimeError(
-        "O elemento <object> do PDF apareceu, mas o atributo 'data' não ficou disponível. "
-        f"Último valor: {ultimo_data!r}"
+        "O elemento <object> do PDF apareceu, mas o atributo 'data' nao ficou disponivel. "
+        f"Ultimo valor: {ultimo_data!r}"
     )
 
 
@@ -237,7 +274,7 @@ def download_pdf(context: BrowserContext, pdf_url: str, output_path: Path) -> No
         debug_path.parent.mkdir(parents=True, exist_ok=True)
         debug_path.write_bytes(body)
         raise RuntimeError(
-            f"Conteúdo retornado não é um PDF válido. Salvo em: {debug_path}"
+            f"Conteudo retornado nao e um PDF valido. Salvo em: {debug_path}"
         )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -246,16 +283,9 @@ def download_pdf(context: BrowserContext, pdf_url: str, output_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Extração da tabela do PDF
+# Extracao da tabela do PDF (reutiliza logica do extract_discharges.py)
 # ---------------------------------------------------------------------------
-# O PDF de altas do dia é gerado em landscape (rotação 90°).
-# Os pacientes são dispostos em colunas verticais ("bands" no eixo X).
-# Cada banda de paciente contém:
-#   - Coluna principal (x): Pront, Nome, CRM, Médico, Data Int
-#   - Coluna secundária (x+1): Leito, Esp, (Alta Ant)
-#   - Continuação (x+10~15): nomes longos de médico
 
-# Padrões
 _RE_PRONTUARIO = re.compile(r"^\d{2,7}/\d$")
 _RE_DATA_CURTA = re.compile(r"^\d{2}/\d{2}/\d{2}$")
 _RE_DATA_LONGA = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -266,12 +296,12 @@ _RE_PREFIXO = re.compile(r"^[A-Z]{1,2}$")
 
 
 def _clean_prontuario(raw: str) -> str:
-    """Remove `/` e mantém só dígitos. Ex: '123456/7' → '1234567'."""
+    """Remove '/' e mantem so digitos."""
     return _RE_SO_NUMEROS.sub("", raw)
 
 
 def _normalize_data(raw: str) -> str:
-    """Normaliza data para DD/MM/YYYY. Ex: '15/04/26' → '15/04/2026'."""
+    """Normaliza data para DD/MM/YYYY."""
     if not raw:
         return raw
     parts = raw.split("/")
@@ -287,11 +317,11 @@ def extract_patients_from_pdf(pdf_path: Path) -> list[dict[str, str]]:
     """
     Extrai a lista de pacientes do PDF de altas.
 
-    Usa análise de coordenadas x/y pois o PDF é landscape rotacionado
-    e o texto extraído não segue a ordem visual das colunas.
+    Usa analise de coordenadas x/y pois o PDF e landscape rotacionado
+    e o texto extraido nao segue a ordem visual das colunas.
     """
     if not pdf_path.exists():
-        raise RuntimeError(f"PDF não encontrado: {pdf_path}")
+        raise RuntimeError(f"PDF nao encontrado: {pdf_path}")
 
     print(f"[i] Extraindo tabela de {pdf_path}...")
     all_patients: list[dict[str, str]] = []
@@ -302,12 +332,14 @@ def extract_patients_from_pdf(pdf_path: Path) -> list[dict[str, str]]:
             if not words:
                 continue
 
-            print(f"  Página {page_num}: {len(words)} palavras, analisando bandas X...")
+            print(
+                f"  Pagina {page_num}: {len(words)} palavras, analisando bandas X..."
+            )
             patients = _extract_patients_by_x_bands(words)
             print(f"  Pacientes encontrados: {len(patients)}")
             all_patients.extend(patients)
 
-    # Pós-processamento: limpa prontuários e normaliza datas
+    # Pos-processamento: limpa prontuarios e normaliza datas
     for patient in all_patients:
         if patient.get("prontuario"):
             patient["prontuario"] = _clean_prontuario(patient["prontuario"])
@@ -321,7 +353,6 @@ def _extract_patients_by_x_bands(words: list) -> list[dict[str, str]]:
     """
     Agrupa palavras por bandas de coordenada X e extrai pacientes.
     """
-    # Encontra todas as palavras que são prontuários (marcam início de paciente)
     pront_words = []
     for word in words:
         if _RE_PRONTUARIO.match(word[4]):
@@ -330,12 +361,10 @@ def _extract_patients_by_x_bands(words: list) -> list[dict[str, str]]:
     if not pront_words:
         return []
 
-    # Agrupa prontuários por banda X (tolerância de ±1.5px)
     bands = _group_by_x_band(pront_words, tolerance=1.5)
 
     patients = []
     for band_x in sorted(bands.keys()):
-        # Coleta todas as palavras na banda principal (x) e secundária (x+1)
         main_words = []
         secondary_words = []
 
@@ -349,7 +378,6 @@ def _extract_patients_by_x_bands(words: list) -> list[dict[str, str]]:
         if not main_words:
             continue
 
-        # Ordena do topo para baixo (y decrescente)
         main_words.sort(key=lambda word: -word[1])
         secondary_words.sort(key=lambda word: -word[1])
 
@@ -381,19 +409,6 @@ def _parse_patient_band(
 ) -> dict[str, str] | None:
     """
     Faz parsing dos campos de um paciente a partir das palavras da banda.
-
-    Estrutura do PDF (landscape rotacionado 90°):
-      Coluna principal (y decrescente = topo → base):
-        Pront → [prefixo 1-2 char] → Nome... → CRM → Médico... → Data Int
-
-      Coluna secundária (y decrescente):
-        Leito → Esp → [Alta Ant (data opcional)]
-
-    Robustez:
-      - Prefixos detectados por tamanho (1-2 char maiúsculos), não por lista fixa.
-      - Especialidade e leito extraídos por posição estrutural (ordem y),
-        não por regex de conteúdo — funciona com qualquer código novo.
-      - Datas aceitas em DD/MM/YY e DD/MM/YYYY.
     """
     pront = ""
     nome_parts: list[str] = []
@@ -401,22 +416,19 @@ def _parse_patient_band(
     leito = ""
     esp = ""
 
-    # --- Coluna principal ---
     i = 0
     mw = main_words
 
-    # 1. Prontuário (sempre o primeiro)
+    # 1. Prontuario (sempre o primeiro)
     if i < len(mw) and _RE_PRONTUARIO.match(mw[i][4]):
         pront = mw[i][4]
         i += 1
 
-    # 2. Pula prefixos: palavras de 1-2 caracteres maiúsculos entre Pront e Nome
-    #    Exemplos conhecidos: "O" (óbito), "RN" (recém-nascido).
-    #    Qualquer prefixo novo no mesmo formato será ignorado automaticamente.
+    # 2. Pula prefixos
     while i < len(mw) and _RE_PREFIXO.match(mw[i][4]):
         i += 1
 
-    # 3. Nome do paciente: palavras até o CRM (número de 4-6 dígitos ou placeholder "CRM")
+    # 3. Nome do paciente: ate o CRM
     while i < len(mw):
         word = mw[i][4]
         if _RE_CRM.match(word) or _RE_CRM_PLACEHOLDER.match(word):
@@ -425,7 +437,7 @@ def _parse_patient_band(
         nome_parts.append(word)
         i += 1
 
-    # 4. Pula nome do médico e captura Data Int (DD/MM/YY ou DD/MM/YYYY)
+    # 4. Pula nome do medico e captura Data Int
     while i < len(mw):
         word = mw[i][4]
         if _RE_DATA_CURTA.match(word) or _RE_DATA_LONGA.match(word):
@@ -434,7 +446,6 @@ def _parse_patient_band(
             break
         i += 1
 
-    # Se não achou Data Int, varre o restante
     if not data_int:
         while i < len(mw):
             word = mw[i][4]
@@ -443,11 +454,7 @@ def _parse_patient_band(
                 break
             i += 1
 
-    # --- Coluna secundária ---
-    # Estrutura física (y decrescente): Leito → Esp → [Alta Ant]
-    # Em vez de adivinhar conteúdo, usamos a posição: primeiro não-data = leito,
-    # último não-data (se diferente do primeiro) = especialidade.
-    # Isso funciona com QUALQUER código de especialidade e qualquer formato de leito.
+    # --- Coluna secundaria ---
     sw = secondary_words
     seen_texts: set[str] = set()
     sw_dedup = []
@@ -456,7 +463,6 @@ def _parse_patient_band(
             seen_texts.add(word[4])
             sw_dedup.append(word)
 
-    # Remove datas (Alta Ant) — aceita ambos os formatos
     valid = [
         word
         for word in sw_dedup
@@ -464,21 +470,15 @@ def _parse_patient_band(
     ]
 
     if len(valid) >= 2:
-        # Caso normal: Leito (1ª posição) + Esp (última posição)
         leito = valid[0][4]
         esp = valid[-1][4]
     elif len(valid) == 1:
-        # Caso ambíguo: um único valor não-data.
-        # Heurística: se parece especialidade (2-4 letras maiúsculas), é esp;
-        # caso contrário, assume leito.
         word = valid[0][4]
         if 2 <= len(word) <= 4 and word.isupper() and word.isalpha():
             esp = word
         else:
             leito = word
-    # len(valid) == 0: ambos vazios (raro mas possível)
 
-    # --- Validação ---
     nome = " ".join(nome_parts).strip()
     if not pront and not nome:
         return None
@@ -492,9 +492,31 @@ def _parse_patient_band(
     }
 
 
+def save_debug(page: Page) -> None:
+    """Salva screenshot e HTML para debug."""
+    DEBUG_DIR.mkdir(exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    try:
+        page.screenshot(
+            path=str(DEBUG_DIR / f"discharges-by-date-error-{ts}.png"),
+            full_page=True,
+        )
+        (DEBUG_DIR / f"discharges-by-date-error-{ts}.html").write_text(
+            page.content(), encoding="utf-8"
+        )
+        print(f"[i] Debug salvo em debug/discharges-by-date-error-{ts}.*")
+    except Exception as e:
+        print(f"[!] Falha ao salvar debug: {e}")
+
+
 def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir) if args.output_dir else DOWNLOADS_DIR
+
+    # Resolve date
+    date_value = args.date or _today_dd_mm_yyyy()
+    ref_date = args.reference_date or time.strftime("%Y-%m-%d")
+    safe_date = date_value.replace("/", "-")
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -506,11 +528,11 @@ def main() -> None:
         page.set_default_timeout(DEFAULT_TIMEOUT_MS)
 
         try:
-            # Login (usando credenciais da CLI)
+            # Login — usa seletores CSS em vez de role/name para robustez em headless
             page.goto(args.source_url)
-            page.get_by_role("textbox", name="Nome de usuário").fill(args.username)
-            page.get_by_role("textbox", name="Senha").fill(args.password)
-            page.get_by_role("button", name="Entrar").click()
+            page.locator("input[placeholder=\"Nome de usu\u00e1rio\"]").fill(args.username)
+            page.locator("input[placeholder=\"Senha\"]").fill(args.password)
+            page.locator("input[placeholder=\"Senha\"]").press("Enter")
             aguardar_pagina_estavel(page)
             fechar_dialogos_iniciais(page)
 
@@ -519,13 +541,18 @@ def main() -> None:
             frame_locator = wait_altas_frame_ready(page)
             page.wait_for_timeout(1500)
 
-            # Visualizar Impressão
+            # Preencher campo de data
+            fill_date_field(frame_locator, page, date_value)
+            page.wait_for_timeout(500)
+
+            # Visualizar Impressao
             click_visualizar_impressao(frame_locator)
             page.wait_for_timeout(3000)
 
             # Download PDF
             pdf_url = get_pdf_url_from_frame(frame_locator, page)
-            pdf_path = output_dir / PDF_OUTPUT_NAME
+            pdf_filename = f"altas-{safe_date}.pdf"
+            pdf_path = output_dir / pdf_filename
             download_pdf(context, pdf_url, pdf_path)
 
             # Extrair pacientes
@@ -534,10 +561,10 @@ def main() -> None:
             # Salvar JSON
             output_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d-%H%M%S")
-            json_path = output_dir / f"discharges-{ts}.json"
-            ref_date = args.reference_date or time.strftime("%Y-%m-%d")
+            json_path = output_dir / f"discharges-{safe_date}-{ts}.json"
             data = {
                 "data": ref_date,
+                "date_display": date_value,
                 "total": len(patients),
                 "pacientes": patients,
             }
@@ -549,14 +576,8 @@ def main() -> None:
 
         except Exception as exc:
             print(f"[ERRO] {exc}", file=sys.stderr)
-            # Salvar debug
-            DEBUG_DIR.mkdir(exist_ok=True)
-            ts = time.strftime("%Y%m%d-%H%M%S")
             try:
-                page.screenshot(path=str(DEBUG_DIR / f"discharges-error-{ts}.png"))
-                (DEBUG_DIR / f"discharges-error-{ts}.html").write_text(
-                    page.content(), encoding="utf-8"
-                )
+                save_debug(page)
             except Exception:
                 pass
             sys.exit(1)

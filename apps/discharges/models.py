@@ -38,6 +38,14 @@ class DischargeRecord(models.Model):
     prontuario = models.CharField(max_length=50, blank=True, default="")
     nome = models.CharField(max_length=255, blank=True, default="")
     data_internacao = models.CharField(max_length=20, blank=True, default="")
+    leito = models.CharField(
+        max_length=20, blank=True, default="",
+        help_text="Bed/leito at discharge.",
+    )
+    especialidade = models.CharField(
+        max_length=20, blank=True, default="",
+        help_text="Medical specialty at discharge.",
+    )
     raw_extra = models.JSONField(
         default=dict,
         blank=True,

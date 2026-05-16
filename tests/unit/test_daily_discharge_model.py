@@ -5,7 +5,7 @@ from datetime import date
 import pytest
 from django.db.utils import IntegrityError
 
-from apps.discharges.models import DailyDischargeCount
+from apps.discharges.models import DailyDischargeCount, DischargeRecord
 
 
 @pytest.mark.django_db
@@ -37,3 +37,40 @@ class TestDailyDischargeCountModel:
         )
         assert "2026-04-28" in str(entry)
         assert "7" in str(entry)
+
+
+@pytest.mark.django_db
+class TestDischargeRecordModel:
+    """Tests for DischargeRecord model with leito and especialidade."""
+
+    def test_create_with_leito_especialidade(self):
+        daily = DailyDischargeCount.objects.create(
+            date=date(2026, 5, 15), count=3,
+        )
+        record = DischargeRecord.objects.create(
+            daily_count=daily,
+            date=date(2026, 5, 15),
+            prontuario="1234567",
+            nome="PACIENTE TESTE",
+            data_internacao="10/05/2026",
+            leito="UG01A",
+            especialidade="NEF",
+        )
+        assert record.leito == "UG01A"
+        assert record.especialidade == "NEF"
+        assert record.prontuario == "1234567"
+
+    def test_str_includes_fields(self):
+        daily = DailyDischargeCount.objects.create(
+            date=date(2026, 5, 15), count=2,
+        )
+        record = DischargeRecord.objects.create(
+            daily_count=daily,
+            date=date(2026, 5, 15),
+            prontuario="7654321",
+            nome="OUTRO PACIENTE",
+            leito="A01",
+            especialidade="CLM",
+        )
+        assert "7654321" in str(record)
+        assert "OUTRO PACIENTE" in str(record)

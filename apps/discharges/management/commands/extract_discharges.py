@@ -1,17 +1,23 @@
+"""Extract discharged patients from the source system.
+
+Supports date selection so any historical date can be queried, not only today.
+When --date is omitted, defaults to today.
+"""
+
 from __future__ import annotations
 
 import json
 import os
 import sys
 import tempfile
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from apps.discharges.models import DailyDischargeCount
+from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.discharges.services import process_discharges
 from apps.ingestion.extractors.subprocess_utils import (
     SubprocessTimeoutError,
@@ -22,7 +28,8 @@ from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
 
 class Command(BaseCommand):
     help = (
-        "Extract discharges from source system and update Admission records."
+        "Extract discharges from source system and update Admission records. "
+        "Use --date DD/MM/AAAA for historical dates."
     )
 
     def add_arguments(self, parser):
@@ -42,22 +49,18 @@ class Command(BaseCommand):
             "--date",
             type=str,
             default=None,
-            help="Reference date in DD/MM/AAAA format (default: today).",
+            help="Target date in DD/MM/AAAA format (default: today).",
         )
 
     def handle(self, *args, **options):
         headless: bool = options["headless"]
         raw_date: str | None = options.get("date")
 
-        # Resolve reference date
-        from datetime import datetime
-
+        # Resolve date
         today = timezone.localdate()
-        date_value = today.strftime("%d/%m/%Y")
         if raw_date:
             try:
                 ref_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
-                date_value = raw_date
             except ValueError:
                 self.stderr.write(
                     f"Invalid date format: {raw_date}. Use DD/MM/AAAA."
@@ -65,29 +68,30 @@ class Command(BaseCommand):
                 sys.exit(1)
         else:
             ref_date = today
+            raw_date = ref_date.strftime("%d/%m/%Y")
 
         ref_date_iso = ref_date.isoformat()
 
-        self.stdout.write(f"Extracting discharges for {date_value}...")
+        self.stdout.write(f"Extracting discharges for {raw_date}...")
 
-        # Resolve credentials from settings/environment
+        # Resolve credentials
         from django.conf import settings
 
         source_url = getattr(settings, "SOURCE_SYSTEM_URL", "") or os.getenv(
             "SOURCE_SYSTEM_URL", ""
         )
-        username = getattr(settings, "SOURCE_SYSTEM_USERNAME", "") or os.getenv(
-            "SOURCE_SYSTEM_USERNAME", ""
-        )
-        password = getattr(settings, "SOURCE_SYSTEM_PASSWORD", "") or os.getenv(
-            "SOURCE_SYSTEM_PASSWORD", ""
-        )
+        username = getattr(
+            settings, "SOURCE_SYSTEM_USERNAME", ""
+        ) or os.getenv("SOURCE_SYSTEM_USERNAME", "")
+        password = getattr(
+            settings, "SOURCE_SYSTEM_PASSWORD", ""
+        ) or os.getenv("SOURCE_SYSTEM_PASSWORD", "")
 
         if not all([source_url, username, password]):
             self.stderr.write("Missing source system credentials in settings.")
             sys.exit(1)
 
-        # Path to the extract_discharges.py script
+        # Path to the extraction script
         script_path = (
             Path(__file__).resolve().parents[4]
             / "automation"
@@ -106,6 +110,7 @@ class Command(BaseCommand):
             intent="discharge_extraction",
             queued_at=timezone.now(),
             processing_started_at=timezone.now(),
+            parameters_json={"date": raw_date, "ref_date": ref_date_iso},
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -124,12 +129,15 @@ class Command(BaseCommand):
                 username,
                 "--password",
                 password,
+                "--date",
+                raw_date,
+                "--reference-date",
+                ref_date_iso,
             ]
             if headless:
                 cmd.append("--headless")
-            cmd.extend(["--reference-date", ref_date_iso])
 
-            self.stdout.write("Running discharge extraction...")
+            self.stdout.write("Running discharge extraction by date...")
             try:
                 result = run_subprocess(
                     cmd,
@@ -169,7 +177,9 @@ class Command(BaseCommand):
                 sys.exit(1)
 
             if result.returncode != 0:
-                err_msg = result.stderr[:500] if result.stderr else "Unknown error"
+                err_msg = (
+                    result.stderr[:500] if result.stderr else "Unknown error"
+                )
                 self._record_stage(
                     run,
                     "discharge_extraction",
@@ -196,13 +206,13 @@ class Command(BaseCommand):
             persist_stage_start = timezone.now()
 
             # Find JSON output
+            safe_date = raw_date.replace("/", "-")
             json_files = sorted(
-                tmpdir_path.glob("discharges-*.json"),
-                key=lambda path: path.stat().st_mtime,
+                tmpdir_path.glob(f"discharges-{safe_date}-*.json"),
+                key=lambda p: p.stat().st_mtime,
                 reverse=True,
             )
             if not json_files:
-                # Empty list — no discharges today (success, just nothing to do)
                 metrics = {
                     "total_pdf": 0,
                     "discharge_set": 0,
@@ -224,14 +234,15 @@ class Command(BaseCommand):
                 run.finished_at = timezone.now()
                 run.save()
 
-                # Record zero discharges for the reference date
                 DailyDischargeCount.objects.update_or_create(
                     date=ref_date,
                     defaults={"count": 0, "raw_data": []},
                 )
 
                 self.stdout.write(
-                    self.style.SUCCESS(f"No discharges found for {date_value}.")
+                    self.style.SUCCESS(
+                        f"No discharges found for {raw_date}."
+                    )
                 )
                 return
 
@@ -241,7 +252,9 @@ class Command(BaseCommand):
             try:
                 data = json.loads(json_path.read_text(encoding="utf-8"))
                 patients = data.get("pacientes", [])
-                self.stdout.write(f"  Patients in PDF: {len(patients)}")
+                self.stdout.write(
+                    f"  Patients in PDF: {len(patients)}"
+                )
 
                 # Reconcile admissions
                 metrics = process_discharges(patients)
@@ -256,38 +269,31 @@ class Command(BaseCommand):
                 )
 
                 # Persist DailyDischargeCount with raw_data
-                pdf_date_str = data.get("data", "")
-                try:
-                    pdf_date = (
-                        date.fromisoformat(pdf_date_str)
-                        if pdf_date_str
-                        else ref_date
+                daily_count, _created = (
+                    DailyDischargeCount.objects.update_or_create(
+                        date=ref_date,
+                        defaults={
+                            "count": len(patients),
+                            "raw_data": patients,
+                        },
                     )
-                except ValueError:
-                    pdf_date = ref_date
-
-                daily_count, _created = DailyDischargeCount.objects.update_or_create(
-                    date=pdf_date,
-                    defaults={
-                        "count": len(patients),
-                        "raw_data": patients,
-                    },
                 )
                 self.stdout.write(
-                    f"  DailyDischargeCount updated: {pdf_date} → {len(patients)} altas"
+                    f"  DailyDischargeCount updated: {ref_date} -> "
+                    f"{len(patients)} altas"
                 )
 
                 # Persist individual DischargeRecord rows
-                from apps.discharges.models import DischargeRecord
-
                 daily_count.records.all().delete()
                 for p in patients:
                     DischargeRecord.objects.create(
                         daily_count=daily_count,
-                        date=pdf_date,
+                        date=ref_date,
                         prontuario=p.get("prontuario", ""),
                         nome=p.get("nome", ""),
                         data_internacao=p.get("data_internacao", ""),
+                        leito=p.get("leito", ""),
+                        especialidade=p.get("especialidade", ""),
                     )
                 self.stdout.write(
                     f"  DischargeRecord: {len(patients)} registros individuais."
@@ -301,9 +307,7 @@ class Command(BaseCommand):
                     details_json={"error": str(exc)},
                 )
                 self._mark_run_failed(
-                    run,
-                    str(exc),
-                    failure_reason="unexpected_exception",
+                    run, str(exc), failure_reason="unexpected_exception"
                 )
                 self.stderr.write(f"Discharge processing failed: {exc}")
                 sys.exit(1)
@@ -322,10 +326,14 @@ class Command(BaseCommand):
 
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"Discharge extraction complete. "
+                    f"Discharge extraction by date complete. "
                     f"{metrics['discharge_set']} discharges set."
                 )
             )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _record_stage(

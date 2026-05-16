@@ -123,7 +123,7 @@ class TestExtractDischargesHook:
         content = source.read_text()
         assert "DailyDischargeCount" in content
         assert "update_or_create" in content
-        # Ensure refresh is no longer called automatically
+        # The new command updates DailyDischargeCount directly (no refresh call)
         assert "call_command" not in content, (
             "extract_discharges should NOT call refresh_daily_discharge_counts; "
             "it should update DailyDischargeCount directly from PDF count."
