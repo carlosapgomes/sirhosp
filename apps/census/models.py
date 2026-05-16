@@ -63,6 +63,17 @@ class CensusSnapshot(models.Model):
         default="",
         help_text="Medical specialty abbreviation (e.g. NEF, CIV, PED)",
     )
+    data_internacao = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="Admission date from the census table (DD/MM or DD/MM/AAAA)",
+    )
+    tempo_internacao = models.IntegerField(
+        blank=True,
+        null=True,
+        help_text="Length of stay in days from the census table (numeric)",
+    )
     bed_status = models.CharField(
         max_length=20,
         choices=BedStatus.choices,
@@ -90,6 +101,34 @@ class CensusSnapshot(models.Model):
             f"{self.prontuario or '-'} "
             f"@ {self.captured_at:%Y-%m-%d %H:%M}"
         )
+
+
+class Specialty(models.Model):
+    """Medical specialty reference table.
+
+    Populated from the AGHU source system specialty catalog.
+    Admin-managed via Django admin.
+    """
+
+    code = models.CharField(
+        max_length=20,
+        unique=True,
+        help_text="Specialty abbreviation (e.g. CIV, NEF, CAR)",
+    )
+    name = models.CharField(
+        max_length=255,
+        help_text="Full specialty name (e.g. CIRURGIA VASCULAR)",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["code"]
+        verbose_name = "Specialty"
+        verbose_name_plural = "Specialties"
+
+    def __str__(self) -> str:
+        return f"[{self.code}] {self.name}"
 
 
 class Ward(models.Model):
