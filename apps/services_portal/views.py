@@ -10,14 +10,14 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 
 from django.contrib.auth.decorators import login_required
-from django.db.models import Count, Max, Q
-from django.db.models.functions import ExtractHour
+from django.db.models import Count, F, Func, IntegerField, Max, Q, Value
+from django.db.models.functions import Cast, Coalesce, ExtractHour
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
 from django.utils import timezone
 
 from apps.admissions.models import DailyAdmissionCount
-from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord
+from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord, Specialty, Ward
 from apps.deaths.models import DailyDeathCount
 from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.ingestion.models import (
@@ -188,24 +188,142 @@ def official_census_list(request: HttpRequest) -> HttpResponse:
         selected_date = None
 
     if selected_date:
-        records = OfficialCensusRecord.objects.filter(date=selected_date).order_by("id")
+        records = OfficialCensusRecord.objects.filter(date=selected_date)
     else:
         latest = OfficialCensusRecord.objects.order_by("-date").first()
         if latest:
             selected_date = latest.date
-            records = OfficialCensusRecord.objects.filter(date=selected_date).order_by("id")
+            records = OfficialCensusRecord.objects.filter(date=selected_date)
         else:
             selected_date = timezone.localdate()
             records = OfficialCensusRecord.objects.none()
 
-    columns = ["prontuario", "nome", "unidade", "quarto_leito", "data_internacao"]
+    # ── Filter by unidade (setor) ────────────────────────────────────
+    unidade_filter = request.GET.get("unidade", "").strip()
+    if unidade_filter:
+        records = records.filter(unidade=unidade_filter)
+
+    # ── Filter by especialidade ──────────────────────────────────────
+    especialidade_filter = request.GET.get("especialidade", "").strip()
+    if especialidade_filter:
+        records = records.filter(especialidade=especialidade_filter)
+
+    # ── Annotate numeric tempo_internacao for proper integer ordering ─
+    # The raw field is a string like "5 dias". We extract digits via
+    # regexp_replace, NULLIF empty -> NULL, CAST to integer, COALESCE to 0.
+    tempo_numeric = Coalesce(
+        Cast(
+            Func(
+                Func(
+                    F("tempo_internacao"),
+                    Value(r"\D"),
+                    Value(""),
+                    Value("g"),
+                    function="regexp_replace",
+                ),
+                Value(""),
+                function="NULLIF",
+            ),
+            output_field=IntegerField(),
+        ),
+        Value(0),
+        output_field=IntegerField(),
+    )
+    records = records.annotate(tempo_internacao_numeric=tempo_numeric)
+
+    # ── Ordering ─────────────────────────────────────────────────────
+    ordering = request.GET.get("ordenar", "").strip()
+    if ordering == "tempo_asc":
+        records = records.order_by("tempo_internacao_numeric")
+    elif ordering == "tempo_desc":
+        records = records.order_by("-tempo_internacao_numeric")
+    elif ordering == "unidade":
+        records = records.order_by("unidade", "quarto_leito")
+    elif ordering == "especialidade":
+        records = records.order_by("especialidade", "unidade")
+    else:
+        records = records.order_by("id")
+
+    # ── Distinct values for filter dropdowns ─────────────────────────
+    # Build ward name map from the bed catalog
+    ward_map: dict[str, str] = {
+        w.source_code: w.name
+        for w in Ward.objects.all()
+    }
+
+    unidade_codes = list(
+        OfficialCensusRecord.objects.filter(date=selected_date)
+        .values_list("unidade", flat=True)
+        .distinct()
+        .order_by("unidade")
+    )
+    unidade_options = [
+        {
+            "value": code,
+            "label": ward_map.get(code, code),
+        }
+        for code in unidade_codes
+    ]
+    especialidade_options = list(
+        OfficialCensusRecord.objects.filter(date=selected_date)
+        .values_list("especialidade", flat=True)
+        .distinct()
+        .order_by("especialidade")
+    )
+
+    # ── Resolve specialty codes ←→ full names ───────────────────────
+    specialty_code_to_name: dict[str, str] = {
+        s.code: s.name
+        for s in Specialty.objects.all()
+    }
+    specialty_name_to_code: dict[str, str] = {
+        s.name: s.code
+        for s in Specialty.objects.all()
+    }
+
+    def _resolve_especialidade(raw: str) -> tuple[str, str]:
+        """Return (sigla, nome_completo) given either a code or full name."""
+        if raw in specialty_code_to_name:
+            return raw, specialty_code_to_name[raw]
+        if raw in specialty_name_to_code:
+            return specialty_name_to_code[raw], raw
+        return raw, raw
+
+    # Annotate each record with ward name and specialty sigla/name for display
+    records_list = list(records)
+    for r in records_list:
+        r.unidade_nome = ward_map.get(r.unidade, r.unidade)
+        sigla, nome = _resolve_especialidade(r.especialidade)
+        r.especialidade_sigla = sigla
+        r.especialidade_nome = nome
+
+    # ── Look up internal Patient IDs for direct linking ──────────────
+    prontuarios = [r.prontuario for r in records_list if r.prontuario]
+    patient_map: dict[str, int] = {}
+    if prontuarios:
+        patient_map = {
+            p.patient_source_key: p.pk
+            for p in Patient.objects.filter(patient_source_key__in=prontuarios)
+        }
+    for r in records_list:
+        r.patient_id = patient_map.get(r.prontuario)
+
+    columns = [
+        "prontuario", "nome", "unidade", "quarto_leito",
+        "data_internacao", "tempo_internacao", "especialidade",
+    ]
 
     return render(request, "services_portal/official_census_list.html", {
         "page_title": "Censo Oficial",
         "date": selected_date,
-        "count": records.count(),
-        "records": records,
+        "count": len(records_list),
+        "records": records_list,
         "columns": columns,
+        "unidade_options": unidade_options,
+        "unidade_filter": unidade_filter,
+        "especialidade_options": especialidade_options,
+        "especialidade_filter": especialidade_filter,
+        "ordering": ordering,
     })
 
 
@@ -512,24 +630,26 @@ def _compute_ingestion_stats() -> dict:
 
 @login_required
 def censo(request: HttpRequest) -> HttpResponse:
-    """Hospital census: filter by ward/sector and search patients.
+    """Hospital census: filter by ward/sector, specialty, and search patients.
 
     Displays a table of current inpatients (occupied beds only)
-    from the latest CensusSnapshot. Supports filtering by sector
-    (dropdown populated from real data) and free-text search
-    across patient name and record number.
+    from the latest CensusSnapshot. Standardized column order and
+    filter structure matching the official census page.
     """
     latest = CensusSnapshot.objects.aggregate(latest=Max("captured_at"))["latest"]
 
     if latest is None:
         return render(request, "services_portal/censo.html", {
             "page_title": "Censo Hospitalar",
-            "setores": [],
-            "setor_filtro": "",
             "busca": "",
             "pacientes": [],
             "total": 0,
             "captured_at": None,
+            "unidade_options": [],
+            "unidade_filter": "",
+            "especialidade_options": [],
+            "especialidade_filter": "",
+            "ordering": "",
         })
 
     # Base queryset: only occupied beds from the most recent snapshot
@@ -538,24 +658,22 @@ def censo(request: HttpRequest) -> HttpResponse:
         bed_status=BedStatus.OCCUPIED,
     ).order_by("setor", "leito")
 
-    # Distinct sectors for the dropdown
-    setores = list(
-        qs.values_list("setor", flat=True)
-        .distinct()
-        .order_by("setor")
-    )
-
-    # Filter by sector
-    setor_filtro = request.GET.get("setor", "").strip()
-    if setor_filtro and setor_filtro != "Todos":
-        qs = qs.filter(setor=setor_filtro)
-
     # Free-text search
     busca = request.GET.get("q", "").strip()
     if busca:
         qs = qs.filter(
             Q(nome__icontains=busca) | Q(prontuario__icontains=busca)
         )
+
+    # Filter by unidade (setor)
+    unidade_filter = request.GET.get("unidade", "").strip()
+    if unidade_filter:
+        qs = qs.filter(setor=unidade_filter)
+
+    # Filter by especialidade
+    especialidade_filter = request.GET.get("especialidade", "").strip()
+    if especialidade_filter:
+        qs = qs.filter(especialidade=especialidade_filter)
 
     snapshots = list(qs)
 
@@ -570,7 +688,7 @@ def censo(request: HttpRequest) -> HttpResponse:
 
     # Look up admission dates for current inpatients (no discharge yet)
     patient_ids = list(patient_map.values())
-    admission_date_map: dict[int, str] = {}
+    admission_date_map: dict[int, date] = {}
     if patient_ids:
         admissions = (
             Admission.objects
@@ -583,31 +701,108 @@ def censo(request: HttpRequest) -> HttpResponse:
                 seen.add(adm.patient_id)
                 if adm.admission_date:
                     admission_date_map[adm.patient_id] = (
-                        adm.admission_date.strftime("%d/%m/%Y")
+                        adm.admission_date.date()
+                        if hasattr(adm.admission_date, "date")
+                        else adm.admission_date
                     )
 
-    pacientes = [
-        {
-            "leito": s.leito,
+    today = timezone.localdate()
+
+    # ── Resolve specialty codes ←→ full names ───────────────────────
+    specialty_code_to_name: dict[str, str] = {
+        s.code: s.name
+        for s in Specialty.objects.all()
+    }
+    specialty_name_to_code: dict[str, str] = {
+        s.name: s.code
+        for s in Specialty.objects.all()
+    }
+
+    def _resolve_especialidade(raw: str) -> tuple[str, str]:
+        """Return (sigla, nome_completo) given either a code or full name."""
+        if raw in specialty_code_to_name:
+            return raw, specialty_code_to_name[raw]
+        if raw in specialty_name_to_code:
+            return specialty_name_to_code[raw], raw
+        return raw, raw
+
+    pacientes = []
+    for s in snapshots:
+        pid = patient_map.get(s.prontuario)
+        adm_date = admission_date_map.get(pid) if pid else None
+
+        # Use data from XLSX census when available (preferred), fallback to Admission
+        if s.tempo_internacao is not None:
+            # Direct from XLSX — numeric, formatted for display
+            dias = s.tempo_internacao
+            tempo_internacao = f"{dias} dia{'s' if dias != 1 else ''}"
+            tempo_numeric = dias
+            data_internacao = s.data_internacao or ""
+        elif adm_date:
+            data_internacao = adm_date.strftime("%d/%m/%Y")
+            dias = (today - adm_date).days
+            tempo_internacao = f"{dias} dia{'s' if dias != 1 else ''}"
+            tempo_numeric = dias
+        else:
+            data_internacao = ""
+            tempo_internacao = ""
+            tempo_numeric = 0
+
+        esp_sigla, esp_nome = _resolve_especialidade(s.especialidade)
+
+        pacientes.append({
+            "prontuario": s.prontuario,
             "nome": s.nome,
-            "registro": s.prontuario,
-            "patient_id": patient_map.get(s.prontuario),
-            "admissao": admission_date_map.get(
-                patient_map.get(s.prontuario, -1), ""
-            ),
-            "setor": s.setor,
-        }
-        for s in snapshots
-    ]
+            "unidade": s.setor,
+            "unidade_nome": s.setor,
+            "quarto_leito": s.leito,
+            "especialidade": esp_sigla,
+            "especialidade_nome": esp_nome,
+            "data_internacao": data_internacao,
+            "tempo_internacao": tempo_internacao,
+            "tempo_numeric": tempo_numeric,
+            "patient_id": pid,
+        })
+
+    # ── Ordering ─────────────────────────────────────────────────────
+    ordering = request.GET.get("ordenar", "").strip()
+    if ordering == "tempo_asc":
+        pacientes.sort(key=lambda p: p["tempo_numeric"])
+    elif ordering == "tempo_desc":
+        pacientes.sort(key=lambda p: -p["tempo_numeric"])
+    elif ordering == "unidade":
+        pacientes.sort(key=lambda p: (p["unidade"], p["quarto_leito"]))
+    elif ordering == "especialidade":
+        pacientes.sort(key=lambda p: (p["especialidade"], p["unidade"]))
+
+    # ── Distinct values for filter dropdowns ─────────────────────────
+    base_dropdown = CensusSnapshot.objects.filter(
+        captured_at=latest,
+        bed_status=BedStatus.OCCUPIED,
+    )
+    unidade_options = list(
+        base_dropdown.values_list("setor", flat=True)
+        .distinct()
+        .order_by("setor")
+    )
+    especialidade_options = list(
+        base_dropdown.values_list("especialidade", flat=True)
+        .exclude(especialidade="")
+        .distinct()
+        .order_by("especialidade")
+    )
 
     return render(request, "services_portal/censo.html", {
         "page_title": "Censo Hospitalar",
-        "setores": setores,
-        "setor_filtro": setor_filtro,
         "busca": busca,
         "pacientes": pacientes,
         "total": len(pacientes),
         "captured_at": latest,
+        "unidade_options": unidade_options,
+        "unidade_filter": unidade_filter,
+        "especialidade_options": especialidade_options,
+        "especialidade_filter": especialidade_filter,
+        "ordering": ordering,
     })
 
 

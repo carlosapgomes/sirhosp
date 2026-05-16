@@ -2,6 +2,11 @@
 
 {% block title %}{{ page_title }} — SIRHOSP{% endblock %}
 
+{% block extra_head %}
+  {{ block.super }}
+  <link href="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/css/tom-select.bootstrap5.min.css" rel="stylesheet">
+{% endblock %}
+
 {% block content %}
 <nav aria-label="breadcrumb" class="mb-3">
   <ol class="breadcrumb small">
@@ -15,6 +20,48 @@
 
 {% include "services_portal/_date_selector.html" %}
 
+<!-- Filter form -->
+<form method="get" class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <input type="hidden" name="date" value="{{ date|date:'Y-m-d' }}">
+    <div class="row g-2 align-items-end">
+      <div class="col-12 col-md-3">
+        <label for="unidade" class="form-label small fw-semibold text-muted">Setor / Unidade</label>
+        <select class="form-select" id="unidade" name="unidade">
+          <option value="">Todos os setores</option>
+          {% for opt in unidade_options %}
+            <option value="{{ opt.value }}" {% if unidade_filter == opt.value %}selected{% endif %}>{{ opt.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-12 col-md-3">
+        <label for="especialidade" class="form-label small fw-semibold text-muted">Especialidade</label>
+        <select class="form-select" id="especialidade" name="especialidade">
+          <option value="">Todas as especialidades</option>
+          {% for opt in especialidade_options %}
+            <option value="{{ opt }}" {% if especialidade_filter == opt %}selected{% endif %}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-8 col-md-3">
+        <label for="ordenar" class="form-label small fw-semibold text-muted">Ordenar por</label>
+        <select class="form-select" id="ordenar" name="ordenar">
+          <option value="">Padrão (ID)</option>
+          <option value="tempo_asc" {% if ordering == 'tempo_asc' %}selected{% endif %}>Tempo Internação (menor primeiro)</option>
+          <option value="tempo_desc" {% if ordering == 'tempo_desc' %}selected{% endif %}>Tempo Internação (maior primeiro)</option>
+          <option value="unidade" {% if ordering == 'unidade' %}selected{% endif %}>Setor / Unidade</option>
+          <option value="especialidade" {% if ordering == 'especialidade' %}selected{% endif %}>Especialidade</option>
+        </select>
+      </div>
+      <div class="col-4 col-md-3 d-grid">
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-funnel me-1"></i> Filtrar
+        </button>
+      </div>
+    </div>
+  </div>
+</form>
+
 {% if records %}
 <div class="table-responsive">
   <table class="table table-sm table-hover">
@@ -22,8 +69,9 @@
       <tr>
         <th>Registro</th>
         <th>Nome</th>
-        <th>Setor</th>
+        <th>Setor / Unidade</th>
         <th>Leito</th>
+        <th>Especialidade</th>
         <th>Data Internação</th>
         <th>Tempo</th>
         <th>CID</th>
@@ -31,11 +79,25 @@
     </thead>
     <tbody>
       {% for r in records %}
-      <tr>
+        {% if r.patient_id %}
+        <tr onclick="window.location='{% url 'patients:admission_list' r.patient_id %}'"
+            style="cursor: pointer;" role="button" tabindex="0"
+            title="Abrir prontu&aacute;rio de {{ r.nome }}">
+        {% else %}
+        <tr onclick="window.location='{% url 'patients:patient_list' %}?q={{ r.prontuario }}'"
+            style="cursor: pointer;" role="button" tabindex="0"
+            title="Buscar prontu&aacute;rio de {{ r.nome }}">
+        {% endif %}
         <td>{{ r.prontuario }}</td>
-        <td>{{ r.nome }}</td>
-        <td>{{ r.unidade }}</td>
+        <td class="fw-medium" style="color: var(--sirhosp-sidebar-bg);">{{ r.nome }}</td>
+        <td>
+          {{ r.unidade_nome }}
+          {% if r.unidade != r.unidade_nome %}
+            <br><small class="text-muted">{{ r.unidade }}</small>
+          {% endif %}
+        </td>
         <td>{{ r.quarto_leito }}</td>
+        <td><span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ r.especialidade_nome }}">{{ r.especialidade_sigla }}</span></td>
         <td>{{ r.data_internacao }}</td>
         <td>{{ r.tempo_internacao }}</td>
         <td>{{ r.cid }}<br><small class="text-muted">{{ r.descricao }}</small></td>
@@ -45,10 +107,39 @@
   </table>
 </div>
 {% else %}
-<div class="alert alert-info">Nenhum registro para esta data.</div>
+<div class="alert alert-info">Nenhum registro para esta data com os filtros selecionados.</div>
 {% endif %}
 
 <a href="{% url 'services_portal:dashboard' %}" class="btn btn-sm btn-outline-secondary mt-2">
   <i class="bi bi-arrow-left me-1"></i> Voltar ao Dashboard
 </a>
+{% endblock %}
+
+{% block extra_js %}
+  {{ block.super }}
+  <script src="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/js/tom-select.complete.min.js"></script>
+  <script>
+    new TomSelect("#unidade", {
+      plugins: ['dropdown_input'],
+      maxOptions: null,
+      placeholder: 'Todos os setores',
+      allowEmptyOption: true,
+      render: {
+        option: function(data, escape) {
+          return '<div>' + escape(data.text) + '</div>';
+        }
+      }
+    });
+    new TomSelect("#especialidade", {
+      plugins: ['dropdown_input'],
+      maxOptions: null,
+      placeholder: 'Todas as especialidades',
+      allowEmptyOption: true,
+      render: {
+        option: function(data, escape) {
+          return '<div>' + escape(data.text) + '</div>';
+        }
+      }
+    });
+  </script>
 {% endblock %}

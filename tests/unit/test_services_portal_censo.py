@@ -81,7 +81,7 @@ class TestCensoRealData:
             bed_status=BedStatus.OCCUPIED,
         )
 
-        url = reverse("services_portal:censo") + "?setor=UTI+A"
+        url = reverse("services_portal:censo") + "?unidade=UTI+A"
         response = admin_client.get(url)
         content = response.content.decode()
         assert response.status_code == 200

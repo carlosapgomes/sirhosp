@@ -14,12 +14,13 @@
     <li class="breadcrumb-item active" aria-current="page">Censo Hospitalar</li>
   </ol>
 </nav>
-<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
   <div>
     <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Censo Hospitalar</h2>
     <p class="text-muted small mb-0">Pacientes atualmente internados por setor e leito</p>
     {% if captured_at %}
-    <p class="text-muted small mb-0">Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}</p>
+    <p class="text-muted small">Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }} — {{ total }} paciente(s)</p>
     {% endif %}
   </div>
 </div>
@@ -28,7 +29,7 @@
 <form method="get" class="card border-0 shadow-sm mb-3">
   <div class="card-body">
     <div class="row g-2 align-items-end">
-      <div class="col-12 col-md-5">
+      <div class="col-12 col-md-3">
         <label for="q" class="form-label small fw-semibold text-muted">Nome ou Registro</label>
         <div class="input-group">
           <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
@@ -36,16 +37,35 @@
                  placeholder="Buscar paciente..." value="{{ busca }}">
         </div>
       </div>
-      <div class="col-8 col-md-4">
-        <label for="setor" class="form-label small fw-semibold text-muted">Setor</label>
-        <select class="form-select" id="setor" name="setor">
+      <div class="col-12 col-md-3">
+        <label for="unidade" class="form-label small fw-semibold text-muted">Setor / Unidade</label>
+        <select class="form-select" id="unidade" name="unidade">
           <option value="">Todos os setores</option>
-          {% for setor in setores %}
-            <option value="{{ setor }}" {% if setor_filtro == setor %}selected{% endif %}>{{ setor }}</option>
+          {% for opt in unidade_options %}
+            <option value="{{ opt }}" {% if unidade_filter == opt %}selected{% endif %}>{{ opt }}</option>
           {% endfor %}
         </select>
       </div>
-      <div class="col-4 col-md-3 d-grid">
+      <div class="col-12 col-md-2">
+        <label for="especialidade" class="form-label small fw-semibold text-muted">Especialidade</label>
+        <select class="form-select" id="especialidade" name="especialidade">
+          <option value="">Todas</option>
+          {% for opt in especialidade_options %}
+            <option value="{{ opt }}" {% if especialidade_filter == opt %}selected{% endif %}>{{ opt }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label for="ordenar" class="form-label small fw-semibold text-muted">Ordenar por</label>
+        <select class="form-select" id="ordenar" name="ordenar">
+          <option value="">Padrão (setor)</option>
+          <option value="tempo_asc" {% if ordering == 'tempo_asc' %}selected{% endif %}>Menos tempo</option>
+          <option value="tempo_desc" {% if ordering == 'tempo_desc' %}selected{% endif %}>Mais tempo</option>
+          <option value="unidade" {% if ordering == 'unidade' %}selected{% endif %}>Setor / Unidade</option>
+          <option value="especialidade" {% if ordering == 'especialidade' %}selected{% endif %}>Especialidade</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2 d-grid">
         <button type="submit" class="btn btn-primary">
           <i class="bi bi-funnel me-1"></i> Filtrar
         </button>
@@ -54,113 +74,130 @@
   </div>
 </form>
 
-<!-- Patients table -->
-<div class="card border-0 shadow-sm">
-  <div class="card-body p-0">
-    <!-- Desktop: table view -->
-    <div class="table-responsive sirhosp-censo-table-wrapper">
-      <table class="table sirhosp-table sirhosp-censo-table mb-0">
-        <thead>
-          <tr>
-            <th scope="col" class="ps-3">Leito</th>
-            <th scope="col">Paciente</th>
-            <th scope="col">Registro</th>
-            <th scope="col">Admissão</th>
-            <th scope="col" class="pe-3 text-end">Setor</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for paciente in pacientes %}
-            {% if paciente.patient_id %}
-            <tr onclick="window.location='{% url 'patients:admission_list' paciente.patient_id %}'"
-                style="cursor: pointer;" role="button" tabindex="0"
-                title="Abrir prontu&aacute;rio de {{ paciente.nome }}">
-            {% else %}
-            <tr onclick="window.location='{% url 'patients:patient_list' %}?q={{ paciente.registro }}'"
-                style="cursor: pointer;" role="button" tabindex="0"
-                title="Buscar prontu&aacute;rio de {{ paciente.nome }}">
-            {% endif %}
-              <td class="ps-3">
-                <span class="badge bg-light text-dark border fw-normal">{{ paciente.leito }}</span>
-              </td>
-              <td class="fw-medium" style="color: var(--sirhosp-sidebar-bg);">{{ paciente.nome }}</td>
-              <td class="text-muted">{{ paciente.registro }}</td>
-              <td class="text-muted">{{ paciente.admissao }}</td>
-              <td class="pe-3 text-end">
-                <span class="badge" style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker); font-weight: 500;">
-                  {{ paciente.setor }}
-                </span>
-              </td>
-            </tr>
-          {% empty %}
-            <tr>
-              <td colspan="5" class="text-center py-4 text-muted">
-                <i class="bi bi-inbox me-1"></i>
-                Nenhum paciente encontrado
-                {% if setor_filtro %}no setor "{{ setor_filtro }}"{% endif %}
-                {% if busca %}para "{{ busca }}"{% endif %}.
-              </td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Mobile: card view -->
-    <div class="sirhosp-censo-cards" style="display: none;">
-      {% for paciente in pacientes %}
-        {% if paciente.patient_id %}
-        <a href="{% url 'patients:admission_list' paciente.patient_id %}"
-           class="text-decoration-none d-block border-bottom p-3"
-           style="color: inherit;">
+{% if pacientes %}
+<!-- Desktop: table view -->
+<div class="table-responsive">
+  <table class="table table-sm table-hover">
+    <thead class="table-light">
+      <tr>
+        <th>Registro</th>
+        <th>Nome</th>
+        <th>Setor / Unidade</th>
+        <th>Leito</th>
+        <th>Especialidade</th>
+        <th>Data Internação</th>
+        <th>Tempo</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in pacientes %}
+        {% if p.patient_id %}
+        <tr onclick="window.location='{% url 'patients:admission_list' p.patient_id %}'"
+            style="cursor: pointer;" role="button" tabindex="0"
+            title="Abrir prontu&aacute;rio de {{ p.nome }}">
         {% else %}
-        <a href="{% url 'patients:patient_list' %}?q={{ paciente.registro }}"
-           class="text-decoration-none d-block border-bottom p-3"
-           style="color: inherit;">
+        <tr onclick="window.location='{% url 'patients:patient_list' %}?q={{ p.prontuario }}'"
+            style="cursor: pointer;" role="button" tabindex="0"
+            title="Buscar prontu&aacute;rio de {{ p.nome }}">
         {% endif %}
-          <div class="d-flex justify-content-between align-items-start gap-2">
-            <div class="flex-grow-1 min-w-0">
-              <div class="fw-semibold small mb-1" style="color: var(--sirhosp-sidebar-bg);">
-                {{ paciente.nome }}
-              </div>
-              <div class="d-flex flex-wrap gap-2 align-items-center">
-                <span class="badge bg-light text-dark border fw-normal">{{ paciente.leito }}</span>
-                <small class="text-muted">{{ paciente.registro }}</small>
-                <small class="text-muted">{{ paciente.admissao }}</small>
-              </div>
-            </div>
-            <span class="badge small flex-shrink-0"
-                  style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker);">
-              {{ paciente.setor }}
-            </span>
-          </div>
-        </a>
+        <td>{{ p.prontuario }}</td>
+        <td class="fw-medium" style="color: var(--sirhosp-sidebar-bg);">{{ p.nome }}</td>
+        <td>{{ p.unidade_nome }}</td>
+        <td>{{ p.quarto_leito }}</td>
+        <td><span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ p.especialidade_nome }}">{{ p.especialidade }}</span></td>
+        <td>{{ p.data_internacao }}</td>
+        <td>{{ p.tempo_internacao }}</td>
+      </tr>
       {% empty %}
-        <div class="text-center py-4 text-muted">
+      <tr>
+        <td colspan="7" class="text-center py-4 text-muted">
           <i class="bi bi-inbox me-1"></i>
           Nenhum paciente encontrado
-          {% if setor_filtro %}no setor "{{ setor_filtro }}"{% endif %}
+          {% if unidade_filter %}no setor informado{% endif %}
           {% if busca %}para "{{ busca }}"{% endif %}.
-        </div>
+        </td>
+      </tr>
       {% endfor %}
-    </div>
-  </div>
-  {% if total %}
-    <div class="card-footer bg-light text-muted small py-2 px-3">
-      <i class="bi bi-people me-1"></i> {{ total }} paciente{{ total|pluralize }} encontrado{{ total|pluralize }}
-    </div>
-  {% endif %}
+    </tbody>
+  </table>
 </div>
+
+<!-- Mobile: card view -->
+<div class="sirhosp-censo-cards" style="display: none;">
+  {% for p in pacientes %}
+    {% if p.patient_id %}
+    <a href="{% url 'patients:admission_list' p.patient_id %}"
+       class="text-decoration-none d-block border-bottom p-3"
+       style="color: inherit;">
+    {% else %}
+    <a href="{% url 'patients:patient_list' %}?q={{ p.prontuario }}"
+       class="text-decoration-none d-block border-bottom p-3"
+       style="color: inherit;">
+    {% endif %}
+      <div class="d-flex justify-content-between align-items-start gap-2">
+        <div class="flex-grow-1 min-w-0">
+          <div class="fw-semibold small mb-1" style="color: var(--sirhosp-sidebar-bg);">
+            {{ p.nome }}
+          </div>
+          <div class="d-flex flex-wrap gap-2 align-items-center">
+            <span class="badge bg-light text-dark border fw-normal">{{ p.quarto_leito }}</span>
+            <small class="text-muted">{{ p.prontuario }}</small>
+            {% if p.especialidade %}
+              <span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ p.especialidade_nome }}">{{ p.especialidade }}</span>
+            {% endif %}
+            <small class="text-muted">{{ p.data_internacao }}</small>
+            <small class="text-muted">{{ p.tempo_internacao }}</small>
+          </div>
+        </div>
+        <span class="badge small flex-shrink-0"
+              style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker);">
+          {{ p.unidade_nome }}
+        </span>
+      </div>
+    </a>
+  {% empty %}
+    <div class="text-center py-4 text-muted">
+      <i class="bi bi-inbox me-1"></i>
+      Nenhum paciente encontrado
+      {% if unidade_filter %}no setor informado{% endif %}
+      {% if busca %}para "{{ busca }}"{% endif %}.
+    </div>
+  {% endfor %}
+</div>
+
+{% if total %}
+  <div class="card-footer bg-light text-muted small py-2 px-3 mt-0">
+    <i class="bi bi-people me-1"></i> {{ total }} paciente{{ total|pluralize }} encontrado{{ total|pluralize }}
+  </div>
+{% endif %}
+{% else %}
+<div class="alert alert-info">Nenhum paciente internado no momento.</div>
+{% endif %}
+
+<a href="{% url 'services_portal:dashboard' %}" class="btn btn-sm btn-outline-secondary mt-2">
+  <i class="bi bi-arrow-left me-1"></i> Voltar ao Dashboard
+</a>
 {% endblock %}
 
 {% block extra_js %}
   {{ block.super }}
   <script src="https://cdn.jsdelivr.net/npm/tom-select@2.3.1/dist/js/tom-select.complete.min.js"></script>
   <script>
-    new TomSelect("#setor", {
+    new TomSelect("#unidade", {
       plugins: ['dropdown_input'],
       maxOptions: null,
       placeholder: 'Todos os setores',
+      allowEmptyOption: true,
+      render: {
+        option: function(data, escape) {
+          return '<div>' + escape(data.text) + '</div>';
+        }
+      }
+    });
+    new TomSelect("#especialidade", {
+      plugins: ['dropdown_input'],
+      maxOptions: null,
+      placeholder: 'Todas as especialidades',
       allowEmptyOption: true,
       render: {
         option: function(data, escape) {
