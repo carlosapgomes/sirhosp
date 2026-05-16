@@ -861,6 +861,8 @@ def _discharge_records_for_template(entry) -> tuple[list[dict], list[str]]:
                     "prontuario": r.prontuario,
                     "nome": r.nome,
                     "data_internacao": r.data_internacao,
+                    "leito": r.leito,
+                    "especialidade": r.especialidade,
                 }
                 d.update(r.raw_extra)
                 recs.append(d)
