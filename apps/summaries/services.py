@@ -24,6 +24,8 @@ from apps.patients.models import Admission
 from apps.summaries.llm_gateway import (
     GatewayConfig,
     call_llm_gateway,
+    call_llm_parallel_chunks,
+    call_llm_parallel_final,
     call_llm_phase2_render,
 )
 from apps.summaries.models import (
@@ -1100,3 +1102,512 @@ def execute_two_phase_pipeline(
     run.save(update_fields=["status", "error_message", "finished_at"])
 
     return pipeline_run
+
+
+# ---------------------------------------------------------------------------
+# Parallel pipeline execution (APS-P-S3)
+# ---------------------------------------------------------------------------
+
+
+def _get_parallel_chunk_config() -> tuple[int, int]:
+    """Return (chunk_days, overlap_days) for the parallel pipeline."""
+    chunk_days = int(
+        os.environ.get("SUMMARY_PARALLEL_CHUNK_DAYS", "4")
+    )
+    overlap_days = int(
+        os.environ.get("SUMMARY_PARALLEL_OVERLAP_DAYS", "1")
+    )
+    return chunk_days, overlap_days
+
+
+def _get_parallel_gateway_config() -> GatewayConfig:
+    """Build GatewayConfig for parallel pipeline from env vars.
+
+    Uses the same SUMMARY_PHASE1_* vars as the serial pipeline.
+    Falls back to legacy LLM_* vars.
+    """
+    from apps.summaries.llm_gateway import _load_gateway_phase1_config
+
+    return _load_gateway_phase1_config()
+
+
+def execute_parallel_pipeline(
+    run: SummaryRun,
+    *,
+    admission: Admission | None = None,
+) -> SummaryRun:
+    """Execute a parallel hierarchical summary pipeline.
+
+    Lifecycle:
+
+    1. Claim run: queued → running, set pinned_cutoff_happened_at.
+    2. Plan windows with parallel overlap (1 day default).
+    3. Create SummaryRunChunk records for each window.
+    4. Load clinical events for each window.
+    5. Dispatch ALL chunks concurrently via ``call_llm_parallel_chunks``.
+    6. Persist successful chunks as ``AdmissionSummaryVersion``.
+    7. Build local summaries list for consolidation.
+    8. Call ``call_llm_parallel_final`` for final consolidation.
+    9. Create ``SummaryPipelineRun`` + ``SummaryPipelineStepRun`` for
+       traceability.
+    10. Update ``AdmissionSummaryState`` with consolidated result.
+    11. Finalise run status.
+
+    Args:
+        run: A ``SummaryRun`` with ``pipeline_type="parallel"``.
+        admission: Pre-fetched ``Admission`` (avoids extra query).
+
+    Returns:
+        The updated ``SummaryRun`` (persisted).
+    """
+    now = django_timezone.now()
+
+    # Check cancellation before any work (including claim)
+    if _is_user_cancelled(run):
+        discard_summary_run_data(run)
+        return run
+
+    # ---- 1. Claim -------
+    run.status = SummaryRun.Status.RUNNING
+    run.pinned_cutoff_happened_at = now
+    run.started_at = now
+    run.save(
+        update_fields=[
+            "status",
+            "pinned_cutoff_happened_at",
+            "started_at",
+        ]
+    )
+
+    # Load admission if not provided
+    if admission is None:
+        admission = Admission.objects.select_related("patient").get(
+            pk=run.admission_id
+        )
+
+    # Determine admission start date
+    if admission.admission_date is None:
+        admission_start = date.today()
+    else:
+        admission_start = admission.admission_date.date()
+
+    # ---- 2. Plan windows with parallel overlap -------
+    chunk_days, overlap_days = _get_parallel_chunk_config()
+    windows = plan_windows(
+        admission_date=admission_start,
+        target_end_date=run.target_end_date,
+        mode=run.mode,
+        prior_coverage_end=None,  # Parallel always processes full period
+        chunk_days=chunk_days,
+        overlap_days=overlap_days,
+    )
+
+    run.total_chunks = len(windows)
+    run.current_chunk_index = 0
+    run.save(update_fields=["total_chunks", "current_chunk_index"])
+
+    # ---- 3-4. Create chunks + load events -------
+    chunks_data: list[dict] = []
+    for idx, (window_start, window_end) in enumerate(windows):
+        events = _load_events_for_window(
+            run=run,
+            admission_id=admission.pk,
+            window_start=window_start,
+            window_end=window_end,
+        )
+
+        novas_evolucoes = [
+            {
+                "event_id": getattr(
+                    ev, "event_identity_key", str(ev.pk)
+                ),
+                "happened_at": (
+                    ev.happened_at.isoformat()
+                    if hasattr(ev, "happened_at")
+                    else ""
+                ),
+                "signed_at": (
+                    ev.signed_at.isoformat()
+                    if getattr(ev, "signed_at", None)
+                    else ""
+                ),
+                "author_name": getattr(ev, "author_name", ""),
+                "profession_type": getattr(
+                    ev, "profession_type", ""
+                ),
+                "content_text": getattr(ev, "content_text", ""),
+            }
+            for ev in events
+        ]
+
+        chunks_data.append({
+            "chunk_index": idx,
+            "novas_evolucoes": novas_evolucoes,
+        })
+
+        SummaryRunChunk.objects.get_or_create(
+            run=run,
+            chunk_index=idx,
+            defaults={
+                "window_start": window_start,
+                "window_end": window_end,
+                "status": SummaryRunChunk.Status.QUEUED,
+                "attempt_count": 0,
+                "input_event_count": len(events),
+            },
+        )
+
+    # ---- 5. Dispatch parallel chunks -------
+    gateway_config = _get_parallel_gateway_config()
+    chunk_results = call_llm_parallel_chunks(
+        chunks_data=chunks_data,
+        config=gateway_config,
+    )
+
+    # ---- 6. Persist successful chunks -------
+    failed_chunks: list[dict] = []
+    local_summaries: list[dict] = []
+
+    # Get or create canonical state
+    state, _created = AdmissionSummaryState.objects.get_or_create(
+        admission=admission,
+        defaults={
+            "coverage_start": admission_start,
+            "coverage_end": admission_start,
+            "structured_state_json": {},
+            "narrative_markdown": "",
+            "status": AdmissionSummaryState.Status.DRAFT,
+        },
+    )
+
+    for i, result in enumerate(chunk_results):
+        chunk_index = result.get("_chunk_index", i)
+
+        # Update chunk record
+        try:
+            chunk = SummaryRunChunk.objects.get(
+                run=run, chunk_index=chunk_index
+            )
+        except SummaryRunChunk.DoesNotExist:
+            chunk = SummaryRunChunk.objects.create(
+                run=run,
+                chunk_index=chunk_index,
+                window_start=windows[chunk_index][0],
+                window_end=windows[chunk_index][1],
+                status=SummaryRunChunk.Status.QUEUED,
+            )
+
+        if result.get("_error"):
+            # Chunk failed after retries
+            chunk.status = SummaryRunChunk.Status.FAILED
+            chunk.error_message = result.get("error_message", "")
+            chunk.save(update_fields=["status", "error_message"])
+            failed_chunks.append(result)
+            continue
+
+        # Chunk succeeded — persist version
+        chunk.status = SummaryRunChunk.Status.SUCCEEDED
+        chunk.error_message = ""
+        chunk.save(update_fields=["status", "error_message"])
+
+        window_start, window_end = windows[chunk_index]
+
+        with transaction.atomic():
+            state.coverage_start = min(
+                state.coverage_start or window_start, window_start
+            )
+            state.coverage_end = max(
+                state.coverage_end or window_end, window_end
+            )
+            state.last_source_event_happened_at = (
+                run.pinned_cutoff_happened_at
+            )
+            state.status = AdmissionSummaryState.Status.DRAFT
+            state.save()
+
+            AdmissionSummaryVersion.objects.create(
+                admission=admission,
+                summary_state=state,
+                run=run,
+                chunk_index=chunk_index,
+                coverage_start=window_start,
+                coverage_end=window_end,
+                structured_state_json=result["estado_estruturado"],
+                narrative_markdown=result["resumo_markdown"],
+                changes_json={
+                    "mudancas": result.get("mudancas_da_rodada", [])
+                },
+                uncertainties_json={
+                    "incertezas": result.get("incertezas", []),
+                    "alertas_consistencia": result.get(
+                        "alertas_consistencia", []
+                    ),
+                },
+                evidences_json=result.get("evidencias", []),
+                llm_provider=result.get("_meta", {}).get(
+                    "provider", "unknown"
+                ),
+                llm_model=result.get("_meta", {}).get(
+                    "model", "unknown"
+                ),
+                prompt_version=PROMPT_VERSION,
+                input_tokens=result.get("input_tokens", 0),
+                output_tokens=result.get("output_tokens", 0),
+                cost_usd_reported=result.get(
+                    "cost_usd_reported", Decimal("0.00")
+                ),
+                cost_usd_estimated=result.get(
+                    "cost_usd_estimated", Decimal("0.00")
+                ),
+                cost_is_reported=result.get("cost_is_reported", False),
+            )
+
+        # Build local summary for consolidation
+        local_summaries.append({
+            "periodo": f"{window_start} a {window_end}",
+            "resumo_markdown": result["resumo_markdown"],
+            "estado_estruturado": result["estado_estruturado"],
+        })
+
+    # ---- Handle partial failure -------
+    if failed_chunks:
+        error_msgs = "; ".join(
+            c.get("error_message", "") for c in failed_chunks
+        )
+        run.status = SummaryRun.Status.PARTIAL
+        run.error_message = (
+            f"{len(failed_chunks)} chunk(s) failed: {error_msgs}"
+        )
+        run.finished_at = django_timezone.now()
+        run.current_chunk_index = run.total_chunks
+        run.save(
+            update_fields=[
+                "status",
+                "error_message",
+                "finished_at",
+                "current_chunk_index",
+            ]
+        )
+        state.status = AdmissionSummaryState.Status.INCOMPLETE
+        state.save(update_fields=["status"])
+        return run
+
+    # ---- 7-8. Build pipeline traceability + consolidate -------
+    pipeline_run = SummaryPipelineRun.objects.create(
+        admission_id=run.admission_id,
+        summary_run=run,
+        requested_by=run.requested_by,
+        mode=run.mode,
+        status=SummaryPipelineRun.Status.RUNNING,
+        started_at=now,
+        currency="USD",
+    )
+
+    # Phase 1 step (parallel chunks)
+    phase1_step = SummaryPipelineStepRun.objects.create(
+        pipeline_run=pipeline_run,
+        step_type=SummaryPipelineStepRun.StepType.PHASE1_CANONICAL,
+        status=SummaryPipelineStepRun.Status.SUCCEEDED,
+        provider_name=gateway_config.provider,
+        model_name=gateway_config.model,
+        base_url=gateway_config.base_url,
+        prompt_version=PROMPT_VERSION,
+        started_at=now,
+        finished_at=django_timezone.now(),
+    )
+
+    # Phase 1 cost aggregation
+    phase1_versions = AdmissionSummaryVersion.objects.filter(run=run)
+    total_input = sum((v.input_tokens or 0) for v in phase1_versions)
+    total_output = sum((v.output_tokens or 0) for v in phase1_versions)
+    total_reported = sum(
+        (v.cost_usd_reported or Decimal("0.00"))
+        for v in phase1_versions
+    )
+    total_estimated = sum(
+        (v.cost_usd_estimated or Decimal("0.00"))
+        for v in phase1_versions
+    )
+    any_reported = any(v.cost_is_reported for v in phase1_versions)
+    phase1_cost_total = (
+        total_reported
+        if any_reported and total_reported > Decimal("0")
+        else total_estimated
+    )
+
+    phase1_step.input_tokens = total_input
+    phase1_step.output_tokens = total_output
+    phase1_step.cost_total = phase1_cost_total
+    phase1_step.cost_usd_reported = total_reported
+    phase1_step.cost_usd_estimated = total_estimated
+    phase1_step.cost_is_reported = any_reported
+    phase1_step.save(
+        update_fields=[
+            "input_tokens",
+            "output_tokens",
+            "cost_total",
+            "cost_usd_reported",
+            "cost_usd_estimated",
+            "cost_is_reported",
+        ]
+    )
+
+    pipeline_run.phase1_cost_total = phase1_cost_total
+    pipeline_run.save(update_fields=["phase1_cost_total"])
+
+    # Phase 2 step (final consolidation)
+    # Resolve phase-2 config from run's phase2_config_json or default
+    phase2_config = run.phase2_config_json or {}
+    phase2_gateway = _build_parallel_phase2_config(phase2_config, gateway_config)
+
+    phase2_step = SummaryPipelineStepRun.objects.create(
+        pipeline_run=pipeline_run,
+        step_type=SummaryPipelineStepRun.StepType.PHASE2_RENDER,
+        status=SummaryPipelineStepRun.Status.RUNNING,
+        started_at=django_timezone.now(),
+    )
+
+    try:
+        final_result = call_llm_parallel_final(
+            local_summaries=local_summaries,
+            config=phase2_gateway,
+        )
+
+        phase2_step.status = SummaryPipelineStepRun.Status.SUCCEEDED
+        phase2_step.provider_name = phase2_gateway.provider
+        phase2_step.model_name = phase2_gateway.model
+        phase2_step.base_url = phase2_gateway.base_url
+        phase2_step.prompt_version = "parallel_final_v1"
+        phase2_step.input_tokens = final_result["input_tokens"]
+        phase2_step.output_tokens = final_result["output_tokens"]
+        phase2_step.cost_total = final_result["cost_total"]
+        phase2_step.cost_usd_reported = final_result["cost_usd_reported"]
+        phase2_step.cost_usd_estimated = final_result["cost_usd_estimated"]
+        phase2_step.cost_is_reported = final_result["cost_is_reported"]
+        phase2_step.latency_ms = final_result.get("latency_ms", 0)
+        phase2_step.finished_at = django_timezone.now()
+        phase2_step.save(
+            update_fields=[
+                "status",
+                "provider_name",
+                "model_name",
+                "base_url",
+                "prompt_version",
+                "input_tokens",
+                "output_tokens",
+                "cost_total",
+                "cost_usd_reported",
+                "cost_usd_estimated",
+                "cost_is_reported",
+                "latency_ms",
+                "finished_at",
+            ]
+        )
+
+        pipeline_run.phase2_cost_total = final_result["cost_total"]
+
+        # ---- Update canonical state with consolidated result -------
+        with transaction.atomic():
+            state.narrative_markdown = final_result["content"]
+            state.structured_state_json = (
+                local_summaries[-1]["estado_estruturado"]
+                if local_summaries
+                else {}
+            )
+            state.status = AdmissionSummaryState.Status.DRAFT
+            state.last_source_event_happened_at = (
+                run.pinned_cutoff_happened_at
+            )
+            state.save()
+
+    except Exception as exc:
+        # Phase 2 failed → pipeline partial
+        phase2_step.status = SummaryPipelineStepRun.Status.FAILED
+        phase2_step.error_message = str(exc)
+        phase2_step.finished_at = django_timezone.now()
+        phase2_step.save(
+            update_fields=["status", "error_message", "finished_at"]
+        )
+
+        pipeline_run.status = SummaryPipelineRun.Status.PARTIAL
+        pipeline_run.error_message = str(exc)
+        pipeline_run.finished_at = django_timezone.now()
+        pipeline_run.phase2_cost_total = Decimal("0.00")
+        pipeline_run.save(
+            update_fields=[
+                "status",
+                "error_message",
+                "finished_at",
+                "phase2_cost_total",
+            ]
+        )
+
+        run.status = SummaryRun.Status.PARTIAL
+        run.error_message = str(exc)
+        run.finished_at = django_timezone.now()
+        run.save(
+            update_fields=["status", "error_message", "finished_at"]
+        )
+        return run
+
+    # ---- 11. Finalise -------
+    pipeline_run.status = SummaryPipelineRun.Status.SUCCEEDED
+    pipeline_run.finished_at = django_timezone.now()
+    pipeline_run.save(
+        update_fields=["status", "phase2_cost_total", "finished_at"]
+    )
+
+    run.status = SummaryRun.Status.SUCCEEDED
+    run.error_message = ""
+    run.current_chunk_index = run.total_chunks
+    run.finished_at = django_timezone.now()
+    run.save(
+        update_fields=[
+            "status",
+            "error_message",
+            "current_chunk_index",
+            "finished_at",
+        ]
+    )
+
+    return run
+
+
+def _build_parallel_phase2_config(
+    phase2_config_json: dict,
+    default_config: GatewayConfig,
+) -> GatewayConfig:
+    """Build phase-2 GatewayConfig for the parallel pipeline.
+
+    Uses user-selected phase-2 provider/model from config page when
+    available. Falls back to phase-1 config.
+    """
+    if phase2_config_json:
+        provider = phase2_config_json.get(
+            "phase2_provider", default_config.provider
+        )
+        model = phase2_config_json.get(
+            "phase2_model", default_config.model
+        )
+        base_url = phase2_config_json.get(
+            "phase2_base_url", default_config.base_url
+        )
+        # API key is resolved securely by the worker at runtime
+        from apps.summaries.llm_config import load_phase2_options
+
+        options = load_phase2_options()
+        option_index = phase2_config_json.get("phase2_option_index")
+        api_key = default_config.api_key
+        if option_index is not None and 1 <= option_index <= len(options):
+            api_key = options[option_index - 1].api_key
+
+        timeout = float(os.environ.get("LLM_TIMEOUT_SECONDS", "120"))
+        return GatewayConfig(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            timeout=timeout,
+            provider=provider,
+        )
+
+    return default_config
