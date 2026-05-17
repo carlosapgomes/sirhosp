@@ -283,31 +283,81 @@ def get_current_setor_info(frame: Frame) -> dict[str, str]:
 # ── XLSX export helpers ─────────────────────────────────────────────
 
 
+def _click_export_button(frame: Frame, page: Page) -> None:
+    """Click the 'Exportar para Arquivo' button using JS.
+
+    Playwright's click() hangs on this PrimeFaces commandButton because
+    it triggers an AJAX event that Playwright misinterprets. Using
+    element.click() via JS dispatch avoids the deadlock.
+    """
+    clicked = frame.evaluate(
+        """
+        () => {
+            const all = document.querySelectorAll('*');
+            for (const el of all) {
+                const t = (el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                if (t === 'exportar para arquivo') {
+                    el.click();
+                    return true;
+                }
+            }
+            return false;
+        }
+        """
+    )
+    if not clicked:
+        raise RuntimeError("Não foi possível clicar em Exportar para Arquivo.")
+    page.wait_for_timeout(300)
+
+
+def _click_xls_tudo(frame: Frame, page: Page) -> None:
+    """Click the 'XLS (Tudo)' menu item using JS."""
+    clicked = frame.evaluate(
+        """
+        () => {
+            const all = document.querySelectorAll('a');
+            for (const a of all) {
+                const t = (a.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                if (t === 'xls (tudo)') {
+                    a.click();
+                    return true;
+                }
+            }
+            return false;
+        }
+        """
+    )
+    if not clicked:
+        raise RuntimeError("Não foi possível clicar em XLS (Tudo).")
+
+
 def export_setor_xlsx(frame: Frame, page: Page) -> Path:
     """Clica em Exportar para Arquivo → XLS (Tudo) e retorna o path do XLSX baixado.
 
-    O arquivo é baixado para o diretório temporário do navegador.
-    Retorna o caminho do arquivo no disco.
+    Usa JS clicks em vez de Playwright clicks para evitar deadlock com
+    eventos AJAX do PrimeFaces. Copia o arquivo para um path estável
+    antes de retornar (evita race condition com tempfile do Playwright).
     """
-    # Clica no botão "Exportar para Arquivo"
-    export_btn = frame.get_by_role("button", name="Exportar para Arquivo")
-    if not safe_click(export_btn, "Exportar para Arquivo", timeout=15000):
-        raise RuntimeError("Não foi possível clicar em Exportar para Arquivo.")
+    import shutil
 
+    _click_export_button(frame, page)
     page.wait_for_timeout(500)
 
     # Prepara o download e clica em "XLS (Tudo)"
     with page.expect_download(timeout=120000) as download_info:
-        xls_link = frame.locator("a").filter(has_text="XLS (Tudo)")
-        xls_link.first.click(timeout=10000)
+        _click_xls_tudo(frame, page)
 
     download = download_info.value
     download_path = download.path()
     if download_path is None:
         raise RuntimeError("Download não produziu arquivo no disco.")
 
-    print(f"    [i] XLSX baixado: {download.suggested_filename} ({download_path.stat().st_size} bytes)")
-    return download_path
+    # Copy to a stable path (Playwright may clean up the temp file)
+    stable_path = download_path.with_suffix(".stable.xlsx")
+    shutil.copy2(download_path, stable_path)
+
+    print(f"    [i] XLSX baixado: {download.suggested_filename} ({stable_path.stat().st_size} bytes)")
+    return stable_path
 
 
 def parse_setor_xlsx(
@@ -371,9 +421,27 @@ def parse_setor_xlsx(
         print(f"    [A] Colunas encontradas: {headers}")
         raise ValueError(f"Colunas obrigatórias ausentes no XLSX: {missing}")
 
+    def _sanitize_prontuario(raw: Any) -> str:
+        """Sanitize prontuário: convert number to int→str, remove separators.
+
+        openpyxl returns numeric cells as int or float. A cell with
+        19017680.0 becomes "19017680.0" via str(), which breaks the
+        downstream worker that receives --patient-record '19017680.0'.
+        """
+        if raw is None:
+            return ""
+        if isinstance(raw, (int, float)):
+            raw = str(int(raw))
+        else:
+            raw = str(raw).strip()
+        # Remove any remaining dots, slashes, or non-digit separators
+        return raw.replace(".", "").replace("/", "").strip()
+
     pacientes: list[dict[str, Any]] = []
     for row in rows_iter:
-        prontuario = str(row[col_map["prontuario"]]).strip() if col_map["prontuario"] < len(row) and row[col_map["prontuario"]] is not None else ""
+        prontuario = _sanitize_prontuario(
+            row[col_map["prontuario"]] if col_map["prontuario"] < len(row) else None
+        )
         nome = str(row[col_map["nome"]]).strip() if col_map["nome"] < len(row) and row[col_map["nome"]] is not None else ""
 
         if not prontuario and not nome:
@@ -544,9 +612,29 @@ def run(
                     setor_codigo = setor_info.get("codigo", "")
                     setor_nome_completo = setor_info.get("nome") or setor
 
-                    # Aguarda a tabela carregar antes de exportar
+                    # Aguarda a tabela carregar
                     wait_ajax_idle(frame, page, timeout_ms=60000)
                     page.wait_for_timeout(1000)
+
+                    # Verifica se o setor tem pacientes antes de exportar
+                    tem_pacientes = frame.evaluate(
+                        """
+                        () => {
+                            const tbody = document.querySelector('[id$="resultList_data"]');
+                            if (!tbody) return false;
+                            const txt = (tbody.textContent || '').trim();
+                            return !txt.includes('Nenhum registro');
+                        }
+                        """
+                    )
+                    if not tem_pacientes:
+                        print(f"    setor vazio — pulando")
+                        results.append({
+                            "setor_codigo": setor_codigo,
+                            "setor": setor_nome_completo,
+                            "pacientes": [],
+                        })
+                        continue
 
                     # Exporta XLSX
                     xlsx_path = export_setor_xlsx(frame, page)
