@@ -558,3 +558,101 @@ class TestParallelPipelineEmptyEvents:
         run.refresh_from_db()
         assert run.status == "succeeded"
         # Chunks still get LLM calls even with empty events
+
+
+# ---------------------------------------------------------------------------
+# Hardening (APS-P-S6)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestParallelPipelineHardening:
+    """Edge cases and env var configuration for parallel pipeline."""
+
+    def test_chunk_config_defaults(self):
+        """Defaults are used when env vars are absent."""
+        import os
+
+        from apps.summaries.services import _get_parallel_chunk_config
+
+        # Clear env vars temporarily
+        old_chunk = os.environ.pop("SUMMARY_PARALLEL_CHUNK_DAYS", None)
+        old_overlap = os.environ.pop("SUMMARY_PARALLEL_OVERLAP_DAYS", None)
+
+        try:
+            chunk_days, overlap_days = _get_parallel_chunk_config()
+            assert chunk_days == 4
+            assert overlap_days == 1
+        finally:
+            if old_chunk is not None:
+                os.environ["SUMMARY_PARALLEL_CHUNK_DAYS"] = old_chunk
+            if old_overlap is not None:
+                os.environ["SUMMARY_PARALLEL_OVERLAP_DAYS"] = old_overlap
+
+    def test_chunk_config_from_env(self):
+        """Env vars override defaults."""
+        import os
+
+        from apps.summaries.services import _get_parallel_chunk_config
+
+        os.environ["SUMMARY_PARALLEL_CHUNK_DAYS"] = "7"
+        os.environ["SUMMARY_PARALLEL_OVERLAP_DAYS"] = "2"
+
+        try:
+            chunk_days, overlap_days = _get_parallel_chunk_config()
+            assert chunk_days == 7
+            assert overlap_days == 2
+        finally:
+            del os.environ["SUMMARY_PARALLEL_CHUNK_DAYS"]
+            del os.environ["SUMMARY_PARALLEL_OVERLAP_DAYS"]
+
+    def test_pipeline_run_cost_aggregation(self):
+        """SummaryPipelineRun costs reflect chunk costs."""
+        from apps.summaries.services import execute_parallel_pipeline
+
+        admission = _make_admission()
+        run = _make_queued_parallel_run(
+            admission=admission,
+            target_end_date=date(2025, 6, 5),
+        )
+
+        # Chunks with non-zero costs
+        resp = _make_local_chunk_response(0)
+        resp["cost_usd_estimated"] = 0.01
+        resp["input_tokens"] = 200
+        resp["output_tokens"] = 100
+
+        with patch(
+            "apps.summaries.services.call_llm_parallel_chunks",
+            return_value=[resp],
+        ), patch(
+            "apps.summaries.services.call_llm_parallel_final",
+            return_value=_make_final_response(),
+        ):
+            execute_parallel_pipeline(run, admission=admission)
+
+        pipeline_run = SummaryPipelineRun.objects.get(summary_run=run)
+        assert pipeline_run.phase1_cost_total > 0
+
+    def test_serial_pipeline_not_affected(self):
+        """SummaryRun with pipeline_type='serial' still uses legacy pipeline."""
+        from unittest.mock import patch
+
+        admission = _make_admission()
+        run = SummaryRun.objects.create(
+            admission=admission,
+            mode="generate",
+            target_end_date=date(2025, 6, 5),
+            status="queued",
+            pipeline_type="serial",
+        )
+
+        with patch(
+            "apps.summaries.services.call_llm_gateway",
+            return_value=_make_local_chunk_response(0),
+        ):
+            from apps.summaries.services import execute_summary_run
+            execute_summary_run(run, admission=admission)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
