@@ -17,6 +17,22 @@
   Status do Resumo #{{ run.pk }}
 </h2>
 
+<!-- Processing banner (shown while running/queued) -->
+{% if not terminal %}
+<div class="alert alert-primary d-flex align-items-center mb-3 py-2 border-0 shadow-sm" role="alert">
+  <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+  <strong class="me-1">Processando...</strong>
+  <span class="small">
+    O resumo está sendo gerado em segundo plano.
+    {% if run.pipeline_type == "parallel" %}
+      Pipeline paralelo — chunks processados simultaneamente.
+    {% else %}
+      Pipeline serial — processamento progressivo.
+    {% endif %}
+  </span>
+</div>
+{% endif %}
+
 <!-- Status card -->
 <div class="card border-0 shadow-sm mb-3">
   <div class="card-body">
@@ -61,6 +77,9 @@
       <div class="col-sm-6">
         <span class="text-muted">Modo:</span>
         <strong>{{ run.get_mode_display }}</strong>
+        <span class="badge {% if run.pipeline_type == 'parallel' %}bg-info text-dark{% else %}bg-light text-dark{% endif %} ms-1 small">
+          {% if run.pipeline_type == "parallel" %}Paralelo{% else %}Serial{% endif %}
+        </span>
       </div>
       <div class="col-sm-6">
         <span class="text-muted">Data alvo:</span>
@@ -195,6 +214,12 @@
   <a href="{% url 'patients:admission_list' run.admission.patient_id %}" class="btn btn-outline-secondary btn-sm">
     <i class="bi bi-arrow-left me-1"></i>Voltar para o paciente
   </a>
+
+  {% if run.status == 'succeeded' or run.status == 'partial' %}
+  <a href="{% url 'summaries:read' run.pk %}" class="btn btn-primary btn-sm">
+    <i class="bi bi-file-text me-1"></i>Ler resumo
+  </a>
+  {% endif %}
 
   {% if can_cancel %}
   <form method="post" action="{% url 'summaries:cancel_summary_run' run.pk %}" class="d-inline">

@@ -478,3 +478,113 @@ class TestCallLLMParallelFinal:
                 "sobrepostos" in system_msg.lower()
                 or "sobreposição" in system_msg.lower()
             )
+
+
+# ---------------------------------------------------------------------------
+# Semaphore concurrency limiting (APS-P-S6 hardening)
+# ---------------------------------------------------------------------------
+
+
+class TestParallelSemaphore:
+    """Tests for asyncio.Semaphore limiting concurrent chunk calls."""
+
+    @pytest.mark.asyncio
+    async def test_semaphore_limits_concurrency(self, gateway_config):
+        """Semaphore prevents more than max_concurrent calls at once."""
+        import os
+
+        from apps.summaries.llm_gateway import _call_chunks_async
+
+        response = _make_llm_response()
+        completion_mock = _make_async_completion_mock(response)
+
+        concurrent_count = 0
+        max_concurrent_seen = 0
+
+        async def track_concurrency(*args, **kwargs):
+            nonlocal concurrent_count, max_concurrent_seen
+            concurrent_count += 1
+            max_concurrent_seen = max(max_concurrent_seen, concurrent_count)
+            await asyncio.sleep(0.02)  # Simulate work
+            concurrent_count -= 1
+            return completion_mock
+
+        with patch(
+            "apps.summaries.llm_gateway.AsyncOpenAI"
+        ) as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.chat = MagicMock()
+            mock_client.chat.completions = MagicMock()
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=track_concurrency
+            )
+            mock_client_cls.return_value = mock_client
+
+            # Set max concurrent to 2
+            os.environ["SUMMARY_PARALLEL_MAX_CONCURRENT"] = "2"
+            try:
+                # 5 chunks with max 2 concurrent
+                chunks = [
+                    {"chunk_index": i, "novas_evolucoes": []}
+                    for i in range(5)
+                ]
+                results = await _call_chunks_async(
+                    chunks_data=chunks,
+                    config=gateway_config,
+                )
+            finally:
+                del os.environ["SUMMARY_PARALLEL_MAX_CONCURRENT"]
+
+            assert len(results) == 5
+            # With max_concurrent=2, never more than 2 should run at once
+            assert max_concurrent_seen <= 2
+
+    @pytest.mark.asyncio
+    async def test_results_ordered_with_semaphore(self, gateway_config):
+        """Results maintain order even when semaphore batches calls."""
+        import os
+
+        from apps.summaries.llm_gateway import _call_chunks_async
+
+        # Responses with chunk-specific content
+        async def per_chunk_response(*args, **kwargs):
+            import json as _json
+            user_msg = kwargs.get("messages", [{}])[-1].get("content", "{}")
+            try:
+                parsed = _json.loads(user_msg)
+                chunk_idx = parsed.get("_chunk_index", -1)
+            except Exception:
+                chunk_idx = -1
+            resp = _make_llm_response()
+            resp["resumo_markdown"] = f"# Chunk {chunk_idx}\n\nTest."
+            await asyncio.sleep(0.01)  # Vary completion time
+            return _make_async_completion_mock(resp)
+
+        with patch(
+            "apps.summaries.llm_gateway.AsyncOpenAI"
+        ) as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.chat = MagicMock()
+            mock_client.chat.completions = MagicMock()
+            mock_client.chat.completions.create = AsyncMock(
+                side_effect=per_chunk_response
+            )
+            mock_client_cls.return_value = mock_client
+
+            os.environ["SUMMARY_PARALLEL_MAX_CONCURRENT"] = "2"
+            try:
+                chunks = [
+                    {"chunk_index": i, "novas_evolucoes": []}
+                    for i in range(5)
+                ]
+                results = await _call_chunks_async(
+                    chunks_data=chunks,
+                    config=gateway_config,
+                )
+            finally:
+                del os.environ["SUMMARY_PARALLEL_MAX_CONCURRENT"]
+
+            assert len(results) == 5
+            # Results should be in chunk_index order (0, 1, 2, 3, 4)
+            for i, result in enumerate(results):
+                assert result.get("_chunk_index") == i

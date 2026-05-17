@@ -399,6 +399,20 @@ def call_llm_phase2_render(
 # ---------------------------------------------------------------------------
 
 _PARALLEL_MAX_RETRIES_PER_CHUNK = 3
+_PARALLEL_MAX_CONCURRENT_DEFAULT = 10
+
+
+def _get_parallel_max_concurrent() -> int:
+    """Return max concurrent parallel chunk calls from env or default."""
+    raw = os.environ.get("SUMMARY_PARALLEL_MAX_CONCURRENT", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+            if value >= 1:
+                return value
+        except ValueError:
+            pass
+    return _PARALLEL_MAX_CONCURRENT_DEFAULT
 
 
 def call_llm_parallel_chunks(
@@ -432,15 +446,24 @@ async def _call_chunks_async(
 ) -> list[dict[str, Any]]:
     """Async: dispatch all chunks with ``asyncio.gather``.
 
-    Each chunk is processed independently and concurrently.
+    Each chunk is processed independently.  A semaphore limits
+    concurrent calls to ``SUMMARY_PARALLEL_MAX_CONCURRENT``
+    (default 10) to avoid provider rate-limiting.
     Results are always returned in the original chunk order.
     """
+    max_concurrent = _get_parallel_max_concurrent()
+    semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def _limited_call(chunk, idx):
+        async with semaphore:
+            return await _call_chunk_local_async(
+                config=config,
+                novas_evolucoes=chunk.get("novas_evolucoes", []),
+                chunk_index=chunk.get("chunk_index", idx),
+            )
+
     tasks = [
-        _call_chunk_local_async(
-            config=config,
-            novas_evolucoes=chunk.get("novas_evolucoes", []),
-            chunk_index=chunk.get("chunk_index", i),
-        )
+        _limited_call(chunk, i)
         for i, chunk in enumerate(chunks_data)
     ]
     return list(await asyncio.gather(*tasks))
