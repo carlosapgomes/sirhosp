@@ -1,0 +1,136 @@
+# Generated manually from AGHU source system specialty catalog
+# Extracted via: DevTools console → specialty autocomplete panel
+# Date: 2026-05-16
+
+from django.db import migrations
+
+
+# fmt: off
+SPECIALTIES_DATA = [
+    ("AHD", "ACESSOS PARA HD"),
+    ("ALG", "ALGOLOGIA"),
+    ("ARM", "ARRITMOLOGIA-MARCAPASSO"),
+    ("BLH", "BANCO DE LEITE HUMANO"),
+    ("BRI", "BIOIMAGEM RADIOLOGIA INTERVENCIONISTA"),
+    ("CAD", "CIRURGIA DO APARELHO DIGESTIVO"),
+    ("CAI", "CARDIOLOGIA PEDIÁTRICA"),
+    ("CAP", "CIRURGIA DE CABEÇA E PESCOÇO"),
+    ("CAR", "CARDIOLOGIA"),
+    ("CAT", "CARDIOLOGIA TELEMEDICINA"),
+    ("CAV", "CARDIOVASCULAR"),
+    ("CCP", "CUIDADOS PALIATIVOS"),
+    ("CCV", "CIRURGIA CARDIOVASCULAR"),
+    ("CEC", "ECOCARDIOGRAFIA"),
+    ("CER", "ERGOMETRIA"),
+    ("CG", "EMERGENCIA CIRURGIA GERAL"),
+    ("CGT", "CIRURGIA GERAL TELEMEDICINA"),
+    ("CIB", "CIRURGIA E TRAUMATOLOGIA BUCOMAXILOFACIAL"),
+    ("CIG", "CIRURGIA GERAL"),
+    ("CII", "CIRURGIA PEDIÁTRICA"),
+    ("CIO", "CANCEROLOGIA CIRÚRGICA"),
+    ("CIP", "CIRURGIA PLÁSTICA"),
+    ("CIT", "CIRURGIA TORÁCICA"),
+    ("CIV", "CIRURGIA VASCULAR"),
+    ("CME", "CLINICA MEDICA"),
+    ("COT", "COLOPROCTOLOGIA - DII"),
+    ("CPT", "CARDIOLOGIA PEDIÁTRICA TELEMEDICINA"),
+    ("CRC", "CIRURGIA CRÂNIO-MAXILO-FACIAL"),
+    ("CTX", "CARDIOLOGIA TRANSPLANTE"),
+    ("CVT", "CIRURGIA VASCULAR TELEMEDICINA"),
+    ("DEP", "DERMATOLOGIA PEDIATRICA"),
+    ("DER", "DERMATOLOGIA"),
+    ("EBC", "EMERGENCIA BUCOMAXILO"),
+    ("ECE", "ECOENDOSCOPIA"),
+    ("ECM", "EMERGENCIA CLINICA MEDICA"),
+    ("ECP", "EMERGENCIA CIRURGIA PEDIATRICA"),
+    ("ECV", "EMERGENCIA CIRURGIA VASCULAR"),
+    ("EEC", "ENFERMAGEM CLINICA"),
+    ("EEF", "ELETROFISIOLOGIA CLÍNICA INVASIVA"),
+    ("EFU", "ENFERMAGEM UROLOGICA"),
+    ("EHP", "ENFERMEIRO HABILITADO EM PICC"),
+    ("ELE", "ELETROCARDIOGRAMA"),
+    ("EMG", "EMERGENCIA GINECOLOGICA"),
+    ("EMT", "EMTN"),
+    ("ENA", "ENDOCRINOLOGIA DE ALTA COMPLEXIDADE"),
+    ("ENC", "EMERGENCIA NEUROCLINICA"),
+    ("END", "ENDOCRINOLOGIA E METABOLOGIA"),
+    ("ENI", "ENDOCRINOLOGIA PEDIÁTRICA"),
+    ("ENO", "ENFERMAGEM OBSTETRICA"),
+    ("ENR", "EMERGENCIA NEUROCIRURGIAO"),
+    ("ENT", "ENDOCRINOLOGIA TELEMEDICINA"),
+    ("EOT", "EMERGENCIA ORTOPEDIA"),
+    ("EPD", "EMERGENCIA PEDIATRIA"),
+    ("EST", "ESTOMATOLOGIA"),
+    ("ETM", "ENDOCRINOLOGIA PEDIÁTRICA TELEMEDICINA"),
+    ("ETT", "ESTOMATERAPIA"),
+    ("FAG", "FISIOTERAPIA ADULTO GERAL"),
+    ("FAL", "ADMINISTRAÇÃO DE LABORATÓRIO CLÍNICO"),
+    ("FAR", "FARMACOLOGIA"),
+    ("FBX", "BACTERIOLOGIA CLÍNICA"),
+    ("FCL", "FARMÁCIA CLÍNICA"),
+    ("FDF", "FISIOTERAPIA DERMATO FUNCIONAL"),
+    ("FDI", "FARMÁCIA DE DISPENSAÇÃO"),
+    ("FHP", "FARMÁCIA HOSPITALAR"),
+    ("FNX", "FISIOTERAPIA NEURO FUNCIONAL"),
+    ("FO", "FONOAUDIOLOGIA"),
+    ("FPE", "FISIOTERAPIA PEDIATRICA"),
+    ("FRM", "FISIOTERAPIA RESPIRATORIA E MOTORA"),
+    ("FRY", "FISIOTERAPIA RESPIRATÓRIA"),
+    ("FSG", "FISIOTERAPIA GERAL"),
+    ("FSM", "FISIOTERAPIA NA SAUDE DA MULHER"),
+    ("FTO", "FISIOTERAPÍA TRAUMATO ORTOPÉDICA FUNCIONAL"),
+    ("GAI", "GASTROENTEROLOGIA PEDIÁTRICA"),
+    ("GAS", "GASTROENTEROLOGIA"),
+    ("GAT", "GASTROENTEROLOGIA TELEMEDICINA"),
+    ("GEP", "GENETICISTA"),
+    ("GIN", "GINECOLOGIA"),
+    ("HEA", "HEMATOLOGIA ADULTO"),
+    ("HEM", "HEMATOLOGIA E HEMOTERAPIA"),
+    ("IMU", "ALERGIA E IMUNOLOGIA"),
+    ("MAE", "ANGIORRADIOLOGIA E CIRURGIA ENDOVASCULAR"),
+    ("MAI", "ALERGIA E IMUNOLOGIA PEDIÁTRICA"),
+    ("MAN", "ANGIOLOGIA"),
+    ("MAY", "ACUPUNTURA"),
+    ("MCT", "CIRURGIA DO TRAUMA"),
+    ("MCV", "CIRURGIA VIDEOLAPAROSCÓPICA"),
+    ("ME", "ANDRÉ RICARDO DE OLIVEIRA ESTRELA"),
+    ("MED", "ENDOSCOPIA DIGESTIVA"),
+    ("MEG", "ENDOSCOPIA GINECOLÓGICA"),
+    ("MEI", "CLÍNICA MÉDICA"),
+    ("MEN", "ENDOSCOPIA"),
+    ("MER", "ENDOSCOPIA RESPIRATÓRIA"),
+    ("MEV", "ECOGRAFIA VASCULAR COM DOPPLER"),
+    ("NCO", "CIRURGIA ONCOLOGICA"),
+    ("OEN", "DISFUNÇÃO TÊMPORO-MANDIBULAR E DOR OROFACIAL"),
+    ("ONC", "CANCEROLOGIA"),
+    ("ORL", "CIRURGIA DA COLUNA"),
+    ("ORM", "CIRURGIA DA MÃO"),
+    ("PRO", "COLOPROCTOLOGIA"),
+    ("SAN", "ANESTESIOLOGIA"),
+    ("SGO", "GINECOLOGIA E OBSTETRÍCIA"),
+    ("TDD", "DOR"),
+]
+# fmt: on
+
+
+def seed_specialties(apps, schema_editor):
+    Specialty = apps.get_model("census", "Specialty")
+    Specialty.objects.all().delete()
+    for code, name in SPECIALTIES_DATA:
+        Specialty.objects.create(code=code, name=name)
+
+
+def reverse_seed(apps, schema_editor):
+    Specialty = apps.get_model("census", "Specialty")
+    Specialty.objects.filter(code__in=[c for c, _ in SPECIALTIES_DATA]).delete()
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ("census", "0008_seed_specialties"),
+    ]
+
+    operations = [
+        migrations.RunPython(seed_specialties, reverse_seed),
+    ]
