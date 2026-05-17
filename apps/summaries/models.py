@@ -178,10 +178,22 @@ class SummaryRun(models.Model):
         related_name="summary_runs",
     )
 
+    class PipelineType(models.TextChoices):
+        SERIAL = "serial", "Serial"
+        PARALLEL = "parallel", "Parallel"
+
     mode = models.CharField(
         max_length=20,
         choices=Mode.choices,
     )
+
+    pipeline_type = models.CharField(
+        max_length=20,
+        choices=PipelineType.choices,
+        default=PipelineType.SERIAL,
+        db_index=True,
+    )
+
     target_end_date = models.DateField()
 
     pinned_cutoff_happened_at = models.DateTimeField(
