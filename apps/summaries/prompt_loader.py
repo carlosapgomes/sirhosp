@@ -102,3 +102,43 @@ def load_phase2_prompt(prompts_dir: Path | None = None) -> str:
             from the prompts directory.
     """
     return _load_prompt_file("phase2_default_v1.md", prompts_dir)
+
+
+def load_phase1_parallel_local_prompt(prompts_dir: Path | None = None) -> str:
+    """Load the phase 1 parallel local prompt.
+
+    This prompt instructs the LLM to produce a period-scoped local
+    summary without receiving prior state or narrative.  It is loaded
+    from ``phase1_parallel_local_v1.md``.
+
+    Args:
+        prompts_dir: Optional explicit path to the prompts directory.
+
+    Returns:
+        Prompt content as a string.
+
+    Raises:
+        PromptFileNotFoundError: If ``phase1_parallel_local_v1.md`` is
+            missing from the prompts directory.
+    """
+    return _load_prompt_file("phase1_parallel_local_v1.md", prompts_dir)
+
+
+def load_phase2_parallel_final_prompt(prompts_dir: Path | None = None) -> str:
+    """Load the phase 2 parallel final consolidation prompt.
+
+    This prompt instructs the LLM to consolidate multiple overlapping
+    local summaries into a single longitudinal narrative.  It is loaded
+    from ``phase2_parallel_final_v1.md``.
+
+    Args:
+        prompts_dir: Optional explicit path to the prompts directory.
+
+    Returns:
+        Prompt content as a string.
+
+    Raises:
+        PromptFileNotFoundError: If ``phase2_parallel_final_v1.md`` is
+            missing from the prompts directory.
+    """
+    return _load_prompt_file("phase2_parallel_final_v1.md", prompts_dir)
