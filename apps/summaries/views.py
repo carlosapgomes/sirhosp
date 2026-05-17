@@ -217,11 +217,24 @@ def run_progress(
         "chunks": run.chunks.all(),
         "terminal": terminal,
     }
-    return render(
+    response = render(
         request,
         "summaries/_summary_run_progress.html",
         context,
     )
+
+    # When run becomes terminal, tell HTMX to reload the full page.
+    # This shows the "Ler resumo" button and final state.
+    # Only trigger if there's no pipeline run (pipeline_progress handles that case).
+    if terminal:
+        from apps.summaries.models import SummaryPipelineRun
+        has_pipeline = SummaryPipelineRun.objects.filter(
+            summary_run=run
+        ).exists()
+        if not has_pipeline:
+            response["HX-Refresh"] = "true"
+
+    return response
 
 
 @login_required
@@ -277,11 +290,18 @@ def pipeline_progress(
         "phase1_status": phase1_status,
         "phase2_status": phase2_status,
     }
-    return render(
+    response = render(
         request,
         "summaries/_summary_pipeline_progress.html",
         context,
     )
+
+    # When pipeline becomes terminal, tell HTMX to reload the full page
+    # so the user sees the "Ler resumo" button and final state.
+    if pipeline_terminal and pipeline_run is not None:
+        response["HX-Refresh"] = "true"
+
+    return response
 
 
 @login_required

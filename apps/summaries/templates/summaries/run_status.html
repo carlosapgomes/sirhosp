@@ -21,15 +21,22 @@
 {% if not terminal %}
 <div class="alert alert-primary d-flex align-items-center mb-3 py-2 border-0 shadow-sm" role="alert">
   <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
-  <strong class="me-1">Processando...</strong>
-  <span class="small">
-    O resumo está sendo gerado em segundo plano.
-    {% if run.pipeline_type == "parallel" %}
-      Pipeline paralelo — chunks processados simultaneamente.
-    {% else %}
-      Pipeline serial — processamento progressivo.
-    {% endif %}
-  </span>
+  {% if pipeline_run and phase1_status == "succeeded" and phase2_status == "running" %}
+    <strong class="me-1">Consolidando resumo final...</strong>
+    <span class="small">Unificando {{ run.total_chunks }} blocos em uma narrativa &uacute;nica.</span>
+  {% elif pipeline_run and phase2_status == "succeeded" %}
+    <strong class="me-1">Finalizando...</strong>
+    <span class="small">Salvando resultado.</span>
+  {% elif run.pipeline_type == "parallel" %}
+    <strong class="me-1">Processando blocos em paralelo...</strong>
+    <span class="small">{{ run.current_chunk_index }} de {{ run.total_chunks }} blocos conclu&iacute;dos.</span>
+  {% else %}
+    <strong class="me-1">Processando...</strong>
+    <span class="small">
+      O resumo est&aacute; sendo gerado em segundo plano.
+      {% if run.pipeline_type == "parallel" %}Pipeline paralelo.{% else %}Pipeline serial.{% endif %}
+    </span>
+  {% endif %}
 </div>
 {% endif %}
 
@@ -234,4 +241,19 @@
   </form>
   {% endif %}
 </div>
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+{% if terminal %}
+<script>
+  // Scroll to actions when page loads in terminal state (after HX-Refresh)
+  document.addEventListener('DOMContentLoaded', function() {
+    var actions = document.querySelector('.d-flex.gap-2.mt-4');
+    if (actions) {
+      actions.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  });
+</script>
+{% endif %}
 {% endblock %}
