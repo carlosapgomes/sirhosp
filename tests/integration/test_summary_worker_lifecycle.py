@@ -443,3 +443,102 @@ class TestUpdateModeWithPriorState:
         # Should have produced chunks only for new coverage
         state = AdmissionSummaryState.objects.get(admission=admission)
         assert state.coverage_end >= date(2025, 1, 5)
+
+
+# ---------------------------------------------------------------------------
+# Parallel pipeline routing (APS-P-S4)
+# ---------------------------------------------------------------------------
+
+
+def _make_queued_parallel_run(admission=None, **overrides):
+    """Create a queued SummaryRun with pipeline_type='parallel'."""
+    if admission is None:
+        admission = _make_admission()
+    defaults = {
+        "admission": admission,
+        "mode": "generate",
+        "target_end_date": date(2025, 1, 10),
+        "status": "queued",
+        "pipeline_type": "parallel",
+    }
+    defaults.update(overrides)
+    return SummaryRun.objects.create(**defaults)
+
+
+@pytest.mark.django_db
+class TestParallelPipelineRouting:
+    """Worker routes parallel runs to execute_parallel_pipeline."""
+
+    def test_parallel_run_is_routed_to_parallel_pipeline(self):
+        """A run with pipeline_type='parallel' uses the parallel pipeline."""
+        from unittest.mock import patch
+
+        admission = _make_admission()
+        run = _make_queued_parallel_run(admission=admission)
+
+        with patch(
+            "apps.summaries.management.commands.process_summary_runs"
+            ".execute_parallel_pipeline"
+        ) as mock_parallel:
+            mock_parallel.return_value = run
+            call_command("process_summary_runs")
+            mock_parallel.assert_called_once()
+
+    def test_serial_run_uses_legacy_pipeline_without_flag(self):
+        """A serial run without --pipeline uses execute_summary_run."""
+        from unittest.mock import patch
+
+        admission = _make_admission()
+        run = _make_queued_run(admission=admission)
+
+        with patch(
+            "apps.summaries.management.commands.process_summary_runs"
+            ".execute_summary_run"
+        ) as mock_serial:
+            mock_serial.return_value = run
+            call_command("process_summary_runs")
+            mock_serial.assert_called_once()
+
+    def test_serial_run_with_pipeline_flag_uses_two_phase(self):
+        """A serial run with --pipeline uses execute_two_phase_pipeline."""
+        from unittest.mock import patch
+
+        admission = _make_admission()
+        _run = _make_queued_run(admission=admission)
+
+        with patch(
+            "apps.summaries.management.commands.process_summary_runs"
+            ".execute_two_phase_pipeline"
+        ) as mock_two_phase:
+            mock_two_phase.return_value = None
+            call_command("process_summary_runs", pipeline=True)
+            mock_two_phase.assert_called_once()
+
+    def test_mixed_serial_and_parallel_runs(self):
+        """Worker processes both serial and parallel runs in the queue."""
+        from unittest.mock import patch
+
+        patient = _make_patient()
+        admission1 = _make_admission(
+            patient=patient, source_admission_key="S4-ADM-M1"
+        )
+        admission2 = _make_admission(
+            patient=patient, source_admission_key="S4-ADM-M2"
+        )
+
+        serial_run = _make_queued_run(admission=admission1)
+        _parallel_run = _make_queued_parallel_run(admission=admission2)
+
+        with patch(
+            "apps.summaries.management.commands.process_summary_runs"
+            ".execute_summary_run"
+        ) as mock_serial, patch(
+            "apps.summaries.management.commands.process_summary_runs"
+            ".execute_parallel_pipeline"
+        ) as mock_parallel:
+            mock_serial.return_value = serial_run
+            mock_parallel.return_value = _parallel_run
+            call_command("process_summary_runs")
+
+            assert mock_serial.call_count == 1
+            assert mock_parallel.call_count == 1

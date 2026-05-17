@@ -23,6 +23,7 @@ from django.utils import timezone
 
 from apps.summaries.models import SummaryRun
 from apps.summaries.services import (
+    execute_parallel_pipeline,
     execute_summary_run,
     execute_two_phase_pipeline,
 )
@@ -97,6 +98,31 @@ class Command(BaseCommand):
                 "instead of the legacy single-phase execution."
             ),
         )
+
+    def _process_single_run(
+        self, run: SummaryRun, pipeline: bool = False
+    ) -> None:
+        """Process a single claimed run, routing by pipeline_type.
+
+        Routing:
+        - pipeline_type == "parallel" → execute_parallel_pipeline
+        - pipeline_type == "serial" + --pipeline → execute_two_phase_pipeline
+        - pipeline_type == "serial" (default) → execute_summary_run (legacy)
+        """
+        if run.pipeline_type == SummaryRun.PipelineType.PARALLEL:
+            execute_parallel_pipeline(run)
+            self.stdout.write(
+                f"  Parallel run #{run.pk} succeeded "
+                f"(mode={run.mode}, chunks={run.total_chunks})"
+            )
+        elif pipeline:
+            _execute_pipeline_with_config(run, self)
+        else:
+            execute_summary_run(run)
+            self.stdout.write(
+                f"  Run #{run.pk} succeeded "
+                f"(mode={run.mode}, chunks={run.total_chunks})"
+            )
 
     def handle(self, *args, **options):
         loop: bool = options["loop"]
@@ -182,15 +208,7 @@ class Command(BaseCommand):
                 # Process outside the atomic block so each run is
                 # independently handled.
                 try:
-                    if pipeline:
-                        _execute_pipeline_with_config(run, self)
-                    else:
-                        execute_summary_run(run)
-                        self.stdout.write(
-                            f"  Run #{run.pk} succeeded "
-                            f"(mode={run.mode}, "
-                            f"chunks={run.total_chunks})"
-                        )
+                    self._process_single_run(run, pipeline=pipeline)
                 except Exception as exc:
                     self.stderr.write(f"  Run #{run.pk} failed: {exc}")
                     run.status = SummaryRun.Status.FAILED
@@ -235,14 +253,7 @@ class Command(BaseCommand):
 
             # Process outside atomic block
             try:
-                if pipeline:
-                    _execute_pipeline_with_config(run, self)
-                else:
-                    execute_summary_run(run)
-                    self.stdout.write(
-                        f"  Run #{run.pk} succeeded "
-                        f"(mode={run.mode}, chunks={run.total_chunks})"
-                    )
+                self._process_single_run(run, pipeline=pipeline)
             except Exception as exc:
                 self.stderr.write(f"  Run #{run.pk} failed: {exc}")
                 run.status = SummaryRun.Status.FAILED
