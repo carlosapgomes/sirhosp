@@ -383,6 +383,7 @@ def _config_form_with_error(
         "page_title": "Configurar Resumo",
         "admission": admission,
         "mode": request.POST.get("mode", "generate"),
+        "pipeline_type": request.POST.get("pipeline_type", "serial"),
         "phase2_options": phase2_options,
         "own_prompts": own_prompts,
         "public_others": public_others,
@@ -425,10 +426,15 @@ def summary_config(
         if mode not in services.VALID_MODES:
             mode = "generate"
 
+        pipeline_type = request.GET.get("pipeline_type", "serial").strip()
+        if pipeline_type not in ("serial", "parallel"):
+            pipeline_type = "serial"
+
         context = {
             "page_title": "Configurar Resumo",
             "admission": admission,
             "mode": mode,
+            "pipeline_type": pipeline_type,
             "phase2_options": phase2_options,
             "own_prompts": own_prompts,
             "public_others": public_others,
@@ -453,6 +459,11 @@ def summary_config(
             f"Modo inválido: '{mode}'. "
             f"Deve ser um de: {', '.join(sorted(services.VALID_MODES))}.",
         )
+
+    # Read pipeline_type (APS-P-S5)
+    pipeline_type = request.POST.get("pipeline_type", "serial").strip()
+    if pipeline_type not in ("serial", "parallel"):
+        pipeline_type = "serial"
 
     # ---- Validate phase2_option_index (strict) ----
     phase2_option_index: int | None = None
@@ -606,6 +617,7 @@ def summary_config(
         mode=mode,
         requested_by=request.user,  # type: ignore[arg-type]
         phase2_config_json=phase2_config,
+        pipeline_type=pipeline_type,
     )
 
     return redirect(reverse("summaries:run_status", args=[run.pk]))

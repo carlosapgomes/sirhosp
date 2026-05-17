@@ -201,6 +201,7 @@ def queue_summary_run(
     mode: str,
     requested_by: User | None = None,
     phase2_config_json: dict | None = None,
+    pipeline_type: str = "serial",
 ) -> SummaryRun:
     """Create a queued SummaryRun for an admission.
 
@@ -209,7 +210,8 @@ def queue_summary_run(
       - closed admission: min(today, discharge_date)
 
     Optionally stores ``phase2_config_json`` for the worker to consume
-    (STP-S7-F1).
+    (STP-S7-F1).  ``pipeline_type`` selects serial or parallel execution
+    (APS-P-S5).
     """
     today = date.today()
 
@@ -225,6 +227,7 @@ def queue_summary_run(
         "mode": mode,
         "target_end_date": target_end_date,
         "status": SummaryRun.Status.QUEUED,
+        "pipeline_type": pipeline_type,
     }
     if phase2_config_json is not None:
         kwargs["phase2_config_json"] = phase2_config_json

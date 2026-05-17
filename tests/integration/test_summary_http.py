@@ -420,3 +420,128 @@ class TestCancelSummaryRunView:
         assert AdmissionSummaryVersion.objects.filter(run=run).count() == 0
         assert SummaryRunChunk.objects.filter(run=run).count() == 0
         assert not AdmissionSummaryState.objects.filter(admission=admission).exists()
+
+
+# ---------------------------------------------------------------------------
+# Pipeline type in summary config (APS-P-S5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestSummaryConfigPipelineType:
+    """Tests for pipeline_type on the summary_config page."""
+
+    def test_config_get_renders_pipeline_type_radio(self):
+        """GET summary_config renders serial/parallel radio buttons."""
+        admission = _make_admission()
+        client = Client()
+        _login(client)
+
+        url = reverse("summaries:summary_config", args=[admission.pk])
+        response = client.get(url)
+
+        assert response.status_code == 200
+        content = response.content.decode("utf-8")
+        assert 'pipeline_type_serial' in content
+        assert 'pipeline_type_parallel' in content
+        assert 'Modo de Processamento' in content
+
+    def test_config_get_defaults_to_serial(self):
+        """GET without explicit pipeline_type defaults to serial."""
+        admission = _make_admission()
+        client = Client()
+        _login(client)
+
+        url = reverse("summaries:summary_config", args=[admission.pk])
+        response = client.get(url)
+
+        content = response.content.decode("utf-8")
+        # Serial radio should be checked by default
+        assert 'pipeline_type_serial' in content
+        assert 'checked' in content
+
+    def test_config_post_parallel_creates_parallel_run(self):
+        """POST with pipeline_type=parallel creates a parallel run."""
+        from unittest.mock import patch
+
+        admission = _make_admission()
+        client = Client()
+        _login(client)
+
+        url = reverse("summaries:summary_config", args=[admission.pk])
+
+        with patch(
+            "apps.summaries.llm_config.load_phase2_options",
+            return_value=[],
+        ):
+            response = client.post(url, {
+                "mode": "generate",
+                "pipeline_type": "parallel",
+                "prompt_mode": "padrao",
+            })
+
+        assert response.status_code == 302
+        run = SummaryRun.objects.filter(admission=admission).latest("pk")
+        assert run.pipeline_type == "parallel"
+
+    def test_config_post_serial_creates_serial_run(self):
+        """POST with pipeline_type=serial creates a serial run."""
+        from unittest.mock import patch
+
+        admission = _make_admission()
+        client = Client()
+        _login(client)
+
+        url = reverse("summaries:summary_config", args=[admission.pk])
+
+        with patch(
+            "apps.summaries.llm_config.load_phase2_options",
+            return_value=[],
+        ):
+            response = client.post(url, {
+                "mode": "generate",
+                "pipeline_type": "serial",
+                "prompt_mode": "padrao",
+            })
+
+        assert response.status_code == 302
+        run = SummaryRun.objects.filter(admission=admission).latest("pk")
+        assert run.pipeline_type == "serial"
+
+    def test_config_post_without_explicit_pipeline_defaults_to_serial(self):
+        """POST without pipeline_type creates a serial run (default)."""
+        from unittest.mock import patch
+
+        admission = _make_admission()
+        client = Client()
+        _login(client)
+
+        url = reverse("summaries:summary_config", args=[admission.pk])
+
+        with patch(
+            "apps.summaries.llm_config.load_phase2_options",
+            return_value=[],
+        ):
+            response = client.post(url, {
+                "mode": "generate",
+                "prompt_mode": "padrao",
+            })
+
+        assert response.status_code == 302
+        run = SummaryRun.objects.filter(admission=admission).latest("pk")
+        assert run.pipeline_type == "serial"
+
+    def test_create_summary_run_legacy_defaults_to_serial(self):
+        """Legacy create_summary_run (no config page) defaults to serial."""
+        admission = _make_admission()
+        client = Client()
+        _login(client)
+
+        url = reverse(
+            "summaries:create_summary_run", args=[admission.pk]
+        )
+        response = client.post(url, {"mode": "generate"})
+
+        assert response.status_code == 302
+        run = SummaryRun.objects.filter(admission=admission).latest("pk")
+        assert run.pipeline_type == "serial"
