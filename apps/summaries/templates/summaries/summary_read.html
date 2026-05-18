@@ -39,10 +39,15 @@
 
   <div class="d-flex gap-2">
     {% if raw_markdown %}
+      <button type="button" class="btn btn-primary btn-sm"
+              id="copy-rendered-btn"
+              title="Copiar texto formatado para a área de transferência">
+        <i class="bi bi-clipboard me-1"></i> Copiar conteúdo
+      </button>
       <button type="button" class="btn btn-outline-secondary btn-sm"
               id="copy-markdown-btn"
               title="Copiar Markdown bruto para a área de transferência">
-        <i class="bi bi-clipboard me-1"></i> Copiar Markdown
+        <i class="bi bi-markdown me-1"></i> Copiar Markdown
       </button>
     {% endif %}
     <a href="{% url 'summaries:run_status' run.pk %}"
@@ -184,7 +189,31 @@
 {{ block.super }}
 {% if raw_markdown %}
 <script>
-  /* APS-S8: Client-side Markdown copy button */
+  /* Copy rendered content (plain text from HTML) */
+  (() => {
+    const renderedBtn = document.getElementById("copy-rendered-btn");
+    if (renderedBtn) {
+      renderedBtn.addEventListener("click", () => {
+        const contentEl = document.querySelector(".summary-content");
+        const text = contentEl ? contentEl.innerText : "";
+        navigator.clipboard.writeText(text).then(() => {
+          const originalHTML = renderedBtn.innerHTML;
+          renderedBtn.innerHTML = '<i class="bi bi-check-lg me-1"></i> Copiado!';
+          renderedBtn.classList.add("btn-success");
+          renderedBtn.classList.remove("btn-primary");
+          setTimeout(() => {
+            renderedBtn.innerHTML = originalHTML;
+            renderedBtn.classList.remove("btn-success");
+            renderedBtn.classList.add("btn-primary");
+          }, 2000);
+        }).catch(() => {
+          alert("Não foi possível copiar. Tente selecionar o texto manualmente.");
+        });
+      });
+    }
+  })();
+
+  /* Copy raw Markdown (APS-S8) */
   (() => {
     const RAW_MARKDOWN = {{ raw_markdown_json|safe }};
 
