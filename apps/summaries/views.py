@@ -414,7 +414,7 @@ def _config_form_with_error(
         "page_title": "Configurar Resumo",
         "admission": admission,
         "mode": request.POST.get("mode", "generate"),
-        "pipeline_type": request.POST.get("pipeline_type", "serial"),
+        "pipeline_type": request.POST.get("pipeline_type", "parallel"),
         "phase2_options": phase2_options,
         "own_prompts": own_prompts,
         "public_others": public_others,
@@ -457,9 +457,9 @@ def summary_config(
         if mode not in services.VALID_MODES:
             mode = "generate"
 
-        pipeline_type = request.GET.get("pipeline_type", "serial").strip()
+        pipeline_type = request.GET.get("pipeline_type", "parallel").strip()
         if pipeline_type not in ("serial", "parallel"):
-            pipeline_type = "serial"
+            pipeline_type = "parallel"
 
         context = {
             "page_title": "Configurar Resumo",
@@ -492,9 +492,9 @@ def summary_config(
         )
 
     # Read pipeline_type (APS-P-S5)
-    pipeline_type = request.POST.get("pipeline_type", "serial").strip()
+    pipeline_type = request.POST.get("pipeline_type", "parallel").strip()
     if pipeline_type not in ("serial", "parallel"):
-        pipeline_type = "serial"
+        pipeline_type = "parallel"
 
     # ---- Validate phase2_option_index (strict) ----
     phase2_option_index: int | None = None

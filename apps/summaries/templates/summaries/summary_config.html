@@ -44,19 +44,21 @@
       <fieldset class="mb-3">
         <legend class="form-label small fw-semibold mb-2">Modo de Processamento</legend>
         <div class="form-check">
+          <input type="radio" name="pipeline_type" id="pipeline_type_parallel"
+                 value="parallel" class="form-check-input"
+                 {% if pipeline_type != "serial" %}checked{% endif %}>
+          <label class="form-check-label small" for="pipeline_type_parallel">
+            <strong>Paralelo</strong> &mdash; chunks independentes em paralelo (recomendado)
+          </label>
+        </div>
+        <div class="form-check">
           <input type="radio" name="pipeline_type" id="pipeline_type_serial"
                  value="serial" class="form-check-input"
                  {% if pipeline_type == "serial" %}checked{% endif %}>
           <label class="form-check-label small" for="pipeline_type_serial">
-            <strong>Serial</strong> &mdash; processamento progressivo (recomendado at&eacute; ~14 dias)
+            <strong>Serial</strong> &mdash; processamento progressivo (para interna&ccedil;&otilde;es curtas)
           </label>
         </div>
-        <div class="form-check">
-          <input type="radio" name="pipeline_type" id="pipeline_type_parallel"
-                 value="parallel" class="form-check-input"
-                 {% if pipeline_type == "parallel" %}checked{% endif %}>
-          <label class="form-check-label small" for="pipeline_type_parallel">
-            <strong>Paralelo</strong> &mdash; chunks independentes em paralelo (recomendado para interna&ccedil;&otilde;es longas, &gt;14 dias)
           </label>
         </div>
         {% if errors.pipeline_type %}

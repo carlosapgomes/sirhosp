@@ -446,8 +446,8 @@ class TestSummaryConfigPipelineType:
         assert 'pipeline_type_parallel' in content
         assert 'Modo de Processamento' in content
 
-    def test_config_get_defaults_to_serial(self):
-        """GET without explicit pipeline_type defaults to serial."""
+    def test_config_get_defaults_to_parallel(self):
+        """GET without explicit pipeline_type defaults to parallel."""
         admission = _make_admission()
         client = Client()
         _login(client)
@@ -456,8 +456,7 @@ class TestSummaryConfigPipelineType:
         response = client.get(url)
 
         content = response.content.decode("utf-8")
-        # Serial radio should be checked by default
-        assert 'pipeline_type_serial' in content
+        assert 'pipeline_type_parallel' in content
         assert 'checked' in content
 
     def test_config_post_parallel_creates_parallel_run(self):
@@ -508,8 +507,8 @@ class TestSummaryConfigPipelineType:
         run = SummaryRun.objects.filter(admission=admission).latest("pk")
         assert run.pipeline_type == "serial"
 
-    def test_config_post_without_explicit_pipeline_defaults_to_serial(self):
-        """POST without pipeline_type creates a serial run (default)."""
+    def test_config_post_without_explicit_pipeline_defaults_to_parallel(self):
+        """POST without pipeline_type creates a parallel run (default)."""
         from unittest.mock import patch
 
         admission = _make_admission()
@@ -529,7 +528,7 @@ class TestSummaryConfigPipelineType:
 
         assert response.status_code == 302
         run = SummaryRun.objects.filter(admission=admission).latest("pk")
-        assert run.pipeline_type == "serial"
+        assert run.pipeline_type == "parallel"
 
     def test_create_summary_run_legacy_defaults_to_serial(self):
         """Legacy create_summary_run (no config page) defaults to serial."""
