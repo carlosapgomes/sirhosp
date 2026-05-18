@@ -186,7 +186,10 @@
 {% endif %}
 
 <!-- Pipeline phase progress — HTMX polling managed by the fragment itself -->
-{% if pipeline_run %}
+<!-- Show for all non-terminal runs (pipeline_run may not exist yet during phase 1) -->
+{% if not terminal %}
+  {% include "summaries/_summary_pipeline_progress.html" %}
+{% elif pipeline_run %}
   {% include "summaries/_summary_pipeline_progress.html" %}
 {% endif %}
 
