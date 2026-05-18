@@ -282,6 +282,10 @@ def pipeline_progress(
                 phase1_status = step.status
             elif step.step_type == "phase2_render":
                 phase2_status = step.status
+    else:
+        # No pipeline run yet — keep polling while the SummaryRun is active
+        if run.status in (SummaryRun.Status.QUEUED, SummaryRun.Status.RUNNING):
+            pipeline_terminal = False
 
     context = {
         "run": run,

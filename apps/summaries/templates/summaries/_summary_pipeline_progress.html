@@ -1,12 +1,41 @@
 {# Pipeline phase progress partial — HTMX polling for two-phase pipeline status #}
 {% load static %}
 
-<div id="summary-pipeline-progress" class="card border-0 shadow-sm mb-3"
+<div id="summary-pipeline-progress" class="mb-3"
      {% if not pipeline_terminal %}
      hx-get="{% url 'summaries:pipeline_progress' run.pk %}"
      hx-trigger="every 3s"
      hx-swap="outerHTML"
      {% endif %}>
+
+  {# --- Status banner (updates every poll) --- #}
+  {% if not pipeline_terminal %}
+  <div class="alert alert-primary d-flex align-items-center mb-3 py-2 border-0 shadow-sm" role="alert">
+    <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+    {% if phase1_status == "succeeded" and phase2_status == "running" %}
+      <strong class="me-1">Consolidando resumo final...</strong>
+      <span class="small">Unificando {{ run.total_chunks }} blocos em uma narrativa &uacute;nica.</span>
+    {% elif phase1_status == "succeeded" and not phase2_status %}
+      <strong class="me-1">Finalizando fase 1...</strong>
+      <span class="small">Preparando consolida&ccedil;&atilde;o.</span>
+    {% elif not pipeline_run %}
+      <strong class="me-1">Processando blocos...</strong>
+      <span class="small">{{ run.current_chunk_index }} de {{ run.total_chunks }} blocos conclu&iacute;dos.</span>
+    {% elif phase1_status == "running" %}
+      <strong class="me-1">Processando blocos...</strong>
+      <span class="small">{{ run.current_chunk_index }} de {{ run.total_chunks }} blocos conclu&iacute;dos.</span>
+    {% else %}
+      <strong class="me-1">Processando...</strong>
+    {% endif %}
+  </div>
+  {% elif pipeline_terminal and pipeline_run and pipeline_run.status == "succeeded" %}
+  <div class="alert alert-success d-flex align-items-center mb-3 py-2 border-0 shadow-sm" role="alert">
+    <i class="bi bi-check-circle-fill me-2"></i>
+    <strong>Resumo conclu&iacute;do!</strong>
+  </div>
+  {% endif %}
+
+  <div class="card border-0 shadow-sm">
   <div class="card-body">
     <h6 class="card-subtitle mb-3 text-muted small">
       <i class="bi bi-diagram-3 me-1"></i>
@@ -114,4 +143,5 @@
     </div>
     {% endif %}
   </div>
-</div>
+  </div>{# /card #}
+</div>{# /summary-pipeline-progress #}
