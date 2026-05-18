@@ -138,6 +138,13 @@ def run_status(
             elif step.step_type == "phase2_render":
                 phase2_is_reported = step.cost_is_reported
                 phase2_status = step.status
+    else:
+        # No pipeline run yet — keep polling while the SummaryRun is active
+        if run.status in (
+            SummaryRun.Status.QUEUED,
+            SummaryRun.Status.RUNNING,
+        ):
+            pipeline_terminal = False
 
     # Pre-compute BRL display strings for template (avoid custom filters)
     cost_brl = {}
