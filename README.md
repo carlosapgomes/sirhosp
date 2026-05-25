@@ -314,6 +314,9 @@ docker compose -f compose.yml -f compose.dev.yml down -v
 - Django runserver com DEBUG=1
 - Volumes para persistência de dados
 - `summary_worker` roda por padrão em pipeline de duas fases (`process_summary_runs --pipeline`)
+- **VPN Tailscale opcional:** sidecar userspace/SOCKS5 para acessar o sistema
+  legado hospitalar via VPN sem conectar o host — ver
+  [docs/dev-tailscale.md](docs/dev-tailscale.md) para configuração e uso
 
 ### Modo Produção
 

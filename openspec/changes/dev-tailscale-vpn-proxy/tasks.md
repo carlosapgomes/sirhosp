@@ -66,15 +66,19 @@ Limite: até 6 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S4.md`.
 
-- [ ] 4.1 Atualizar documentação de desenvolvimento/Compose com o fluxo
+- [x] 4.1 Criar `docs/dev-tailscale.md` com documentação completa do fluxo
       Tailscale userspace/SOCKS5.
-- [ ] 4.2 Documentar envs: `TS_AUTHKEY` e `PLAYWRIGHT_PROXY_SERVER`.
-- [ ] 4.3 Documentar que o host não entra na VPN e que produção não usa essa
+- [x] 4.2 Atualizar `.env.example` com placeholders de `TS_AUTHKEY` e
+      `PLAYWRIGHT_PROXY_SERVER`.
+- [x] 4.3 Documentar que o host não entra na VPN e que produção não usa essa
       configuração por padrão.
-- [ ] 4.4 Documentar troubleshooting: authkey expirada, subnet routes não
+- [x] 4.4 Documentar troubleshooting: authkey expirada, subnet routes não
       aprovadas, timeout inicial, certificado interno e limpeza do volume.
-- [ ] 4.5 Executar markdown format/lint e gates relevantes.
-- [ ] 4.6 Gerar `/tmp/sirhosp-slice-S4-report.md`.
+- [x] 4.5 Atualizar `README.md` com referência cruzada para
+      `docs/dev-tailscale.md`.
+- [x] 4.6 Executar markdown format/lint e gerar
+      `/tmp/sirhosp-slice-S4-report.md`.
+- [x] 4.7 Relatório gerado em `/tmp/sirhosp-slice-S4-report.md`.
 
 ## 5. Slice S5 - Smoke operacional ponta a ponta sem dados sensíveis
 
