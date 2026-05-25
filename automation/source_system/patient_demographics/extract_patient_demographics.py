@@ -34,7 +34,9 @@ from playwright.sync_api import Frame, Page, sync_playwright
 
 # Add parent directory so we can import from the sibling package
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "medical_evolution"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from proxy_config import get_playwright_proxy  # noqa: E402
 from source_system import (  # noqa: E402
     DEFAULT_TIMEOUT_MS,
     aguardar_pagina_estavel,
@@ -412,9 +414,11 @@ def run(
 
         try:
             print("Abrindo navegador...")
+            _proxy = get_playwright_proxy()
             browser = playwright.chromium.launch(
                 headless=headless,
                 args=["--ignore-certificate-errors"],
+                **({"proxy": _proxy} if _proxy else {}),
             )
             context = browser.new_context(
                 ignore_https_errors=True,

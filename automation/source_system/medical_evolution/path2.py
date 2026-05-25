@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 import html
+import sys
 
 from dotenv import load_dotenv
 from playwright.sync_api import BrowserContext, Locator, Page, Frame, sync_playwright
@@ -27,6 +28,8 @@ from source_system import (
     salvar_debug,
     salvar_texto_extraido,
 )
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from proxy_config import get_playwright_proxy  # noqa: E402
 
 DEFAULT_PATIENT_RECORD: Final[str] = "1234567"
 DEFAULT_START_DATE: Final[str] = "05/06/2024"
@@ -1481,9 +1484,11 @@ def run(
 
         try:
             print("Abrindo navegador...")
+            _proxy = get_playwright_proxy()
             browser = playwright.chromium.launch(
                 headless=headless,
                 args=["--ignore-certificate-errors"],
+                **({"proxy": _proxy} if _proxy else {}),
             )
             context = browser.new_context(ignore_https_errors=True, accept_downloads=True)
             page = context.new_page()

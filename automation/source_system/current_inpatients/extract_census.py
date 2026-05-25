@@ -35,6 +35,7 @@ _CURRENT_DIR = Path(__file__).resolve().parent
 _SOURCE_SYSTEM_DIR = _CURRENT_DIR.parent
 sys.path.insert(0, str(_SOURCE_SYSTEM_DIR))
 
+from proxy_config import get_playwright_proxy  # noqa: E402
 from source_system import aguardar_pagina_estavel, fechar_dialogos_iniciais  # noqa: E402
 
 DEFAULT_TIMEOUT_MS = 180000
@@ -559,7 +560,14 @@ def run(
         browser = context = page = None
         try:
             print("[i] Abrindo navegador...")
-            browser = pw.chromium.launch(headless=headless, args=["--ignore-certificate-errors"])
+            _proxy = get_playwright_proxy()
+            _launch_kwargs: dict[str, Any] = {
+                "headless": headless,
+                "args": ["--ignore-certificate-errors"],
+            }
+            if _proxy:
+                _launch_kwargs["proxy"] = _proxy
+            browser = pw.chromium.launch(**_launch_kwargs)
             context = browser.new_context(ignore_https_errors=True)
             page = context.new_page()
             page.set_default_timeout(DEFAULT_TIMEOUT_MS)

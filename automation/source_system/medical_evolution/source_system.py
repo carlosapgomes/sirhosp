@@ -6,12 +6,15 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin
 import shutil
+import sys
 
 import pymupdf
 from playwright.sync_api import BrowserContext, Locator, Page, expect, sync_playwright
 
 from config import Settings, load_settings
 from processa_evolucoes_txt import process_file
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from proxy_config import get_playwright_proxy  # noqa: E402
 
 DEFAULT_TIMEOUT_MS = 180000
 UI_TIMEOUT_MS = 60000
@@ -440,9 +443,11 @@ def capture_evolution_data(
 
         try:
             report("starting", "Preparando consulta no sistema fonte...")
+            _proxy = get_playwright_proxy()
             browser = playwright.chromium.launch(
                 headless=False,
                 args=["--ignore-certificate-errors"],
+                **({"proxy": _proxy} if _proxy else {}),
             )
             context = browser.new_context(ignore_https_errors=True, accept_downloads=True)
             page = context.new_page()
