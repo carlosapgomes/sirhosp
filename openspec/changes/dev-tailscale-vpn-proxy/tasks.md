@@ -95,7 +95,7 @@ Prompt executor: `slice-prompts/SLICE-S5.md`.
       legado no repositório.
 - [x] 5.3 Smoke retorna exit code 2 quando proxy não está disponível (exit 6/7
       do curl), validado em cenário negativo.
-- [ ] 5.4 Validar em ambiente real que o smoke retorna exit code 0 quando
+- [x] 5.4 Validar em ambiente real que o smoke retorna exit code 0 quando
       Tailscale está autenticado, subnet route está aprovada e o target responde
       HTTP 2xx/3xx.
 - [x] 5.5 Quality gates executados e relatório gerado em
