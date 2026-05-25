@@ -89,13 +89,14 @@ Limite: até 6 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S5.md`.
 
-- [ ] 5.1 Criar ou documentar comando de smoke que testa apenas conectividade
-      HTTP/HTTPS de `SOURCE_SYSTEM_URL` via proxy, sem credenciais.
-- [ ] 5.2 Garantir que o smoke não grave resposta do sistema legado no
-      repositório.
-- [ ] 5.3 Validar que o smoke falha com exit code != 0 quando o proxy não está
-      disponível.
-- [ ] 5.4 Validar que o smoke passa quando Tailscale está autenticado e a subnet
-      está alcançável.
-- [ ] 5.5 Executar quality gates aplicáveis e gerar
+- [x] 5.1 Criar `scripts/smoke-vpn-connectivity.sh` que testa conectividade
+      HTTP/HTTPS de `SOURCE_SYSTEM_URL` via proxy SOCKS5, sem credenciais.
+- [x] 5.2 Smoke usa `-o /dev/null` no curl e não persiste resposta do sistema
+      legado no repositório.
+- [x] 5.3 Smoke retorna exit code 2 quando proxy não está disponível (exit 6/7
+      do curl), validado em cenário negativo.
+- [ ] 5.4 Validar em ambiente real que o smoke retorna exit code 0 quando
+      Tailscale está autenticado, subnet route está aprovada e o target responde
+      HTTP 2xx/3xx.
+- [x] 5.5 Quality gates executados e relatório gerado em
       `/tmp/sirhosp-slice-S5-report.md`.

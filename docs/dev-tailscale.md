@@ -124,18 +124,44 @@ tailscale-app  | 2025/01/15 10:00:02 Connected.
 
 ### 4. Executar smoke de conectividade (sem login)
 
-Para testar se o proxy está funcional, execute um probe HTTP/HTTPS dentro de
-um container da stack:
+Para testar se o proxy está funcional, utilize o script de smoke dedicado:
 
 ```bash
+# De dentro de um container da stack (recomendado):
 docker compose -f compose.yml -f compose.dev.yml exec -T web \
-  bash -c 'curl --proxy socks5h://tailscale-app:1055 \
-  --connect-timeout 10 --max-time 15 -k -o /dev/null -w "%{http_code}" \
-  ${SOURCE_SYSTEM_URL}'
+  ./scripts/smoke-vpn-connectivity.sh
+
+# Uso direto no host é avançado: só funciona se PLAYWRIGHT_PROXY_SERVER
+# apontar para um proxy SOCKS5 acessível pelo host.
+./scripts/smoke-vpn-connectivity.sh
 ```
 
-Saída esperada em caso de sucesso: código HTTP (`200`, `302`, etc.). Em caso de
-falha (timeout, `000`), verifique a seção de Troubleshooting abaixo.
+No setup padrão, o proxy `tailscale-app:1055` existe apenas dentro da rede
+Compose. Portanto, execute o smoke dentro do container `web`. O uso direto no
+host só é válido quando `PLAYWRIGHT_PROXY_SERVER` apontar para um proxy SOCKS5
+alcançável pelo host.
+
+O script utiliza `SOURCE_SYSTEM_URL` e `PLAYWRIGHT_PROXY_SERVER` do ambiente,
+não persiste resposta do sistema legado e retorna exit code zero apenas quando
+a conectividade via proxy está funcionando.
+
+Saída esperada em caso de sucesso:
+
+```text
+[INFO] Target URL : https://...
+[INFO] Proxy      : socks5h://tailscale-app:1055
+[INFO] Testing HTTP connectivity via proxy...
+[INFO] Smoke PASSED — HTTP 200
+```
+
+Exit codes:
+
+- `0`: conectividade OK (HTTP 2xx/3xx via proxy)
+- `1`: erro de uso (`SOURCE_SYSTEM_URL` não definida)
+- `2`: proxy não alcançável (sidecar não está rodando)
+- `3`: sistema legado não respondeu ou retornou erro HTTP
+
+Em caso de falha, verifique a seção de Troubleshooting abaixo.
 
 ### 5. Rotina normal de desenvolvimento
 
