@@ -9,14 +9,14 @@ Limite: até 5 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S1.md`.
 
-- [ ] 1.1 (RED) Criar teste unitário falhando para env ausente/vazia/presente de
+- [x] 1.1 (RED) Criar teste unitário falhando para env ausente/vazia/presente de
       `PLAYWRIGHT_PROXY_SERVER`.
-- [ ] 1.2 Criar helper central para retornar configuração Playwright
+- [x] 1.2 Criar helper central para retornar configuração Playwright
       `proxy={"server": ...}` somente quando a env estiver definida.
-- [ ] 1.3 Adicionar teste de integração/mocking mínimo em um script Playwright
+- [x] 1.3 Adicionar teste de integração/mocking mínimo em um script Playwright
       representativo para provar que o proxy é repassado ao `chromium.launch`.
-- [ ] 1.4 Preservar `--ignore-certificate-errors` e `ignore_https_errors=True`.
-- [ ] 1.5 Executar testes unitários relevantes e gerar
+- [x] 1.4 Preservar `--ignore-certificate-errors` e `ignore_https_errors=True`.
+- [x] 1.5 Executar testes unitários relevantes e gerar
       `/tmp/sirhosp-slice-S1-report.md`.
 
 ## 2. Slice S2 - Aplicação do proxy em todos os scripts Playwright operacionais
@@ -28,13 +28,13 @@ Limite: até 10 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S2.md`.
 
-- [ ] 2.1 (RED) Usar busca por `chromium.launch` para listar pontos ainda sem o
+- [x] 2.1 (RED) Usar busca por `chromium.launch` para listar pontos ainda sem o
       helper.
-- [ ] 2.2 Aplicar o helper nos scripts Playwright de `automation/source_system/`.
-- [ ] 2.3 Garantir que nenhum script altere `SOURCE_SYSTEM_URL`, usuário ou senha.
-- [ ] 2.4 Garantir que argumentos existentes de Chromium e contexts HTTPS sejam
+- [x] 2.2 Aplicar o helper nos scripts Playwright de `automation/source_system/`.
+- [x] 2.3 Garantir que nenhum script altere `SOURCE_SYSTEM_URL`, usuário ou senha.
+- [x] 2.4 Garantir que argumentos existentes de Chromium e contexts HTTPS sejam
       preservados.
-- [ ] 2.5 Executar testes unitários relevantes, lint/typecheck aplicáveis e gerar
+- [x] 2.5 Executar testes unitários relevantes, lint/typecheck aplicáveis e gerar
       `/tmp/sirhosp-slice-S2-report.md`.
 
 ## 3. Slice S3 - Sidecar Tailscale no Compose dev
@@ -46,15 +46,15 @@ Limite: até 5 arquivos alterados.
 
 Prompt executor: `slice-prompts/SLICE-S3.md`.
 
-- [ ] 3.1 (RED operacional) Demonstrar que `compose.dev.yml` ainda não possui
+- [x] 3.1 (RED operacional) Demonstrar que `compose.dev.yml` ainda não possui
       sidecar Tailscale nem `PLAYWRIGHT_PROXY_SERVER`.
-- [ ] 3.2 Adicionar serviço `tailscale-app` dev-only com `TS_USERSPACE=true`,
+- [x] 3.2 Adicionar serviço `tailscale-app` dev-only com `TS_USERSPACE=true`,
       `TS_SOCKS5_SERVER=0.0.0.0:1055`, `TS_EXTRA_ARGS=--accept-routes` e volume
       nomeado de estado.
-- [ ] 3.3 Passar `PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-}` para
+- [x] 3.3 Passar `PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-}` para
       serviços que executam ou podem disparar Playwright.
-- [ ] 3.4 Não adicionar TUN, capabilities, privileged ou `network_mode`.
-- [ ] 3.5 Validar `docker compose config`, smoke de conectividade quando
+- [x] 3.4 Não adicionar TUN, capabilities, privileged ou `network_mode`.
+- [x] 3.5 Validar `docker compose config`, smoke de conectividade quando
       `TS_AUTHKEY` estiver disponível e gerar `/tmp/sirhosp-slice-S3-report.md`.
 
 ## 4. Slice S4 - Documentação operacional dev VPN
