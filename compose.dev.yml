@@ -33,6 +33,8 @@ services:
       - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
       - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
       - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
+      # Proxy opcional para Playwright via sidecar Tailscale (dev-only)
+      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-}
       # uv: ambiente virtual fora do bind mount (/opt) para evitar problemas de permissão
       - UV_PROJECT_ENVIRONMENT=/opt/venv
       - UV_CACHE_DIR=/home/10001/.uv_cache
@@ -70,6 +72,8 @@ services:
       - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
       - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
       - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
+      # Proxy opcional para Playwright via sidecar Tailscale (dev-only)
+      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-}
       # uv: ambiente virtual fora do bind mount (/opt) para evitar problemas de permissão
       - UV_PROJECT_ENVIRONMENT=/opt/venv
       - UV_CACHE_DIR=/home/10001/.uv_cache
@@ -103,6 +107,8 @@ services:
       - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
       - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
       - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
+      # Proxy opcional para Playwright via sidecar Tailscale (dev-only)
+      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-}
       # LLM (OpenAI ou compatível) — necessário para sumário via IA
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
@@ -116,3 +122,28 @@ services:
         condition: service_healthy
     command: ["uv", "run", "--no-sync", "python", "manage.py", "process_summary_runs", "--pipeline", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Sidecar Tailscale dev-only (userspace + SOCKS5)
+  # Ativado via profile "tailscale"; requer TS_AUTHKEY para autenticar.
+  # Usado como proxy opcional pelo Playwright nos serviços acima.
+  # Não requer /dev/net/tun, NET_ADMIN, NET_RAW ou privileged.
+  # Documentação: docs/dev-tailscale.md (slice S4)
+  # ---------------------------------------------------------------------------
+  tailscale-app:
+    profiles:
+      - tailscale
+    image: tailscale/tailscale:latest
+    container_name: sirhosp-tailscale
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_USERSPACE=true
+      - TS_SOCKS5_SERVER=0.0.0.0:1055
+      - TS_EXTRA_ARGS=--accept-routes
+    volumes:
+      - sirhosp_tailscale_state:/var/lib/tailscale
+    restart: unless-stopped
+
+volumes:
+  sirhosp_tailscale_state:
+    driver: local
