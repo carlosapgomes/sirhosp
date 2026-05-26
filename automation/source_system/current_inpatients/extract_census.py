@@ -219,44 +219,92 @@ def clear_setor(frame: Frame, page: Page) -> None:
 
 
 def select_setor(frame: Frame, page: Page, setor: str) -> bool:
+    """Seleciona um setor digitando o nome no campo de autocomplete.
+
+    Em vez de abrir o dropdown completo e caçar o item (que falha quando há
+    muitos setores ou o DOM está incompleto), usa o comportamento nativo do
+    PrimeFaces Autocomplete: digita o nome no campo de input, aguarda o
+    filtro AJAX reduzir o painel, e clica no primeiro item resultante.
+    """
     clear_setor(frame, page)
 
-    btn = frame.locator('[id="unidadeFuncional:unidadeFuncional:suggestion_button"]')
-    if not safe_click(btn, "abrir dropdown setor", timeout=10000):
-        return False
-
-    wait_ajax_idle(frame, page, timeout_ms=8000)
-    page.wait_for_timeout(350)
-
-    result = frame.evaluate(
-        """
-        (setor) => {
-            const panel = document.querySelector('[id="unidadeFuncional:unidadeFuncional:suggestion_panel"]');
-            if (!panel) return 'panel-not-found';
-
-            const norm = (s) => (s || '').replace(/\\s+/g, ' ').trim();
-            const nodes = Array.from(panel.querySelectorAll('[role="cell"], td, li'));
-
-            let target = nodes.find((n) => norm(n.textContent) === setor);
-            if (!target) {
-                target = nodes.find((n) => norm(n.textContent).includes(setor));
-            }
-            if (!target) return 'not-found';
-
-            target.scrollIntoView({ block: 'center' });
-            target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            target.click();
-            return 'ok';
-        }
-        """,
-        setor,
+    # Localiza o input do autocomplete e garante que está visível
+    input_el = frame.locator(
+        '#unidadeFuncional\\:unidadeFuncional\\:suggestion_input'
     )
-
-    if result != "ok":
-        print(f"  [!] Falha seleção setor '{setor}': {result}")
+    if not wait_visible(input_el, timeout=8000):
+        print(f"  [!] Input de autocomplete não visível para '{setor}'")
         return False
 
-    wait_ajax_idle(frame, page, timeout_ms=10000)
+    # clear_setor pode falhar silenciosamente (botão sgClear não visível
+    # ou AJAX pendente), deixando o input disabled com o valor do setor
+    # anterior. Nesse caso, força a habilitação e limpeza via JS.
+    if not input_el.is_enabled(timeout=3000):
+        print(f"  [!] Input disabled — forçando habilitação via JS")
+        frame.evaluate(
+            """
+            () => {
+                const el = document.getElementById(
+                    'unidadeFuncional:unidadeFuncional:suggestion_input'
+                );
+                if (el) {
+                    el.removeAttribute('disabled');
+                    el.classList.remove('ui-state-disabled');
+                    el.value = '';
+                }
+            }
+            """
+        )
+        page.wait_for_timeout(500)
+
+    # Limpa e digita o nome completo do setor (press_sequentially
+    # dispara eventos keydown/keyup que o PrimeFaces precisa para o AJAX)
+    input_el.click()
+    input_el.fill("")
+    input_el.press_sequentially(setor, delay=50)
+
+    # Aguarda o painel de sugestão aparecer com os resultados filtrados
+    panel = frame.locator(
+        '#unidadeFuncional\\:unidadeFuncional\\:suggestion_panel'
+    )
+    if not wait_visible(panel, timeout=12000):
+        # Fallback: tenta sem o prefixo "código - " (ex: "0 T - SALA LARANJA"
+        # → "SALA LARANJA"). Alguns nomes não disparam o autocomplete com o
+        # formato completo.
+        if ' - ' in setor:
+            nome_desc = setor.split(' - ', 1)[1]
+            print(
+                f"  [!] Painel não apareceu com nome completo,"
+                f" tentando '{nome_desc}'"
+            )
+            input_el.fill("")
+            input_el.press_sequentially(nome_desc, delay=50)
+            if not wait_visible(panel, timeout=10000):
+                print(f"  [!] Painel de sugestão não apareceu para '{setor}'")
+                return False
+        else:
+            print(f"  [!] Painel de sugestão não apareceu para '{setor}'")
+            return False
+
+    page.wait_for_timeout(500)
+
+    # Clica no primeiro (e idealmente único) item do painel
+    item = panel.locator('a, li, div[role="cell"], td').first
+    if item.count() == 0:
+        print(f"  [!] Nenhum item no painel para '{setor}'")
+        return False
+
+    try:
+        item.click(timeout=5000)
+    except Exception:
+        # Último recurso: JS click
+        try:
+            item.evaluate("el => el.click()")
+        except Exception as e:
+            print(f"  [!] Clique no item falhou para '{setor}': {e}")
+            return False
+
+    wait_ajax_idle(frame, page, timeout_ms=15000)
     return True
 
 
@@ -288,21 +336,64 @@ def _click_export_button(frame: Frame, page: Page) -> None:
     """Click the 'Exportar para Arquivo' button using JS.
 
     Playwright's click() hangs on this PrimeFaces commandButton because
-    it triggers an AJAX event that Playwright misinterprets. Using
+    it triggers an AJAX event that Playwright misinterprets.  Using
     element.click() via JS dispatch avoids the deadlock.
+
+    In sectors with many patients the button is below the fold,
+    so we scroll to the bottom of the page first.
     """
+    # Aguarda o botão Exportar estar presente no DOM (o paginator pode
+    # renderizar após o tbody em datatables muito longos como este).
+    try:
+        frame.locator('[title="Exportar para Arquivo"]').wait_for(
+            state='attached', timeout=15000
+        )
+    except Exception:
+        raise RuntimeError("Botão Exportar não apareceu no DOM após 15s")
+    page.wait_for_timeout(300)
+
+    # Scroll agressivo até o final da tabela (setores com 60+ pacientes
+    # deixam o botão muito abaixo do fold visível).  window.scrollTo no
+    # body do iframe não é suficiente porque o scroll real está no
+    # wrapper .ui-datatable-tablewrapper do PrimeFaces.
+    frame.evaluate(
+        """
+        () => {
+            // Rola wrappers de datatable até o fim
+            const wrappers = document.querySelectorAll(
+                '.ui-datatable-tablewrapper, .ui-datatable-scrollable-body'
+            );
+            for (const w of wrappers) {
+                w.scrollTop = w.scrollHeight;
+            }
+            // Rola também o body e o html
+            window.scrollTo(0, document.body.scrollHeight);
+            document.documentElement.scrollTop = document.documentElement.scrollHeight;
+        }
+        """
+    )
+    page.wait_for_timeout(200)
+
+    # Tecla End como reforço (alcança o fundo mesmo em tabelas muito longas)
+    frame.locator('body').press('End')
+    page.wait_for_timeout(200)
+
+    # PageDown repetido como último recurso (para datatables que
+    # renderizam linhas sob demanda conforme scroll)
+    for _ in range(3):
+        frame.locator('body').press('PageDown')
+        page.wait_for_timeout(150)
+
     clicked = frame.evaluate(
         """
         () => {
-            const all = document.querySelectorAll('*');
-            for (const el of all) {
-                const t = (el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
-                if (t === 'exportar para arquivo') {
-                    el.click();
-                    return true;
-                }
-            }
-            return false;
+            const btn = document.querySelector(
+                '[title="Exportar para Arquivo"]'
+            );
+            if (!btn) return false;
+            btn.scrollIntoView({ block: 'center' });
+            btn.click();
+            return true;
         }
         """
     )
@@ -318,8 +409,10 @@ def _click_xls_tudo(frame: Frame, page: Page) -> None:
         () => {
             const all = document.querySelectorAll('a');
             for (const a of all) {
+                if (a.offsetParent === null) continue;
                 const t = (a.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
                 if (t === 'xls (tudo)') {
+                    a.scrollIntoView({ block: 'center' });
                     a.click();
                     return true;
                 }
@@ -599,72 +692,137 @@ def run(
             print(f"[i] Total de setores a processar: {len(setores)}")
 
             results: list[dict] = []
+            _retried: list[str] = []
+            _failed: list[str] = []
 
             for i, setor in enumerate(setores, start=1):
                 print(f"\n[{i}/{len(setores)}] {setor}")
 
-                try:
-                    if not select_setor(frame, page, setor):
-                        raise RuntimeError("não conseguiu selecionar setor")
+                _max_retries = 2
+                _last_error = None
 
-                    page.wait_for_timeout(pause_ms)
+                for _attempt in range(_max_retries + 1):
+                    if _attempt > 0:
+                        print(
+                            f"    [RETRY {_attempt}/{_max_retries}]"
+                            f" após erro: {_last_error}"
+                        )
+                        page.wait_for_timeout(3000)
 
-                    setor_codigo = ""
-                    setor_nome_completo = setor
+                    try:
+                        if not select_setor(frame, page, setor):
+                            raise RuntimeError(
+                                "não conseguiu selecionar setor"
+                            )
 
-                    if not click_pesquisar(frame):
-                        raise RuntimeError("falha no clique de pesquisar")
+                        page.wait_for_timeout(pause_ms)
 
-                    # Extrair código e nome completo após pesquisar
-                    setor_info = get_current_setor_info(frame)
-                    setor_codigo = setor_info.get("codigo", "")
-                    setor_nome_completo = setor_info.get("nome") or setor
+                        setor_codigo = ""
+                        setor_nome_completo = setor
 
-                    # Aguarda a tabela carregar
-                    wait_ajax_idle(frame, page, timeout_ms=60000)
-                    page.wait_for_timeout(1000)
+                        if not click_pesquisar(frame):
+                            raise RuntimeError("falha no clique de pesquisar")
 
-                    # Verifica se o setor tem pacientes antes de exportar
-                    tem_pacientes = frame.evaluate(
-                        """
-                        () => {
-                            const tbody = document.querySelector('[id$="resultList_data"]');
-                            if (!tbody) return false;
-                            const txt = (tbody.textContent || '').trim();
-                            return !txt.includes('Nenhum registro');
-                        }
-                        """
-                    )
-                    if not tem_pacientes:
-                        print(f"    setor vazio — pulando")
+                        # Extrair código e nome completo após pesquisar
+                        setor_info = get_current_setor_info(frame)
+                        setor_codigo = setor_info.get("codigo", "")
+                        setor_nome_completo = (
+                            setor_info.get("nome") or setor
+                        )
+
+                        # Aguarda a tabela carregar completamente
+                        wait_ajax_idle(frame, page, timeout_ms=60000)
+
+                        # Aguarda o tbody ter conteúdo real
+                        try:
+                            frame.wait_for_function(
+                                """
+                                () => {
+                                    const tbody = document.querySelector(
+                                        '[id$="resultList_data"]'
+                                    );
+                                    if (!tbody) return false;
+                                    return (
+                                        (
+                                            tbody.textContent || ''
+                                        ).trim().length > 0
+                                    );
+                                }
+                                """,
+                                timeout=45000,
+                            )
+                        except Exception:
+                            page.wait_for_timeout(3000)
+
+                        # Verifica se o setor tem pacientes
+                        tem_pacientes = frame.evaluate(
+                            """
+                            () => {
+                                const tbody = document.querySelector(
+                                    '[id$="resultList_data"]'
+                                );
+                                if (!tbody) return false;
+                                const txt = (
+                                    tbody.textContent || ''
+                                ).trim();
+                                if (txt.includes('Nenhum registro'))
+                                    return false;
+                                const rows = tbody.querySelectorAll('tr');
+                                if (rows.length === 0) return false;
+                                for (const row of rows) {
+                                    const td = row.querySelector('td');
+                                    if (
+                                        td
+                                        && td.textContent.trim().length > 0
+                                    ) {
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            }
+                            """
+                        )
+                        if not tem_pacientes:
+                            print(f"    setor vazio — pulando")
+                            results.append({
+                                "setor_codigo": setor_codigo,
+                                "setor": setor_nome_completo,
+                                "pacientes": [],
+                            })
+                            break  # sai do loop de retry
+
+                        # Exporta XLSX
+                        xlsx_path = export_setor_xlsx(frame, page)
+
+                        # Parseia o XLSX
+                        pacientes = parse_setor_xlsx(
+                            xlsx_path, setor_codigo, setor_nome_completo
+                        )
+                        print(
+                            f"    pacientes extraídos: {len(pacientes)}"
+                        )
+
                         results.append({
                             "setor_codigo": setor_codigo,
                             "setor": setor_nome_completo,
-                            "pacientes": [],
+                            "pacientes": pacientes,
                         })
-                        continue
+                        if _attempt > 0:
+                            _retried.append(setor)
+                        break  # sucesso — sai do loop de retry
 
-                    # Exporta XLSX
-                    xlsx_path = export_setor_xlsx(frame, page)
-
-                    # Parseia o XLSX
-                    pacientes = parse_setor_xlsx(xlsx_path, setor_codigo, setor_nome_completo)
-                    print(f"    pacientes extraídos: {len(pacientes)}")
-
-                    results.append({
-                        "setor_codigo": setor_codigo,
-                        "setor": setor_nome_completo,
-                        "pacientes": pacientes,
-                    })
-
-                except Exception as e:
-                    print(f"    [ERRO] {e}")
-                    results.append({
-                        "setor_codigo": "",
-                        "setor": setor,
-                        "pacientes": [],
-                        "erro": str(e),
-                    })
+                    except Exception as _exc:
+                        _last_error = _exc
+                        if _attempt < _max_retries:
+                            continue
+                        _failed.append(setor)
+                        print(f"    [ERRO] {_last_error}")
+                        results.append({
+                            "setor_codigo": "",
+                            "setor": setor,
+                            "pacientes": [],
+                            "erro": str(_last_error),
+                        })
 
             json_path, csv_path = save_results(results, csv_only=csv_only)
 
@@ -673,6 +831,20 @@ def run(
             print("\n" + "=" * 70)
             print(f"Setores processados: {len(results)}")
             print(f"Setores com erro:   {setores_erro}")
+            if _retried:
+                print(
+                    f"Setores recuperados após retry:"
+                    f" {len(_retried)}"
+                )
+                for s in _retried:
+                    print(f"  ✓ {s}")
+            if _failed:
+                print(
+                    f"Setores com falha definitiva:"
+                    f" {len(_failed)}"
+                )
+                for s in _failed:
+                    print(f"  ✗ {s}")
             print(f"Total pacientes:    {total_pacientes}")
             if json_path:
                 print(f"JSON: {json_path}")

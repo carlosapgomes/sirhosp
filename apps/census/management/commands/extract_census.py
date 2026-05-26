@@ -88,7 +88,7 @@ class Command(BaseCommand):
             try:
                 result = run_subprocess(
                     cmd,
-                    timeout=1800,  # 30 minutes max
+                    timeout=4800,  # 80 minutes max (sistema fonte lento)
                 )
             except SubprocessTimeoutError as exc:
                 self._record_stage(
