@@ -755,3 +755,95 @@ class TestAdmissionDeathChartViews:
         url = reverse("services_portal:death_chart")
         response = admin_client.get(url)
         assert response.context.get("period_options") == [30, 60, 90, 180, 365]
+
+    # ── ADC-S2: Canvas and title tests ──────────────────────────────
+
+    def test_admission_chart_has_daily_canvas(self, admin_client):
+        """Admission chart HTML includes canvas#dailyChart for daily bars."""
+        self._create_admission_counts(10)
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '<canvas id="dailyChart"' in content
+
+    def test_death_chart_has_daily_canvas(self, admin_client):
+        """Death chart HTML includes canvas#dailyChart for daily bars."""
+        self._create_death_counts(10)
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '<canvas id="dailyChart"' in content
+
+    def test_admission_chart_has_weekday_canvas_when_data_exists(self, admin_client):
+        """Admission chart includes canvas#weekdayAverageChart when data exists."""
+        self._create_admission_counts(14)  # 2 weeks
+        url = reverse("services_portal:admission_chart") + "?dias=14"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '<canvas id="weekdayAverageChart"' in content
+
+    def test_death_chart_has_weekday_canvas_when_data_exists(self, admin_client):
+        """Death chart includes canvas#weekdayAverageChart when data exists."""
+        self._create_death_counts(14)  # 2 weeks
+        url = reverse("services_portal:death_chart") + "?dias=14"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '<canvas id="weekdayAverageChart"' in content
+
+    def test_admission_chart_empty_hides_weekday_canvas(self, admin_client):
+        """Admission chart hides weekdayAverageChart canvas when no data."""
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '<canvas id="weekdayAverageChart"' not in content
+
+    def test_death_chart_empty_hides_weekday_canvas(self, admin_client):
+        """Death chart hides weekdayAverageChart canvas when no data."""
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '<canvas id="weekdayAverageChart"' not in content
+
+    def test_admission_chart_has_specific_title(self, admin_client):
+        """Admission chart page shows 'Admissões por Dia' title."""
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert "Admissões por Dia" in content
+
+    def test_death_chart_has_specific_title(self, admin_client):
+        """Death chart page shows 'Óbitos por Dia' title."""
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert "Óbitos por Dia" in content
+
+    def test_admission_chart_has_specific_weekday_title(self, admin_client):
+        """Admission chart shows 'Média de Admissões por Dia da Semana'."""
+        self._create_admission_counts(14)
+        url = reverse("services_portal:admission_chart") + "?dias=14"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert "Média de Admissões por Dia da Semana" in content
+
+    def test_death_chart_has_specific_weekday_title(self, admin_client):
+        """Death chart shows 'Média de Óbitos por Dia da Semana'."""
+        self._create_death_counts(14)
+        url = reverse("services_portal:death_chart") + "?dias=14"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert "Média de Óbitos por Dia da Semana" in content
+
+    def test_admission_chart_empty_shows_empty_message(self, admin_client):
+        """Admission chart shows empty-state message when no data."""
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert "Nenhum dado disponível" in content
+
+    def test_death_chart_empty_shows_empty_message(self, admin_client):
+        """Death chart shows empty-state message when no data."""
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert "Nenhum dado disponível" in content

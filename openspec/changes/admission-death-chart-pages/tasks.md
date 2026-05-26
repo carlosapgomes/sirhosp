@@ -46,27 +46,27 @@ e média semanal, ainda que o template inicial seja mínimo.
 **Escopo máximo:** 2 templates + 1 arquivo de teste + ajustes mínimos em view
 se necessários.
 
-- [ ] 2.1 (RED) Adicionar testes para HTML das páginas:
+- [x] 2.1 (RED) Adicionar testes para HTML das páginas:
   - presença do canvas do gráfico diário;
   - presença do canvas da média por dia da semana quando há dados;
   - estado vazio sem canvas quebrado quando não há registros;
   - títulos específicos para admissões e óbitos.
-- [ ] 2.2 Implementar template compartilhado
+- [x] 2.2 Implementar template compartilhado
       `apps/services_portal/templates/services_portal/daily_event_chart.html`:
   - breadcrumb para Dashboard;
   - seletor de período `30`, `60`, `90`, `180`, `365`;
   - card do gráfico diário em barras;
   - card da média por dia da semana em barras;
   - mensagens de estado vazio.
-- [ ] 2.3 Implementar JavaScript Chart.js parametrizado por `json_script`:
+- [x] 2.3 Implementar JavaScript Chart.js parametrizado por `json_script`:
   - dataset label específico (`Admissões` ou `Óbitos`);
   - tooltip da média semanal com valor e `n` de observações;
   - degradação segura quando Chart.js ou dados não estiverem disponíveis.
-- [ ] 2.4 Gate ADC-S2:
+- [x] 2.4 Gate ADC-S2:
   - `./scripts/test-in-container.sh check`
   - `./scripts/test-in-container.sh unit`
   - `./scripts/test-in-container.sh lint`
-- [ ] 2.5 Gerar `/tmp/sirhosp-slice-ADC-S2-report.md`.
+- [x] 2.5 Gerar `/tmp/sirhosp-slice-ADC-S2-report.md`.
 
 ## Slice ADC-S3 — Navegação a partir das listagens e hardening final
 
