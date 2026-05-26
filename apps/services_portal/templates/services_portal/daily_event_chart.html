@@ -52,6 +52,22 @@
   </div>
 </div>
 
+<!-- Legend -->
+<div class="d-flex gap-4 flex-wrap small text-muted mb-4">
+  <div class="d-flex align-items-center gap-2">
+    <span style="display:inline-block;width:12px;height:12px;background:#0D6EFD33;border:1px solid #0D6EFD;border-radius:2px;"></span>
+    Dia útil
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <span style="display:inline-block;width:12px;height:12px;background:#F59E0B33;border:1px solid #F59E0B;border-radius:2px;"></span>
+    Sábado
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <span style="display:inline-block;width:12px;height:12px;background:#DC262633;border:1px solid #DC2626;border-radius:2px;"></span>
+    Domingo
+  </div>
+</div>
+
 <!-- Weekday average chart -->
 {% if weekday_avg.has_data %}
 <div class="card border-0 shadow-sm mb-4">
@@ -97,6 +113,19 @@
     if (!canvas) return;
     var ctx = canvas.getContext('2d');
 
+    var bgColors = data.counts.map(function(_, i) {
+      if (data.weekend_flags && data.weekend_flags[i]) {
+        return data.weekday_short[i] === 'sáb' ? '#F59E0B33' : '#DC262633';
+      }
+      return '#0D6EFD33';
+    });
+    var bdColors = data.counts.map(function(_, i) {
+      if (data.weekend_flags && data.weekend_flags[i]) {
+        return data.weekday_short[i] === 'sáb' ? '#F59E0B' : '#DC2626';
+      }
+      return '#0D6EFD';
+    });
+
     new Chart(ctx, {
       type: 'bar',
       data: {
@@ -104,8 +133,8 @@
         datasets: [{
           label: data.dataset_label || '{{ dataset_label }}',
           data: data.counts,
-          backgroundColor: '#0D6EFD33',
-          borderColor: '#0D6EFD',
+          backgroundColor: bgColors,
+          borderColor: bdColors,
           borderWidth: 1,
         }],
       },
@@ -125,6 +154,13 @@
     if (!canvas) return;
     var ctx = canvas.getContext('2d');
 
+    var bgColors = data.values.map(function(_, i) {
+      return i === 5 ? '#F59E0B33' : i === 6 ? '#DC262633' : '#0D6EFD33';
+    });
+    var bdColors = data.values.map(function(_, i) {
+      return i === 5 ? '#F59E0B' : i === 6 ? '#DC2626' : '#0D6EFD';
+    });
+
     new Chart(ctx, {
       type: 'bar',
       data: {
@@ -132,8 +168,8 @@
         datasets: [{
           label: 'Média de {{ dataset_label }}',
           data: data.values,
-          backgroundColor: '#0D6EFD33',
-          borderColor: '#0D6EFD',
+          backgroundColor: bgColors,
+          borderColor: bdColors,
           borderWidth: 1,
         }],
       },

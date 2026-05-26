@@ -614,10 +614,20 @@ def _daily_count_chart_context(
     labels = [e.date.strftime("%d/%m/%Y") for e in entries]
     counts = [e.count for e in entries]
 
+    _WEEKDAY_ABBR = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
+    weekend_flags = []
+    weekday_short = []
+    for e in entries:
+        wd = e.date.weekday()  # 0=Mon … 6=Sun
+        weekend_flags.append(wd >= 5)
+        weekday_short.append(_WEEKDAY_ABBR[wd])
+
     chart_data = {
         "labels": labels,
         "counts": counts,
         "dataset_label": dataset_label,
+        "weekend_flags": weekend_flags,
+        "weekday_short": weekday_short,
     }
 
     weekday_avg = _weekday_average(entries)

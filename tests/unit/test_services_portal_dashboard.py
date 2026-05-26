@@ -847,3 +847,135 @@ class TestAdmissionDeathChartViews:
         response = admin_client.get(url)
         content = response.content.decode()
         assert "Nenhum dado disponível" in content
+
+    # ── ADC-S3: Navigation from list pages ──────────────────────────────
+
+    def test_admission_list_has_chart_link(self, admin_client):
+        """Admission list page includes a link to admission chart."""
+        url = reverse("services_portal:admission_list")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        chart_url = reverse("services_portal:admission_chart")
+        assert chart_url in content
+        assert "Ver gráfico de admissões" in content
+
+    def test_death_list_has_chart_link(self, admin_client):
+        """Death list page includes a link to death chart."""
+        url = reverse("services_portal:death_list")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        chart_url = reverse("services_portal:death_chart")
+        assert chart_url in content
+        assert "Ver gráfico de óbitos" in content
+
+    def test_admission_list_preserves_date_selector(self, admin_client):
+        """Admission list page still has date selector."""
+        url = reverse("services_portal:admission_list")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '_date_selector' in content or 'date' in content.lower()
+        # Dashboard back link is still present
+        dashboard_url = reverse("services_portal:dashboard")
+        assert dashboard_url in content
+
+    def test_death_list_preserves_date_selector(self, admin_client):
+        """Death list page still has date selector."""
+        url = reverse("services_portal:death_list")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '_date_selector' in content or 'date' in content.lower()
+        # Dashboard back link is still present
+        dashboard_url = reverse("services_portal:dashboard")
+        assert dashboard_url in content
+
+    # ── ADC-S3-DWI: Weekend highlighting ──────────────────────────────
+
+    def test_admission_chart_context_has_weekend_flags(self, admin_client):
+        """Admission chart context contains weekend_flags aligned with labels."""
+        self._create_admission_counts(10)
+        url = reverse("services_portal:admission_chart") + "?dias=7"
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        assert "weekend_flags" in chart_data
+        n = len(chart_data["labels"])
+        assert len(chart_data["weekend_flags"]) == n
+        assert len(chart_data["weekend_flags"]) == len(chart_data["counts"])
+        assert all(isinstance(f, bool) for f in chart_data["weekend_flags"])
+
+    def test_death_chart_context_has_weekend_flags(self, admin_client):
+        """Death chart context contains weekend_flags aligned with labels."""
+        self._create_death_counts(10)
+        url = reverse("services_portal:death_chart") + "?dias=7"
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        assert "weekend_flags" in chart_data
+        n = len(chart_data["labels"])
+        assert len(chart_data["weekend_flags"]) == n
+        assert len(chart_data["weekend_flags"]) == len(chart_data["counts"])
+        assert all(isinstance(f, bool) for f in chart_data["weekend_flags"])
+
+    def test_admission_weekend_flags_correct_for_known_dates(self, admin_client):
+        """Admission weekend_flags correct for Sat/Sun vs Mon-Fri."""
+        today = timezone.localdate()
+        for i in range(8, 0, -1):
+            day = today - timedelta(days=i)
+            DailyAdmissionCount.objects.create(date=day, count=5)
+
+        url = reverse("services_portal:admission_chart") + "?dias=8"
+        response = admin_client.get(url)
+        labels = response.context["chart_data"]["labels"]
+        flags = response.context["chart_data"]["weekend_flags"]
+
+        for label, flag in zip(labels, flags, strict=True):
+            d = datetime.strptime(label, "%d/%m/%Y").date()
+            is_weekend = d.weekday() >= 5
+            assert flag == is_weekend, (
+                f"{label} weekday={d.weekday()} flag={flag}"
+            )
+
+    def test_death_weekend_flags_correct_for_known_dates(self, admin_client):
+        """Death weekend_flags correct for Sat/Sun vs Mon-Fri."""
+        today = timezone.localdate()
+        for i in range(8, 0, -1):
+            day = today - timedelta(days=i)
+            DailyDeathCount.objects.create(date=day, count=3)
+
+        url = reverse("services_portal:death_chart") + "?dias=8"
+        response = admin_client.get(url)
+        labels = response.context["chart_data"]["labels"]
+        flags = response.context["chart_data"]["weekend_flags"]
+
+        for label, flag in zip(labels, flags, strict=True):
+            d = datetime.strptime(label, "%d/%m/%Y").date()
+            is_weekend = d.weekday() >= 5
+            assert flag == is_weekend, (
+                f"{label} weekday={d.weekday()} flag={flag}"
+            )
+
+    def test_admission_chart_html_has_weekend_colors(self, admin_client):
+        """Admission chart HTML/JS contains weekend_flags for per-bar coloring."""
+        self._create_admission_counts(10)
+        url = reverse("services_portal:admission_chart") + "?dias=7"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '"weekend_flags"' in content
+        assert "weekend_flags" in content
+        assert any(
+            term in content
+            for term in ["Sábado", "Domingo", "sábado", "domingo",
+                         "fim de semana", "dia útil"]
+        )
+
+    def test_death_chart_html_has_weekend_colors(self, admin_client):
+        """Death chart HTML/JS contains weekend_flags for per-bar coloring."""
+        self._create_death_counts(10)
+        url = reverse("services_portal:death_chart") + "?dias=7"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert '"weekend_flags"' in content
+        assert "weekend_flags" in content
+        assert any(
+            term in content
+            for term in ["Sábado", "Domingo", "sábado", "domingo",
+                         "fim de semana", "dia útil"]
+        )

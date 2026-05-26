@@ -75,22 +75,22 @@ já consulta admissões e óbitos por data.
 
 **Escopo máximo:** 2 templates + 1 arquivo de teste.
 
-- [ ] 3.1 (RED) Adicionar testes para navegação:
+- [x] 3.1 (RED) Adicionar testes para navegação:
   - `admission_list.html` contém link para `services_portal:admission_chart`;
   - `death_list.html` contém link para `services_portal:death_chart`;
   - os links não removem o seletor de data nem o botão de retorno ao dashboard.
-- [ ] 3.2 Atualizar `admission_list.html` com botão
+- [x] 3.2 Atualizar `admission_list.html` com botão
       `Ver gráfico de admissões`.
-- [ ] 3.3 Atualizar `death_list.html` com botão `Ver gráfico de óbitos`.
-- [ ] 3.4 Revisar estados vazios/esparsos e consistência dos labels.
-- [ ] 3.5 Gate ADC-S3:
+- [x] 3.3 Atualizar `death_list.html` com botão `Ver gráfico de óbitos`.
+- [x] 3.4 Revisar estados vazios/esparsos e consistência dos labels.
+- [x] 3.5 Gate ADC-S3:
   - `./scripts/test-in-container.sh check`
   - `./scripts/test-in-container.sh unit`
   - `./scripts/test-in-container.sh integration`
   - `./scripts/test-in-container.sh lint`
   - `./scripts/test-in-container.sh typecheck`
   - `./scripts/markdown-lint.sh`
-- [ ] 3.6 Gerar `/tmp/sirhosp-slice-ADC-S3-report.md`.
+- [x] 3.6 Gerar `/tmp/sirhosp-slice-ADC-S3-report.md`.
 
 ## Stop Rule
 
