@@ -118,7 +118,7 @@ main() {
         typecheck)
             up_stack
             trap cleanup EXIT
-            run_runner "uv run --no-sync mypy config apps tests manage.py"
+            run_runner "uv run --no-sync mypy --cache-dir /tmp/.mypy_cache config apps tests manage.py"
             ;;
         quality-gate)
             up_stack
@@ -126,7 +126,7 @@ main() {
             run_runner "uv run --no-sync python manage.py check"
             run_runner "PYTEST_ADDOPTS='-p no:cacheprovider' uv run --no-sync pytest -q tests/unit"
             run_runner "uv run --no-sync ruff check config apps tests manage.py"
-            run_runner "uv run --no-sync mypy config apps tests manage.py"
+            run_runner "uv run --no-sync mypy --cache-dir /tmp/.mypy_cache config apps tests manage.py"
             ;;
         check-and-unit)
             up_stack
@@ -145,7 +145,7 @@ main() {
             dc run --rm --no-deps \
                 -e POSTGRES_HOST="" \
                 -e DATABASE_URL="" \
-                test-runner bash -lc "uv run --no-sync mypy config apps tests manage.py"
+                test-runner bash -lc "uv run --no-sync mypy --cache-dir /tmp/.mypy_cache config apps tests manage.py"
             ;;
         -h|--help|help)
             usage

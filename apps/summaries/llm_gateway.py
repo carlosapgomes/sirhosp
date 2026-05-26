@@ -301,7 +301,7 @@ def call_llm_phase2_render(
         ensure_ascii=False,
     )
 
-    request_payload = {
+    request_payload: dict[str, Any] = {
         "model": config.model,
         "messages": [
             {"role": "system", "content": prompt_text},
@@ -626,7 +626,7 @@ async def _call_parallel_final_async(
         ensure_ascii=False,
     )
 
-    request_payload = {
+    request_payload: dict[str, Any] = {
         "model": config.model,
         "messages": [
             {"role": "system", "content": prompt_text},

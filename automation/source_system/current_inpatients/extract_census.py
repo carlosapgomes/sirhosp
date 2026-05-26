@@ -585,7 +585,7 @@ def parse_setor_xlsx(
 # ── Output helpers ──────────────────────────────────────────────────
 
 
-def save_results(results: list[dict], csv_only: bool = False) -> tuple[Path, Path | None]:
+def save_results(results: list[dict], csv_only: bool = False) -> tuple[Path | None, Path]:
     DOWNLOADS_DIR.mkdir(exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
 

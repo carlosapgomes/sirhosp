@@ -8,6 +8,7 @@ Slice IRMD-S6: Ingestion metric cards on dashboard and metrics page route.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from django.contrib.auth.decorators import login_required
 from django.db.models import Count, F, Func, IntegerField, Max, Q, Value
@@ -338,7 +339,7 @@ def official_census_list(request: HttpRequest) -> HttpResponse:
         return raw, raw
 
     # Annotate each record with ward name and specialty sigla/name for display
-    records_list = list(records)
+    records_list: list[Any] = list(records)
     for r in records_list:
         r.unidade_nome = ward_map.get(r.unidade, r.unidade)
         sigla, nome = _resolve_especialidade(r.especialidade)
@@ -485,7 +486,7 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
     hour_labels = [f"{h:02d}h" for h in range(24)]
 
     # Build table: total, after 16h, % after 16h
-    hourly_table = []
+    hourly_table: list[dict[str, Any]] = []
     for esp in sorted_specialties:
         vals = hour_dist[esp]
         total = sum(vals)
@@ -861,7 +862,7 @@ def censo(request: HttpRequest) -> HttpResponse:
             return specialty_name_to_code[raw], raw
         return raw, raw
 
-    pacientes = []
+    pacientes: list[dict[str, Any]] = []
     for s in snapshots:
         pid = patient_map.get(s.prontuario)
         adm_date = admission_date_map.get(pid) if pid else None
