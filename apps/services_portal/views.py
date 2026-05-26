@@ -177,6 +177,54 @@ def death_list(request: HttpRequest) -> HttpResponse:
 
 
 @login_required
+def admission_chart(request: HttpRequest) -> HttpResponse:
+    """Admission chart page with daily bars and weekday averages.
+
+    Query parameter:
+        ?dias=N  — number of days to display (default: 90)
+
+    Data is sourced from DailyAdmissionCount and excludes today
+    (in-progress day).
+    """
+    dias = _parse_dias_param(request)
+    context = _daily_count_chart_context(
+        model=DailyAdmissionCount,
+        dias=dias,
+        dataset_label="Admissões",
+        page_title="Admissões por Dia",
+        daily_chart_title="Admissões por Dia",
+        weekday_chart_title="Média de Admissões por Dia da Semana",
+        list_url_name="services_portal:admission_list",
+        list_link_label="Ver lista de admissões",
+    )
+    return render(request, "services_portal/daily_event_chart.html", context)
+
+
+@login_required
+def death_chart(request: HttpRequest) -> HttpResponse:
+    """Death chart page with daily bars and weekday averages.
+
+    Query parameter:
+        ?dias=N  — number of days to display (default: 90)
+
+    Data is sourced from DailyDeathCount and excludes today
+    (in-progress day).
+    """
+    dias = _parse_dias_param(request)
+    context = _daily_count_chart_context(
+        model=DailyDeathCount,
+        dias=dias,
+        dataset_label="Óbitos",
+        page_title="Óbitos por Dia",
+        daily_chart_title="Óbitos por Dia",
+        weekday_chart_title="Média de Óbitos por Dia da Semana",
+        list_url_name="services_portal:death_list",
+        list_link_label="Ver lista de óbitos",
+    )
+    return render(request, "services_portal/daily_event_chart.html", context)
+
+
+@login_required
 def official_census_list(request: HttpRequest) -> HttpResponse:
     date_str = request.GET.get("date", "").strip()
     if date_str:
@@ -511,6 +559,83 @@ def _exponential_moving_average(
         result[i] = round(ema, 1)
 
     return result
+
+
+def _parse_dias_param(request: HttpRequest) -> int:
+    """Parse ?dias=N from request, defaulting to 90.
+
+    Returns an integer between 1 and 365; invalid/non-numeric values
+    fall back to 90.
+    """
+    dias_str = request.GET.get("dias", "90").strip()
+    try:
+        dias = int(dias_str)
+        if dias < 1:
+            dias = 90
+    except (ValueError, TypeError):
+        dias = 90
+    return dias
+
+
+def _daily_count_chart_context(
+    model,
+    dias: int,
+    dataset_label: str,
+    page_title: str,
+    daily_chart_title: str,
+    weekday_chart_title: str,
+    list_url_name: str,
+    list_link_label: str,
+) -> dict:
+    """Build shared chart context for admission/death daily event charts.
+
+    Args:
+        model: Django model class with date, count fields (DailyAdmissionCount
+               or DailyDeathCount).
+        dias: Number of days to include (excludes today).
+        dataset_label: Label for the chart dataset ("Admissões" or "Óbitos").
+        page_title: HTML page title.
+        daily_chart_title: Title for the daily bar chart card.
+        weekday_chart_title: Title for the weekday average card.
+        list_url_name: Named URL for the corresponding list page.
+        list_link_label: Button label for the back-to-list link.
+
+    Returns:
+        Dict with chart_data, weekday_avg, period_options, and metadata.
+    """
+    today = timezone.localdate()
+
+    entries = list(
+        model.objects.filter(date__lt=today)
+        .order_by("-date")[:dias]
+    )
+    entries.reverse()  # chronological order
+
+    labels = [e.date.strftime("%d/%m/%Y") for e in entries]
+    counts = [e.count for e in entries]
+
+    chart_data = {
+        "labels": labels,
+        "counts": counts,
+        "dataset_label": dataset_label,
+    }
+
+    weekday_avg = _weekday_average(entries)
+
+    from django.urls import reverse
+    context = {
+        "page_title": page_title,
+        "daily_chart_title": daily_chart_title,
+        "weekday_chart_title": weekday_chart_title,
+        "chart_data": chart_data,
+        "weekday_avg": weekday_avg,
+        "dias": dias,
+        "period_options": [30, 60, 90, 180, 365],
+        "list_url": reverse(list_url_name),
+        "list_link_label": list_link_label,
+        "dataset_label": dataset_label,
+    }
+    return context
 
 
 def _weekday_average(entries: list) -> dict:

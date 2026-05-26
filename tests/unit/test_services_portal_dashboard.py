@@ -10,7 +10,9 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
+from apps.admissions.models import DailyAdmissionCount
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.deaths.models import DailyDeathCount
 from apps.discharges.models import DailyDischargeCount
 from apps.ingestion.models import IngestionRun
 from apps.patients.models import Patient
@@ -101,7 +103,9 @@ class TestDashboardRealStats:
         assert response.status_code == 200
         ctx = response.context
         assert ctx["coleta"]["setores"] == 2
-        assert ctx["coleta"]["ultima_varredura"] == timezone.localtime(now).strftime("%d/%m/%Y %H:%M")
+        assert ctx["coleta"]["ultima_varredura"] == (
+            timezone.localtime(now).strftime("%d/%m/%Y %H:%M")
+        )
 
     def test_dashboard_no_census_shows_fallback(self, admin_client):
         """Without CensusSnapshot, shows informative message."""
@@ -576,3 +580,178 @@ class TestDischargeChartView:
         assert wa["counts"] == [2, 2, 2, 2, 2, 2, 2]
         # Each avg should be 5.0 (all entries have count=5)
         assert all(v == 5.0 for v in wa["values"])
+
+
+@pytest.mark.django_db
+class TestAdmissionDeathChartViews:
+    """ADC-S1: Tests for /painel/admissoes/ and /painel/obitos/ chart pages."""
+
+    # ── Admission chart tests ────────────────────────────────────────
+
+    def _create_admission_counts(self, days: int, start_count: int = 5):
+        """Helper: create DailyAdmissionCount entries for last N days."""
+        today = timezone.localdate()
+        for i in range(days):
+            day = today - timedelta(days=days - i)
+            DailyAdmissionCount.objects.create(date=day, count=start_count + i)
+
+    def _create_death_counts(self, days: int, start_count: int = 5):
+        """Helper: create DailyDeathCount entries for last N days."""
+        today = timezone.localdate()
+        for i in range(days):
+            day = today - timedelta(days=days - i)
+            DailyDeathCount.objects.create(date=day, count=start_count + i)
+
+    def test_admission_chart_requires_authentication(self, client):
+        """Anonymous user is redirected to login for admission chart."""
+        url = reverse("services_portal:admission_chart")
+        response = client.get(url)
+        assert response.status_code == 302
+
+    def test_death_chart_requires_authentication(self, client):
+        """Anonymous user is redirected to login for death chart."""
+        url = reverse("services_portal:death_chart")
+        response = client.get(url)
+        assert response.status_code == 302
+
+    def test_admission_chart_returns_200_when_authenticated(self, admin_client):
+        """Authenticated user can access the admission chart page."""
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+    def test_death_chart_returns_200_when_authenticated(self, admin_client):
+        """Authenticated user can access the death chart page."""
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+    def test_admission_chart_context_uses_daily_admission_count(self, admin_client):
+        """Admission chart context contains chart_data from DailyAdmissionCount."""
+        self._create_admission_counts(10)
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context.get("chart_data")
+        assert chart_data is not None
+        assert "labels" in chart_data
+        assert "counts" in chart_data
+        assert len(chart_data["labels"]) > 0
+
+    def test_death_chart_context_uses_daily_death_count(self, admin_client):
+        """Death chart context contains chart_data from DailyDeathCount."""
+        self._create_death_counts(10)
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context.get("chart_data")
+        assert chart_data is not None
+        assert "labels" in chart_data
+        assert "counts" in chart_data
+        assert len(chart_data["labels"]) > 0
+
+    def test_admission_chart_respects_dias_parameter(self, admin_client):
+        """?dias=30 limits the admission chart to 30 days."""
+        self._create_admission_counts(60)
+        url = reverse("services_portal:admission_chart") + "?dias=30"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert len(chart_data["labels"]) <= 30
+
+    def test_death_chart_respects_dias_parameter(self, admin_client):
+        """?dias=30 limits the death chart to 30 days."""
+        self._create_death_counts(60)
+        url = reverse("services_portal:death_chart") + "?dias=30"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert len(chart_data["labels"]) <= 30
+
+    def test_admission_chart_invalid_dias_falls_back_to_90(self, admin_client):
+        """Invalid ?dias=abc falls back to default 90 for admissions."""
+        self._create_admission_counts(100)
+        url = reverse("services_portal:admission_chart") + "?dias=abc"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert len(chart_data["labels"]) <= 90
+
+    def test_death_chart_invalid_dias_falls_back_to_90(self, admin_client):
+        """Invalid ?dias=abc falls back to default 90 for deaths."""
+        self._create_death_counts(100)
+        url = reverse("services_portal:death_chart") + "?dias=abc"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert len(chart_data["labels"]) <= 90
+
+    def test_admission_chart_handles_empty_data(self, admin_client):
+        """Admission chart renders without error when no data exists."""
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert chart_data["labels"] == []
+        assert chart_data["counts"] == []
+
+    def test_death_chart_handles_empty_data(self, admin_client):
+        """Death chart renders without error when no data exists."""
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        chart_data = response.context["chart_data"]
+        assert chart_data["labels"] == []
+        assert chart_data["counts"] == []
+
+    def test_admission_chart_context_has_weekday_avg(self, admin_client):
+        """Admission chart context contains weekday_avg."""
+        self._create_admission_counts(10)
+        url = reverse("services_portal:admission_chart") + "?dias=7"
+        response = admin_client.get(url)
+        assert "weekday_avg" in response.context
+        wa = response.context["weekday_avg"]
+        assert "labels" in wa
+        assert "values" in wa
+        assert "counts" in wa
+
+    def test_death_chart_context_has_weekday_avg(self, admin_client):
+        """Death chart context contains weekday_avg."""
+        self._create_death_counts(10)
+        url = reverse("services_portal:death_chart") + "?dias=7"
+        response = admin_client.get(url)
+        assert "weekday_avg" in response.context
+        wa = response.context["weekday_avg"]
+        assert "labels" in wa
+        assert "values" in wa
+        assert "counts" in wa
+
+    def test_admission_chart_excludes_today(self, admin_client):
+        """Admission chart excludes today (in-progress day)."""
+        self._create_admission_counts(10)
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        today_str = timezone.localdate().strftime("%d/%m/%Y")
+        assert today_str not in chart_data["labels"]
+
+    def test_death_chart_excludes_today(self, admin_client):
+        """Death chart excludes today (in-progress day)."""
+        self._create_death_counts(10)
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        today_str = timezone.localdate().strftime("%d/%m/%Y")
+        assert today_str not in chart_data["labels"]
+
+    def test_admission_chart_period_options_in_context(self, admin_client):
+        """Admission chart context contains period_options."""
+        url = reverse("services_portal:admission_chart")
+        response = admin_client.get(url)
+        assert response.context.get("period_options") == [30, 60, 90, 180, 365]
+
+    def test_death_chart_period_options_in_context(self, admin_client):
+        """Death chart context contains period_options."""
+        url = reverse("services_portal:death_chart")
+        response = admin_client.get(url)
+        assert response.context.get("period_options") == [30, 60, 90, 180, 365]

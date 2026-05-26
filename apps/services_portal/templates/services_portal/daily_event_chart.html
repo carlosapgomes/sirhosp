@@ -1,0 +1,156 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }} — SIRHOSP{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item active" aria-current="page">{{ page_title }}</li>
+  </ol>
+</nav>
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">{{ page_title }}</h2>
+    <p class="text-muted small mb-0">Contagem diária com média por dia da semana</p>
+  </div>
+  <a href="{{ list_url }}" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-list-ul me-1"></i> {{ list_link_label }}
+  </a>
+</div>
+
+<!-- Period selector -->
+<div class="d-flex gap-2 mb-4 flex-wrap">
+  <span class="text-muted small align-self-center me-2">Período:</span>
+  {% for option in period_options %}
+    <a href="?dias={{ option }}"
+       class="btn btn-sm {% if option == dias %}btn-primary{% else %}btn-outline-primary{% endif %}">
+      {{ option }} dias
+    </a>
+  {% endfor %}
+</div>
+
+<!-- Daily bar chart -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body">
+    {% if chart_data.counts %}
+    <div style="position: relative; height: 400px;">
+      <canvas id="dailyChart"></canvas>
+    </div>
+    {% else %}
+    <div class="text-center py-5 text-muted">
+      <i class="bi bi-bar-chart" style="font-size: 3rem;"></i>
+      <p class="mt-3">Nenhum dado disponível.</p>
+      <p class="small">Os dados começarão a aparecer após a primeira extração.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Weekday average chart -->
+{% if weekday_avg.has_data %}
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header bg-white border-0">
+    <h5 class="card-title mb-1">{{ weekday_chart_title }}</h5>
+    <p class="text-muted small mb-0">Baseada no mesmo período selecionado</p>
+  </div>
+  <div class="card-body">
+    <div style="position: relative; height: 350px;">
+      <canvas id="weekdayAverageChart"></canvas>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{{ chart_data|json_script:"chart-data" }}
+{{ weekday_avg|json_script:"weekday-avg-data" }}
+<script>
+  'use strict';
+
+  function safeJSON(id, fallback) {
+    var el = document.getElementById(id);
+    if (!el) return fallback;
+    try { return JSON.parse(el.textContent); }
+    catch(e) {
+      console.warn('SIRHOSP: JSON parse error ' + id, e);
+      return fallback;
+    }
+  }
+
+  if (typeof Chart === 'undefined') {
+    console.error('SIRHOSP: Chart.js nao carregou');
+  } else {
+
+  /* ════════ Chart 1: {daily_chart_title} ════════ */
+  (function() {
+    var data = safeJSON('chart-data', {});
+    if (!data.labels || !data.labels.length) return;
+    var canvas = document.getElementById('dailyChart');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: data.labels,
+        datasets: [{
+          label: data.dataset_label || '{{ dataset_label }}',
+          data: data.counts,
+          backgroundColor: '#0D6EFD33',
+          borderColor: '#0D6EFD',
+          borderWidth: 1,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } },
+      },
+    });
+  })();
+
+  /* ════════ Chart 2: Media por Dia da Semana ════════ */
+  (function() {
+    var data = safeJSON('weekday-avg-data', {});
+    if (!data.values || !data.values.length) return;
+    var canvas = document.getElementById('weekdayAverageChart');
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+
+    new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: data.labels,
+        datasets: [{
+          label: 'Média de {{ dataset_label }}',
+          data: data.values,
+          backgroundColor: '#0D6EFD33',
+          borderColor: '#0D6EFD',
+          borderWidth: 1,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                var idx = context.dataIndex;
+                return 'Média: ' + data.values[idx] + ' (n=' + data.counts[idx] + ')';
+              }
+            }
+          }
+        },
+        scales: { y: { beginAtZero: true, title: { display: true, text: 'Média de {{ dataset_label }}' } } },
+      },
+    });
+  })();
+
+  } /* end if Chart defined */
+</script>
+{% endblock %}

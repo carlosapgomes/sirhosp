@@ -91,8 +91,6 @@ class TestDischargeRecordModel:
             nome="TESTE",
             data_internacao="10/05/2026",
         )
-        from django.db.utils import IntegrityError
-        import pytest
         with pytest.raises(IntegrityError):
             DischargeRecord.objects.create(
                 daily_count=daily,
