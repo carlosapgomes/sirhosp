@@ -145,6 +145,50 @@ def wait_frame_ready(page: Page, timeout_ms: int = 60000) -> FrameLocator:
     raise RuntimeError("Timeout aguardando iframe pesquisar pacientes com alta.")
 
 
+def _scroll_to_bottom(frame, page: Page) -> None:
+    """Scroll agressivo até o final da tabela (mesma técnica do extract_census).
+
+    O scroll é best-effort: se o frame ainda estiver carregando, pula
+    silenciosamente em vez de lançar exceção.
+    """
+    try:
+        frame.evaluate(
+            """
+            () => {
+                const wrappers = document.querySelectorAll(
+                    '.ui-datatable-tablewrapper, .ui-datatable-scrollable-body'
+                );
+                for (const w of wrappers) {
+                    w.scrollTop = w.scrollHeight;
+                }
+                if (document.body) {
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
+                if (document.documentElement) {
+                    document.documentElement.scrollTop =
+                        document.documentElement.scrollHeight;
+                }
+            }
+            """
+        )
+    except Exception as exc:
+        print(f"  [!] Scroll via JS ignorado: {exc}")
+        return
+
+    page.wait_for_timeout(200)
+    try:
+        frame.locator('body').press('End')
+    except Exception:
+        pass
+    page.wait_for_timeout(200)
+    for _ in range(3):
+        try:
+            frame.locator('body').press('PageDown')
+        except Exception:
+            pass
+        page.wait_for_timeout(150)
+
+
 def fill_date_field(
     frame_locator: FrameLocator,
     page: Page,
@@ -167,8 +211,18 @@ def fill_date_field(
     print(f"  [i] {label} preenchido: {date_value}")
 
 
-def click_exportar_arquivo(frame_locator: FrameLocator) -> None:
-    """Clica no botao Exportar para Arquivo para abrir o menu."""
+def click_exportar_arquivo(
+    frame_locator: FrameLocator, page: Page
+) -> None:
+    """Clica no botao Exportar para Arquivo para abrir o menu.
+
+    Em páginas com muitos resultados o botão fica abaixo do fold.
+    Faz scroll agressivo antes de tentar clicar.
+    """
+    frame = page.frame(name=PROCURAR_IFRAME_NAME)
+    if frame is not None:
+        _scroll_to_bottom(frame, page)
+
     # PrimeFaces button: text inside <span class="ui-button-text ui-c">
     btn = frame_locator.locator("button").filter(has_text="Exportar para Arquivo")
     if not safe_click(btn, "botao Exportar para Arquivo", timeout=20000):
@@ -177,7 +231,15 @@ def click_exportar_arquivo(frame_locator: FrameLocator) -> None:
 
 
 def click_xls_option(page: Page, frame_locator: FrameLocator) -> bytes:
-    """Clica na opcao XLS (Tudo) e retorna o conteudo do download."""
+    """Clica na opcao XLS (Tudo) e retorna o conteudo do download.
+
+    O menu dropdown com a opção pode abrir abaixo do fold em tabelas
+    com muitos resultados — faz scroll antes de procurar o link.
+    """
+    frame = page.frame(name=PROCURAR_IFRAME_NAME)
+    if frame is not None:
+        _scroll_to_bottom(frame, page)
+
     xls_link = frame_locator.locator("a").filter(has_text="XLS (Tudo)")
     if not wait_visible(xls_link, timeout=10000):
         raise RuntimeError("Link XLS (Tudo) nao encontrado no menu.")
@@ -278,10 +340,28 @@ def main() -> None:
             if not safe_click(pesquisar_btn, "botao Pesquisar", timeout=20000):
                 raise RuntimeError("Nao foi possivel clicar em Pesquisar.")
             print("[i] Botao Pesquisar clicado, aguardando resultados...")
-            page.wait_for_timeout(3000)
+
+            # O botão Pesquisar submete o formulário (type=submit) e causa
+            # navegação completa no iframe — precisamos aguardar o novo
+            # documento carregar antes de interagir com a página de resultados.
+            # wait_frame_ready confirma que o <body> foi attached, mas a
+            # página pode estar em redirect (POST → 302 → final).
+            # wait_for_load_state garante que o DOM está completamente parseado.
+            frame_locator = wait_frame_ready(page, timeout_ms=90000)
+            frame = page.frame(name=PROCURAR_IFRAME_NAME)
+            if frame is not None:
+                try:
+                    frame.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception:
+                    page.wait_for_timeout(5000)
+            page.wait_for_timeout(2000)
+
+            # Scroll até o fim — a tabela de resultados pode ser longa
+            if frame is not None:
+                _scroll_to_bottom(frame, page)
 
             # Exportar XLS
-            click_exportar_arquivo(frame_locator)
+            click_exportar_arquivo(frame_locator, page)
             page.wait_for_timeout(1000)
 
             xls_content = click_xls_option(page, frame_locator)

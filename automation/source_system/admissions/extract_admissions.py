@@ -199,8 +199,60 @@ def click_pesquisar(frame_locator: FrameLocator, page: Page) -> None:
     print("[i] Pesquisa concluída.")
 
 
+def _scroll_to_bottom(frame, page: Page) -> None:
+    """Scroll agressivo até o final da tabela (mesma técnica do extract_census).
+
+    O scroll é best-effort: se o frame ainda estiver carregando, pula
+    silenciosamente em vez de lançar exceção.
+    """
+    try:
+        frame.evaluate(
+            """
+            () => {
+                const wrappers = document.querySelectorAll(
+                    '.ui-datatable-tablewrapper, .ui-datatable-scrollable-body'
+                );
+                for (const w of wrappers) {
+                    w.scrollTop = w.scrollHeight;
+                }
+                if (document.body) {
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
+                if (document.documentElement) {
+                    document.documentElement.scrollTop =
+                        document.documentElement.scrollHeight;
+                }
+            }
+            """
+        )
+    except Exception as exc:
+        print(f"  [!] Scroll via JS ignorado: {exc}")
+        return
+
+    page.wait_for_timeout(200)
+    try:
+        frame.locator('body').press('End')
+    except Exception:
+        pass
+    page.wait_for_timeout(200)
+    for _ in range(3):
+        try:
+            frame.locator('body').press('PageDown')
+        except Exception:
+            pass
+        page.wait_for_timeout(150)
+
+
 def click_exportar_xls(frame_locator: FrameLocator, page: Page) -> bytes:
-    """Clica em Exportar para Arquivo > XLS (Tudo) e retorna o conteúdo do download."""
+    """Clica em Exportar para Arquivo > XLS (Tudo) e retorna o conteúdo do download.
+
+    Em páginas com muitos resultados o botão e o menu ficam abaixo do
+    fold — faz scroll agressivo antes de interagir.
+    """
+    frame = page.frame(name=ADMISSIONS_IFRAME_NAME)
+    if frame is not None:
+        _scroll_to_bottom(frame, page)
+
     export_btn = frame_locator.get_by_role("button", name="Exportar para Arquivo")
     if not wait_visible(export_btn, timeout=15000):
         raise RuntimeError("Botão Exportar para Arquivo não encontrado.")
@@ -373,6 +425,20 @@ def run(
 
             # Pesquisar
             click_pesquisar(frame_locator, page)
+
+            # O botão Pesquisar submete o formulário (type=submit) e causa
+            # navegação completa no iframe — precisamos aguardar o novo
+            # documento carregar antes de interagir com a página de resultados.
+            # wait_admissions_frame_ready confirma que o <body> foi attached,
+            # mas a página pode estar em redirect (POST → 302 → final).
+            # wait_for_load_state garante que o DOM está completamente parseado.
+            frame_locator = wait_admissions_frame_ready(page, timeout_ms=90000)
+            frame = page.frame(name=ADMISSIONS_IFRAME_NAME)
+            if frame is not None:
+                try:
+                    frame.wait_for_load_state("domcontentloaded", timeout=30000)
+                except Exception:
+                    page.wait_for_timeout(5000)
             page.wait_for_timeout(2000)
 
             # Exportar XLS
