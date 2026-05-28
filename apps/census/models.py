@@ -74,6 +74,27 @@ class CensusSnapshot(models.Model):
         null=True,
         help_text="Length of stay in days from the census table (numeric)",
     )
+    data_movimentacao = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        help_text="Date of last movement (DD/MM or DD/MM/AAAA)",
+    )
+    tipo_alta = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        help_text=(
+            "Discharge type code: A=alta médica, "
+            "G=alta administrativa, I=desistiu tratamento"
+        ),
+    )
+    origem = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text="Origin sector/bed code from the last movement",
+    )
     bed_status = models.CharField(
         max_length=20,
         choices=BedStatus.choices,

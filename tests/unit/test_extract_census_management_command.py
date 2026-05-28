@@ -59,7 +59,7 @@ class TestExtractCensusLifecycleMetrics:
             tmp_path = Path(real_tmp)
             # Create a CSV inside the temp dir (simulating subprocess output)
             csv_path = tmp_path / "censo-20260426.csv"
-            csv_path.write_text("setor,qrt_leito,prontuario,nome,esp\n")
+            csv_path.write_text("setor_codigo,setor,qrt_leito,prontuario,nome,esp,dt_mvt,alta,origem\n")
 
             # Mock subprocess.run to return success
             fake_result = MagicMock()
@@ -249,7 +249,7 @@ class TestExtractCensusLifecycleMetrics:
         with tempfile.TemporaryDirectory() as real_tmp:
             tmp_path = Path(real_tmp)
             csv_path = tmp_path / "censo-20260426.csv"
-            csv_path.write_text("setor,qrt_leito,prontuario,nome,esp\n")
+            csv_path.write_text("setor_codigo,setor,qrt_leito,prontuario,nome,esp,dt_mvt,alta,origem\n")
 
             fake_result = MagicMock()
             fake_result.returncode = 0

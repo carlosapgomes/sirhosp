@@ -176,6 +176,9 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
         has_setor_codigo = "setor_codigo" in actual
         has_dt_int = "dt_int" in actual
         has_tempo = "tempo" in actual
+        has_dt_mvt = "dt_mvt" in actual
+        has_alta = "alta" in actual
+        has_origem = "origem" in actual
 
         for row in reader:
             prontuario = (row.get("prontuario") or "").strip()
@@ -206,6 +209,21 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
                     "data_internacao": data_internacao,
                     "tempo_internacao": tempo_internacao,
                     "bed_status": bed_status,
+                    "data_movimentacao": (
+                        (row.get("dt_mvt") or "").strip()
+                        if has_dt_mvt
+                        else ""
+                    ),
+                    "tipo_alta": (
+                        (row.get("alta") or "").strip()
+                        if has_alta
+                        else ""
+                    ),
+                    "origem": (
+                        (row.get("origem") or "").strip()
+                        if has_origem
+                        else ""
+                    ),
                 }
             )
 

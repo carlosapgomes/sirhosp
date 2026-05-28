@@ -565,6 +565,18 @@ def parse_setor_xlsx(
         if "convenio" in col_map and col_map["convenio"] < len(row) and row[col_map["convenio"]] is not None:
             convenio = str(row[col_map["convenio"]]).strip()
 
+        dt_mvt = ""
+        if "dt_mvt" in col_map and col_map["dt_mvt"] < len(row) and row[col_map["dt_mvt"]] is not None:
+            dt_mvt = str(row[col_map["dt_mvt"]]).strip()
+
+        alta = ""
+        if "alta" in col_map and col_map["alta"] < len(row) and row[col_map["alta"]] is not None:
+            alta = str(row[col_map["alta"]]).strip()
+
+        origem = ""
+        if "origem" in col_map and col_map["origem"] < len(row) and row[col_map["origem"]] is not None:
+            origem = str(row[col_map["origem"]]).strip()
+
         pacientes.append({
             "setor_codigo": setor_codigo,
             "setor": setor_nome,
@@ -576,6 +588,9 @@ def parse_setor_xlsx(
             "tempo": tempo,
             "idade": idade,
             "convenio": convenio,
+            "dt_mvt": dt_mvt,
+            "alta": alta,
+            "origem": origem,
         })
 
     wb.close()
@@ -599,7 +614,7 @@ def save_results(results: list[dict], csv_only: bool = False) -> tuple[Path | No
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         fieldnames = [
             "setor_codigo", "setor", "qrt_leito", "prontuario", "nome", "esp",
-            "dt_int", "tempo", "idade", "convenio",
+            "dt_int", "tempo", "idade", "convenio", "dt_mvt", "alta", "origem",
         ]
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
@@ -617,6 +632,9 @@ def save_results(results: list[dict], csv_only: bool = False) -> tuple[Path | No
                     "tempo": p.get("tempo", ""),
                     "idade": p.get("idade", ""),
                     "convenio": p.get("convenio", ""),
+                    "dt_mvt": p.get("dt_mvt", ""),
+                    "alta": p.get("alta", ""),
+                    "origem": p.get("origem", ""),
                 }
                 w.writerow(row)
 

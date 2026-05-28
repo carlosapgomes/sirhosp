@@ -13,12 +13,12 @@ class TestParseCensusCsv:
     def test_parse_valid_csv(self):
         """Parse a valid CSV with mixed bed statuses."""
         csv_content = (
-            "setor_codigo,setor,qrt_leito,prontuario,nome,esp\n"
-            "640,UTI A,UG01A,14160147,JOSE MERCES,NEF\n"
-            "630,UTI A,UG02B,,DESOCUPADO,\n"
-            "654,UTI A,UG03C,,RESERVA INTERNA,\n"
-            "642,ENF B,E01A,99999,MARIA SILVA,CME\n"
-            "651,ENF B,E02B,,LIMPEZA,\n"
+            "setor_codigo,setor,qrt_leito,prontuario,nome,esp,dt_mvt,alta,origem\n"
+            "640,UTI A,UG01A,14160147,JOSE MERCES,NEF,26/05,,\n"
+            "630,UTI A,UG02B,,DESOCUPADO,,,,\n"
+            "654,UTI A,UG03C,,RESERVA INTERNA,,,,,\n"
+            "642,ENF B,E01A,99999,MARIA SILVA,CME,27/05,A,640/UG01A\n"
+            "651,ENF B,E02B,,LIMPEZA,,,,,\n"
         )
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".csv", delete=False, encoding="utf-8"

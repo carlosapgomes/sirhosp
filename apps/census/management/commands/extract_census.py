@@ -189,6 +189,9 @@ class Command(BaseCommand):
                         especialidade=row["especialidade"],
                         data_internacao=row.get("data_internacao", ""),
                         tempo_internacao=row.get("tempo_internacao"),
+                        data_movimentacao=row.get("data_movimentacao", ""),
+                        tipo_alta=row.get("tipo_alta", ""),
+                        origem=row.get("origem", ""),
                         bed_status=row["bed_status"],
                     )
                     for row in parsed_rows
