@@ -40,7 +40,7 @@ class Migration(migrations.Migration):
                     "Discharge type code: A=alta médica, "
                     "G=alta administrativa, I=desistiu tratamento"
                 ),
-                max_length=50,
+                max_length=1,
             ),
         ),
     ]
