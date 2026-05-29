@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import csv
+import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from django.db.models import Max
 from django.utils import timezone
 
-from apps.census.models import BedStatus, CensusSnapshot
+from apps.census.models import BedStatus, CensusSnapshot, PatientMovement
 from apps.ingestion.models import CensusExecutionBatch
 from apps.ingestion.services import (
     queue_admissions_only_run,
     queue_demographics_only_run,
 )
 from apps.patients.models import Admission, Patient
+
+logger = logging.getLogger(__name__)
 
 
 def classify_bed_status(prontuario: str, nome: str) -> str:
@@ -393,6 +397,141 @@ def process_census_snapshot(
         "patients_skipped": total_skipped,
         "patients_skipped_no_pront": no_pront_skipped,
         "patients_skipped_duplicate": dup_skipped,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PatientMovement upsert
+# ---------------------------------------------------------------------------
+
+
+def _recalc_sequences(patient: Patient) -> None:
+    """Recalculate sequence numbers for all movements of a patient.
+
+    Orders by movement_date, first_seen_at, pk and assigns sequential
+    sequence values starting from 0.
+    """
+    movements = PatientMovement.objects.filter(
+        patient=patient,
+    ).order_by("movement_date", "first_seen_at", "pk")
+    for i, m in enumerate(movements):
+        if m.sequence != i:
+            m.sequence = i
+            m.save(update_fields=["sequence"])
+
+
+def upsert_patient_movements() -> dict:
+    """Upsert PatientMovement records from the latest census snapshot.
+
+    Processes the most recent CensusSnapshot (by captured_at), filtering
+    only occupied beds with a non-empty prontuario. For each patient,
+    creates or updates a PatientMovement based on the unique key
+    (patient, movement_date, sector).
+
+    Returns:
+        dict with keys: movements_created, movements_updated,
+        patients_processed, errors
+    """
+    latest_captured = CensusSnapshot.objects.aggregate(
+        latest=Max("captured_at"),
+    )["latest"]
+    if latest_captured is None:
+        return {
+            "movements_created": 0,
+            "movements_updated": 0,
+            "patients_processed": 0,
+            "errors": 0,
+        }
+
+    snapshots = CensusSnapshot.objects.filter(
+        captured_at=latest_captured,
+        bed_status=BedStatus.OCCUPIED,
+    )
+
+    now = timezone.now()
+    movements_created = 0
+    movements_updated = 0
+    patients_processed = 0
+    errors = 0
+    touched_patients: set[int] = set()
+
+    for snap in snapshots:
+        pront = snap.prontuario.strip()
+        if not pront:
+            continue
+
+        # Parse movement_date from data_movimentacao
+        raw_date = _parse_dt_int(snap.data_movimentacao)
+        if not raw_date:
+            logger.warning(
+                "Skipping patient prontuario=%s: empty data_movimentacao",
+                pront,
+            )
+            continue
+
+        try:
+            movement_date = datetime.strptime(raw_date, "%d/%m/%Y").date()
+        except (ValueError, TypeError):
+            logger.warning(
+                "Skipping patient prontuario=%s: invalid data_movimentacao='%s'",
+                pront,
+                raw_date,
+            )
+            errors += 1
+            continue
+
+        # Get or create Patient
+        patient, _ = Patient.objects.get_or_create(
+            source_system="tasy",
+            patient_source_key=pront,
+            defaults={"name": snap.nome.strip()},
+        )
+
+        # Find active admission (best-effort)
+        active_admission = (
+            Admission.objects.filter(
+                patient=patient,
+                discharge_date__isnull=True,
+            )
+            .order_by("-admission_date")
+            .first()
+        )
+
+        # Upsert PatientMovement
+        movement, created = PatientMovement.objects.get_or_create(
+            patient=patient,
+            movement_date=movement_date,
+            sector=snap.setor.strip(),
+            defaults={
+                "admission": active_admission,
+                "origin": snap.origem.strip(),
+                "bed": snap.leito.strip(),
+                "discharge_type": snap.tipo_alta.strip(),
+                "first_seen_at": now,
+                "last_seen_at": now,
+            },
+        )
+
+        if created:
+            movements_created += 1
+        else:
+            movement.last_seen_at = now
+            movement.save(update_fields=["last_seen_at"])
+            movements_updated += 1
+
+        touched_patients.add(patient.pk)
+
+    # Recalculate sequences for all touched patients
+    for patient_pk in touched_patients:
+        _recalc_sequences(Patient.objects.get(pk=patient_pk))
+
+    patients_processed = len(touched_patients)
+
+    return {
+        "movements_created": movements_created,
+        "movements_updated": movements_updated,
+        "patients_processed": patients_processed,
+        "errors": errors,
     }
 
 

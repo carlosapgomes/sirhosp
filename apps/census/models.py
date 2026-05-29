@@ -3,6 +3,67 @@ from __future__ import annotations
 from django.db import models
 
 
+class PatientMovement(models.Model):
+    patient = models.ForeignKey(
+        "patients.Patient", on_delete=models.CASCADE,
+        related_name="movements",
+    )
+    admission = models.ForeignKey(
+        "patients.Admission", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="movements",
+    )
+    movement_date = models.DateField(
+        help_text="Data da movimentação (do censo)",
+    )
+    sector = models.CharField(
+        max_length=255, help_text="Setor atual",
+    )
+    bed = models.CharField(max_length=50, blank=True, default="")
+    origin = models.CharField(
+        max_length=100, blank=True, default="",
+        help_text="Setor de origem (campo Origem do censo)",
+    )
+    discharge_type = models.CharField(
+        max_length=50, blank=True, default="",
+        help_text="Tipo de alta (vazio = ativo)",
+    )
+    sequence = models.IntegerField(
+        default=0,
+        help_text="Ordem cronológica dentro da admissão",
+    )
+    first_seen_at = models.DateTimeField(
+        help_text="Primeiro snapshot que capturou este estado",
+    )
+    last_seen_at = models.DateTimeField(
+        help_text="Último snapshot (atualizado a cada repetição)",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["patient", "movement_date", "sector"],
+                name="uq_patient_movement_date_sector",
+            ),
+        ]
+        ordering = ["patient", "sequence"]
+        indexes = [
+            models.Index(fields=["sector", "last_seen_at"]),
+            models.Index(fields=["patient", "sequence"]),
+            models.Index(fields=["discharge_type"]),
+        ]
+        verbose_name = "Patient Movement"
+        verbose_name_plural = "Patient Movements"
+
+    def __str__(self) -> str:
+        discharge = f" → {self.discharge_type}" if self.discharge_type else ""
+        return (
+            f"[{self.movement_date}] {self.patient} @ {self.sector}"
+            f"{discharge}"
+        )
+
+
 class BedStatus(models.TextChoices):
     OCCUPIED = "occupied", "Ocupado"
     EMPTY = "empty", "Vago"

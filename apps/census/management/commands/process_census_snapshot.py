@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand
 
-from apps.census.services import process_census_snapshot
+from apps.census.services import process_census_snapshot, upsert_patient_movements
 
 
 class Command(BaseCommand):
@@ -32,5 +32,16 @@ class Command(BaseCommand):
                 f"  Demographics runs enqueued: {result['demographics_runs_enqueued']}\n"
                 f"  Skipped (empty pront):      {result['patients_skipped_no_pront']}\n"
                 f"  Skipped (duplicate pront):  {result['patients_skipped_duplicate']}"
+            )
+        )
+
+        # Upsert PatientMovement records from the latest snapshot
+        self.stdout.write("Upserting PatientMovement records...")
+        movement_result = upsert_patient_movements()
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Patient movements: {movement_result['movements_created']} created, "
+                f"{movement_result['movements_updated']} updated, "
+                f"{movement_result['patients_processed']} patients processed."
             )
         )
