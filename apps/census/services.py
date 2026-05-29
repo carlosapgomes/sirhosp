@@ -272,27 +272,45 @@ def process_census_snapshot(
                 "runs_enqueued": 0,
                 "demographics_runs_enqueued": 0,
                 "patients_skipped": 0,
+                "patients_skipped_no_pront": 0,
+                "patients_skipped_duplicate": 0,
             }
         snapshots = CensusSnapshot.objects.filter(captured_at=latest_captured)
 
     # Filter only occupied beds
     occupied = snapshots.filter(bed_status=BedStatus.OCCUPIED)
 
-    # Deduplicate by prontuario — keep last occurrence
-    seen: set[str] = set()
-    patients_to_process: list[dict[str, str]] = []
-    for snap in occupied.order_by("-pk"):  # latest first → keeps last
+    # Deduplicate by prontuario — prefer entry with non-empty especialidade
+    patients_dict: dict[str, dict[str, str]] = {}
+    patients_esp: dict[str, str] = {}  # best especialidade per prontuario
+    no_pront_skipped = 0
+    dup_skipped = 0
+
+    for snap in occupied.order_by("-pk"):  # latest first
         pront = snap.prontuario.strip()
         if not pront:
+            no_pront_skipped += 1
             continue
-        if pront not in seen:
-            seen.add(pront)
-            patients_to_process.append({
-                "prontuario": pront,
-                "nome": snap.nome.strip(),
-                "setor": snap.setor,
-                "leito": snap.leito,
-            })
+
+        esp = snap.especialidade.strip()
+        entry = {
+            "prontuario": pront,
+            "nome": snap.nome.strip(),
+            "setor": snap.setor,
+            "leito": snap.leito,
+        }
+
+        if pront in patients_dict:
+            # Duplicate — prefer entry with non-empty especialidade
+            if esp and not patients_esp.get(pront, ""):
+                patients_dict[pront] = entry
+                patients_esp[pront] = esp
+            dup_skipped += 1
+        else:
+            patients_dict[pront] = entry
+            patients_esp[pront] = esp
+
+    patients_to_process = list(patients_dict.values())
 
     # No occupied beds with prontuario → no batch needed
     if not patients_to_process:
@@ -303,9 +321,9 @@ def process_census_snapshot(
             "patients_updated": 0,
             "runs_enqueued": 0,
             "demographics_runs_enqueued": 0,
-            "patients_skipped": max(
-                0, occupied.count() - len(patients_to_process)
-            ),
+            "patients_skipped": no_pront_skipped + dup_skipped,
+            "patients_skipped_no_pront": no_pront_skipped,
+            "patients_skipped_duplicate": dup_skipped,
         }
 
     # Create execution batch for this census cycle
@@ -351,15 +369,17 @@ def process_census_snapshot(
         # Enqueue demographics-only run for this patient
         queue_demographics_only_run(patient_record=prontuario, batch=batch)
 
+    total_skipped = no_pront_skipped + dup_skipped
+
     # Mark enqueue phase as complete
     batch.enqueue_finished_at = timezone.now()
     batch.notes_json = {
         **batch.notes_json,
         "runs_enqueued": enqueued_count,
         "demographics_runs_enqueued": len(patients_to_process),
-        "patients_skipped": max(
-            0, occupied.count() - len(patients_to_process)
-        ),
+        "patients_skipped": total_skipped,
+        "patients_skipped_no_pront": no_pront_skipped,
+        "patients_skipped_duplicate": dup_skipped,
     }
     batch.save(update_fields=["enqueue_finished_at", "notes_json"])
 
@@ -370,9 +390,9 @@ def process_census_snapshot(
         "patients_updated": updated_count,
         "runs_enqueued": enqueued_count,
         "demographics_runs_enqueued": len(patients_to_process),
-        "patients_skipped": max(
-            0, occupied.count() - len(patients_to_process)
-        ),
+        "patients_skipped": total_skipped,
+        "patients_skipped_no_pront": no_pront_skipped,
+        "patients_skipped_duplicate": dup_skipped,
     }
 
 

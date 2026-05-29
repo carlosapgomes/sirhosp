@@ -30,6 +30,7 @@ class Command(BaseCommand):
                 f"  Patients updated:           {result['patients_updated']}\n"
                 f"  Admissions runs enqueued:   {result['runs_enqueued']}\n"
                 f"  Demographics runs enqueued: {result['demographics_runs_enqueued']}\n"
-                f"  Skipped (no pront):         {result['patients_skipped']}"
+                f"  Skipped (empty pront):      {result['patients_skipped_no_pront']}\n"
+                f"  Skipped (duplicate pront):  {result['patients_skipped_duplicate']}"
             )
         )
