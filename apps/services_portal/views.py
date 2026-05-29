@@ -18,7 +18,14 @@ from django.shortcuts import render
 from django.utils import timezone
 
 from apps.admissions.models import DailyAdmissionCount
-from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord, Specialty, Ward
+from apps.census.models import (
+    BedStatus,
+    CensusSnapshot,
+    OfficialCensusRecord,
+    PatientMovement,
+    Specialty,
+    Ward,
+)
 from apps.deaths.models import DailyDeathCount
 from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.ingestion.models import (
@@ -1278,3 +1285,107 @@ def _discharge_records_for_template(entry) -> tuple[list[dict], list[str]]:
     records = entry.raw_data if entry else []
     columns = list(records[0].keys()) if records else []
     return records, columns
+
+
+@login_required
+def sector_occupation(request: HttpRequest) -> HttpResponse:
+    """Setores > Ocupação: patients by sector within a period.
+
+    GET params:
+        setor — sector name (default: first sector from movements)
+        dias  — period in days: 7, 30, 90 (default: 7)
+
+    Returns summary cards, patient table, sector dropdown, period selector.
+    """
+    dias_str = request.GET.get("dias", "7").strip()
+    try:
+        dias = int(dias_str)
+        if dias not in (7, 30, 90):
+            dias = 7
+    except (ValueError, TypeError):
+        dias = 7
+
+    cutoff = timezone.now() - timedelta(days=dias)
+
+    # ── Sectors dropdown ────────────────────────────────────────────
+    sectors_list = list(
+        PatientMovement.objects.values_list("sector", flat=True)
+        .distinct()
+        .order_by("sector")
+    )
+
+    sector = request.GET.get("setor", "").strip()
+    if not sector and sectors_list:
+        sector = sectors_list[0]
+
+    # ── Base queryset ───────────────────────────────────────────────
+    qs = PatientMovement.objects.filter(
+        last_seen_at__gte=cutoff,
+    )
+
+    if sector:
+        qs = qs.filter(sector=sector)
+
+    qs = qs.select_related("patient")
+
+    # ── Summary cards ────────────────────────────────────────────────
+    total = qs.count()
+    still_in = qs.filter(discharge_type="").count()
+    left = qs.exclude(discharge_type="").count()
+
+    if total > 0:
+        # Compute avg_stay as average of days between movement_date and today
+        today = timezone.localdate()
+        days_list = []
+        for m in qs.iterator():
+            d = (today - m.movement_date).days
+            if d < 0:
+                d = 0
+            days_list.append(d)
+
+        if days_list:
+            avg_stay_days = round(sum(days_list) / len(days_list), 1)
+        else:
+            avg_stay_days = None
+    else:
+        avg_stay_days = None
+
+    # ── Patient table ────────────────────────────────────────────────
+    movements = qs.order_by("-movement_date")
+    today = timezone.localdate()
+
+    patients: list[dict[str, Any]] = []
+    for m in movements:
+        if m.discharge_type:
+            destination = m.discharge_type
+        else:
+            destination = "(no setor)"
+
+        days_in_sector = (today - m.movement_date).days
+        if days_in_sector < 0:
+            days_in_sector = 0
+
+        patients.append({
+            "name": m.patient.name,
+            "prontuario": m.patient.patient_source_key,
+            "entry_date": m.movement_date,
+            "days": days_in_sector,
+            "destination": destination,
+        })
+
+    context = {
+        "page_title": "Setores — Ocupação",
+        "sectors": sectors_list,
+        "selected_sector": sector,
+        "period_days": dias,
+        "period_options": [7, 30, 90],
+        "summary": {
+            "total": total,
+            "still_in": still_in,
+            "left": left,
+            "avg_stay_days": avg_stay_days,
+        },
+        "patients": patients,
+        "active_tab": "setores",
+    }
+    return render(request, "services_portal/sector_occupation.html", context)

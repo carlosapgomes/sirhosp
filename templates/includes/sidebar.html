@@ -19,6 +19,27 @@
       <i class="bi bi-door-open"></i>
       Leitos
     </a>
+    <!-- Setores toggle -->
+    <a class="sirhosp-sidebar-link" data-bs-toggle="collapse" href="#sidebar-setores" role="button" aria-expanded="{% if active_menu == 'setores' %}true{% else %}false{% endif %}">
+      <i class="bi bi-geo-alt"></i>
+      <span>Setores</span>
+      <i class="bi bi-chevron-down ms-auto small"></i>
+    </a>
+    <div class="collapse {% if active_menu == 'setores' %}show{% endif %}" id="sidebar-setores">
+      <ul class="nav flex-column ms-3">
+        <li class="nav-item">
+          <a class="nav-link small sirhosp-sidebar-link py-1 px-2"
+             href="{% url 'services_portal:sector_occupation' %}">
+            Ocupação
+          </a>
+        </li>
+        <li class="nav-item">
+          <a class="nav-link small sirhosp-sidebar-link py-1 px-2" href="#">
+            Indicadores
+          </a>
+        </li>
+      </ul>
+    </div>
     <a href="{% url 'patients:patient_list' %}" class="sirhosp-sidebar-link {% if active_menu == 'pacientes' %}active{% endif %}">
       <i class="bi bi-people"></i>
       Pacientes

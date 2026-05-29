@@ -18,4 +18,5 @@ urlpatterns = [
     path("admissoes/", views.admission_list, name="admission_list"),
     path("obitos/", views.death_list, name="death_list"),
     path("censo-oficial/", views.official_census_list, name="official_census_list"),
+    path("setores/ocupacao/", views.sector_occupation, name="sector_occupation"),
 ]

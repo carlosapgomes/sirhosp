@@ -10,6 +10,7 @@ MENU_PATH_MAP = [
     ("/painel/", "dashboard"),
     ("/censo/", "censo"),
     ("/monitor/", "monitor"),
+    ("/setores/", "setores"),
 ]
 
 
