@@ -1,0 +1,92 @@
+{% load i18n %}
+{# Partial: Patient trajectory timeline (Slice PMT-S3) #}
+{% if trajectory %}
+  <div class="card border-0 shadow-sm mb-3">
+    <div class="card-header bg-transparent border-bottom-0 pb-0">
+      <h6 class="mb-0 text-muted">
+        <i class="bi bi-signpost-split me-1"></i> Trajet&oacute;ria
+      </h6>
+    </div>
+    <div class="card-body pt-2">
+      {# Horizontal timeline #}
+      <div class="d-flex flex-wrap align-items-start gap-2 mb-3">
+        {% for item in trajectory %}
+          <div class="text-center" style="min-width: 100px; max-width: 160px;">
+            <div class="card border {% if item.is_active %}border-primary{% else %}border-light{% endif %} shadow-sm">
+              <div class="card-body p-2">
+                <strong class="small">{{ item.sector }}</strong>
+                <br>
+                <span class="text-muted" style="font-size: 0.75rem;">
+                  {{ item.entry_date|date:"d/m" }}
+                </span>
+                <br>
+                <span class="badge {% if item.is_active %}bg-primary{% elif item.discharge_type %}bg-secondary{% else %}bg-light text-dark{% endif %}">
+                  {{ item.days }} dia{{ item.days|pluralize }}
+                </span>
+                {% if item.is_active %}
+                  <br>
+                  <span class="badge bg-success mt-1">(atual)</span>
+                {% elif item.discharge_type %}
+                  <br>
+                  <span class="badge bg-warning text-dark mt-1">Alta: {{ item.discharge_type }}</span>
+                {% endif %}
+              </div>
+            </div>
+            {% if item.origin %}
+              <small class="text-muted d-block mt-1">Veio de {{ item.origin }}</small>
+            {% endif %}
+          </div>
+          {% if not forloop.last %}
+            <div class="d-flex align-items-center" style="padding-top: 30px;">
+              <i class="bi bi-arrow-right text-muted"></i>
+            </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+
+      {# Summary table #}
+      <div class="table-responsive">
+        <table class="table table-sm table-hover small mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Setor</th>
+              <th>Entrada</th>
+              <th>Dias</th>
+              <th>Destino/Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in trajectory %}
+              <tr>
+                <td>{{ item.sector }}</td>
+                <td>{{ item.entry_date|date:"d/m/Y" }}</td>
+                <td>{{ item.days }}</td>
+                <td>
+                  {% if item.is_active %}
+                    <span class="badge bg-success">Ativa</span>
+                  {% elif item.discharge_type %}
+                    <span class="badge bg-warning text-dark">Alta: {{ item.discharge_type }}</span>
+                  {% else %}
+                    <span class="text-muted">—</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+{% else %}
+  <div class="card border-0 shadow-sm mb-3">
+    <div class="card-body text-center py-4">
+      <i class="bi bi-signpost-split text-muted" style="font-size: 1.5rem;"></i>
+      <p class="text-muted mt-2 mb-0 small">
+        Trajet&oacute;ria ainda n&atilde;o dispon&iacute;vel. Os dados de
+        movimenta&ccedil;&atilde;o come&ccedil;am a ser registrados a partir
+        da primeira coleta ap&oacute;s a ativa&ccedil;&atilde;o desta
+        funcionalidade.
+      </p>
+    </div>
+  </div>
+{% endif %}

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import date as date_type
+
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
 
+from apps.census.models import PatientMovement
 from apps.patients import services
 from apps.patients.models import Admission, Patient
 
@@ -110,6 +113,34 @@ def admission_list_view(
         summary_context = get_admission_summary_context(selected_admission)
         sync_context = get_admission_sync_context(selected_admission)
 
+    # --- PMT-S3: Patient trajectory ---
+    trajectory: list[dict] = []
+    if selected_admission:
+        movements = list(
+            PatientMovement.objects.filter(
+                patient=selected_admission.patient,
+            ).order_by("sequence")
+        )
+        today = date_type.today()
+        for i, m in enumerate(movements):
+            if i + 1 < len(movements):
+                days = (movements[i + 1].movement_date - m.movement_date).days
+            else:
+                if m.discharge_type:
+                    days = 0
+                else:
+                    days = (today - m.movement_date).days
+            trajectory.append({
+                "sector": m.sector,
+                "entry_date": m.movement_date,
+                "days": max(days, 0),
+                "origin": m.origin,
+                "discharge_type": m.discharge_type,
+                "is_active": (
+                    i == len(movements) - 1 and not m.discharge_type
+                ),
+            })
+
     context = {
         "patient": patient,
         "idade": idade,
@@ -124,6 +155,7 @@ def admission_list_view(
         "today": date_mod.today().isoformat(),
         "summary": summary_context,
         "sync": sync_context,
+        "trajectory": trajectory,
     }
     return render(request, "patients/admission_list.html", context)
 
