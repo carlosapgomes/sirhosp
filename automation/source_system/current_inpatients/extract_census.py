@@ -571,7 +571,12 @@ def parse_setor_xlsx(
 
         alta = ""
         if "alta" in col_map and col_map["alta"] < len(row) and row[col_map["alta"]] is not None:
-            alta = str(row[col_map["alta"]]).strip()
+            alta_raw = row[col_map["alta"]]
+            # Numeric 0 / 0.0 means "no discharge" — treat as empty
+            if isinstance(alta_raw, (int, float)):
+                alta = "" if float(alta_raw) == 0.0 else str(int(alta_raw))
+            else:
+                alta = str(alta_raw).strip()
 
         origem = ""
         if "origem" in col_map and col_map["origem"] < len(row) and row[col_map["origem"]] is not None:
