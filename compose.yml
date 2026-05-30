@@ -26,3 +26,7 @@ services:
 volumes:
   sirhosp_db_data:
     driver: local
+
+networks:
+  hospital_edge:
+    external: true
