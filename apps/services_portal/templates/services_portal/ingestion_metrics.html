@@ -40,7 +40,36 @@
 
 {% if active_tab == 'runs' %}
 
-<!-- Resumo do período selecionado -->
+<!-- IWBO-S3: Batch detail mode — runs table is conditional on batch selection -->
+{% if show_batch_detail %}
+
+<!-- Batch detail header with back link -->
+<div class="d-flex flex-wrap justify-content-between align-items-center mb-3">
+  <div>
+    <h5 class="fw-semibold mb-1" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-box me-2"></i>Batch #{{ selected_batch.pk }}
+    </h5>
+    <p class="text-muted small mb-0">
+      {{ selected_batch.started_at|date:"d/m/Y H:i"|default:"—" }} → {{ selected_batch.finished_at|date:"d/m/Y H:i"|default:"—" }}
+      &nbsp;|&nbsp;
+      Status:
+      {% if selected_batch.status == "succeeded" %}
+        <span class="badge bg-success">Sucesso</span>
+      {% elif selected_batch.status == "failed" %}
+        <span class="badge bg-danger">Falhou</span>
+      {% else %}
+        <span class="badge bg-secondary">{{ selected_batch.status }}</span>
+      {% endif %}
+    </p>
+  </div>
+  <div>
+    <a href="{% url 'services_portal:ingestion_metrics' %}" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left me-1"></i> Voltar ao histórico
+    </a>
+  </div>
+</div>
+
+<!-- Resumo do batch selecionado -->
 <div class="row g-3 mb-4">
   <div class="col-12 col-md-6 col-lg-3">
     <div class="sirhosp-stat-card d-flex align-items-center gap-3">
@@ -48,7 +77,7 @@
         <i class="bi bi-arrow-repeat" style="color: var(--bs-primary); font-size: 1.25rem;"></i>
       </div>
       <div>
-        <div class="sirhosp-stat-value">{{ ingestion_stats.total_finished }}</div>
+        <div class="sirhosp-stat-value">{{ selected_batch_stats.total_finished }}</div>
         <div class="sirhosp-stat-label">
           Execuções{% if filters.periodo != "24h" %} ({{ filters.periodo }}){% endif %}
         </div>
@@ -61,7 +90,7 @@
         <i class="bi bi-check-circle" style="color: #16A34A; font-size: 1.25rem;"></i>
       </div>
       <div>
-        <div class="sirhosp-stat-value">{{ ingestion_stats.success_rate }}%</div>
+        <div class="sirhosp-stat-value">{{ selected_batch_stats.success_rate }}%</div>
         <div class="sirhosp-stat-label">Taxa de Sucesso</div>
       </div>
     </div>
@@ -72,7 +101,7 @@
         <i class="bi bi-clock-history" style="color: #DC2626; font-size: 1.25rem;"></i>
       </div>
       <div>
-        <div class="sirhosp-stat-value">{{ ingestion_stats.timeout_rate }}%</div>
+        <div class="sirhosp-stat-value">{{ selected_batch_stats.timeout_rate }}%</div>
         <div class="sirhosp-stat-label">Taxa de Timeout</div>
       </div>
     </div>
@@ -83,60 +112,11 @@
         <i class="bi bi-stopwatch" style="color: #0284C7; font-size: 1.25rem;"></i>
       </div>
       <div>
-        <div class="sirhosp-stat-value">{{ ingestion_stats.avg_duration_seconds }}s</div>
+        <div class="sirhosp-stat-value">{{ selected_batch_stats.avg_duration_seconds }}s</div>
         <div class="sirhosp-stat-label">Duração Média</div>
       </div>
     </div>
   </div>
-  {% if batch_failure_stats.has_batch %}
-  <div class="col-12 col-md-6 col-lg-3">
-    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
-      <div class="sirhosp-stat-icon" style="background: var(--bs-primary-lightest);">
-        <i class="bi bi-stopwatch" style="color: var(--bs-primary); font-size: 1.25rem;"></i>
-      </div>
-      <div>
-        <div class="sirhosp-stat-value">
-          {% if batch_failure_stats.total_duration_hours is not None %}
-            {{ batch_failure_stats.total_duration_hours }}h
-          {% else %}
-            -
-          {% endif %}
-        </div>
-        <div class="sirhosp-stat-label">Duração Total do Censo</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-md-6 col-lg-3">
-    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
-      <div class="sirhosp-stat-icon" style="background: #FFF7ED;">
-        <i class="bi bi-database" style="color: #EA580C; font-size: 1.25rem;"></i>
-      </div>
-      <div>
-        <div class="sirhosp-stat-value">{{ batch_failure_stats.batch_id }}</div>
-        <div class="sirhosp-stat-label">ID do Lote</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-12 col-md-6 col-lg-3">
-    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
-      <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
-        <i class="bi bi-flag" style="color: #0284C7; font-size: 1.25rem;"></i>
-      </div>
-      <div>
-        <div class="sirhosp-stat-value">
-          {% if batch_failure_stats.status == 'succeeded' %}
-            <span class="badge bg-success">Sucesso</span>
-          {% elif batch_failure_stats.status == 'failed' %}
-            <span class="badge bg-danger">Falhou</span>
-          {% else %}
-            <span class="badge bg-secondary">{{ batch_failure_stats.status }}</span>
-          {% endif %}
-        </div>
-        <div class="sirhosp-stat-label">Status do Lote</div>
-      </div>
-    </div>
-  </div>
-  {% endif %}
 </div>
 
 <!-- Filtros -->
@@ -144,6 +124,7 @@
   <div class="card-body">
     <form method="get" class="row g-2 align-items-end">
       <input type="hidden" name="tab" value="runs">
+      <input type="hidden" name="batch_id" value="{{ selected_batch.pk }}">
       <div class="col-6 col-md-2">
         <label for="periodo" class="form-label small fw-semibold">Período</label>
         <select name="periodo" id="periodo" class="form-select form-select-sm">
@@ -185,7 +166,7 @@
         </button>
       </div>
       <div class="col-6 col-md-2">
-        <a href="{% url 'services_portal:ingestion_metrics' %}" class="btn btn-sm btn-outline-secondary w-100">
+        <a href="{% url 'services_portal:ingestion_metrics' %}?batch_id={{ selected_batch.pk }}" class="btn btn-sm btn-outline-secondary w-100">
           <i class="bi bi-x-circle me-1"></i> Limpar
         </a>
       </div>
@@ -193,16 +174,16 @@
   </div>
 </div>
 
-<!-- Tabela de Runs -->
+<!-- Tabela de Runs do Batch -->
 <div class="card border-0 shadow-sm">
   <div class="card-header bg-white border-bottom-0 d-flex justify-content-between align-items-center">
     <h5 class="fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">
       <i class="bi bi-list-ul me-2"></i>Execuções
-      <span class="badge bg-secondary ms-2">{{ runs|length }}</span>
+      {% if selected_batch_runs_page %}<span class="badge bg-secondary ms-2">{{ selected_batch_runs_page.paginator.count }}</span>{% endif %}
     </h5>
   </div>
   <div class="card-body p-0">
-    {% if runs %}
+    {% if selected_batch_runs_page and selected_batch_runs_page.object_list %}
     <div class="table-responsive">
       <table class="table table-hover align-middle mb-0">
         <thead class="table-light">
@@ -219,7 +200,7 @@
           </tr>
         </thead>
         <tbody>
-          {% for run in runs %}
+          {% for run in selected_batch_runs_page.object_list %}
           <tr>
             <td class="ps-3 fw-semibold small">{{ run.pk }}</td>
             <td><span class="badge bg-light text-dark small">{{ run.intent|default:"-" }}</span></td>
@@ -275,11 +256,180 @@
         </tbody>
       </table>
     </div>
+    <!-- Paginação de execuções -->
+    {% if selected_batch_runs_page.paginator.num_pages > 1 %}
+    <nav aria-label="Navegação de execuções" class="px-3 py-2">
+      <ul class="pagination pagination-sm justify-content-center mb-0">
+        {% if selected_batch_runs_page.has_previous %}
+        <li class="page-item">
+          <a class="page-link" href="?batch_id={{ selected_batch.pk }}&amp;run_page={{ selected_batch_runs_page.previous_page_number }}{% if filters.periodo != "24h" %}&amp;periodo={{ filters.periodo }}{% endif %}{% if filters.status %}&amp;status={{ filters.status }}{% endif %}{% if filters.intent %}&amp;intent={{ filters.intent }}{% endif %}{% if filters.failure_reason %}&amp;failure_reason={{ filters.failure_reason }}{% endif %}">Anterior</a>
+        </li>
+        {% else %}
+        <li class="page-item disabled">
+          <span class="page-link">Anterior</span>
+        </li>
+        {% endif %}
+
+        {% for num in selected_batch_runs_page.paginator.page_range %}
+        <li class="page-item {% if num == selected_batch_runs_page.number %}active{% endif %}">
+          <a class="page-link" href="?batch_id={{ selected_batch.pk }}&amp;run_page={{ num }}{% if filters.periodo != "24h" %}&amp;periodo={{ filters.periodo }}{% endif %}{% if filters.status %}&amp;status={{ filters.status }}{% endif %}{% if filters.intent %}&amp;intent={{ filters.intent }}{% endif %}{% if filters.failure_reason %}&amp;failure_reason={{ filters.failure_reason }}{% endif %}">{{ num }}</a>
+        </li>
+        {% endfor %}
+
+        {% if selected_batch_runs_page.has_next %}
+        <li class="page-item">
+          <a class="page-link" href="?batch_id={{ selected_batch.pk }}&amp;run_page={{ selected_batch_runs_page.next_page_number }}{% if filters.periodo != "24h" %}&amp;periodo={{ filters.periodo }}{% endif %}{% if filters.status %}&amp;status={{ filters.status }}{% endif %}{% if filters.intent %}&amp;intent={{ filters.intent }}{% endif %}{% if filters.failure_reason %}&amp;failure_reason={{ filters.failure_reason }}{% endif %}">Próximo</a>
+        </li>
+        {% else %}
+        <li class="page-item disabled">
+          <span class="page-link">Próximo</span>
+        </li>
+        {% endif %}
+      </ul>
+    </nav>
+    {% endif %}
     {% else %}
     <div class="text-center py-5">
       <i class="bi bi-inbox fs-1 text-muted mb-3 d-block"></i>
       <h5 class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">Nenhuma execução encontrada</h5>
-      <p class="text-muted mb-0">Nenhum run corresponde aos filtros selecionados no período.</p>
+      <p class="text-muted mb-0">Nenhum run encontrado no batch {{ selected_batch.pk }} para os filtros selecionados.</p>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{% elif batch_not_found %}
+
+<!-- Batch inválido -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body text-center py-4">
+    <i class="bi bi-exclamation-circle fs-3 text-muted mb-2 d-block"></i>
+    <h5 class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">Batch não encontrado</h5>
+    <p class="text-muted mb-0">O batch solicitado não existe ou foi removido.</p>
+    <a href="{% url 'services_portal:ingestion_metrics' %}" class="btn btn-sm btn-outline-primary mt-3">
+      <i class="bi bi-arrow-left me-1"></i> Voltar ao histórico
+    </a>
+  </div>
+</div>
+
+{% else %}
+
+<!-- Visão padrão sem batch selecionado: apenas histórico, sem execuções globais -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body text-center py-4">
+    <i class="bi bi-info-circle fs-3 text-muted mb-2 d-block"></i>
+    <h5 class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">Selecione um batch</h5>
+    <p class="text-muted mb-0">Selecione um batch na tabela de histórico acima para ver as execuções detalhadas.</p>
+  </div>
+</div>
+
+{% endif %}
+
+<!-- IWBO-S2: Tabela histórica de batches (sempre visível) -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-header bg-white border-bottom-0 d-flex justify-content-between align-items-center">
+    <h5 class="fw-semibold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+      <i class="bi bi-clock-history me-2"></i>Histórico de Lotes
+      {% if batch_page %}<span class="badge bg-secondary ms-2">{{ batch_page.paginator.count }}</span>{% endif %}
+    </h5>
+  </div>
+  <div class="card-body p-0">
+    {% if batch_history %}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3 small">Batch ID</th>
+            <th class="small">Status</th>
+            <th class="small">Início</th>
+            <th class="small">Fim</th>
+            <th class="small">Duração</th>
+            <th class="small">Jobs</th>
+            <th class="small">Sucesso</th>
+            <th class="small">Falha</th>
+            <th class="small">Workers</th>
+            <th class="small">Pico</th>
+            <th class="small">Jobs/min</th>
+            <th class="small">Méd/job</th>
+            <th class="small">Méd/tent</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for batch in batch_history %}
+          <tr>
+            <td class="ps-3 fw-semibold small">
+              <a href="?batch_id={{ batch.batch_id }}" class="text-decoration-none">
+                {{ batch.batch_id }}
+              </a>
+            </td>
+            <td>
+              {% if batch.status == "succeeded" %}
+                <span class="badge bg-success">Sucesso</span>
+              {% elif batch.status == "failed" %}
+                <span class="badge bg-danger">Falhou</span>
+              {% else %}
+                <span class="badge bg-secondary">{{ batch.status }}</span>
+              {% endif %}
+            </td>
+            <td class="small text-muted">{{ batch.started_at|date:"d/m H:i"|default:"—" }}</td>
+            <td class="small text-muted">{{ batch.finished_at|date:"d/m H:i"|default:"—" }}</td>
+            <td class="small text-muted">
+              {% if batch.drain_duration_seconds %}
+                {{ batch.drain_duration_seconds|floatformat:0 }}s
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td class="small text-muted">{{ batch.runs_total }}</td>
+            <td class="small text-success">{{ batch.runs_succeeded }}</td>
+            <td class="small text-danger">{{ batch.runs_failed }}</td>
+            <td class="small text-muted">{{ batch.observed_worker_count }}</td>
+            <td class="small text-muted">{{ batch.observed_peak_concurrency }}</td>
+            <td class="small text-muted">{{ batch.throughput_jobs_per_minute }}</td>
+            <td class="small text-muted">{{ batch.avg_processing_duration_seconds }}s</td>
+            <td class="small text-muted">{{ batch.avg_attempt_duration_seconds }}s</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <!-- Pagination -->
+    {% if batch_page.paginator.num_pages > 1 %}
+    <nav aria-label="Navegação de lotes" class="px-3 py-2">
+      <ul class="pagination pagination-sm justify-content-center mb-0">
+        {% if batch_page.has_previous %}
+        <li class="page-item">
+          <a class="page-link" href="?batch_page={{ batch_page.previous_page_number }}">Anterior</a>
+        </li>
+        {% else %}
+        <li class="page-item disabled">
+          <span class="page-link">Anterior</span>
+        </li>
+        {% endif %}
+
+        {% for num in batch_page.paginator.page_range %}
+        <li class="page-item {% if num == batch_page.number %}active{% endif %}">
+          <a class="page-link" href="?batch_page={{ num }}">{{ num }}</a>
+        </li>
+        {% endfor %}
+
+        {% if batch_page.has_next %}
+        <li class="page-item">
+          <a class="page-link" href="?batch_page={{ batch_page.next_page_number }}">Próximo</a>
+        </li>
+        {% else %}
+        <li class="page-item disabled">
+          <span class="page-link">Próximo</span>
+        </li>
+        {% endif %}
+      </ul>
+    </nav>
+    {% endif %}
+    {% else %}
+    <div class="text-center py-4">
+      <i class="bi bi-inbox fs-1 text-muted mb-3 d-block"></i>
+      <h5 class="fw-semibold" style="color: var(--sirhosp-sidebar-bg);">Nenhum lote finalizado</h5>
+      <p class="text-muted mb-0 small">Ainda não há lotes de censo concluídos no histórico.</p>
     </div>
     {% endif %}
   </div>
@@ -301,7 +451,101 @@
       </div>
     </div>
   </div>
+  <!-- IWBO-S1: Worker efficiency metrics -->
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
+        <i class="bi bi-people" style="color: #0284C7; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.observed_worker_count }}</div>
+        <div class="sirhosp-stat-label">Workers observados</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #F3E8FF;">
+        <i class="bi bi-activity" style="color: #9333EA; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.observed_peak_concurrency }}</div>
+        <div class="sirhosp-stat-label">Concorrência observada (pico)</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #F3E8FF;">
+        <i class="bi bi-bar-chart" style="color: #9333EA; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.observed_avg_concurrency }}</div>
+        <div class="sirhosp-stat-label">Concorrência média</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #DCFCE7;">
+        <i class="bi bi-speedometer2" style="color: #16A34A; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.throughput_jobs_per_minute }}</div>
+        <div class="sirhosp-stat-label">Jobs/min</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FFF7ED;">
+        <i class="bi bi-clock" style="color: #EA580C; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.avg_processing_duration_seconds }}s</div>
+        <div class="sirhosp-stat-label">Média por job</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
+        <i class="bi bi-stopwatch" style="color: #D97706; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.avg_attempt_duration_seconds }}s</div>
+        <div class="sirhosp-stat-label">Média por tentativa</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #F0FDF4;">
+        <i class="bi bi-check2-circle" style="color: #16A34A; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ batch_failure_stats.runs_succeeded }}/{{ batch_failure_stats.runs_total }}</div>
+        <div class="sirhosp-stat-label">Jobs (sucesso/total)</div>
+      </div>
+    </div>
+  </div>
 </div>
+
+<!-- IWBO-S1: Workers labels list -->
+{% if batch_failure_stats.observed_worker_labels %}
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card border-0 shadow-sm">
+      <div class="card-body py-2">
+        <span class="fw-semibold small me-2">Workers observados:</span>
+        {% for label in batch_failure_stats.observed_worker_labels %}
+          <span class="badge bg-light text-dark me-1 small">{{ label }}</span>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 <!-- Falhas por intent -->
 {% if batch_failure_stats.failures_by_intent %}

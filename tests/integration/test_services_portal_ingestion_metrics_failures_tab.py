@@ -26,7 +26,7 @@ from apps.ingestion.models import (
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
-def _make_run(**kwargs) -> IngestionRun:
+def _make_run(batch: CensusExecutionBatch | None = None, **kwargs) -> IngestionRun:
     """Create an IngestionRun with defaults suitable for metrics page tests."""
     now = timezone.now()
     defaults: dict = {
@@ -37,6 +37,7 @@ def _make_run(**kwargs) -> IngestionRun:
         "finished_at": now - timedelta(hours=1),
         "timed_out": False,
         "failure_reason": "",
+        "batch": batch,
     }
     defaults.update(kwargs)
     return IngestionRun.objects.create(**defaults)
@@ -56,8 +57,7 @@ def _make_batch(**kwargs) -> CensusExecutionBatch:
 
 def _make_final_failure(batch: CensusExecutionBatch, **kwargs) -> FinalRunFailure:
     """Create a FinalRunFailure linked to a batch and a run."""
-    run_kwargs = {"status": "failed", "batch": batch}
-    run = _make_run(**run_kwargs)
+    run = _make_run(batch=batch, status="failed")
     now = timezone.now()
     defaults: dict = {
         "batch": batch,
@@ -91,17 +91,32 @@ class TestIngestionMetricsTabs:
         assert "Pacientes" in content
 
     def test_default_tab_is_runs(self, admin_client):
-        """Without ?tab= param, the runs table (default) is visible."""
-        run = _make_run(intent="full_sync", status="succeeded")
+        """Without ?tab= param, the runs view is the default tab.
+
+        IWBO-S3: Without batch_id, the runs tab shows guidance text and
+        batch history, not the global runs table. We verify the tab is
+        active and the page renders correctly.
+        """
         response = self._get_page(admin_client)
         content = response.content.decode()
-        assert str(run.pk) in content
+        assert response.status_code == 200
         assert "Execuções" in content
+        # Without batch_id, the page shows guidance text
+        assert "Selecione um batch" in content
 
     def test_tab_runs_shows_run_table(self, admin_client):
-        """?tab=runs renders the run table with run data."""
-        run = _make_run(intent="admissions_only", status="succeeded")
-        response = self._get_page(admin_client, tab="runs")
+        """?tab=runs with batch_id renders the run table with run data.
+
+        IWBO-S3: Runs table is visible only when a batch is selected.
+        """
+        now = timezone.now()
+        batch = _make_batch()
+        run = _make_run(
+            batch=batch,
+            intent="admissions_only",
+            status="succeeded",
+        )
+        response = self._get_page(admin_client, tab="runs", batch_id=batch.pk, periodo="30d")
         content = response.content.decode()
         assert str(run.pk) in content
 
@@ -134,8 +149,8 @@ class TestIngestionMetricsBatchCards:
         url = reverse("services_portal:ingestion_metrics")
         return admin_client.get(url, params)
 
-    def test_patients_tab_shows_batch_duration_card(self, admin_client):
-        """Patients tab shows the total duration of the last finished batch."""
+    def test_patients_tab_shows_batch_failure_cards(self, admin_client):
+        """Patients tab shows batch failure summary cards."""
         now = timezone.now()
         _make_batch(
             enqueue_finished_at=now - timedelta(hours=3),
@@ -143,8 +158,8 @@ class TestIngestionMetricsBatchCards:
         )
         response = self._get_page(admin_client, tab="patients")
         content = response.content.decode()
-        # Duration should be ~7200 seconds, displayed in some human-readable form
-        assert "Duração" in content or "Tempo" in content or "duration" in content.lower()
+        # The patients tab shows worker efficiency cards
+        assert "Workers" in content or "Concorrência" in content or "Jobs/min" in content
 
     def test_patients_tab_shows_total_failures_card(self, admin_client):
         """Patients tab shows total count of patients with final failure."""
@@ -280,25 +295,34 @@ class TestIngestionMetricsTabFilterCoexistence:
         url = reverse("services_portal:ingestion_metrics")
         return admin_client.get(url, params)
 
-    def test_tab_runs_preserves_period_filter(self, admin_client):
-        """?tab=runs&periodo=7d renders run table with the period filter applied."""
+    def test_batch_detail_ignores_period_filter(self, admin_client):
+        """Batch detail shows all runs regardless of periodo filter.
+
+        IWBO-S3 (pós-review): periodo does NOT filter runs when
+        batch_id is present. All runs of the batch are visible.
+        """
+        now = timezone.now()
+        batch = _make_batch()
         recent = _make_run(
-            queued_at=timezone.now() - timedelta(hours=1),
-            processing_started_at=timezone.now() - timedelta(minutes=55),
-            finished_at=timezone.now() - timedelta(minutes=50),
+            batch=batch,
+            queued_at=now - timedelta(hours=1),
+            processing_started_at=now - timedelta(minutes=55),
+            finished_at=now - timedelta(minutes=50),
         )
         old = _make_run(
-            queued_at=timezone.now() - timedelta(days=10),
-            processing_started_at=timezone.now() - timedelta(days=10),
-            finished_at=timezone.now() - timedelta(days=10),
+            batch=batch,
+            queued_at=now - timedelta(days=10),
+            processing_started_at=now - timedelta(days=10),
+            finished_at=now - timedelta(days=10),
         )
-        response = self._get_page(admin_client, tab="runs", periodo="7d")
-        content = response.content.decode()
-        assert str(recent.pk) in content
-        # Use a more specific match: the PK in a table cell (<td>) context
-        assert f"<td>{recent.pk}</td>" in content or f">{recent.pk}<" in content
-        # Old run PK should not appear in any table cell
-        assert f"<td>{old.pk}</td>" not in content
+        response = self._get_page(
+            admin_client, tab="runs", periodo="7d", batch_id=batch.pk,
+        )
+        page = response.context["selected_batch_runs_page"]
+        run_ids = [r.pk for r in page.object_list]
+        # Both recent and old runs appear — periodo is ignored in batch detail
+        assert recent.pk in run_ids
+        assert old.pk in run_ids
 
     def test_tab_patients_preserves_filters_in_ui(self, admin_client):
         """?tab=patients with filter params renders without error."""

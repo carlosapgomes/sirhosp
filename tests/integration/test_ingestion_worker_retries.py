@@ -8,6 +8,7 @@ Tests the retry logic in the worker:
 - full_sync auto-enqueued inherits batch_id from source run
 """
 
+import os
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +21,100 @@ from apps.ingestion.models import (
     IngestionRun,
     IngestionRunAttempt,
 )
+
+
+@pytest.mark.django_db
+class TestWorkerLabel:
+    """IWBO-S1: Worker label is populated when processing runs."""
+
+    def _queue_run(self, **kwargs):
+        """Helper to create a queued IngestionRun."""
+        defaults = {
+            "status": "queued",
+            "intent": "admissions_only",
+            "parameters_json": {
+                "patient_record": "LABEL_P1",
+                "intent": "admissions_only",
+            },
+        }
+        defaults.update(kwargs)
+        return IngestionRun.objects.create(**defaults)
+
+    def test_worker_label_set_from_env(self):
+        """Run processed by worker gets worker_label containing SIRHOSP_WORKER_LABEL."""
+        run = self._queue_run()
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.return_value = []
+
+        with patch.dict(os.environ, {"SIRHOSP_WORKER_LABEL": "test-worker"}, clear=False), \
+             patch(
+                "apps.ingestion.management.commands"
+                ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+                return_value=mock_ext,
+             ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        assert run.worker_label != ""
+        assert "test-worker" in run.worker_label
+
+    def test_worker_label_not_empty_with_fallback(self):
+        """Run processed by worker gets a non-empty worker_label even without env var."""
+        run = self._queue_run()
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.return_value = []
+
+        # Ensure SIRHOSP_WORKER_LABEL is not set, but keep other env vars
+        with patch.dict(os.environ, {"SIRHOSP_WORKER_LABEL": ""}, clear=False), \
+             patch(
+                "apps.ingestion.management.commands"
+                ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+                return_value=mock_ext,
+             ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        assert run.worker_label != ""
+        # Should contain hostname or PID
+        assert ":" in run.worker_label
+
+    def test_worker_label_includes_pid_suffix(self):
+        """Worker label ends with :<pid> suffix."""
+        run = self._queue_run()
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.return_value = []
+
+        with patch.dict(os.environ, {"SIRHOSP_WORKER_LABEL": "label-pid-test"}, clear=False), \
+             patch(
+                "apps.ingestion.management.commands"
+                ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+                return_value=mock_ext,
+             ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        parts = run.worker_label.rsplit(":", 1)
+        assert len(parts) == 2
+        assert parts[1].isdigit()  # PID is numeric
+        assert parts[0] == "label-pid-test"
+
+    def test_worker_label_overwritten_on_retry_by_new_worker(self):
+        """Worker_label is overwritten when a different worker processes on retry."""
+        run = self._queue_run(worker_label="old-worker:1")
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.return_value = []
+
+        with patch.dict(os.environ, {"SIRHOSP_WORKER_LABEL": "new-worker"}, clear=False), \
+             patch(
+                "apps.ingestion.management.commands"
+                ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+                return_value=mock_ext,
+             ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        assert "new-worker" in run.worker_label
+        assert "old-worker" not in run.worker_label
 
 
 @pytest.mark.django_db

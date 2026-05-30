@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from django.contrib.auth.decorators import login_required
+from django.core.paginator import EmptyPage, Paginator
 from django.db.models import (
     Avg,
     Count,
@@ -43,6 +44,7 @@ from apps.ingestion.models import (
     CensusExecutionBatch,
     FinalRunFailure,
     IngestionRun,
+    IngestionRunAttempt,
 )
 from apps.patients.models import Admission, Patient
 
@@ -970,6 +972,10 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
 
     CQM-S5: Also delivers batch_failure_stats for the latest finished
     census execution batch.
+
+    IWBO-S3: Batch detail mode via ?batch_id=<id>. When batch_id is
+    present and valid, renders run table only for that batch. Without
+    batch_id, no global runs table is shown — only batch history.
     """
     periodo = request.GET.get("periodo", "24h").strip()
     status = request.GET.get("status", "").strip()
@@ -978,6 +984,75 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
     tab = request.GET.get("tab", "runs").strip()
     if tab not in ("runs", "patients"):
         tab = "runs"
+
+    # IWBO-S3: Parse batch_id for detail mode
+    batch_id_raw = request.GET.get("batch_id", "").strip()
+    selected_batch = None
+    show_batch_detail = False
+    batch_not_found = False
+    selected_batch_runs_page = None
+    selected_batch_stats = None
+
+    if batch_id_raw:
+        try:
+            batch_id_val = int(batch_id_raw)
+            selected_batch = CensusExecutionBatch.objects.filter(pk=batch_id_val).first()
+        except (ValueError, TypeError):
+            selected_batch = None
+
+        if selected_batch is not None:
+            show_batch_detail = True
+
+            # Build filtered queryset within the batch (no period filter —
+            # batch detail must show all runs of the batch regardless of
+            # the default 24h window).
+            qs = IngestionRun.objects.filter(batch=selected_batch)
+            if status:
+                qs = qs.filter(status=status)
+            if intent:
+                qs = qs.filter(intent=intent)
+            if failure_reason:
+                qs = qs.filter(failure_reason=failure_reason)
+
+            # Stats for the batch's filtered runs
+            total = qs.count()
+            success_count = qs.filter(status="succeeded").count()
+            timeout_count = qs.filter(timed_out=True).count()
+            success_rate = round(success_count / total * 100, 1) if total else 0.0
+            timeout_rate = round(timeout_count / total * 100, 1) if total else 0.0
+
+            runs_with_duration = qs.exclude(processing_started_at__isnull=True)
+            durations: list[float] = []
+            for run in runs_with_duration:
+                if run.processing_started_at and run.finished_at:
+                    durations.append(
+                        (run.finished_at - run.processing_started_at).total_seconds()
+                    )
+            avg_seconds = round(sum(durations) / len(durations)) if durations else 0
+
+            selected_batch_stats = {
+                "total_finished": total,
+                "success_rate": success_rate,
+                "timeout_rate": timeout_rate,
+                "avg_duration_seconds": avg_seconds,
+            }
+
+            # Paginate runs within the batch
+            run_page_size = 50
+            run_paginator = Paginator(qs.order_by("-finished_at"), run_page_size)
+            run_page_number = request.GET.get("run_page", 1)
+            try:
+                run_page_number = int(run_page_number)
+            except (ValueError, TypeError):
+                run_page_number = 1
+            try:
+                selected_batch_runs_page = run_paginator.page(run_page_number)
+            except EmptyPage:
+                selected_batch_runs_page = run_paginator.page(
+                    run_paginator.num_pages
+                )
+        else:
+            batch_not_found = True
 
     result = _build_filtered_queryset(
         periodo=periodo,
@@ -1007,7 +1082,10 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
 
     batch_failure_stats = _get_latest_batch_failure_stats()
 
-    context = {
+    # IWBO-S2: Batch history table (paginated)
+    batch_history_context = _get_batch_history_context(request)
+
+    context: dict[str, Any] = {
         "page_title": "Métricas de Ingestão",
         "ingestion_stats": result["stats"],
         "runs": result["runs"],
@@ -1024,12 +1102,27 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
         },
         "batch_failure_stats": batch_failure_stats,
         "active_tab": tab,
+        **batch_history_context,
+        # IWBO-S3: Batch detail keys
+        "show_batch_detail": show_batch_detail,
+        "selected_batch": selected_batch,
+        "selected_batch_runs_page": selected_batch_runs_page,
+        "selected_batch_stats": selected_batch_stats,
+        "batch_not_found": batch_not_found,
+        "run_filters": {
+            "status": status,
+            "intent": intent,
+            "failure_reason": failure_reason,
+        },
     }
     return render(request, "services_portal/ingestion_metrics.html", context)
 
 
 def _get_latest_batch_failure_stats() -> dict:
     """Aggregate final-failure stats for the latest finished census batch.
+
+    IWBO-S1: Also computes observed worker efficiency metrics from
+    the batch's runs and attempt records.
 
     Returns a dict with keys:
         has_batch: bool — False when no finished batch exists.
@@ -1040,6 +1133,11 @@ def _get_latest_batch_failure_stats() -> dict:
         failure_patients: list[dict] — sorted by failed_at descending;
             each dict has patient_record, intent, failed_at,
             attempts_exhausted.
+        runs_total, runs_succeeded, runs_failed, runs_active — job counts.
+        observed_worker_count, observed_worker_labels — worker identity.
+        observed_peak_concurrency, observed_avg_concurrency — concurrency.
+        throughput_jobs_per_minute — jobs / drain minutes.
+        avg_processing_duration_seconds, avg_attempt_duration_seconds.
 
     CQM-S5: Safe fallback to empty structure when no batch is available.
     """
@@ -1051,19 +1149,7 @@ def _get_latest_batch_failure_stats() -> dict:
     )
 
     if batch is None:
-        return {
-            "has_batch": False,
-            "batch_id": None,
-            "status": None,
-            "total_duration_seconds": None,
-            "total_duration_hours": None,
-            "started_at": None,
-            "enqueue_finished_at": None,
-            "finished_at": None,
-            "final_failures_total": 0,
-            "failures_by_intent": {},
-            "failure_patients": [],
-        }
+        return _empty_batch_stats()
 
     failures = FinalRunFailure.objects.filter(
         batch=batch,
@@ -1087,6 +1173,93 @@ def _get_latest_batch_failure_stats() -> dict:
     if batch.total_duration_seconds is not None:
         total_duration_hours = round(batch.total_duration_seconds / 3600, 1)
 
+    # ── IWBO-S1: Batch run and attempt metrics ───────────────────────
+    batch_runs = IngestionRun.objects.filter(batch=batch)
+    runs_total = batch_runs.count()
+    runs_succeeded = batch_runs.filter(status="succeeded").count()
+    runs_failed = batch_runs.filter(status="failed").count()
+    runs_active = batch_runs.filter(status__in=["queued", "running"]).count()
+
+    # Worker labels distinct non-empty
+    worker_labels_qs = (
+        batch_runs
+        .exclude(worker_label="")
+        .values_list("worker_label", flat=True)
+        .distinct()
+        .order_by("worker_label")
+    )
+    observed_worker_labels = list(worker_labels_qs)
+    observed_worker_count = len(observed_worker_labels)
+
+    # Attempt-level metrics
+    attempts = IngestionRunAttempt.objects.filter(run__batch=batch)
+
+    # Sweep-line for peak concurrency
+    events: list[tuple] = []
+    for attempt in attempts.iterator():
+        if attempt.started_at is not None:
+            events.append((attempt.started_at, 1))
+        if attempt.finished_at is not None:
+            events.append((attempt.finished_at, -1))
+
+    # Sort: finished_at (-1) before started_at (+1) for equal timestamps
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    peak_concurrency = 0
+    current = 0
+    for _ts, delta in events:
+        current += delta
+        if current > peak_concurrency:
+            peak_concurrency = current
+
+    # Drain window
+    drain_seconds: float | None = None
+    if batch.enqueue_finished_at and batch.finished_at:
+        drain_seconds = (
+            batch.finished_at - batch.enqueue_finished_at
+        ).total_seconds()
+
+    # Average concurrency = sum(attempt_durations) / drain_seconds
+    total_attempt_duration: float = 0.0
+    attempt_durations: list[float] = []
+    for attempt in attempts.iterator():
+        if attempt.started_at is not None and attempt.finished_at is not None:
+            secs = (attempt.finished_at - attempt.started_at).total_seconds()
+            total_attempt_duration += secs
+            attempt_durations.append(secs)
+
+    avg_concurrency = 0.0
+    if drain_seconds and drain_seconds > 0:
+        avg_concurrency = round(total_attempt_duration / drain_seconds, 1)
+
+    # Throughput: terminal runs / minutes of drain
+    throughput = 0.0
+    if drain_seconds and drain_seconds > 0:
+        terminal_runs = runs_succeeded + runs_failed
+        drain_minutes = drain_seconds / 60.0
+        if drain_minutes > 0:
+            throughput = round(terminal_runs / drain_minutes, 1)
+
+    # Average processing duration (from run timestamps)
+    runs_with_duration = batch_runs.exclude(
+        processing_started_at__isnull=True
+    ).exclude(finished_at__isnull=True)
+    processing_durations: list[float] = []
+    for run in runs_with_duration.iterator():
+        if run.finished_at is not None and run.processing_started_at is not None:
+            pd = (run.finished_at - run.processing_started_at).total_seconds()
+            processing_durations.append(pd)
+    avg_processing = (
+        round(sum(processing_durations) / len(processing_durations))
+        if processing_durations else 0
+    )
+
+    # Average attempt duration
+    avg_attempt = (
+        round(sum(attempt_durations) / len(attempt_durations))
+        if attempt_durations else 0
+    )
+
     return {
         "has_batch": True,
         "batch_id": batch.pk,
@@ -1099,6 +1272,223 @@ def _get_latest_batch_failure_stats() -> dict:
         "final_failures_total": len(failure_patients),
         "failures_by_intent": failures_by_intent,
         "failure_patients": failure_patients,
+        # IWBO-S1: Worker efficiency metrics
+        "runs_total": runs_total,
+        "runs_succeeded": runs_succeeded,
+        "runs_failed": runs_failed,
+        "runs_active": runs_active,
+        "observed_worker_count": observed_worker_count,
+        "observed_worker_labels": observed_worker_labels,
+        "observed_peak_concurrency": peak_concurrency,
+        "observed_avg_concurrency": avg_concurrency,
+        "throughput_jobs_per_minute": throughput,
+        "avg_processing_duration_seconds": avg_processing,
+        "avg_attempt_duration_seconds": avg_attempt,
+    }
+
+
+def _empty_batch_stats() -> dict:
+    """Return fully zeroed batch stats structure.
+
+    Used when no finished batch exists or as safe fallback.
+    Includes all keys from CQM-S5 and IWBO-S1.
+    """
+    return {
+        "has_batch": False,
+        "batch_id": None,
+        "status": None,
+        "total_duration_seconds": None,
+        "total_duration_hours": None,
+        "started_at": None,
+        "enqueue_finished_at": None,
+        "finished_at": None,
+        "final_failures_total": 0,
+        "failures_by_intent": {},
+        "failure_patients": [],
+        "runs_total": 0,
+        "runs_succeeded": 0,
+        "runs_failed": 0,
+        "runs_active": 0,
+        "observed_worker_count": 0,
+        "observed_worker_labels": [],
+        "observed_peak_concurrency": 0,
+        "observed_avg_concurrency": 0.0,
+        "throughput_jobs_per_minute": 0.0,
+        "avg_processing_duration_seconds": 0,
+        "avg_attempt_duration_seconds": 0,
+        # IWBO-S2: Batch history table fields
+        "drain_duration_seconds": None,
+    }
+
+
+# ── IWBO-S2: Batch history helpers ──────────────────────────────────────
+
+
+_BATCH_PAGE_SIZE = 20
+
+
+def _compute_batch_metrics(batch: CensusExecutionBatch) -> dict:
+    """Compute derived metrics for a single CensusExecutionBatch.
+
+    Calculates run counts, worker identity, concurrency, throughput,
+    and average durations from the batch's IngestionRun and
+    IngestionRunAttempt records.
+
+    Returns dict with keys:
+        batch_id, status, started_at, enqueue_finished_at, finished_at,
+        drain_duration_seconds, runs_total, runs_succeeded, runs_failed,
+        runs_active, observed_worker_count, observed_worker_labels,
+        observed_peak_concurrency, observed_avg_concurrency,
+        throughput_jobs_per_minute, avg_processing_duration_seconds,
+        avg_attempt_duration_seconds.
+    """
+    batch_runs = IngestionRun.objects.filter(batch=batch)
+    runs_total = batch_runs.count()
+    runs_succeeded = batch_runs.filter(status="succeeded").count()
+    runs_failed = batch_runs.filter(status="failed").count()
+    runs_active = batch_runs.filter(status__in=["queued", "running"]).count()
+
+    # Worker labels distinct non-empty
+    worker_labels_qs = (
+        batch_runs
+        .exclude(worker_label="")
+        .values_list("worker_label", flat=True)
+        .distinct()
+        .order_by("worker_label")
+    )
+    observed_worker_labels = list(worker_labels_qs)
+    observed_worker_count = len(observed_worker_labels)
+
+    # Attempt-level metrics
+    attempts = IngestionRunAttempt.objects.filter(run__batch=batch)
+
+    # Sweep-line for peak concurrency
+    events: list[tuple] = []
+    for attempt in attempts.iterator():
+        if attempt.started_at is not None:
+            events.append((attempt.started_at, 1))
+        if attempt.finished_at is not None:
+            events.append((attempt.finished_at, -1))
+
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    peak_concurrency = 0
+    current = 0
+    for _ts, delta in events:
+        current += delta
+        if current > peak_concurrency:
+            peak_concurrency = current
+
+    # Drain window
+    drain_seconds: float | None = None
+    if batch.enqueue_finished_at and batch.finished_at:
+        drain_seconds = (
+            batch.finished_at - batch.enqueue_finished_at
+        ).total_seconds()
+
+    # Average concurrency = sum(attempt_durations) / drain_seconds
+    total_attempt_duration: float = 0.0
+    attempt_durations: list[float] = []
+    for attempt in attempts.iterator():
+        if attempt.started_at is not None and attempt.finished_at is not None:
+            secs = (attempt.finished_at - attempt.started_at).total_seconds()
+            total_attempt_duration += secs
+            attempt_durations.append(secs)
+
+    avg_concurrency = 0.0
+    if drain_seconds and drain_seconds > 0:
+        avg_concurrency = round(total_attempt_duration / drain_seconds, 1)
+
+    # Throughput: terminal runs / minutes of drain
+    throughput = 0.0
+    if drain_seconds and drain_seconds > 0:
+        terminal_runs = runs_succeeded + runs_failed
+        drain_minutes = drain_seconds / 60.0
+        if drain_minutes > 0:
+            throughput = round(terminal_runs / drain_minutes, 1)
+
+    # Average processing duration (from run timestamps)
+    runs_with_duration = batch_runs.exclude(
+        processing_started_at__isnull=True
+    ).exclude(finished_at__isnull=True)
+    processing_durations: list[float] = []
+    for run in runs_with_duration.iterator():
+        if run.finished_at is not None and run.processing_started_at is not None:
+            pd = (run.finished_at - run.processing_started_at).total_seconds()
+            processing_durations.append(pd)
+    avg_processing = (
+        round(sum(processing_durations) / len(processing_durations))
+        if processing_durations else 0
+    )
+
+    # Average attempt duration
+    avg_attempt = (
+        round(sum(attempt_durations) / len(attempt_durations))
+        if attempt_durations else 0
+    )
+
+    return {
+        "batch_id": batch.pk,
+        "status": batch.status,
+        "started_at": batch.started_at,
+        "enqueue_finished_at": batch.enqueue_finished_at,
+        "finished_at": batch.finished_at,
+        "drain_duration_seconds": drain_seconds,
+        "runs_total": runs_total,
+        "runs_succeeded": runs_succeeded,
+        "runs_failed": runs_failed,
+        "runs_active": runs_active,
+        "observed_worker_count": observed_worker_count,
+        "observed_worker_labels": observed_worker_labels,
+        "observed_peak_concurrency": peak_concurrency,
+        "observed_avg_concurrency": avg_concurrency,
+        "throughput_jobs_per_minute": throughput,
+        "avg_processing_duration_seconds": avg_processing,
+        "avg_attempt_duration_seconds": avg_attempt,
+    }
+
+
+def _get_batch_history_context(request: HttpRequest) -> dict:
+    """Build context for the paginated batch history table.
+
+    Queries finished CensusExecutionBatch records ordered by
+    -finished_at, -id, paginates using batch_page param, and
+    computes metrics only for batches on the current page.
+
+    Returns dict with keys:
+        batch_history: list of batch metric dicts for current page.
+        batch_page: django Page object (for template pagination).
+    """
+    batches_qs = (
+        CensusExecutionBatch.objects
+        .filter(finished_at__isnull=False)
+        .order_by("-finished_at", "-id")
+    )
+
+    page_size = _BATCH_PAGE_SIZE
+    page_param = "batch_page"
+
+    paginator = Paginator(batches_qs, page_size)
+
+    page_number = request.GET.get(page_param, 1)
+    try:
+        page_number = int(page_number)
+    except (ValueError, TypeError):
+        page_number = 1
+
+    try:
+        page = paginator.page(page_number)
+    except EmptyPage:
+        page = paginator.page(paginator.num_pages)
+
+    # Compute metrics only for batches on this page
+    batch_metrics = []
+    for batch in page.object_list:
+        batch_metrics.append(_compute_batch_metrics(batch))
+
+    return {
+        "batch_history": batch_metrics,
+        "batch_page": page,
     }
 
 

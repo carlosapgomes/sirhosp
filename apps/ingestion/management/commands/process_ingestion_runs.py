@@ -14,6 +14,8 @@ Slice S3 adds:
 
 from __future__ import annotations
 
+import os
+import socket
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -109,6 +111,22 @@ class Command(BaseCommand):
                 script_path=script_path,
                 headless=headless,
             )
+
+    @staticmethod
+    def _resolve_worker_label() -> str:
+        """Resolve an operational worker label for identifying this process.
+
+        Priority:
+        1. SIRHOSP_WORKER_LABEL env var (if set and non-empty).
+        2. socket.gethostname() as fallback.
+        3. PID suffix to differentiate processes.
+
+        Returns:
+            Label in the format '<base>:<pid>'.
+        """
+        base = os.environ.get("SIRHOSP_WORKER_LABEL", "") or socket.gethostname()
+        pid = os.getpid()
+        return f"{base}:{pid}"
 
     @staticmethod
     def _claim_eligible_run() -> IngestionRun | None:
@@ -401,7 +419,10 @@ class Command(BaseCommand):
         run.attempt_count += 1
         if run.processing_started_at is None:
             run.processing_started_at = timezone.now()
-        run.save(update_fields=["status", "attempt_count", "processing_started_at"])
+        # IWBO-S1: Record/update worker label for operational observability.
+        # Always update so retries reflect the actual worker that processed.
+        run.worker_label = self._resolve_worker_label()
+        run.save(update_fields=["status", "attempt_count", "processing_started_at", "worker_label"])
 
         # Persist attempt start record
         IngestionRunAttempt.objects.create(
