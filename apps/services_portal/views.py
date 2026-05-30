@@ -11,7 +11,18 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from django.contrib.auth.decorators import login_required
-from django.db.models import Count, F, Func, IntegerField, Max, Q, Value
+from django.db.models import (
+    Avg,
+    Count,
+    DurationField,
+    ExpressionWrapper,
+    F,
+    Func,
+    IntegerField,
+    Max,
+    Q,
+    Value,
+)
 from django.db.models.functions import Cast, Coalesce, ExtractHour
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
@@ -1389,3 +1400,138 @@ def sector_occupation(request: HttpRequest) -> HttpResponse:
         "active_tab": "setores",
     }
     return render(request, "services_portal/sector_occupation.html", context)
+
+
+@login_required
+def sector_indicators(request: HttpRequest) -> HttpResponse:
+    """Setores > Indicadores: aggregated analytics from PatientMovement.
+
+    GET params:
+        dias — period in days: 7, 30, 90, 180 (default: 30)
+        origem — optional sector to filter flow card
+
+    Provides 4 analytical cards in context:
+        avg_stay, destinations, long_stay, bottlenecks
+    """
+    dias_str = request.GET.get("dias", "30").strip()
+    try:
+        dias = int(dias_str)
+        if dias not in (7, 30, 90, 180):
+            dias = 30
+    except (ValueError, TypeError):
+        dias = 30
+
+    cutoff = timezone.now() - timedelta(days=dias)
+
+    # ── Card 1: Average stay by sector ──────────────────────────────
+    avg_stay_qs = list(
+        PatientMovement.objects
+        .filter(first_seen_at__gte=cutoff)
+        .values("sector")
+        .annotate(
+            avg_days=Avg(
+                ExpressionWrapper(
+                    F("last_seen_at") - F("first_seen_at"),
+                    output_field=DurationField(),
+                )
+            )
+        )
+        .order_by("-avg_days")
+    )
+    avg_stay: list[dict[str, Any]] = []
+    for entry in avg_stay_qs:
+        td = entry["avg_days"]
+        if td is not None:
+            days = round(td.total_seconds() / 86400, 1)
+            avg_stay.append({"sector": entry["sector"], "avg_days": days})
+
+    # ── Card 2: Top destination sectors from origin ─────────────────
+    origem = request.GET.get("origem", "").strip()
+
+    dest_qs = PatientMovement.objects.filter(first_seen_at__gte=cutoff)
+    if origem:
+        dest_qs = dest_qs.filter(origin__icontains=origem)
+
+    destinations = list(
+        dest_qs
+        .values("sector")
+        .annotate(count=Count("id"))
+        .order_by("-count")[:10]
+    )
+
+    # Origin options for the dropdown (same as S4 logic)
+    origin_options = list(
+        PatientMovement.objects
+        .values_list("origin", flat=True)
+        .exclude(origin="")
+        .distinct()
+        .order_by("origin")
+    )
+
+    # ── Card 3: Long-stay patients (>15 days in same sector) ────────
+    long_stay_threshold = timezone.now() - timedelta(days=15)
+
+    long_stay = list(
+        PatientMovement.objects
+        .filter(
+            discharge_type="",
+            first_seen_at__lte=long_stay_threshold,
+        )
+        .values("sector")
+        .annotate(count=Count("patient_id", distinct=True))
+        .order_by("-count")
+    )
+
+    # ── Card 4: Bottlenecks (entries > exits) ───────────────────────
+    entries_qs = (
+        PatientMovement.objects
+        .filter(first_seen_at__gte=cutoff)
+        .values("sector")
+        .annotate(entry_count=Count("id"))
+    )
+    entries_map: dict[str, int] = {
+        e["sector"]: e["entry_count"] for e in entries_qs
+    }
+
+    exits_qs = (
+        PatientMovement.objects
+        .filter(
+            last_seen_at__gte=cutoff,
+        )
+        .exclude(discharge_type="")
+        .values("sector")
+        .annotate(exit_count=Count("id"))
+    )
+    exits_map: dict[str, int] = {
+        e["sector"]: e["exit_count"] for e in exits_qs
+    }
+
+    all_sectors = set(list(entries_map.keys()) + list(exits_map.keys()))
+    bottlenecks: list[dict[str, Any]] = []
+    for sector in sorted(all_sectors):
+        entry_count = entries_map.get(sector, 0)
+        exit_count = exits_map.get(sector, 0)
+        net = entry_count - exit_count
+        if net > 0:
+            bottlenecks.append({
+                "sector": sector,
+                "entries": entry_count,
+                "exits": exit_count,
+                "net": net,
+            })
+    bottlenecks.sort(key=lambda b: -b["net"])
+
+    context = {
+        "page_title": "Setores — Indicadores",
+        "period_days": dias,
+        "period_options": [7, 30, 90, 180],
+        "avg_stay": avg_stay,
+        "origin_filter": origem,
+        "origin_options": origin_options,
+        "destinations": destinations,
+        "long_stay": long_stay,
+        "bottlenecks": bottlenecks,
+    }
+    return render(
+        request, "services_portal/sector_indicators.html", context
+    )
