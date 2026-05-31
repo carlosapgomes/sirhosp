@@ -1,6 +1,6 @@
 {% extends "base_sidebar.html" %}
 
-{% block title %}Métricas de Ingestão — SIRHOSP{% endblock %}
+{% block title %}Métricas de Ingestão — Prisma{% endblock %}
 
 {% block content %}
 <nav aria-label="breadcrumb" class="mb-3">
@@ -374,8 +374,8 @@
             <td class="small text-muted">{{ batch.started_at|date:"d/m H:i"|default:"—" }}</td>
             <td class="small text-muted">{{ batch.finished_at|date:"d/m H:i"|default:"—" }}</td>
             <td class="small text-muted">
-              {% if batch.drain_duration_seconds %}
-                {{ batch.drain_duration_seconds|floatformat:0 }}s
+              {% if batch.drain_duration_hours %}
+                {{ batch.drain_duration_hours }}h
               {% else %}
                 —
               {% endif %}

@@ -1,8 +1,10 @@
+{% load static %}
+
 <aside class="sirhosp-sidebar" id="sidebar" role="navigation" aria-label="Menu principal">
   <!-- Brand -->
   <a href="{% if user.is_authenticated %}{% url 'services_portal:dashboard' %}{% else %}/{% endif %}" class="sirhosp-sidebar-brand">
-    <i class="bi bi-heart-pulse"></i>
-    SIRHosp
+    <img src="{% static 'img/prisma-mark.svg' %}" alt="" class="prisma-brand-mark prisma-brand-mark-sidebar" width="20" height="20" aria-hidden="true">
+    Prisma
   </a>
 
   <!-- Navigation -->

@@ -1,6 +1,6 @@
 {% extends "base_sidebar.html" %}
 
-{% block title %}Altas por Dia — SIRHOSP{% endblock %}
+{% block title %}Altas por Dia — Prisma{% endblock %}
 
 {% block content %}
 <nav aria-label="breadcrumb" class="mb-3">
@@ -205,13 +205,13 @@
     if (!el) return fallback;
     try { return JSON.parse(el.textContent); }
     catch(e) {
-      console.warn('SIRHOSP: JSON parse error ' + id, e);
+      console.warn('Prisma: JSON parse error ' + id, e);
       return fallback;
     }
   }
 
   if (typeof Chart === 'undefined') {
-    console.error('SIRHOSP: Chart.js nao carregou');
+    console.error('Prisma: Chart.js nao carregou');
   } else {
 
   /* ════════ Chart 1: Altas por Dia ════════ */

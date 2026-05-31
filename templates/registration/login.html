@@ -1,17 +1,16 @@
 {% extends "base.html" %}
 {% load static %}
 
-{% block title %}Login — SIRHOSP{% endblock %}
+{% block title %}Login — Prisma{% endblock %}
 
 {% block body %}
 <div class="sirhosp-public-bg d-flex align-items-center justify-content-center min-vh-100 p-3">
   <div class="card shadow-lg border-0" style="max-width: 420px; width: 100%; border-radius: 1rem;">
     <div class="card-body text-center p-4">
       <div class="mb-4">
-        <i class="bi bi-heart-pulse text-white d-inline-flex align-items-center justify-content-center rounded-3 mb-3"
-           style="font-size: 2rem; width: 56px; height: 56px; background: var(--bs-primary);"></i>
+        <img src="{% static 'img/prisma-mark.svg' %}" alt="Prisma" class="prisma-public-mark mb-3" width="56" height="56">
         <h1 class="h4 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Acesso ao portal</h1>
-        <p class="text-muted small">SIRHosp</p>
+        <p class="text-muted small">Prisma</p>
       </div>
 
       {% if form.errors %}

@@ -3,7 +3,7 @@ from django.shortcuts import render
 
 
 def home(request: HttpRequest) -> HttpResponse:
-    return render(request, "core/home.html", {"page_title": "SIRHosp"})
+    return render(request, "core/home.html", {"page_title": "Prisma"})
 
 
 def health(request: HttpRequest) -> JsonResponse:

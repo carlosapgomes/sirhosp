@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Gradiente do Feixe de Dados (Entrada) -->
+    <linearGradient id="dataStreamIn" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#1d4ed8" stop-opacity="1"/>
+    </linearGradient>
+
+    <!-- CORREÇÃO: Gradiente na VERTICAL (y1 para y2) -->
+    <!-- Faz as cores se dividirem na largura do feixe (vermelho em cima, roxo embaixo) -->
+    <linearGradient id="dashboardOut" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ef4444"/>    <!-- Vermelho (desvia menos) -->
+      <stop offset="25%" stop-color="#f59e0b"/>   <!-- Laranja/Amarelo -->
+      <stop offset="50%" stop-color="#10b981"/>   <!-- Verde -->
+      <stop offset="75%" stop-color="#1d4ed8"/>   <!-- Azul -->
+      <stop offset="100%" stop-color="#8b5cf6"/>  <!-- Violeta (desvia mais) -->
+    </linearGradient>
+
+    <!-- Vidro do Prisma Otimizado para Ícone -->
+    <linearGradient id="prismGlass" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0.05"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 1. Entrada de Dados (Esquerda) -->
+  <polygon points="20,270 212,242 210,248 20,276" fill="url(#dataStreamIn)" />
+
+  <!-- 2. Processamento Interno -->
+  <polygon points="212,242 322,282 334,332 210,248" fill="#1e40af" opacity="0.25" />
+
+  <!-- 3. Saída de Dados/Dashboard (Direita) - Agora com dispersão lateral correta -->
+  <polygon points="322,282 334,332 492,430 492,170" fill="url(#dashboardOut)" />
+
+  <!-- 4. O Prisma (Traços grossos para legibilidade como ícone) -->
+  <polygon points="290,120 130,360 370,360" fill="url(#prismGlass)" stroke="#0ea5e9" stroke-width="14" stroke-linejoin="round" />
+
+  <!-- Linha de brilho frontal do ícone -->
+  <line x1="290" y1="120" x2="130" y2="360" stroke="#bae6fd" stroke-width="4" stroke-linecap="round" opacity="0.7" />
+</svg>

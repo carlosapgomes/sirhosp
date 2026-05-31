@@ -1,5 +1,5 @@
 /* ==========================================================================
-   SIRHOSP — Hospital Mirror System
+   Prisma — Hospital Mirror System
    Identity: Professional Healthcare UI
    Palette: Teal primary, Slate sidebar, Clean whites
    ========================================================================== */
@@ -65,6 +65,19 @@
 
 .sirhosp-sidebar-brand i {
   font-size: 1.4rem;
+}
+
+.prisma-brand-mark {
+  display: inline-block;
+  flex: 0 0 auto;
+  max-width: none;
+  object-fit: contain;
+  vertical-align: -0.125em;
+}
+
+.prisma-brand-mark-sidebar {
+  width: 20px !important;
+  height: 20px !important;
 }
 
 .sirhosp-sidebar-nav {
@@ -138,6 +151,11 @@
 
 .sirhosp-topbar-brand i {
   font-size: 1.1rem;
+}
+
+.prisma-brand-mark-topbar {
+  width: 16px !important;
+  height: 16px !important;
 }
 
 .sirhosp-topbar-brand-sep {
@@ -215,6 +233,17 @@
 .sirhosp-public-bg {
   background: linear-gradient(135deg, var(--bs-primary-darker) 0%, var(--bs-primary) 100%);
   min-height: 100vh;
+}
+
+.prisma-public-mark {
+  width: 56px !important;
+  height: 56px !important;
+  object-fit: contain;
+}
+
+.prisma-public-mark-lg {
+  width: 64px !important;
+  height: 64px !important;
 }
 
 /* --------------------------------------------------------------------------

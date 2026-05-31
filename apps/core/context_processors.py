@@ -54,7 +54,7 @@ def _default_title(path: str) -> str:
         return "Timeline"
     if clean == "ingestao":
         return "Extração"
-    return "SIRHOSP"
+    return "Prisma"
 
 
 def sync_status(request: HttpRequest) -> dict:
