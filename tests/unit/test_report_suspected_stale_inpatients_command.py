@@ -96,7 +96,8 @@ def test_reports_only_active_admissions_without_events_in_last_72h(tmp_path: Pat
         raw_payload_json={},
     )
 
-    # Paciente ativo sem nenhuma evolução na admissão → entra
+    # Paciente ativo sem nenhuma evolução na admissão
+    # e com admissão antiga (>72h) → entra
     p_never = Patient.objects.create(
         patient_source_key="P4", source_system="tasy", name="Paciente Sem Evolucao"
     )
@@ -104,11 +105,27 @@ def test_reports_only_active_admissions_without_events_in_last_72h(tmp_path: Pat
         patient=p_never,
         source_admission_key="A4",
         source_system="tasy",
-        admission_date=now - timedelta(days=1),
+        admission_date=now - timedelta(days=10),
         discharge_date=None,
         ward="Observacao",
         bed="",
         source_patient_reference="P4",
+    )
+
+    # Paciente ativo com admissão recente (<72h) sem evolução
+    # → NÃO entra (internação ainda não tem idade suficiente)
+    p_recent_no_events = Patient.objects.create(
+        patient_source_key="P5", source_system="tasy", name="Paciente Recente Sem Evento"
+    )
+    Admission.objects.create(
+        patient=p_recent_no_events,
+        source_admission_key="A5",
+        source_system="tasy",
+        admission_date=now - timedelta(days=1),
+        discharge_date=None,
+        ward="Observacao",
+        bed="",
+        source_patient_reference="P5",
     )
 
     output = tmp_path / "suspeitos.csv"

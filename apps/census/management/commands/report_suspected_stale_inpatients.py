@@ -68,16 +68,20 @@ class Command(BaseCommand):
 
         # 2) Admissões ativas cuja admissão mais recente do paciente
         #    também é sem alta (evita falsos positivos com admissões
-        #    antigas órfãs de discharge_date)
+        #    antigas órfãs de discharge_date).
+        #    Só considera internações com pelo menos stale_hours de
+        #    existência — evita que admissões recém-criadas sem
+        #    evolução extraída sejam tratadas como suspeitas.
         active = Admission.objects.filter(
             discharge_date__isnull=True,
+            admission_date__lt=cutoff,
         ).annotate(
             latest_patient_discharge=latest_discharge,
         ).filter(
             latest_patient_discharge__isnull=True,
         )
 
-        # 3) Existe alguma evolução nesta admissão nos últimos 72h?
+        # 3) Existe alguma evolução nesta admissão nas últimas N horas?
         recent_event_exists = Exists(
             ClinicalEvent.objects.filter(
                 admission=OuterRef("pk"),
