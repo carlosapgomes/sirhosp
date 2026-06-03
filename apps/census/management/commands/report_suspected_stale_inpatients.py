@@ -16,10 +16,16 @@ from apps.patients.models import Admission
 class Command(BaseCommand):
     help = (
         "Gera CSV de admissões ativas (sem alta) cujo paciente não possui "
-        "nenhuma evolução registrada nas últimas 72 horas."
+        "nenhuma evolução registrada nas últimas N horas (default: 72h)."
     )
 
     def add_arguments(self, parser):
+        parser.add_argument(
+            "--hours",
+            type=int,
+            default=72,
+            help="Horas sem evolução para considerar suspeito (default: 72).",
+        )
         parser.add_argument(
             "--output",
             type=str,
@@ -41,13 +47,14 @@ class Command(BaseCommand):
             default=False,
             help=(
                 "Lista APENAS pacientes que estão no censo mas sem "
-                "evolução há 72h — relatório para enviar à TI do hospital."
+                "evolução há N horas — relatório para enviar à TI do hospital."
             ),
         )
 
     def handle(self, *args, **options):
         now = timezone.now()
-        cutoff = now - timedelta(hours=72)
+        stale_hours = options["hours"]
+        cutoff = now - timedelta(hours=stale_hours)
         include_census = options["include_census_present"]
 
         # 1) Para cada paciente, identificar a admissão mais recente
@@ -164,11 +171,11 @@ class Command(BaseCommand):
                 last = adm.last_happened_at
                 if last is None:
                     hours_since = ""
-                    status = "SEM_EVOLUCAO_72H"
+                    status = f"SEM_EVOLUCAO_{stale_hours}H"
                     last_str = ""
                 else:
                     hours_since = int((now - last).total_seconds() // 3600)
-                    status = "STALE_72H"
+                    status = f"STALE_{stale_hours}H"
                     last_str = last.isoformat()
 
                 data_internacao = (
