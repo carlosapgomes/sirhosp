@@ -81,20 +81,30 @@ class Command(BaseCommand):
             latest_patient_discharge__isnull=True,
         )
 
-        # 3) Existe alguma evolução nesta admissão nas últimas N horas?
+        # 3) PK da última admissão do paciente (por data, desempate por id)
+        latest_adm_pk = Subquery(
+            Admission.objects.filter(
+                patient=OuterRef("patient")
+            ).order_by("-admission_date", "-id").values("pk")[:1]
+        )
+
+        # 4) Existe alguma evolução na ÚLTIMA admissão do paciente
+        #    nas últimas N horas? (Não na admissão corrente — evita
+        #    falsos positivos quando há admissão antiga órfã sem alta
+        #    mas a admissão mais recente tem evoluções.)
         recent_event_exists = Exists(
             ClinicalEvent.objects.filter(
-                admission=OuterRef("pk"),
+                admission_id=latest_adm_pk,
                 happened_at__gte=cutoff,
             )
         )
 
-        # 4) Última evolução desta admissão (para informação contextual)
+        # 5) Última evolução da ÚLTIMA admissão (info contextual)
         last_event_qs = ClinicalEvent.objects.filter(
-            admission=OuterRef("pk")
+            admission_id=latest_adm_pk
         ).order_by("-happened_at")
 
-        # 5) Dados do censo mais recente (setor/leito/especialidade atuais)
+        # 6) Dados do censo mais recente (setor/leito/especialidade atuais)
         latest_census_at = CensusSnapshot.objects.aggregate(
             m=Max("captured_at")
         )["m"]

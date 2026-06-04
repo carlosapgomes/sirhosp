@@ -139,6 +139,62 @@ def test_reports_only_active_admissions_without_events_in_last_72h(tmp_path: Pat
 
 
 @pytest.mark.django_db
+def test_excludes_patient_with_old_orphan_admission_when_latest_has_recent_events(
+    tmp_path: Path,
+):
+    """Paciente com admissão antiga sem alta (órfã) + admissão recente
+       COM eventos recentes → NÃO deve aparecer (não é fantasma)."""
+    now = timezone.now()
+
+    p = Patient.objects.create(
+        patient_source_key="PX", source_system="tasy", name="Paciente Duas Admissões"
+    )
+    # Admissão antiga sem alta (bug no sistema fonte)
+    old_adm = Admission.objects.create(
+        patient=p,
+        source_admission_key="AX-old",
+        source_system="tasy",
+        admission_date=now - timedelta(days=60),
+        discharge_date=None,
+        ward="Clinica",
+        bed="101A",
+        source_patient_reference="PX",
+    )
+    # Admissão recente (última) sem alta, mas com evolução recente
+    latest_adm = Admission.objects.create(
+        patient=p,
+        source_admission_key="AX-latest",
+        source_system="tasy",
+        admission_date=now - timedelta(days=5),
+        discharge_date=None,
+        ward="UTI",
+        bed="201B",
+        source_patient_reference="PX",
+    )
+    # Evento recente na última admissão
+    ClinicalEvent.objects.create(
+        admission=latest_adm,
+        patient=p,
+        event_identity_key="evt-x",
+        content_hash="hx",
+        happened_at=now - timedelta(hours=12),
+        author_name="Autor",
+        profession_type="medica",
+        content_text="texto",
+        raw_payload_json={},
+    )
+
+    output = tmp_path / "suspeitos.csv"
+    call_command("report_suspected_stale_inpatients", "--output", str(output))
+
+    with output.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    prontuarios = {r["prontuario"] for r in rows}
+    assert "PX" not in prontuarios
+
+
+@pytest.mark.django_db
 def test_deduplicates_patient_with_multiple_stale_admissions(tmp_path: Path):
     """Paciente com 2 admissões ativas sem evento aparece apenas uma vez."""
     now = timezone.now()
