@@ -141,6 +141,7 @@ services:
       - tailscale
     image: tailscale/tailscale:latest
     container_name: sirhosp-tailscale
+    hostname: sirhosp-tailscale
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY:-}
       - TS_USERSPACE=true
