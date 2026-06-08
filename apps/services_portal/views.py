@@ -1434,6 +1434,7 @@ def _compute_batch_metrics(batch: CensusExecutionBatch) -> dict:
         "enqueue_finished_at": batch.enqueue_finished_at,
         "finished_at": batch.finished_at,
         "drain_duration_seconds": drain_seconds,
+        "drain_duration_hours": round(drain_seconds / 3600, 1) if drain_seconds else None,
         "runs_total": runs_total,
         "runs_succeeded": runs_succeeded,
         "runs_failed": runs_failed,

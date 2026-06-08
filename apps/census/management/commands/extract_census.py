@@ -100,6 +100,8 @@ class Command(BaseCommand):
                 )
                 self._mark_run_failed(run, exc)
                 self.stderr.write(f"Census extraction timed out: {exc}")
+                if exc.stderr:
+                    self.stderr.write(f"  Script stderr: {exc.stderr[:2000]}")
                 sys.exit(1)
             except Exception as exc:
                 self._record_stage(
@@ -112,6 +114,9 @@ class Command(BaseCommand):
                 )
                 self._mark_run_failed(run, exc)
                 self.stderr.write(f"Census extraction failed: {exc}")
+                script_stderr = getattr(exc, 'stderr', None)
+                if script_stderr:
+                    self.stderr.write(f"  Script stderr: {script_stderr[:2000]}")
                 sys.exit(1)
 
             if result.returncode != 0:
