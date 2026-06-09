@@ -1973,6 +1973,7 @@ def sector_indicators(request: HttpRequest) -> HttpResponse:
     # Origin dropdown: now shows actual sector names (not bed codes)
     origin_options = sorted(
         PatientMovement.objects
+        .order_by()  # clear Meta.ordering so distinct() works on sector alone
         .values_list("sector", flat=True)
         .distinct()
     )
