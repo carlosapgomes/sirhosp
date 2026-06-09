@@ -8,15 +8,13 @@ Slice IRMD-S6: Ingestion metric cards on dashboard and metrics page route.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from itertools import groupby
 from typing import Any
 
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import EmptyPage, Paginator
 from django.db.models import (
-    Avg,
     Count,
-    DurationField,
-    ExpressionWrapper,
     F,
     Func,
     IntegerField,
@@ -1876,10 +1874,13 @@ def sector_indicators(request: HttpRequest) -> HttpResponse:
 
     GET params:
         dias — period in days: 7, 30, 90, 180 (default: 30)
-        origem — optional sector to filter flow card
+        origem — optional origin sector to filter Card 2 (flow)
 
     Provides 4 analytical cards in context:
         avg_stay, destinations, long_stay, bottlenecks
+
+    Cards now use CensusSnapshot as ground truth for current occupancy
+    and next-movement dates for actual stay calculation.
     """
     dias_str = request.GET.get("dias", "30").strip()
     try:
@@ -1890,35 +1891,77 @@ def sector_indicators(request: HttpRequest) -> HttpResponse:
         dias = 30
 
     cutoff = timezone.now() - timedelta(days=dias)
+    today = timezone.localdate()
+
+    # ── Shared: latest census ground truth ──────────────────────────
+    latest_census = CensusSnapshot.objects.aggregate(
+        latest=Max("captured_at")
+    )["latest"]
+
+    current_by_sector: dict[str, set[str]] = {}
+    if latest_census:
+        for snap in CensusSnapshot.objects.filter(
+            captured_at=latest_census,
+            bed_status=BedStatus.OCCUPIED,
+        ):
+            pront = snap.prontuario.strip()
+            if pront:
+                current_by_sector.setdefault(snap.setor, set()).add(pront)
 
     # ── Card 1: Average stay by sector ──────────────────────────────
-    avg_stay_qs = list(
+    # Correct calculation: for each movement, stay = next movement_date
+    # minus this movement_date (or today minus movement_date for the
+    # last movement).  Assumes movements are ordered by sequence.
+    sector_stays: dict[str, list[int]] = {}
+    movements_all = list(
         PatientMovement.objects
         .filter(first_seen_at__gte=cutoff)
-        .values("sector")
-        .annotate(
-            avg_days=Avg(
-                ExpressionWrapper(
-                    F("last_seen_at") - F("first_seen_at"),
-                    output_field=DurationField(),
-                )
-            )
-        )
-        .order_by("-avg_days")
+        .order_by("patient", "sequence")
     )
+    # Group consecutive movements per patient
+    for _patient_id, group in groupby(
+        movements_all, key=lambda m: m.patient_id
+    ):
+        mvts = list(group)
+        for i, m in enumerate(mvts):
+            if i + 1 < len(mvts):
+                nxt = mvts[i + 1].movement_date
+                days = (nxt - m.movement_date).days
+            else:
+                days = (today - m.movement_date).days
+            if days < 0:
+                days = 0
+            sector_stays.setdefault(m.sector, []).append(days)
+
     avg_stay: list[dict[str, Any]] = []
-    for entry in avg_stay_qs:
-        td = entry["avg_days"]
-        if td is not None:
-            days = round(td.total_seconds() / 86400, 1)
-            avg_stay.append({"sector": entry["sector"], "avg_days": days})
+    for sector, stays in sector_stays.items():
+        if stays:
+            avg_stay.append({
+                "sector": sector,
+                "avg_days": round(sum(stays) / len(stays), 1),
+            })
+    avg_stay.sort(key=lambda x: -x["avg_days"])
 
     # ── Card 2: Top destination sectors from origin ─────────────────
+    # Filters by PREVIOUS movement's sector (actual clinical origin),
+    # not the census 'origin' field (which contains bed codes).
     origem = request.GET.get("origem", "").strip()
 
-    dest_qs = PatientMovement.objects.filter(first_seen_at__gte=cutoff)
     if origem:
-        dest_qs = dest_qs.filter(origin__icontains=origem)
+        # Find movements whose previous movement was in sector `origem`
+        prev_sector_subq = PatientMovement.objects.filter(
+            patient=OuterRef("patient"),
+            sequence=OuterRef("sequence") - 1,
+        ).values("sector")[:1]
+
+        dest_qs = (
+            PatientMovement.objects
+            .filter(first_seen_at__gte=cutoff)
+            .annotate(prev_sector=Subquery(prev_sector_subq))
+            .filter(prev_sector=origem)
+        )
+    else:
+        dest_qs = PatientMovement.objects.filter(first_seen_at__gte=cutoff)
 
     destinations = list(
         dest_qs
@@ -1927,30 +1970,39 @@ def sector_indicators(request: HttpRequest) -> HttpResponse:
         .order_by("-count")[:10]
     )
 
-    # Origin options for the dropdown (same as S4 logic)
-    origin_options = list(
+    # Origin dropdown: now shows actual sector names (not bed codes)
+    origin_options = sorted(
         PatientMovement.objects
-        .values_list("origin", flat=True)
-        .exclude(origin="")
+        .values_list("sector", flat=True)
         .distinct()
-        .order_by("origin")
     )
 
-    # ── Card 3: Long-stay patients (>15 days in same sector) ────────
+    # ── Card 3: Long-stay patients (>15 days) ───────────────────────
+    # Only counts patients who are STILL in the sector (per latest
+    # census), not just anyone with discharge_type="".
     long_stay_threshold = timezone.now() - timedelta(days=15)
+    long_stay_counts: dict[str, int] = {}
 
-    long_stay = list(
-        PatientMovement.objects
-        .filter(
-            discharge_type="",
-            first_seen_at__lte=long_stay_threshold,
-        )
-        .values("sector")
-        .annotate(count=Count("patient_id", distinct=True))
-        .order_by("-count")
+    long_movements = PatientMovement.objects.filter(
+        first_seen_at__lte=long_stay_threshold,
+    ).select_related("patient")
+
+    for m in long_movements.iterator():
+        pront = m.patient.patient_source_key
+        if pront and pront in current_by_sector.get(m.sector, set()):
+            long_stay_counts[m.sector] = (
+                long_stay_counts.get(m.sector, 0) + 1
+            )
+
+    long_stay = sorted(
+        [{"sector": s, "count": c} for s, c in long_stay_counts.items()],
+        key=lambda x: -x["count"],
     )
 
     # ── Card 4: Bottlenecks (entries > exits) ───────────────────────
+    # Entry: movement first seen in period.
+    # Exit:  movement last seen in period AND patient NOT in latest
+    #        census for that sector (they left).
     entries_qs = (
         PatientMovement.objects
         .filter(first_seen_at__gte=cutoff)
@@ -1961,18 +2013,14 @@ def sector_indicators(request: HttpRequest) -> HttpResponse:
         e["sector"]: e["entry_count"] for e in entries_qs
     }
 
-    exits_qs = (
-        PatientMovement.objects
-        .filter(
-            last_seen_at__gte=cutoff,
-        )
-        .exclude(discharge_type="")
-        .values("sector")
-        .annotate(exit_count=Count("id"))
-    )
-    exits_map: dict[str, int] = {
-        e["sector"]: e["exit_count"] for e in exits_qs
-    }
+    exits_map: dict[str, int] = {}
+    exit_movements = PatientMovement.objects.filter(
+        last_seen_at__gte=cutoff,
+    ).select_related("patient")
+    for m in exit_movements.iterator():
+        pront = m.patient.patient_source_key
+        if pront and pront not in current_by_sector.get(m.sector, set()):
+            exits_map[m.sector] = exits_map.get(m.sector, 0) + 1
 
     all_sectors = set(list(entries_map.keys()) + list(exits_map.keys()))
     bottlenecks: list[dict[str, Any]] = []
