@@ -21,7 +21,9 @@ from django.db.models import (
     Func,
     IntegerField,
     Max,
+    OuterRef,
     Q,
+    Subquery,
     Value,
 )
 from django.db.models.functions import Cast, Coalesce, ExtractHour
@@ -1689,15 +1691,31 @@ def _discharge_records_for_template(entry) -> tuple[list[dict], list[str]]:
     return records, columns
 
 
+_HIGH_TURNOVER_KEYWORDS = (
+    "CRPA", "SALA", "OBSERVACAO", "OBSERVAÇÃO",
+    "PS", "EMERGENCIA", "EMERGÊNCIA", "PRONTO",
+)
+
+
+def _is_high_turnover_sector(sector: str) -> bool:
+    """Check if a sector name indicates high patient turnover."""
+    if not sector:
+        return False
+    upper = sector.upper()
+    return any(kw in upper for kw in _HIGH_TURNOVER_KEYWORDS)
+
+
 @login_required
-def sector_occupation(request: HttpRequest) -> HttpResponse:
-    """Setores > Ocupação: patients by sector within a period.
+def sector_passage_history(request: HttpRequest) -> HttpResponse:
+    """Setores > Histórico de Passagem: patients who passed through a sector.
+
+    Shows patients whose movement through the selected sector was captured
+    by census snapshots within the period.  Ground-truth for "currently in
+    sector" is the latest CensusSnapshot, not PatientMovement flags.
 
     GET params:
         setor — sector name (default: first sector from movements)
         dias  — period in days: 7, 30, 90 (default: 7)
-
-    Returns summary cards, patient table, sector dropdown, period selector.
     """
     dias_str = request.GET.get("dias", "7").strip()
     try:
@@ -1730,38 +1748,82 @@ def sector_occupation(request: HttpRequest) -> HttpResponse:
 
     qs = qs.select_related("patient")
 
+    # ── Annotate with is_latest flag ─────────────────────────────────
+    patient_max_seq = PatientMovement.objects.filter(
+        patient=OuterRef("patient")
+    ).values("patient").annotate(
+        max_seq=Max("sequence")
+    ).values("max_seq")
+
+    qs = qs.annotate(
+        is_latest=Q(sequence=Subquery(patient_max_seq))
+    )
+
+    # ── Ground truth: who is in this sector RIGHT NOW? ───────────────
+    latest_census = CensusSnapshot.objects.aggregate(
+        latest=Max("captured_at")
+    )["latest"]
+
+    current_patient_ids: set[int] = set()
+    if latest_census and sector:
+        current_prontuarios = CensusSnapshot.objects.filter(
+            captured_at=latest_census,
+            setor=sector,
+            bed_status=BedStatus.OCCUPIED,
+        ).values_list("prontuario", flat=True)
+
+        current_pront_list = [p for p in current_prontuarios if p]
+        if current_pront_list:
+            current_patient_ids = set(
+                Patient.objects.filter(
+                    patient_source_key__in=current_pront_list
+                ).values_list("id", flat=True)
+            )
+
     # ── Summary cards ────────────────────────────────────────────────
     total = qs.count()
-    still_in = qs.filter(discharge_type="").count()
-    left = qs.exclude(discharge_type="").count()
+    still_in = qs.filter(patient_id__in=current_patient_ids).count()
+    left = total - still_in
 
-    if total > 0:
-        # Compute avg_stay as average of days between movement_date and today
-        today = timezone.localdate()
-        days_list = []
-        for m in qs.iterator():
-            d = (today - m.movement_date).days
-            if d < 0:
-                d = 0
-            days_list.append(d)
+    today = timezone.localdate()
 
-        if days_list:
-            avg_stay_days = round(sum(days_list) / len(days_list), 1)
-        else:
-            avg_stay_days = None
-    else:
-        avg_stay_days = None
+    # Average stay: separate current patients vs those who left
+    avg_current_stay: float | None = None
+    avg_completed_stay: float | None = None
+
+    if still_in > 0:
+        current_qs = qs.filter(patient_id__in=current_patient_ids)
+        current_days = [
+            max((today - m.movement_date).days, 0)
+            for m in current_qs.iterator()
+        ]
+        if current_days:
+            avg_current_stay = round(
+                sum(current_days) / len(current_days), 1
+            )
+
+    if left > 0:
+        left_qs = qs.exclude(patient_id__in=current_patient_ids)
+        left_days = [
+            max((today - m.movement_date).days, 0)
+            for m in left_qs.iterator()
+        ]
+        if left_days:
+            avg_completed_stay = round(
+                sum(left_days) / len(left_days), 1
+            )
 
     # ── Patient table ────────────────────────────────────────────────
     movements = qs.order_by("-movement_date")
-    today = timezone.localdate()
 
     patients: list[dict[str, Any]] = []
     for m in movements:
         if m.discharge_type:
             destination = m.discharge_type
-        else:
+        elif m.patient_id in current_patient_ids:
             destination = "(no setor)"
+        else:
+            destination = "(não está mais no setor)"
 
         days_in_sector = (today - m.movement_date).days
         if days_in_sector < 0:
@@ -1776,7 +1838,7 @@ def sector_occupation(request: HttpRequest) -> HttpResponse:
         })
 
     context = {
-        "page_title": "Setores — Ocupação",
+        "page_title": "Setores — Histórico de Passagem",
         "sectors": sectors_list,
         "selected_sector": sector,
         "period_days": dias,
@@ -1785,12 +1847,27 @@ def sector_occupation(request: HttpRequest) -> HttpResponse:
             "total": total,
             "still_in": still_in,
             "left": left,
-            "avg_stay_days": avg_stay_days,
+            "avg_current_stay": avg_current_stay,
+            "avg_completed_stay": avg_completed_stay,
         },
         "patients": patients,
         "active_tab": "setores",
+        "high_turnover_warning": (
+            _is_high_turnover_sector(sector) if sector else False
+        ),
     }
-    return render(request, "services_portal/sector_occupation.html", context)
+    return render(
+        request,
+        "services_portal/sector_passage_history.html",
+        context,
+    )
+
+
+@login_required
+def sector_occupation(request: HttpRequest) -> HttpResponse:
+    """Redirect to renamed Histórico de Passagem page."""
+    from django.shortcuts import redirect
+    return redirect("services_portal:sector_passage_history")
 
 
 @login_required

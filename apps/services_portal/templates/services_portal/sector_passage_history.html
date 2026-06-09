@@ -1,0 +1,169 @@
+{% extends "base_sidebar.html" %}
+
+{% block title %}{{ page_title }} — Prisma{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="#">Setores</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Histórico de Passagem</li>
+  </ol>
+</nav>
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">{{ page_title }}</h2>
+    <p class="text-muted small mb-0">
+      Pacientes que passaram pelo setor e foram capturados pelo censo no período selecionado
+    </p>
+  </div>
+</div>
+
+<!-- Aviso: setores de alta rotatividade -->
+{% if high_turnover_warning %}
+<div class="alert alert-warning d-flex align-items-center gap-2 py-2 mb-4" role="alert">
+  <i class="bi bi-exclamation-triangle flex-shrink-0"></i>
+  <div class="small">
+    <strong>Setor de alta rotatividade.</strong>
+    Pacientes que entram e saem entre duas execuções do censo não são capturados.
+    Os números abaixo representam apenas os pacientes que estavam no setor
+    no momento da coleta — o total real de passagens pode ser maior.
+  </div>
+</div>
+{% endif %}
+
+<!-- Filtros -->
+<form method="get" class="card border-0 shadow-sm mb-4">
+  <div class="card-body">
+    <div class="row g-2 align-items-end">
+      <div class="col-12 col-md-4">
+        <label for="setor" class="form-label small fw-semibold text-muted">Setor</label>
+        <select class="form-select" id="setor" name="setor">
+          {% for s in sectors %}
+            <option value="{{ s }}" {% if selected_sector == s %}selected{% endif %}>{{ s }}</option>
+          {% empty %}
+            <option value="">Nenhum setor disponível</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="dias" class="form-label small fw-semibold text-muted">Período</label>
+        <select class="form-select" id="dias" name="dias">
+          {% for opt in period_options %}
+            <option value="{{ opt }}" {% if period_days == opt %}selected{% endif %}>{{ opt }} dias</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-2 d-grid">
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-funnel me-1"></i> Filtrar
+        </button>
+      </div>
+    </div>
+  </div>
+</form>
+
+<!-- Cards de resumo -->
+<div class="row g-3 mb-4">
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: var(--bs-primary-lightest);">
+        <i class="bi bi-people" style="color: var(--bs-primary); font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ summary.total }}</div>
+        <div class="sirhosp-stat-label">Pacientes que passaram</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #DCFCE7;">
+        <i class="bi bi-building" style="color: #16A34A; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ summary.still_in }}</div>
+        <div class="sirhosp-stat-label">Ainda no setor</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #FEE2E2;">
+        <i class="bi bi-box-arrow-right" style="color: #DC2626; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">{{ summary.left }}</div>
+        <div class="sirhosp-stat-label">Já saíram</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-6 col-lg-3">
+    <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+      <div class="sirhosp-stat-icon" style="background: #E0F2FE;">
+        <i class="bi bi-clock" style="color: #0284C7; font-size: 1.25rem;"></i>
+      </div>
+      <div>
+        <div class="sirhosp-stat-value">
+          {% if summary.avg_current_stay is not None %}
+            {{ summary.avg_current_stay }}d
+          {% else %}
+            —
+          {% endif %}
+        </div>
+        <div class="sirhosp-stat-label">Permanência média (atuais)</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Tabela de pacientes -->
+{% if patients %}
+<div class="table-responsive">
+  <table class="table table-sm table-hover">
+    <thead class="table-light">
+      <tr>
+        <th>Nome</th>
+        <th>Prontuário</th>
+        <th>Entrada</th>
+        <th>Dias</th>
+        <th>Destino</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in patients %}
+      <tr>
+        <td class="fw-medium" style="color: var(--sirhosp-sidebar-bg);">{{ p.name }}</td>
+        <td>{{ p.prontuario }}</td>
+        <td>{{ p.entry_date|date:"d/m/Y" }}</td>
+        <td>{{ p.days }}</td>
+        <td>
+          {% if p.destination == "(no setor)" %}
+            <span class="badge bg-success-subtle text-success-emphasis fw-normal">{{ p.destination }}</span>
+          {% elif p.destination == "(não está mais no setor)" %}
+            <span class="badge bg-warning-subtle text-warning-emphasis fw-normal">{{ p.destination }}</span>
+          {% else %}
+            <span class="badge bg-secondary-subtle text-secondary-emphasis fw-normal">{{ p.destination }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="text-center py-5 text-muted">
+  <i class="bi bi-inbox" style="font-size: 2rem; display: block; margin-bottom: 0.75rem;"></i>
+  <p class="mb-1">
+    {% if selected_sector %}
+      Nenhum paciente passou pelo setor <strong>{{ selected_sector }}</strong>
+      nos últimos {{ period_days }} dias.
+    {% else %}
+      Nenhum paciente encontrado no período selecionado.
+    {% endif %}
+  </p>
+  <p class="small mb-0">Tente alterar o filtro de setor ou aumentar o período.</p>
+</div>
+{% endif %}
+{% endblock %}
