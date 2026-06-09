@@ -784,18 +784,22 @@ def _compute_ingestion_stats() -> dict:
     return _build_filtered_queryset(periodo="24h")["stats"]
 
 
-@login_required
-def censo(request: HttpRequest) -> HttpResponse:
-    """Hospital census: filter by ward/sector, specialty, and search patients.
+def _build_censo_context(request: HttpRequest) -> dict[str, Any]:
+    """Build the context dict for the censo page.
 
-    Displays a table of current inpatients (occupied beds only)
-    from the latest CensusSnapshot. Standardized column order and
-    filter structure matching the official census page.
+    Centralizes snapshot lookup, filtering, patient/admission resolution,
+    specialty resolution, ordering and dropdown options.
+    Reusable by the HTML view and the XLSX export endpoint.
+
+    Returns a dict with keys:
+        page_title, busca, pacientes, total, captured_at,
+        unidade_options, unidade_filter, especialidade_options,
+        especialidade_filter, ordering.
     """
     latest = CensusSnapshot.objects.aggregate(latest=Max("captured_at"))["latest"]
 
     if latest is None:
-        return render(request, "services_portal/censo.html", {
+        return {
             "page_title": "Censo Hospitalar",
             "busca": "",
             "pacientes": [],
@@ -806,7 +810,7 @@ def censo(request: HttpRequest) -> HttpResponse:
             "especialidade_options": [],
             "especialidade_filter": "",
             "ordering": "",
-        })
+        }
 
     # Base queryset: only occupied beds from the most recent snapshot
     qs = CensusSnapshot.objects.filter(
@@ -958,7 +962,7 @@ def censo(request: HttpRequest) -> HttpResponse:
         for raw in raw_especialidade_options
     ]
 
-    return render(request, "services_portal/censo.html", {
+    return {
         "page_title": "Censo Hospitalar",
         "busca": busca,
         "pacientes": pacientes,
@@ -969,7 +973,19 @@ def censo(request: HttpRequest) -> HttpResponse:
         "especialidade_options": especialidade_options,
         "especialidade_filter": especialidade_filter,
         "ordering": ordering,
-    })
+    }
+
+
+@login_required
+def censo(request: HttpRequest) -> HttpResponse:
+    """Hospital census: filter by ward/sector, specialty, and search patients.
+
+    Displays a table of current inpatients (occupied beds only)
+    from the latest CensusSnapshot. Standardized column order and
+    filter structure matching the official census page.
+    """
+    context = _build_censo_context(request)
+    return render(request, "services_portal/censo.html", context)
 
 
 @login_required

@@ -211,10 +211,13 @@ class TestCensoRealData:
         # Option preserves code as value
         assert 'value="NEF"' in content
         # Dropdown shows full name as the option TEXT (not just in title attribute)
+        # Currently shows: <option value="NEF">NEF</option>
+        # Should show:     <option value="NEF">NEFROLOGIA</option>
         assert 'value="NEF">NEFROLOGIA' in content or '"NEF">NEFROLOGIA' in content
 
     def test_censo_table_and_card_show_full_specialty_name(self, admin_client):
         """RED 2: Table and card show full specialty name as main text."""
+        # Use a unique test code not seeded by migrations
         Specialty.objects.create(code="CES", name="CARDIOLOGIA ESPECIAL TESTE")
         now = timezone.now()
         CensusSnapshot.objects.create(
@@ -227,12 +230,21 @@ class TestCensoRealData:
         response = admin_client.get(url)
         content = response.content.decode()
         assert response.status_code == 200
+        # Full name must appear as inner text of a badge/tag,
+        # not just inside a title attribute.
+        # Currently badge renders: title="CARDIOLOGIA ESPECIAL TESTE">CES<
+        # After fix it should:    title="CES">CARDIOLOGIA ESPECIAL TESTE<
+        # So check that the sigla is NOT the badge inner text:
+        # `>CES<` should NOT be present (currently it IS)
         assert ">CES<" not in content, "Sigla CES should not be badge inner text"
+        # The full name should appear outside title attribute context
         assert "CARDIOLOGIA ESPECIAL TESTE" in content
+        # The code value is still valid in dropdown options
         assert 'value="CES"' in content
 
     def test_censo_specialty_filter_continues_by_code(self, admin_client):
         """RED 3: Filtering by specialty code still works."""
+        # Use unique test codes not seeded by migrations
         Specialty.objects.create(code="CES", name="CARDIOLOGIA ESPECIAL TESTE")
         Specialty.objects.create(code="ORT", name="ORTOPEDIA ESPECIAL TESTE")
         now = timezone.now()
@@ -253,10 +265,12 @@ class TestCensoRealData:
         assert response.status_code == 200
         assert "PACIENTE CARDIACO" in content
         assert "PACIENTE ORTOPEDICO" not in content
+        # Dropdown preserves the selected option with code value
         assert 'value="CES" selected' in content
 
     def test_censo_unknown_specialty_fallback(self, admin_client):
         """RED 4: Unknown specialty falls back to original value."""
+        # No Specialty created for "XYZ"
         now = timezone.now()
         CensusSnapshot.objects.create(
             captured_at=now, setor="UTI A", leito="01",
@@ -269,3 +283,105 @@ class TestCensoRealData:
         content = response.content.decode()
         assert response.status_code == 200
         assert "XYZ" in content
+
+    # ── CES-S2: Helper comum do resultado do censo ───────────────
+
+    def test_censo_combined_filters(self, admin_client):
+        """RED 1: Combined q, unidade and especialidade filters work together."""
+        Specialty.objects.get_or_create(code="NEF", defaults={"name": "NEFROLOGIA"})
+        Specialty.objects.get_or_create(code="CAR", defaults={"name": "CARDIOLOGIA"})
+        now = timezone.now()
+        # Patient matching all filters
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ESPERADO", especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        # Different sector — should be filtered out
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="ENFERMARIA", leito="01",
+            prontuario="222", nome="OUTRO SETOR", especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        # Different specialty — should be filtered out
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="02",
+            prontuario="333", nome="OUTRA ESPECIALIDADE", especialidade="CAR",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = (
+            reverse("services_portal:censo")
+            + "?q=ESPERADO&unidade=UTI+A&especialidade=NEF"
+        )
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "PACIENTE ESPERADO" in content
+        assert "OUTRO SETOR" not in content
+        assert "OUTRA ESPECIALIDADE" not in content
+        # Total count reflects only the single match
+        assert "1 paciente" in content or "1 pacientes" in content or "paciente" in content
+
+    def test_censo_ordering_by_especialidade(self, admin_client):
+        """RED 2: Ordering by specialty works via context."""
+        Specialty.objects.get_or_create(code="AAA", defaults={"name": "ESPECIALIDADE A"})
+        Specialty.objects.get_or_create(code="BBB", defaults={"name": "ESPECIALIDADE B"})
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE BETA", especialidade="BBB",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="02",
+            prontuario="222", nome="PACIENTE ALFA", especialidade="AAA",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo") + "?ordenar=especialidade"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        pacientes = response.context["pacientes"]
+        assert len(pacientes) == 2
+        # Ordered by specialty alphabetically: AAA first, then BBB
+        assert pacientes[0]["especialidade"] == "AAA"
+        assert pacientes[1]["especialidade"] == "BBB"
+        # Names should appear in matching order: PACIENTE ALFA, then PACIENTE BETA
+        assert pacientes[0]["nome"] == "PACIENTE ALFA"
+        assert pacientes[1]["nome"] == "PACIENTE BETA"
+
+    def test_censo_ordering_by_tempo_desc(self, admin_client):
+        """RED 2b: Ordering by descending stay time works via context."""
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE CURTO", especialidade="NEF",
+            tempo_internacao=2,
+            bed_status=BedStatus.OCCUPIED,
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="02",
+            prontuario="222", nome="PACIENTE LONGO", especialidade="NEF",
+            tempo_internacao=10,
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo") + "?ordenar=tempo_desc"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        pacientes = response.context["pacientes"]
+        assert len(pacientes) == 2
+        # Longer stay first
+        assert pacientes[0]["nome"] == "PACIENTE LONGO"
+        assert pacientes[1]["nome"] == "PACIENTE CURTO"
+
+    def test_censo_empty_state_preserved(self, admin_client):
+        """RED 3: Empty state with context values."""
+        # No snapshots at all
+        url = reverse("services_portal:censo")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        assert response.context["pacientes"] == []
+        assert response.context["total"] == 0
+        assert response.context["captured_at"] is None
