@@ -8,9 +8,11 @@ Slice IRMD-S6: Ingestion metric cards on dashboard and metrics page route.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from io import BytesIO
 from itertools import groupby
 from typing import Any
 
+import openpyxl
 from django.contrib.auth.decorators import login_required
 from django.core.paginator import EmptyPage, Paginator
 from django.db.models import (
@@ -986,6 +988,86 @@ def censo(request: HttpRequest) -> HttpResponse:
     """
     context = _build_censo_context(request)
     return render(request, "services_portal/censo.html", context)
+
+
+@login_required
+def censo_export_xlsx(request: HttpRequest) -> HttpResponse:
+    """Export current census to XLSX.
+
+    Reuses _build_censo_context to share filtering, ordering and
+    specialty resolution with the HTML view. Returns a workbook in
+    memory with no temporary files written to disk.
+
+    Query parameters: q, unidade, especialidade, ordenar.
+    """
+    from openpyxl.styles import Font
+
+    context = _build_censo_context(request)
+    pacientes = context["pacientes"]
+    captured_at = context["captured_at"]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Censo Hospitalar"
+
+    # Headers
+    headers = [
+        "Registro", "Nome", "Setor / Unidade", "Leito",
+        "Especialidade", "Data Internação", "Tempo Internação",
+        "Capturado em",
+    ]
+    header_font = Font(bold=True)
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+
+    # Format captured_at for the last column
+    if captured_at:
+        captured_str = timezone.localtime(captured_at).strftime("%d/%m/%Y %H:%M")
+    else:
+        captured_str = timezone.localtime(timezone.now()).strftime("%d/%m/%Y %H:%M")
+
+    # Data rows
+    for row_idx, p in enumerate(pacientes, start=2):
+        ws.cell(row=row_idx, column=1, value=p["prontuario"])
+        ws.cell(row=row_idx, column=2, value=p["nome"])
+        ws.cell(row=row_idx, column=3, value=p["unidade_nome"])
+        ws.cell(row=row_idx, column=4, value=p["quarto_leito"])
+        ws.cell(row=row_idx, column=5, value=p["especialidade_nome"])
+        ws.cell(row=row_idx, column=6, value=p["data_internacao"])
+        ws.cell(row=row_idx, column=7, value=p["tempo_internacao"])
+        ws.cell(row=row_idx, column=8, value=captured_str)
+
+    # Auto-fit column widths (approximate)
+    for col_idx, header in enumerate(headers, start=1):
+        max_len = len(header)
+        for row in ws.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+            for cell in row:
+                if cell.value:
+                    max_len = max(max_len, len(str(cell.value)))
+        ws.column_dimensions[
+            openpyxl.utils.get_column_letter(col_idx)
+        ].width = max_len + 3
+
+    # Build filename
+    if captured_at:
+        file_ts = timezone.localtime(captured_at).strftime("%Y%m%d-%H%M")
+    else:
+        file_ts = timezone.localtime(timezone.now()).strftime("%Y%m%d-%H%M")
+    filename = f"censo-hospitalar-{file_ts}.xlsx"
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    response = HttpResponse(
+        output.getvalue(),
+        content_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+    )
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
 
 
 @login_required

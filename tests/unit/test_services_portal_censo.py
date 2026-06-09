@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
+import openpyxl
 import pytest
 from django.urls import reverse
 from django.utils import timezone
@@ -385,3 +388,134 @@ class TestCensoRealData:
         assert response.context["pacientes"] == []
         assert response.context["total"] == 0
         assert response.context["captured_at"] is None
+
+
+# ── CES-S3: Endpoint autenticado de exportação XLSX ─────────────
+
+
+@pytest.mark.django_db
+class TestCensoExportXlsx:
+    """CES-S3: XLSX export endpoint tests."""
+
+    def test_export_requires_login(self, client):
+        """RED 1: Anonymous user receives redirect to login."""
+        url = reverse("services_portal:censo_export_xlsx")
+        response = client.get(url)
+        assert response.status_code == 302
+        assert "/login/" in response.url or "/accounts/login/" in response.url
+
+    def test_export_returns_valid_xlsx(self, admin_client):
+        """RED 2: Authenticated user gets valid XLSX with correct headers."""
+        Specialty.objects.get_or_create(code="NEF", defaults={"name": "NEFROLOGIA"})
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ALPHA", especialidade="NEF",
+            tempo_internacao=5,
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo_export_xlsx")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        assert response["Content-Type"] == (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert ".xlsx" in response["Content-Disposition"]
+
+        # Validate workbook can be opened
+        wb = openpyxl.load_workbook(BytesIO(response.content))
+        ws = wb.active
+        assert ws is not None
+        assert ws.title == "Censo Hospitalar"
+
+    def test_export_columns_and_full_specialty_names(self, admin_client):
+        """RED 3: Workbook has expected columns and full specialty names."""
+        Specialty.objects.get_or_create(
+            code="CES", defaults={"name": "CARDIOLOGIA ESPECIAL TESTE"}
+        )
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ALPHA", especialidade="CES",
+            tempo_internacao=5,
+            data_internacao="01/06/2026",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo_export_xlsx")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+        wb = openpyxl.load_workbook(BytesIO(response.content))
+        ws = wb.active
+
+        # Headers
+        expected_headers = [
+            "Registro", "Nome", "Setor / Unidade", "Leito",
+            "Especialidade", "Data Internação", "Tempo Internação",
+            "Capturado em",
+        ]
+        header_row = [cell.value for cell in ws[1]]
+        assert header_row == expected_headers, f"Headers mismatch: {header_row}"
+
+        # Data row: full specialty name
+        data_row = [cell.value for cell in ws[2]]
+        # Registro, Nome, Setor, Leito, Especialidade, Data Internação, Tempo, Capturado
+        assert data_row[0] == "111"  # Registro
+        assert data_row[1] == "PACIENTE ALPHA"  # Nome
+        assert data_row[2] == "UTI A"  # Setor / Unidade
+        assert data_row[3] == "01"  # Leito
+        assert data_row[4] == "CARDIOLOGIA ESPECIAL TESTE"  # Especialidade (full name!)
+        assert data_row[5] == "01/06/2026"  # Data Internação
+        assert "5" in str(data_row[6])  # Tempo Internação
+
+    def test_export_respects_filters(self, admin_client):
+        """RED 4: Export with query params filters correctly."""
+        Specialty.objects.get_or_create(code="NEF", defaults={"name": "NEFROLOGIA"})
+        Specialty.objects.get_or_create(code="ORT", defaults={"name": "ORTOPEDIA"})
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ALFA", especialidade="NEF",
+            tempo_internacao=3,
+            bed_status=BedStatus.OCCUPIED,
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="02",
+            prontuario="222", nome="PACIENTE BETA", especialidade="ORT",
+            tempo_internacao=5,
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo_export_xlsx") + "?especialidade=NEF&q=ALFA"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+        wb = openpyxl.load_workbook(BytesIO(response.content))
+        ws = wb.active
+
+        rows = list(ws.iter_rows(min_row=2, values_only=True))
+        assert len(rows) == 1, f"Expected 1 row, got {len(rows)}"
+        assert rows[0][1] == "PACIENTE ALFA"
+
+    def test_export_empty_state_valid(self, admin_client):
+        """RED 5: Export with no snapshot returns valid workbook with headers only."""
+        url = reverse("services_portal:censo_export_xlsx")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+
+        wb = openpyxl.load_workbook(BytesIO(response.content))
+        ws = wb.active
+
+        # Headers only, no data rows
+        expected_headers = [
+            "Registro", "Nome", "Setor / Unidade", "Leito",
+            "Especialidade", "Data Internação", "Tempo Internação",
+            "Capturado em",
+        ]
+        header_row = [cell.value for cell in ws[1]]
+        assert header_row == expected_headers, f"Headers mismatch: {header_row}"
+        # Only header row exists
+        row_count = sum(1 for _ in ws.iter_rows(min_row=2, values_only=True))
+        assert row_count == 0
