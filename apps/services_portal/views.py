@@ -941,12 +941,22 @@ def censo(request: HttpRequest) -> HttpResponse:
         .distinct()
         .order_by("setor")
     )
-    especialidade_options = list(
+    raw_especialidade_options = list(
         base_dropdown.values_list("especialidade", flat=True)
         .exclude(especialidade="")
         .distinct()
         .order_by("especialidade")
     )
+    # CES-S1: Build options with value (for filtering) and label (for display).
+    # Uses specialty_code_to_name dict already built above for resolution.
+    especialidade_options = [
+        {
+            "value": raw,
+            "label": specialty_code_to_name.get(raw, raw),
+            "code": raw,
+        }
+        for raw in raw_especialidade_options
+    ]
 
     return render(request, "services_portal/censo.html", {
         "page_title": "Censo Hospitalar",

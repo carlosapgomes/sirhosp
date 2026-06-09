@@ -6,7 +6,7 @@ import pytest
 from django.urls import reverse
 from django.utils import timezone
 
-from apps.census.models import BedStatus, CensusSnapshot
+from apps.census.models import BedStatus, CensusSnapshot, Specialty
 
 
 @pytest.mark.django_db
@@ -190,3 +190,82 @@ class TestCensoRealData:
         content = response.content.decode()
         assert response.status_code == 200
         assert "q=12345" in content
+
+    # ── CES-S1: Nomes completos de especialidades na UI ──────────
+
+    def test_censo_dropdown_shows_full_specialty_name_with_code_value(self, admin_client):
+        """RED 1: Dropdown shows full name while preserving code as value."""
+        # NEF already seeded by migration, so use get_or_create
+        Specialty.objects.get_or_create(code="NEF", defaults={"name": "NEFROLOGIA"})
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ALFA", especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        # Option preserves code as value
+        assert 'value="NEF"' in content
+        # Dropdown shows full name as the option TEXT (not just in title attribute)
+        assert 'value="NEF">NEFROLOGIA' in content or '"NEF">NEFROLOGIA' in content
+
+    def test_censo_table_and_card_show_full_specialty_name(self, admin_client):
+        """RED 2: Table and card show full specialty name as main text."""
+        Specialty.objects.create(code="CES", name="CARDIOLOGIA ESPECIAL TESTE")
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ALFA", especialidade="CES",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert ">CES<" not in content, "Sigla CES should not be badge inner text"
+        assert "CARDIOLOGIA ESPECIAL TESTE" in content
+        assert 'value="CES"' in content
+
+    def test_censo_specialty_filter_continues_by_code(self, admin_client):
+        """RED 3: Filtering by specialty code still works."""
+        Specialty.objects.create(code="CES", name="CARDIOLOGIA ESPECIAL TESTE")
+        Specialty.objects.create(code="ORT", name="ORTOPEDIA ESPECIAL TESTE")
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE CARDIACO", especialidade="CES",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="02",
+            prontuario="222", nome="PACIENTE ORTOPEDICO", especialidade="ORT",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo") + "?especialidade=CES"
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "PACIENTE CARDIACO" in content
+        assert "PACIENTE ORTOPEDICO" not in content
+        assert 'value="CES" selected' in content
+
+    def test_censo_unknown_specialty_fallback(self, admin_client):
+        """RED 4: Unknown specialty falls back to original value."""
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ALFA", especialidade="XYZ",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "XYZ" in content

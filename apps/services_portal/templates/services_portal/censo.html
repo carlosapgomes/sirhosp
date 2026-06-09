@@ -51,7 +51,7 @@
         <select class="form-select" id="especialidade" name="especialidade">
           <option value="">Todas</option>
           {% for opt in especialidade_options %}
-            <option value="{{ opt }}" {% if especialidade_filter == opt %}selected{% endif %}>{{ opt }}</option>
+            <option value="{{ opt.value }}" {% if especialidade_filter == opt.value %}selected{% endif %}>{{ opt.label }}</option>
           {% endfor %}
         </select>
       </div>
@@ -104,7 +104,7 @@
         <td class="fw-medium" style="color: var(--sirhosp-sidebar-bg);">{{ p.nome }}</td>
         <td>{{ p.unidade_nome }}</td>
         <td>{{ p.quarto_leito }}</td>
-        <td><span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ p.especialidade_nome }}">{{ p.especialidade }}</span></td>
+        <td><span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ p.especialidade }}">{{ p.especialidade_nome }}</span></td>
         <td>{{ p.data_internacao }}</td>
         <td>{{ p.tempo_internacao }}</td>
       </tr>
@@ -143,7 +143,7 @@
             <span class="badge bg-light text-dark border fw-normal">{{ p.quarto_leito }}</span>
             <small class="text-muted">{{ p.prontuario }}</small>
             {% if p.especialidade %}
-              <span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ p.especialidade_nome }}">{{ p.especialidade }}</span>
+              <span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ p.especialidade }}">{{ p.especialidade_nome }}</span>
             {% endif %}
             <small class="text-muted">{{ p.data_internacao }}</small>
             <small class="text-muted">{{ p.tempo_internacao }}</small>
