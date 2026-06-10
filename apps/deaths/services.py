@@ -9,6 +9,7 @@ from datetime import date as Date
 from datetime import datetime
 from pathlib import Path
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.ingestion.extractors.subprocess_utils import (
@@ -349,59 +350,60 @@ def process_deaths(
     """
     from apps.deaths.models import DailyDeathCount, DeathRecord
 
-    daily_count, _created = DailyDeathCount.objects.update_or_create(
-        date=reference_date,
-        defaults={
-            "count": len(records),
-            "raw_data": records,
-        },
-    )
-
-    # Delete old individual records and recreate
-    daily_count.records.all().delete()
-
-    for rec in records:
-        prontuario = _find_value(rec, "PRONTUARIO", "prontuario", "Prontuário")
-        nome = _find_value(rec, "NOME", "nome", "Paciente")
-        data_obito = _find_value(
-            rec,
-            "OBITO",
-            "DATA OBITO",
-            "DATA_OBITO",
-            "DATA ÓBITO",
-            "data_obito",
-            "Data Óbito",
+    with transaction.atomic():
+        daily_count, _created = DailyDeathCount.objects.update_or_create(
+            date=reference_date,
+            defaults={
+                "count": len(records),
+                "raw_data": records,
+            },
         )
 
-        extra = {
-            k: v
-            for k, v in rec.items()
-            if k
-            not in {
-                "PRONTUARIO",
-                "NOME",
+        # Delete old individual records and recreate
+        daily_count.records.all().delete()
+
+        for rec in records:
+            prontuario = _find_value(rec, "PRONTUARIO", "prontuario", "Prontuário")
+            nome = _find_value(rec, "NOME", "nome", "Paciente")
+            data_obito = _find_value(
+                rec,
                 "OBITO",
                 "DATA OBITO",
                 "DATA_OBITO",
                 "DATA ÓBITO",
-                "prontuario",
-                "nome",
                 "data_obito",
-                "Prontuário",
-                "Paciente",
                 "Data Óbito",
-            }
-            and v
-        }
+            )
 
-        DeathRecord.objects.create(
-            daily_count=daily_count,
-            date=reference_date,
-            prontuario=str(prontuario or ""),
-            nome=str(nome or ""),
-            data_obito=str(data_obito or ""),
-            raw_extra=extra,
-        )
+            extra = {
+                k: v
+                for k, v in rec.items()
+                if k
+                not in {
+                    "PRONTUARIO",
+                    "NOME",
+                    "OBITO",
+                    "DATA OBITO",
+                    "DATA_OBITO",
+                    "DATA ÓBITO",
+                    "prontuario",
+                    "nome",
+                    "data_obito",
+                    "Prontuário",
+                    "Paciente",
+                    "Data Óbito",
+                }
+                and v
+            }
+
+            DeathRecord.objects.create(
+                daily_count=daily_count,
+                date=reference_date,
+                prontuario=str(prontuario or ""),
+                nome=str(nome or ""),
+                data_obito=str(data_obito or ""),
+                raw_extra=extra,
+            )
 
     return {
         "total_records": len(records),
