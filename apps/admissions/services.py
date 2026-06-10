@@ -8,8 +8,8 @@ import tempfile
 from datetime import date as Date
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.ingestion.extractors.subprocess_utils import (
@@ -247,8 +247,10 @@ def run_admission_extraction(
             )
 
             if not json_files:
-                # No admissions found — success, nothing to persist
-                metrics: dict[str, Any] = {"total_records": 0}
+                # No admissions found — success, nothing to persist.
+                # Call process_admissions with empty list to ensure any stale
+                # AdmissionRecord rows for this date are also cleared.
+                metrics = process_admissions([], reference_date=ref_date)
                 create_stage_metric(
                     run=run,
                     stage_name="admission_persistence",
@@ -257,13 +259,6 @@ def run_admission_extraction(
                     details_json=metrics,
                 )
                 mark_run_succeeded(run)
-
-                from apps.admissions.models import DailyAdmissionCount
-
-                DailyAdmissionCount.objects.update_or_create(
-                    date=ref_date,
-                    defaults={"count": 0, "raw_data": []},
-                )
 
                 return ExtractionResult(
                     extraction_type="admission_extraction",
@@ -355,57 +350,58 @@ def process_admissions(
     """
     from apps.admissions.models import AdmissionRecord, DailyAdmissionCount
 
-    daily_count, _created = DailyAdmissionCount.objects.update_or_create(
-        date=reference_date,
-        defaults={
-            "count": len(records),
-            "raw_data": records,
-        },
-    )
-
-    # Delete old individual records and recreate
-    daily_count.records.all().delete()
-
-    for rec in records:
-        prontuario = _find_value(rec, "PRONTUARIO", "prontuario", "Prontuário")
-        nome = _find_value(rec, "NOME", "nome", "Paciente")
-        data_internacao = _find_value(
-            rec,
-            "DATA INTERNACAO",
-            "DATA_INTERNACAO",
-            "DATA INTERNAÇÃO",
-            "data_internacao",
-            "Data Internação",
+    with transaction.atomic():
+        daily_count, _created = DailyAdmissionCount.objects.update_or_create(
+            date=reference_date,
+            defaults={
+                "count": len(records),
+                "raw_data": records,
+            },
         )
 
-        extra = {
-            k: v
-            for k, v in rec.items()
-            if k
-            not in {
-                "PRONTUARIO",
-                "NOME",
+        # Delete old individual records and recreate
+        daily_count.records.all().delete()
+
+        for rec in records:
+            prontuario = _find_value(rec, "PRONTUARIO", "prontuario", "Prontuário")
+            nome = _find_value(rec, "NOME", "nome", "Paciente")
+            data_internacao = _find_value(
+                rec,
                 "DATA INTERNACAO",
                 "DATA_INTERNACAO",
                 "DATA INTERNAÇÃO",
-                "prontuario",
-                "nome",
                 "data_internacao",
-                "Prontuário",
-                "Paciente",
                 "Data Internação",
-            }
-            and v
-        }
+            )
 
-        AdmissionRecord.objects.create(
-            daily_count=daily_count,
-            date=reference_date,
-            prontuario=str(prontuario or ""),
-            nome=str(nome or ""),
-            data_internacao=str(data_internacao or ""),
-            raw_extra=extra,
-        )
+            extra = {
+                k: v
+                for k, v in rec.items()
+                if k
+                not in {
+                    "PRONTUARIO",
+                    "NOME",
+                    "DATA INTERNACAO",
+                    "DATA_INTERNACAO",
+                    "DATA INTERNAÇÃO",
+                    "prontuario",
+                    "nome",
+                    "data_internacao",
+                    "Prontuário",
+                    "Paciente",
+                    "Data Internação",
+                }
+                and v
+            }
+
+            AdmissionRecord.objects.create(
+                daily_count=daily_count,
+                date=reference_date,
+                prontuario=str(prontuario or ""),
+                nome=str(nome or ""),
+                data_internacao=str(data_internacao or ""),
+                raw_extra=extra,
+            )
 
     return {
         "total_records": len(records),
