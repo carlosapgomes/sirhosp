@@ -7,7 +7,7 @@
 set -euo pipefail
 
 COMPOSE_ARGS=(-p "${SIRHOSP_TEST_PROJECT:-sirhosp-test}" -f compose.yml -f compose.test.yml)
-TEST_DB_PORT="${SIRHOSP_TEST_DB_PORT:-55432}"
+TEST_DB_PORT="${SIRHOSP_TEST_DB_PORT:-55433}"
 
 log() {
     printf '[test-in-container] %s\n' "$1"
