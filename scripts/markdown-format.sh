@@ -25,15 +25,20 @@ if [ ${#files[@]} -eq 0 ]; then
   exit 0
 fi
 
-MARKDOWNLINT_CONFIG="${MARKDOWNLINT_CONFIG:-$HOME/.markdownlint.json}"
+MARKDOWNLINT_CONFIG="${MARKDOWNLINT_CONFIG:-.markdownlint.yaml}"
+MARKDOWNLINT_CLI2_CONFIG="${MARKDOWNLINT_CLI2_CONFIG:-.markdownlint-cli2.yaml}"
 
 npx --yes prettier --write "${files[@]}"
 
 if [ -f "$MARKDOWNLINT_CONFIG" ]; then
   npx --yes markdownlint-cli --config "$MARKDOWNLINT_CONFIG" --fix "${files[@]}"
-  npx --yes markdownlint-cli2 --config "$MARKDOWNLINT_CONFIG" "${files[@]}"
 else
   npx --yes markdownlint-cli --fix "${files[@]}"
+fi
+
+if [ -f "$MARKDOWNLINT_CLI2_CONFIG" ]; then
+  npx --yes markdownlint-cli2 --config "$MARKDOWNLINT_CLI2_CONFIG" "${files[@]}"
+else
   npx --yes markdownlint-cli2 "${files[@]}"
 fi
 

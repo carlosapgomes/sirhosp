@@ -1,0 +1,26 @@
+# Configuração compartilhada do markdownlint para editor e CLI.
+#
+# Este arquivo contém as regras do markdownlint core e deve ser usado por
+# integrações de editor (ex.: extensão Markdownlint do VS Code). O wrapper
+# CLI2 do projeto usa a mesma configuração, espelhada em
+# `.markdownlint-cli2.yaml`, para evitar divergência entre editor e validação
+# oficial.
+
+# Ativar todas as regras default.
+default: true
+
+# MD013/line-length — manter linhas com no máximo 80 colunas para melhorar a
+# legibilidade em revisão, terminal e editor.
+MD013: true
+
+# MD041/first-line-heading — todo documento Markdown deve começar com H1.
+MD041: true
+
+# MD033/no-inline-html — permitido para diagramas ASCII em code blocks e
+# templates (ex: ADR template com placeholders).
+MD033: false
+
+# MD032/blanks-around-lists — desabilitado porque o projeto contém arquivos .md
+# que são textos de prompt LLM (apps/summaries/prompts/); adicionar blank lines
+# pode alterar o conteúdo enviado ao modelo.
+MD032: false

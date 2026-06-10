@@ -3,28 +3,29 @@
 #
 # Uso obrigatório: todo arquivo .md criado/alterado deve passar sem erros
 # por `markdownlint-cli2` (ou `./scripts/markdown-lint.sh`).
+#
+# Observação: as regras abaixo espelham `.markdownlint.yaml`, usado por
+# integrações de editor. Mantemos as regras embutidas aqui porque o
+# markdownlint-cli2 resolve `config: .markdownlint.yaml` relativo ao diretório
+# atual de execução, não ao local deste arquivo, o que causa divergência quando
+# a validação é chamada a partir de subdiretórios.
 
 config:
-  # Ativar todas as regras default
+  # Ativar todas as regras default.
   default: true
 
-  # MD013/line-length — desabilitado porque docs técnicos em português
-  # frequentemente excedem 80 caracteres. Não é prático requebrar
-  # textos longos (URLs, tabelas, diagramas ASCII, paths).
-  MD013: false
+  # MD013/line-length — manter linhas com no máximo 80 colunas para melhorar a
+  # legibilidade em revisão, terminal e editor.
+  MD013: true
 
-  # MD033/no-inline-html — permitido para diagramas ASCII em code blocks
-  # e templates (ex: ADR template com placeholders).
+  # MD041/first-line-heading — todo documento Markdown deve começar com H1.
+  MD041: true
+
+  # MD033/no-inline-html — permitido para diagramas ASCII em code blocks e
+  # templates (ex: ADR template com placeholders).
   MD033: false
 
-  # MD041/first-line-heading — desabilitado porque o projeto contém
-  # arquivos .md que são textos de prompt LLM (apps/summaries/prompts/),
-  # não documentos Markdown tradicionais. A primeira linha desses
-  # arquivos é o início do prompt, não um heading.
-  MD041: false
-
-  # MD032/blanks-around-lists — desabilitado pela mesma razão do MD041.
-  # Os prompts LLM contêm listas que fazem parte do texto do prompt;
-  # adicionar blank lines alteraria o conteúdo enviado ao modelo.
+  # MD032/blanks-around-lists — desabilitado porque o projeto contém arquivos
+  # .md que são textos de prompt LLM (apps/summaries/prompts/); adicionar blank
+  # lines pode alterar o conteúdo enviado ao modelo.
   MD032: false
-

@@ -25,10 +25,11 @@ if [ ${#files[@]} -eq 0 ]; then
   exit 0
 fi
 
-# Prioriza config local do projeto (.markdownlint-cli2.yaml),
-# depois .markdownlint.json no HOME, senão roda sem --config.
+# Prioriza config local do projeto (.markdownlint-cli2.yaml) de forma
+# explícita para evitar que configs globais do usuário sejam usadas.
+# Depois usa .markdownlint.json no HOME, senão roda sem --config.
 if [ -f ".markdownlint-cli2.yaml" ]; then
-  npx --yes markdownlint-cli2 "${files[@]}"
+  npx --yes markdownlint-cli2 --config ".markdownlint-cli2.yaml" "${files[@]}"
 elif [ -f "$HOME/.markdownlint.json" ]; then
   npx --yes markdownlint-cli2 --config "$HOME/.markdownlint.json" "${files[@]}"
 else
