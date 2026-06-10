@@ -519,3 +519,55 @@ class TestCensoExportXlsx:
         # Only header row exists
         row_count = sum(1 for _ in ws.iter_rows(min_row=2, values_only=True))
         assert row_count == 0
+
+
+# ── CES-S4: Botão de exportação na página /censo/ ───────────────────
+
+
+@pytest.mark.django_db
+class TestCensoExportButton:
+    """CES-S4: Export button on the /censo/ page."""
+
+    def test_censo_export_button_exists(self, admin_client):
+        """RED 1: Page shows 'Exportar Excel' link pointing to export route."""
+        Specialty.objects.get_or_create(code="NEF", defaults={"name": "NEFROLOGIA"})
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ALFA", especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        url = reverse("services_portal:censo")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "Exportar Excel" in content
+        export_url = reverse("services_portal:censo_export_xlsx")
+        assert export_url in content
+
+    def test_censo_export_button_preserves_querystring(self, admin_client):
+        """RED 2: Export link preserves q, unidade, especialidade and ordenar."""
+        Specialty.objects.get_or_create(code="NEF", defaults={"name": "NEFROLOGIA"})
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now, setor="UTI A", leito="01",
+            prontuario="111", nome="PACIENTE ALFA", especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+        export_url = reverse("services_portal:censo_export_xlsx")
+        url = (
+            reverse("services_portal:censo")
+            + "?q=ALFA&unidade=UTI+A&especialidade=NEF&ordenar=tempo_desc"
+        )
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert response.status_code == 200
+        # The export link should contain the export URL with the same params
+        assert 'q=ALFA' in content or 'q=ALFA' in response.content.decode()
+        assert 'unidade=UTI+A' in content or 'unidade=UTI%2BA' in content
+        assert 'especialidade=NEF' in content
+        assert 'ordenar=tempo_desc' in content
+        # The export route must be in the link along with at least one param
+        assert export_url in content

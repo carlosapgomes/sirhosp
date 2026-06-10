@@ -23,6 +23,10 @@
     <p class="text-muted small">Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }} — {{ total }} paciente(s)</p>
     {% endif %}
   </div>
+  <a href="{% url 'services_portal:censo_export_xlsx' %}?{{ request.GET.urlencode }}"
+     class="btn btn-sm btn-success">
+    <i class="bi bi-file-earmark-excel me-1"></i> Exportar Excel
+  </a>
 </div>
 
 <!-- Filter form -->
