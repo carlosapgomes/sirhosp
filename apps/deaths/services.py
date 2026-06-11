@@ -57,7 +57,8 @@ def run_death_extraction(
     """
     # --- Resolve and validate dates ---
     try:
-        ref_date = datetime.strptime(start_date, "%d/%m/%Y").date()
+        parsed_start = datetime.strptime(start_date, "%d/%m/%Y").date()
+        parsed_end = datetime.strptime(end_date, "%d/%m/%Y").date()
     except ValueError:
         return ExtractionResult(
             extraction_type="death_extraction",
@@ -65,8 +66,10 @@ def run_death_extraction(
             target_end=Date(1, 1, 1),
             success=False,
             failure_reason="validation_error",
-            error_message=f"Invalid date format: {start_date}. Use DD/MM/AAAA.",
+            error_message=f"Invalid date format: {start_date} / {end_date}. Use DD/MM/AAAA.",
         )
+
+    ref_date = parsed_start
 
     # --- Resolve credentials ---
     try:
@@ -74,8 +77,8 @@ def run_death_extraction(
     except ValueError as exc:
         return ExtractionResult(
             extraction_type="death_extraction",
-            target_start=ref_date,
-            target_end=ref_date,
+            target_start=parsed_start,
+            target_end=parsed_end,
             success=False,
             failure_reason="validation_error",
             error_message=str(exc),
@@ -115,8 +118,8 @@ def run_death_extraction(
         )
         return ExtractionResult(
             extraction_type="death_extraction",
-            target_start=ref_date,
-            target_end=ref_date,
+            target_start=parsed_start,
+            target_end=parsed_end,
             success=False,
             failure_reason="source_unavailable",
             error_message=err_msg,
@@ -155,8 +158,10 @@ def run_death_extraction(
                     timeout=600,
                     check=False,
                 )
-            except SubprocessTimeoutError as exc:
-                err_msg = safe_error_message(str(exc))
+            except SubprocessTimeoutError:
+                err_msg = safe_error_message(
+                    "Source-system automation timed out."
+                )
                 create_stage_metric(
                     run=run,
                     stage_name="death_extraction",
@@ -172,8 +177,8 @@ def run_death_extraction(
                 )
                 return ExtractionResult(
                     extraction_type="death_extraction",
-                    target_start=ref_date,
-                    target_end=ref_date,
+                    target_start=parsed_start,
+                    target_end=parsed_end,
                     success=False,
                     failure_reason="timeout",
                     error_message=err_msg,
@@ -196,8 +201,8 @@ def run_death_extraction(
                 )
                 return ExtractionResult(
                     extraction_type="death_extraction",
-                    target_start=ref_date,
-                    target_end=ref_date,
+                    target_start=parsed_start,
+                    target_end=parsed_end,
                     success=False,
                     failure_reason="unexpected_exception",
                     error_message=err_msg,
@@ -222,8 +227,8 @@ def run_death_extraction(
                 )
                 return ExtractionResult(
                     extraction_type="death_extraction",
-                    target_start=ref_date,
-                    target_end=ref_date,
+                    target_start=parsed_start,
+                    target_end=parsed_end,
                     success=False,
                     failure_reason="source_unavailable",
                     error_message=err_msg,
@@ -262,8 +267,8 @@ def run_death_extraction(
 
                 return ExtractionResult(
                     extraction_type="death_extraction",
-                    target_start=ref_date,
-                    target_end=ref_date,
+                    target_start=parsed_start,
+                    target_end=parsed_end,
                     success=True,
                     metrics=metrics,
                     ingestion_run_id=run.pk,
@@ -292,8 +297,8 @@ def run_death_extraction(
                 )
                 return ExtractionResult(
                     extraction_type="death_extraction",
-                    target_start=ref_date,
-                    target_end=ref_date,
+                    target_start=parsed_start,
+                    target_end=parsed_end,
                     success=False,
                     failure_reason="unexpected_exception",
                     error_message=err_msg,
@@ -312,8 +317,8 @@ def run_death_extraction(
 
             return ExtractionResult(
                 extraction_type="death_extraction",
-                target_start=ref_date,
-                target_end=ref_date,
+                target_start=parsed_start,
+                target_end=parsed_end,
                 success=True,
                 metrics=metrics,
                 ingestion_run_id=run.pk,
@@ -321,14 +326,22 @@ def run_death_extraction(
 
     except Exception as exc:
         err_msg = safe_error_message(str(exc))
+        # If the run was already created, mark it as failed —
+        # do not leave it stuck as 'running'.
+        if "run" in dir() and run and run.pk:
+            mark_run_failed(
+                run,
+                error_message=err_msg,
+                failure_reason="unexpected_exception",
+            )
         return ExtractionResult(
             extraction_type="death_extraction",
-            target_start=ref_date,
-            target_end=ref_date,
+            target_start=parsed_start,
+            target_end=parsed_end,
             success=False,
             failure_reason="unexpected_exception",
             error_message=err_msg,
-            ingestion_run_id=run.pk if "run" in dir() and run.pk else None,
+            ingestion_run_id=run.pk if "run" in dir() and run and run.pk else None,
         )
 
 

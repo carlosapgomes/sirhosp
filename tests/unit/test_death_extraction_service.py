@@ -314,6 +314,117 @@ class TestFailedDeathExtraction:
         assert stages[1].status == "failed"
         assert "DB connection lost" in json.dumps(stages[1].details_json)
 
+    def test_timeout_error_does_not_contain_credentials(
+        self, mock_credentials, mock_subprocess_timeout
+    ):
+        """Timeout error messages must not expose the --password argument."""
+        result = run_death_extraction(
+            start_date="01/06/2026",
+            end_date="01/06/2026",
+        )
+
+        assert result.success is False
+        assert result.failure_reason == "timeout"
+        # The error message must be deterministic and safe — not str(exc)
+        # which would contain the full command with --password.
+        assert "secret" not in result.error_message
+        assert "password" not in result.error_message.lower()
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        assert "secret" not in run.error_message
+        assert "password" not in run.error_message.lower()
+
+    def test_outer_exception_marks_run_as_failed(
+        self, mock_credentials, mock_subprocess_success
+    ):
+        """The outer fallback except must mark the IngestionRun as failed.
+
+        If an unexpected exception occurs after the run is created but the
+        inner handlers miss it, the outer fallback must not leave the run
+        as ``running``.
+        """
+        # Trigger an exception inside the outer try block after run creation.
+        # We patch Path.glob *on the service module* to raise only during the
+        # service call, not during test fixture setup.
+        real_dir = Path(tempfile_module.mkdtemp())
+        try:
+            with patch(
+                "apps.deaths.services.tempfile.TemporaryDirectory"
+            ) as m_tmp:
+                m_tmp.return_value.__enter__.return_value = str(real_dir)
+                with patch(
+                    "apps.deaths.services.Path.glob"
+                ) as m_glob:
+                    m_glob.side_effect = OSError("Disk full")
+                    result = run_death_extraction(
+                        start_date="01/06/2026",
+                        end_date="01/06/2026",
+                    )
+        finally:
+            shutil.rmtree(str(real_dir), ignore_errors=True)
+
+        assert result.success is False
+        assert result.failure_reason == "unexpected_exception"
+        assert result.ingestion_run_id is not None
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        assert run.status == "failed", (
+            "Outer exception must mark the run as failed, not leave it running"
+        )
+        assert run.failure_reason == "unexpected_exception"
+
+
+# =========================================================================
+# Tests: Period metadata (S8 hardening)
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestPeriodMetadata:
+    """target_start and target_end must reflect the actual requested period."""
+
+    def test_period_request_preserves_both_dates(
+        self, mock_credentials, mock_subprocess_success
+    ):
+        """A multi-day period must set distinct target_start and target_end."""
+        with _mock_tempdir_and_glob(records_count=2):
+            result = run_death_extraction(
+                start_date="01/06/2026",
+                end_date="05/06/2026",
+            )
+
+        assert result.success is True
+        assert result.target_start == date(2026, 6, 1)
+        assert result.target_end == date(2026, 6, 5)
+        assert result.target_start != result.target_end
+
+    def test_single_day_period_has_equal_dates(
+        self, mock_credentials, mock_subprocess_success
+    ):
+        """A single-day request must have equal start and end."""
+        with _mock_tempdir_and_glob(records_count=1):
+            result = run_death_extraction(
+                start_date="01/06/2026",
+                end_date="01/06/2026",
+            )
+
+        assert result.success is True
+        assert result.target_start == date(2026, 6, 1)
+        assert result.target_end == date(2026, 6, 1)
+
+    def test_invalid_end_date_fails_with_validation_error(
+        self, mock_credentials
+    ):
+        """An invalid end_date must produce a validation_error result."""
+        result = run_death_extraction(
+            start_date="01/06/2026",
+            end_date="not-a-date",
+        )
+
+        assert result.success is False
+        assert result.failure_reason == "validation_error"
+        assert "DD/MM/AAAA" in result.error_message
+
 
 # =========================================================================
 # Tests: ExtractionResult contract compliance
