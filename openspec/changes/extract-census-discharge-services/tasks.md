@@ -14,14 +14,14 @@
 
 ## 2. Slice S2 - Official census persistence hardening
 
-- [ ] 2.1 Add tests proving repeated official census extraction for the same
+- [x] 2.1 Add tests proving repeated official census extraction for the same
       date does not duplicate records.
-- [ ] 2.2 Add tests proving empty official census output persists a successful
+- [x] 2.2 Add tests proving empty official census output persists a successful
       zero-count result and clears stale rows for the target date.
-- [ ] 2.3 Harden official census persistence with the smallest safe
+- [x] 2.3 Harden official census persistence with the smallest safe
       transaction/idempotency changes required by the tests.
-- [ ] 2.4 Run focused official census persistence tests.
-- [ ] 2.5 Create `/tmp/sirhosp-slice-C2-S2-report.md` with required
+- [x] 2.4 Run focused official census persistence tests.
+- [x] 2.5 Create `/tmp/sirhosp-slice-C2-S2-report.md` with required
       before/after evidence.
 
 ## 3. Slice S3 - Discharge extraction service and command wrapper
