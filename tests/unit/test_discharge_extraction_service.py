@@ -12,6 +12,7 @@ be verified without a real Playwright automation script or source system.
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile as tempfile_module
 from contextlib import contextmanager
@@ -411,6 +412,140 @@ class TestDischargeExtractionFailures:
         run = IngestionRun.objects.get(pk=result.ingestion_run_id)
         assert run.status == "failed"
         assert run.failure_reason == "unexpected_exception"
+
+    def test_outer_exception_marks_run_as_failed(self, mock_credentials, mock_subprocess_success):
+        """The outer fallback except must mark the IngestionRun as failed.
+
+        If an unexpected exception occurs after the run is created but the
+        inner handlers miss it, the outer fallback must not leave the run
+        as ``running``.
+        """
+        from apps.discharges.extraction_service import run_discharge_extraction
+        from apps.ingestion.models import IngestionRun
+
+        real_dir = Path(tempfile_module.mkdtemp())
+        try:
+            with patch(
+                "apps.discharges.extraction_service.tempfile.TemporaryDirectory"
+            ) as m_tmp:
+                m_tmp.return_value.__enter__.return_value = str(real_dir)
+                with patch("pathlib.Path.glob") as m_glob:
+                    m_glob.side_effect = OSError("Disk full")
+                    result = run_discharge_extraction(
+                        date="01/06/2026",
+                    )
+        finally:
+            shutil.rmtree(str(real_dir), ignore_errors=True)
+
+        assert result.success is False
+        assert result.failure_reason == "unexpected_exception"
+        assert result.ingestion_run_id is not None
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        assert run.status == "failed", (
+            "Outer exception must mark the run as failed, not leave it running"
+        )
+        assert run.failure_reason == "unexpected_exception"
+
+
+# =========================================================================
+# Tests: IngestionRun observability
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestDischargeIngestionRunObservability:
+    """Service execution must preserve IngestionRun lifecycle and stage metrics."""
+
+    def test_stage_metrics_recorded_for_success(
+        self, mock_credentials, mock_subprocess_success,
+    ):
+        """Successful extraction records extraction and persistence stages."""
+        from apps.discharges.extraction_service import run_discharge_extraction
+        from apps.ingestion.models import IngestionRun
+
+        with _mock_tempdir_and_xls(records_count=3):
+            result = run_discharge_extraction(
+                date="01/06/2026",
+            )
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        stages = list(
+            run.stage_metrics.all().order_by("started_at")
+        )
+        assert len(stages) == 2
+        assert stages[0].stage_name == "discharge_extraction"
+        assert stages[0].status == "succeeded"
+        assert stages[1].stage_name == "discharge_persistence"
+        assert stages[1].status == "succeeded"
+        assert stages[1].details_json.get("total_records") == 3
+
+    def test_stage_metrics_for_failed_extraction(
+        self, mock_credentials, mock_subprocess_failure,
+    ):
+        """Failed extraction records a failed extraction stage."""
+        from apps.discharges.extraction_service import run_discharge_extraction
+        from apps.ingestion.models import IngestionRun
+
+        result = run_discharge_extraction(
+            date="01/06/2026",
+        )
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        stages = list(
+            run.stage_metrics.all().order_by("started_at")
+        )
+        assert len(stages) >= 1
+        assert stages[0].stage_name == "discharge_extraction"
+        assert stages[0].status == "failed"
+
+    def test_ingestion_run_parameters(
+        self, mock_credentials, mock_subprocess_success,
+    ):
+        """The IngestionRun stores the extraction parameters."""
+        from apps.discharges.extraction_service import run_discharge_extraction
+        from apps.ingestion.models import IngestionRun
+
+        with _mock_tempdir_and_xls(records_count=2):
+            result = run_discharge_extraction(
+                date="01/06/2026",
+            )
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        assert run.parameters_json["date"] == "01/06/2026"
+
+    def test_run_uses_proper_intent(
+        self, mock_credentials, mock_subprocess_success,
+    ):
+        """The IngestionRun intent should be discharge_extraction."""
+        from apps.discharges.extraction_service import run_discharge_extraction
+        from apps.ingestion.models import IngestionRun
+
+        with _mock_tempdir_and_xls(records_count=1):
+            result = run_discharge_extraction(
+                date="01/06/2026",
+            )
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        assert run.intent == "discharge_extraction"
+
+    def test_error_stage_metric_does_not_contain_credentials(
+        self, mock_credentials, mock_subprocess_failure,
+    ):
+        """Error details in stage metrics must not expose credentials."""
+        from apps.discharges.extraction_service import run_discharge_extraction
+        from apps.ingestion.models import IngestionRun
+
+        result = run_discharge_extraction(
+            date="01/06/2026",
+        )
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        stages = list(run.stage_metrics.all())
+        for stage in stages:
+            details_str = json.dumps(stage.details_json)
+            assert "secret" not in details_str
+        assert "secret" not in run.error_message
 
 
 # =========================================================================

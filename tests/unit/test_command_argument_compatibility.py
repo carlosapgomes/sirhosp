@@ -154,3 +154,99 @@ class TestExtractAdmissionsHelpOutput(TestCase):
         self.assertIn("--date", help_text)
         self.assertIn("--start-date", help_text)
         self.assertIn("--end-date", help_text)
+
+
+class TestExtractOfficialCensusCommandArguments(TestCase):
+    """Verify extract_official_census command exposes --date, --headless, --no-headless."""
+
+    def test_command_has_date_argument(self):
+        """--date argument is accepted by the parser."""
+        buf = StringIO()
+        try:
+            call_command("extract_official_census", "--date=01/06/2026", stdout=buf)
+        except SystemExit:
+            pass
+        output = buf.getvalue()
+        self.assertNotIn("unrecognized arguments", output)
+
+    def test_command_has_headless_argument(self):
+        """--headless argument is accepted by the parser."""
+        buf = StringIO()
+        try:
+            call_command("extract_official_census", "--headless", stdout=buf)
+        except SystemExit:
+            pass
+        output = buf.getvalue()
+        self.assertNotIn("unrecognized arguments", output)
+
+    def test_command_has_no_headless_argument(self):
+        """--no-headless argument is accepted by the parser."""
+        buf = StringIO()
+        try:
+            call_command("extract_official_census", "--no-headless", stdout=buf)
+        except SystemExit:
+            pass
+        output = buf.getvalue()
+        self.assertNotIn("unrecognized arguments", output)
+
+    def test_help_shows_all_arguments(self):
+        """--help output lists --date, --headless, and --no-headless."""
+        from apps.census.management.commands.extract_official_census import (
+            Command as CensusCommand,
+        )
+
+        cmd = CensusCommand()
+        parser = cmd.create_parser("./manage.py", "extract_official_census")
+
+        help_text = parser.format_help()
+        self.assertIn("--date", help_text)
+        self.assertIn("--headless", help_text)
+        self.assertIn("--no-headless", help_text)
+
+
+class TestExtractDischargesCommandArguments(TestCase):
+    """Verify extract_discharges command exposes --date, --headless, --no-headless."""
+
+    def test_command_has_date_argument(self):
+        """--date argument is accepted by the parser."""
+        buf = StringIO()
+        try:
+            call_command("extract_discharges", "--date=01/06/2026", stdout=buf)
+        except SystemExit:
+            pass
+        output = buf.getvalue()
+        self.assertNotIn("unrecognized arguments", output)
+
+    def test_command_has_headless_argument(self):
+        """--headless argument is accepted by the parser."""
+        buf = StringIO()
+        try:
+            call_command("extract_discharges", "--headless", stdout=buf)
+        except SystemExit:
+            pass
+        output = buf.getvalue()
+        self.assertNotIn("unrecognized arguments", output)
+
+    def test_command_has_no_headless_argument(self):
+        """--no-headless argument is accepted by the parser."""
+        buf = StringIO()
+        try:
+            call_command("extract_discharges", "--no-headless", stdout=buf)
+        except SystemExit:
+            pass
+        output = buf.getvalue()
+        self.assertNotIn("unrecognized arguments", output)
+
+    def test_help_shows_all_arguments(self):
+        """--help output lists --date, --headless, and --no-headless."""
+        from apps.discharges.management.commands.extract_discharges import (
+            Command as DischargesCommand,
+        )
+
+        cmd = DischargesCommand()
+        parser = cmd.create_parser("./manage.py", "extract_discharges")
+
+        help_text = parser.format_help()
+        self.assertIn("--date", help_text)
+        self.assertIn("--headless", help_text)
+        self.assertIn("--no-headless", help_text)

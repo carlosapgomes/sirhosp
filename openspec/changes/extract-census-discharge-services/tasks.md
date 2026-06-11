@@ -52,16 +52,16 @@
 
 ## 5. Slice S5 - Observability, failure safety, and CLI compatibility
 
-- [ ] 5.1 Add or adjust tests that verify census and discharge service
+- [x] 5.1 Add or adjust tests that verify census and discharge service
       executions preserve `IngestionRun` lifecycle and stage metrics.
-- [ ] 5.2 Add tests proving timeout and unexpected failure metadata does not
+- [x] 5.2 Add tests proving timeout and unexpected failure metadata does not
       expose source credentials.
-- [ ] 5.3 Verify commands still expose the existing `--date`, `--headless`, and
+- [x] 5.3 Verify commands still expose the existing `--date`, `--headless`, and
       `--no-headless` arguments.
-- [ ] 5.4 Ensure outer unexpected failures after run creation mark the linked
+- [x] 5.4 Ensure outer unexpected failures after run creation mark the linked
       `IngestionRun` as failed.
-- [ ] 5.5 Run focused observability and command compatibility tests.
-- [ ] 5.6 Create `/tmp/sirhosp-slice-C2-S5-report.md` with required
+- [x] 5.5 Run focused observability and command compatibility tests.
+- [x] 5.6 Create `/tmp/sirhosp-slice-C2-S5-report.md` with required
       before/after evidence.
 
 ## 6. Slice S6 - Change-level validation and Change 3 handoff
