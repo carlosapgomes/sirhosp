@@ -1,17 +1,34 @@
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import re
+import sys
+import tempfile
+from datetime import date as Date
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
 
-from apps.census.models import BedStatus, CensusSnapshot, PatientMovement
-from apps.ingestion.models import CensusExecutionBatch
+from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord, PatientMovement
+from apps.ingestion.extractors.subprocess_utils import (
+    SubprocessTimeoutError,
+    run_subprocess,
+)
+from apps.ingestion.historical_extraction import (
+    ExtractionResult,
+    create_stage_metric,
+    mark_run_failed,
+    mark_run_succeeded,
+    resolve_source_credentials,
+    safe_error_message,
+)
+from apps.ingestion.models import CensusExecutionBatch, IngestionRun
 from apps.ingestion.services import (
     queue_admissions_only_run,
     queue_demographics_only_run,
@@ -603,3 +620,399 @@ def parse_wards_beds_pdf_text(pdf_text):
 
     return units
 
+
+# ---------------------------------------------------------------------------
+# Official census extraction service
+# ---------------------------------------------------------------------------
+
+
+def run_official_census_extraction(
+    *,
+    date: str,
+    headless: bool = True,
+) -> ExtractionResult:
+    """Execute official daily census extraction from the source system and persist records.
+
+    This is the Python-callable service entry point for official census
+    historical report extraction. It handles the full orchestration flow:
+
+    1. Resolve and validate the target date.
+    2. Resolve source-system credentials.
+    3. Create an ``IngestionRun`` for observability.
+    4. Execute the Playwright automation script via subprocess.
+    5. Parse the generated JSON output.
+    6. Persist records via :func:`process_official_census_records`.
+    7. Record stage metrics.
+    8. Return a structured ``ExtractionResult``.
+
+    Args:
+        date: Target date in ``DD/MM/AAAA`` format.
+        headless: Whether to run Playwright in headless mode.
+
+    Returns:
+        An ``ExtractionResult`` describing the execution outcome.
+    """
+    # --- Resolve and validate date ---
+    try:
+        parsed_date = datetime.strptime(date, "%d/%m/%Y").date()
+    except ValueError:
+        return ExtractionResult(
+            extraction_type="official_census_extraction",
+            target_start=Date(1, 1, 1),
+            target_end=Date(1, 1, 1),
+            success=False,
+            failure_reason="validation_error",
+            error_message=f"Invalid date format: {date}. Use DD/MM/AAAA.",
+        )
+
+    ref_date = parsed_date
+
+    # --- Resolve credentials ---
+    try:
+        creds = resolve_source_credentials()
+    except ValueError as exc:
+        return ExtractionResult(
+            extraction_type="official_census_extraction",
+            target_start=parsed_date,
+            target_end=parsed_date,
+            success=False,
+            failure_reason="validation_error",
+            error_message=str(exc),
+        )
+
+    # --- Create IngestionRun ---
+    run = IngestionRun.objects.create(
+        status="running",
+        intent="official_census_extraction",
+        queued_at=timezone.now(),
+        processing_started_at=timezone.now(),
+        parameters_json={
+            "date": date,
+            "ref_date": ref_date.isoformat(),
+        },
+    )
+
+    # --- Resolve automation script path ---
+    script_path = (
+        Path(__file__).resolve().parents[2]
+        / "automation"
+        / "source_system"
+        / "official_census"
+        / "extract_official_census.py"
+    )
+
+    if not script_path.exists():
+        err_msg = f"Automation script not found: {script_path}"
+        mark_run_failed(
+            run, error_message=err_msg, failure_reason="source_unavailable"
+        )
+        create_stage_metric(
+            run=run,
+            stage_name="official_census_extraction",
+            status="failed",
+            started_at=timezone.now(),
+            details_json={"error": err_msg},
+        )
+        return ExtractionResult(
+            extraction_type="official_census_extraction",
+            target_start=parsed_date,
+            target_end=parsed_date,
+            success=False,
+            failure_reason="source_unavailable",
+            error_message=err_msg,
+            ingestion_run_id=run.pk,
+        )
+
+    # --- Stage: official_census_extraction (subprocess) ---
+    ext_stage_start = timezone.now()
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
+
+            cmd = [
+                sys.executable,
+                str(script_path),
+                "--output-dir",
+                str(tmpdir_path),
+                "--source-url",
+                creds.url,
+                "--username",
+                creds.username,
+                "--password",
+                creds.password,
+                "--date",
+                date,
+            ]
+            if headless:
+                cmd.append("--headless")
+
+            try:
+                subprocess_result = run_subprocess(
+                    cmd,
+                    timeout=600,
+                    check=False,
+                )
+            except SubprocessTimeoutError:
+                err_msg = safe_error_message(
+                    "Source-system automation timed out."
+                )
+                create_stage_metric(
+                    run=run,
+                    stage_name="official_census_extraction",
+                    status="failed",
+                    started_at=ext_stage_start,
+                    details_json={"error": err_msg},
+                )
+                mark_run_failed(
+                    run,
+                    error_message=err_msg,
+                    failure_reason="timeout",
+                    timed_out=True,
+                )
+                return ExtractionResult(
+                    extraction_type="official_census_extraction",
+                    target_start=parsed_date,
+                    target_end=parsed_date,
+                    success=False,
+                    failure_reason="timeout",
+                    error_message=err_msg,
+                    ingestion_run_id=run.pk,
+                )
+
+            except Exception as exc:
+                err_msg = safe_error_message(str(exc))
+                create_stage_metric(
+                    run=run,
+                    stage_name="official_census_extraction",
+                    status="failed",
+                    started_at=ext_stage_start,
+                    details_json={"error": err_msg},
+                )
+                mark_run_failed(
+                    run,
+                    error_message=err_msg,
+                    failure_reason="unexpected_exception",
+                )
+                return ExtractionResult(
+                    extraction_type="official_census_extraction",
+                    target_start=parsed_date,
+                    target_end=parsed_date,
+                    success=False,
+                    failure_reason="unexpected_exception",
+                    error_message=err_msg,
+                    ingestion_run_id=run.pk,
+                )
+
+            if subprocess_result.returncode != 0:
+                err_msg = safe_error_message(
+                    subprocess_result.stderr[:500]
+                    if subprocess_result.stderr
+                    else "Unknown error"
+                )
+                create_stage_metric(
+                    run=run,
+                    stage_name="official_census_extraction",
+                    status="failed",
+                    started_at=ext_stage_start,
+                    details_json={
+                        "returncode": subprocess_result.returncode
+                    },
+                )
+                mark_run_failed(
+                    run,
+                    error_message=err_msg,
+                    failure_reason="source_unavailable",
+                )
+                return ExtractionResult(
+                    extraction_type="official_census_extraction",
+                    target_start=parsed_date,
+                    target_end=parsed_date,
+                    success=False,
+                    failure_reason="source_unavailable",
+                    error_message=err_msg,
+                    ingestion_run_id=run.pk,
+                )
+
+            create_stage_metric(
+                run=run,
+                stage_name="official_census_extraction",
+                status="succeeded",
+                started_at=ext_stage_start,
+            )
+
+            # --- Stage: official_census_persistence (process JSON) ---
+            persist_stage_start = timezone.now()
+
+            json_files = sorted(
+                tmpdir_path.glob("censo-oficial-*.json"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+
+            if not json_files:
+                # No official census data found — success, zero records.
+                # Call process with empty list to clear stale rows for this date.
+                metrics = process_official_census_records(
+                    [], reference_date=ref_date
+                )
+                create_stage_metric(
+                    run=run,
+                    stage_name="official_census_persistence",
+                    status="succeeded",
+                    started_at=persist_stage_start,
+                    details_json=metrics,
+                )
+                mark_run_succeeded(run)
+
+                return ExtractionResult(
+                    extraction_type="official_census_extraction",
+                    target_start=parsed_date,
+                    target_end=parsed_date,
+                    success=True,
+                    metrics=metrics,
+                    ingestion_run_id=run.pk,
+                )
+
+            json_path = json_files[0]
+
+            try:
+                data = json.loads(
+                    json_path.read_text(encoding="utf-8")
+                )
+                records = data.get("records", [])
+
+                metrics = process_official_census_records(
+                    records, reference_date=ref_date
+                )
+            except Exception as exc:
+                err_msg = safe_error_message(str(exc))
+                create_stage_metric(
+                    run=run,
+                    stage_name="official_census_persistence",
+                    status="failed",
+                    started_at=persist_stage_start,
+                    details_json={"error": err_msg},
+                )
+                mark_run_failed(
+                    run,
+                    error_message=err_msg,
+                    failure_reason="unexpected_exception",
+                )
+                return ExtractionResult(
+                    extraction_type="official_census_extraction",
+                    target_start=parsed_date,
+                    target_end=parsed_date,
+                    success=False,
+                    failure_reason="unexpected_exception",
+                    error_message=err_msg,
+                    ingestion_run_id=run.pk,
+                )
+
+            create_stage_metric(
+                run=run,
+                stage_name="official_census_persistence",
+                status="succeeded",
+                started_at=persist_stage_start,
+                details_json=metrics,
+            )
+
+            mark_run_succeeded(run)
+
+            return ExtractionResult(
+                extraction_type="official_census_extraction",
+                target_start=parsed_date,
+                target_end=parsed_date,
+                success=True,
+                metrics=metrics,
+                ingestion_run_id=run.pk,
+            )
+
+    except Exception as exc:
+        err_msg = safe_error_message(str(exc))
+        if "run" in dir() and run and run.pk:
+            mark_run_failed(
+                run,
+                error_message=err_msg,
+                failure_reason="unexpected_exception",
+            )
+        return ExtractionResult(
+            extraction_type="official_census_extraction",
+            target_start=parsed_date,
+            target_end=parsed_date,
+            success=False,
+            failure_reason="unexpected_exception",
+            error_message=err_msg,
+            ingestion_run_id=run.pk
+            if "run" in dir() and run and run.pk
+            else None,
+        )
+
+
+def process_official_census_records(
+    records: list[dict[str, str | None]],
+    *,
+    reference_date: Date,
+) -> dict[str, int]:
+    """Process official census records from the JSON extraction.
+
+    Persists individual ``OfficialCensusRecord`` rows with date-replace
+    semantics: existing rows for the target date are deleted and new rows
+    are bulk-created from the extracted data.
+
+    Args:
+        records: List of dicts with official census record data from the
+            JSON output. Expected keys: PRONTUARIO, NOME, DATA INTERNACAO,
+            TEMPO INT, QUARTO/LEITO, CID INT, DESCRICAO, UNIDADE,
+            AREA FUNCIONAL, SIGLA, ESPECIALIDADE.
+        reference_date: The date these records refer to.
+
+    Returns:
+        A dict with metrics counters.
+    """
+    from apps.census.models import OfficialCensusRecord
+
+    with transaction.atomic():
+        # Delete existing rows for this date
+        OfficialCensusRecord.objects.filter(
+            date=reference_date
+        ).delete()
+
+        # Bulk-create from the extracted records
+        snapshot_batch: list[OfficialCensusRecord] = []
+        for record in records:
+            snapshot_batch.append(
+                OfficialCensusRecord(
+                    date=reference_date,
+                    prontuario=record.get("PRONTUARIO", "") or "",
+                    nome=record.get("NOME", "") or "",
+                    data_internacao=record.get(
+                        "DATA INTERNACAO", ""
+                    )
+                    or "",
+                    tempo_internacao=record.get("TEMPO INT", "")
+                    or "",
+                    quarto_leito=record.get("QUARTO/LEITO", "")
+                    or "",
+                    cid=record.get("CID INT", "") or "",
+                    descricao=record.get("DESCRICAO", "") or "",
+                    unidade=record.get("UNIDADE", "") or "",
+                    area_funcional=record.get(
+                        "AREA FUNCIONAL", ""
+                    )
+                    or "",
+                    sigla=record.get("SIGLA", "") or "",
+                    especialidade=record.get(
+                        "ESPECIALIDADE", ""
+                    )
+                    or "",
+                )
+            )
+        if snapshot_batch:
+            OfficialCensusRecord.objects.bulk_create(
+                snapshot_batch
+            )
+
+    return {
+        "total_records": len(snapshot_batch),
+    }
