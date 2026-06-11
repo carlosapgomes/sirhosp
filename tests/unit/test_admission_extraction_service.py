@@ -295,6 +295,24 @@ class TestFailedAdmissionExtraction:
         assert result.success is False
         assert result.failure_reason == "unexpected_exception"
         assert "DB connection lost" in result.error_message
+        assert result.ingestion_run_id is not None, (
+            "IngestionRun should be created before persistence failure"
+        )
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        assert run.status == "failed"
+        assert run.failure_reason == "unexpected_exception"
+        assert "DB connection lost" in run.error_message
+
+        stages = list(run.stage_metrics.all().order_by("started_at"))
+        assert len(stages) >= 2
+        # First stage (extraction) succeeded
+        assert stages[0].stage_name == "admission_extraction"
+        assert stages[0].status == "succeeded"
+        # Second stage (persistence) failed
+        assert stages[1].stage_name == "admission_persistence"
+        assert stages[1].status == "failed"
+        assert "DB connection lost" in json.dumps(stages[1].details_json)
 
 
 # =========================================================================
