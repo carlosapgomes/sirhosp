@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.ingestion.extractors.subprocess_utils import (
@@ -138,6 +139,7 @@ def _parse_xls_row(
 # ---------------------------------------------------------------------------
 
 
+@transaction.atomic
 def _persist_discharge_records(
     patients: list[dict[str, Any]],
     *,
@@ -154,6 +156,19 @@ def _persist_discharge_records(
         ``errors`` counters.
     """
     from apps.discharges.models import DailyDischargeCount, DischargeRecord  # noqa: PLC0415
+
+    # When patients list is empty, record zero-count for ref_date
+    if not patients:
+        DailyDischargeCount.objects.update_or_create(
+            date=ref_date,
+            defaults={"count": 0, "raw_data": []},
+        )
+        return {
+            "total_records": 0,
+            "created": 0,
+            "updated": 0,
+            "errors": 0,
+        }
 
     created = 0
     updated = 0

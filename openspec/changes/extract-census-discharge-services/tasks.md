@@ -39,15 +39,15 @@
 
 ## 4. Slice S4 - Discharge persistence hardening
 
-- [ ] 4.1 Add tests proving repeated discharge extraction for the same date does
+- [x] 4.1 Add tests proving repeated discharge extraction for the same date does
       not duplicate `DischargeRecord` rows.
-- [ ] 4.2 Add tests proving empty discharge output persists a successful
+- [x] 4.2 Add tests proving empty discharge output persists a successful
       zero-count result.
-- [ ] 4.3 Harden discharge report persistence with the smallest safe
+- [x] 4.3 Harden discharge report persistence with the smallest safe
       transaction/idempotency changes required by the tests.
-- [ ] 4.4 Confirm `apps/discharges/services.py` remains unchanged.
-- [ ] 4.5 Run focused discharge persistence tests.
-- [ ] 4.6 Create `/tmp/sirhosp-slice-C2-S4-report.md` with required
+- [x] 4.4 Confirm `apps/discharges/services.py` remains unchanged.
+- [x] 4.5 Run focused discharge persistence tests.
+- [x] 4.6 Create `/tmp/sirhosp-slice-C2-S4-report.md` with required
       before/after evidence.
 
 ## 5. Slice S5 - Observability, failure safety, and CLI compatibility
