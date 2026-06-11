@@ -110,38 +110,31 @@ class TestRefreshDailyDischargeCounts:
 
 @pytest.mark.django_db
 class TestExtractDischargesHook:
-    """Smoke tests: verify extract_discharges updates DailyDischargeCount."""
+    """Smoke tests: verify extract_discharges command delegates to service."""
 
-    def test_command_file_contains_daily_discharge_upsert(self):
-        """extract_discharges.py contains DailyDischargeCount.update_or_create."""
+    def test_command_delegates_to_service(self):
+        """extract_discharges.py imports run_discharge_extraction."""
         from pathlib import Path
         source = (
             Path(__file__).resolve().parents[2]
             / "apps" / "discharges" / "management" / "commands"
             / "extract_discharges.py"
+        )
+        content = source.read_text()
+        assert "run_discharge_extraction" in content
+        assert "from apps.discharges.extraction_service import run_discharge_extraction" in content
+        # The command must NOT contain the old orchestration logic
+        assert "DailyDischargeCount" not in content
+
+    def test_service_module_contains_persistence_logic(self):
+        """extraction_service.py contains DailyDischargeCount.update_or_create."""
+        from pathlib import Path
+        source = (
+            Path(__file__).resolve().parents[2]
+            / "apps" / "discharges" / "extraction_service.py"
         )
         content = source.read_text()
         assert "DailyDischargeCount" in content
         assert "update_or_create" in content
-        # The new command updates DailyDischargeCount directly (no refresh call)
-        assert "call_command" not in content, (
-            "extract_discharges should NOT call refresh_daily_discharge_counts; "
-            "it should update DailyDischargeCount directly from PDF count."
-        )
-
-    def test_upsert_follows_status_succeeded_assignment(self):
-        """DailyDischargeCount upsert appears after run.status = 'succeeded'."""
-        from pathlib import Path
-        source = (
-            Path(__file__).resolve().parents[2]
-            / "apps" / "discharges" / "management" / "commands"
-            / "extract_discharges.py"
-        )
-        content = source.read_text()
-        pos_status = content.find('run.status = "succeeded"')
-        pos_upsert = content.find("DailyDischargeCount.objects.update_or_create")
-        assert pos_status > 0, "status succeeded line not found"
-        assert pos_upsert > 0, "DailyDischargeCount upsert not found"
-        assert pos_upsert > pos_status, (
-            "DailyDischargeCount upsert must appear AFTER status succeeded"
-        )
+        # The service must manage persistence (not delegate to another command)
+        assert "call_command" not in content

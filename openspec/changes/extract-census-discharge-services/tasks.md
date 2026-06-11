@@ -26,15 +26,15 @@
 
 ## 3. Slice S3 - Discharge extraction service and command wrapper
 
-- [ ] 3.1 Add characterization tests for discharge service execution with mocked
+- [x] 3.1 Add characterization tests for discharge service execution with mocked
       subprocess output and synthetic XLS data.
-- [ ] 3.2 Move discharge report extraction orchestration into a Python-callable
+- [x] 3.2 Move discharge report extraction orchestration into a Python-callable
       service outside `apps/discharges/services.py`.
-- [ ] 3.3 Preserve XLS row parsing behavior and report persistence semantics.
-- [ ] 3.4 Update `extract_discharges` management command to delegate to the
+- [x] 3.3 Preserve XLS row parsing behavior and report persistence semantics.
+- [x] 3.4 Update `extract_discharges` management command to delegate to the
       extraction service and preserve CLI behavior.
-- [ ] 3.5 Run focused discharge extraction tests.
-- [ ] 3.6 Create `/tmp/sirhosp-slice-C2-S3-report.md` with required
+- [x] 3.5 Run focused discharge extraction tests.
+- [x] 3.6 Create `/tmp/sirhosp-slice-C2-S3-report.md` with required
       before/after evidence.
 
 ## 4. Slice S4 - Discharge persistence hardening
