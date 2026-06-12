@@ -1,11 +1,10 @@
-"""Historical recovery planning and result contracts.
+"""Historical recovery planning, orchestration, and result contracts.
 
-Provides planning logic and command-level result dataclasses for the
-historical recovery orchestrator. This module does NOT call extractor
-services — Slice C3-S1 focuses exclusively on contracts and planning.
-
-The orchestrator (Slice C3-S2) will import these dataclasses and the
-plan-building helpers to manage service execution.
+Provides planning logic, command-level result dataclasses, and the
+full orchestration engine (``execute_recovery_plan``) for historical
+data recovery. The orchestrator calls extractor services directly,
+supports dry-run and fail-fast execution modes, aggregates step
+results, and converts unexpected exceptions into safe failed steps.
 """
 
 from __future__ import annotations
