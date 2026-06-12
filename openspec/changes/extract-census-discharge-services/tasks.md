@@ -66,11 +66,11 @@
 
 ## 6. Slice S6 - Change-level validation and Change 3 handoff
 
-- [ ] 6.1 Run relevant containerized validation commands for this change.
-- [ ] 6.2 Update OpenSpec checkboxes for completed tasks and confirm markdown
+- [x] 6.1 Run relevant containerized validation commands for this change.
+- [x] 6.2 Update OpenSpec checkboxes for completed tasks and confirm markdown
       lint passes for changed `.md` files.
-- [ ] 6.3 Create `change-3-handoff.md` describing service entry points and known
+- [x] 6.3 Create `change-3-handoff.md` describing service entry points and known
       validation caveats for `add-historical-recovery-command`.
-- [ ] 6.4 Confirm no discharge reconciliation code was modified.
-- [ ] 6.5 Create `/tmp/sirhosp-slice-C2-S6-report.md` with final validation
+- [x] 6.4 Confirm no discharge reconciliation code was modified.
+- [x] 6.5 Create `/tmp/sirhosp-slice-C2-S6-report.md` with final validation
       evidence and archive readiness notes.
