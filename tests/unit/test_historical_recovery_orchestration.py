@@ -435,7 +435,7 @@ class TestExceptionHandling:
         step = result.steps[0]
         assert step.success is False
         assert step.failure_reason == "unexpected_error"
-        assert "RuntimeError" in step.error_message or "Unexpected error" in step.error_message
+        assert step.error_message == "Unexpected extractor failure."
 
     def test_exception_does_not_abort_other_steps(self):
         """Default behaviour: continue after exception."""

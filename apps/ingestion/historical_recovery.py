@@ -10,7 +10,6 @@ plan-building helpers to manage service execution.
 
 from __future__ import annotations
 
-import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -194,6 +193,18 @@ def execute_recovery_plan(
     ``plan.extractors``, calls the matching service function, and collects
     per-step results into a ``RecoveryRunResult``.
 
+    When ``plan.dry_run`` is ``True``, no service functions are called --
+    each step is recorded as skipped with ``success=True`` and empty metrics.
+
+    When ``plan.fail_fast`` is ``True``, execution stops immediately after
+    the first failed step (service result with ``success=False`` or an
+    unexpected exception). By default, all steps are executed and failures
+    are aggregated.
+
+    Unexpected Python exceptions from service calls are converted into
+    failed steps with ``failure_reason="unexpected_error"`` and a generic
+    safe message.
+
     Args:
         plan: The plan describing dates, extractors, and execution flags.
         headless: Whether to run Playwright in headless mode.
@@ -217,16 +228,35 @@ def execute_recovery_plan(
         raise ValueError(f"Unknown extractor(s) in plan: {', '.join(unknown)}")
 
     steps: list[RecoveryStepResult] = []
+    should_stop = False
 
     for day in plan.dates:
+        if should_stop:
+            break
+
         date_label = _date_to_str(day)
 
         for extractor_name in ordered_extractors:
+            if plan.dry_run:
+                step = RecoveryStepResult(
+                    date=day,
+                    date_label=date_label,
+                    extractor=extractor_name,
+                    success=True,
+                    extraction_type=f"{extractor_name}_extraction",
+                    metrics={},
+                    skipped=True,
+                    failure_reason="",
+                    error_message="",
+                    ingestion_run_id=None,
+                )
+                steps.append(step)
+                continue
+
             service_fn = service_registry[extractor_name]
 
             try:
                 service_result = service_fn(date_label, headless=headless)
-
                 step = RecoveryStepResult(
                     date=day,
                     date_label=date_label,
@@ -239,11 +269,10 @@ def execute_recovery_plan(
                     error_message=service_result.error_message,
                     ingestion_run_id=service_result.ingestion_run_id,
                 )
-            except Exception as exc:
+            except Exception:
                 # Catch unexpected exceptions from service calls and convert
-                # them into a safe failed step (credential-free message).
-                tb = traceback.format_exception_only(type(exc), exc)
-                safe_msg = "".join(tb).strip()
+                # them into a safe failed step with a generic credential-safe
+                # message instead of raw traceback text.
                 step = RecoveryStepResult(
                     date=day,
                     date_label=date_label,
@@ -253,11 +282,15 @@ def execute_recovery_plan(
                     metrics={},
                     skipped=False,
                     failure_reason="unexpected_error",
-                    error_message=safe_msg,
+                    error_message="Unexpected extractor failure.",
                     ingestion_run_id=None,
                 )
 
             steps.append(step)
+
+            if plan.fail_fast and not step.success:
+                should_stop = True
+                break
 
     return RecoveryRunResult(
         start_date=plan.dates[0] if plan.dates else date.min,
