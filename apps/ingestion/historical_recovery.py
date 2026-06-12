@@ -10,9 +10,14 @@ plan-building helpers to manage service execution.
 
 from __future__ import annotations
 
+import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from apps.ingestion.historical_extraction import ExtractionResult
 
 # ---------------------------------------------------------------------------
 # Default extractor order (mirrors legacy shell script behaviour)
@@ -32,6 +37,11 @@ _VALID_EXTRACTORS: set[str] = set(DEFAULT_EXTRACTOR_ORDER)
 # ---------------------------------------------------------------------------
 
 _DATE_FORMAT = "%d/%m/%Y"
+
+
+def _date_to_str(d: date) -> str:
+    """Format a ``date`` as ``DD/MM/AAAA``."""
+    return d.strftime(_DATE_FORMAT)
 
 
 def _parse_date(date_str: str) -> date:
@@ -113,6 +123,147 @@ def validate_extractors(selected: list[str] | None = None) -> list[str]:
         )
 
     return [name for name in DEFAULT_EXTRACTOR_ORDER if name in set(selected)]
+
+
+# ---------------------------------------------------------------------------
+# Service registry
+# ---------------------------------------------------------------------------
+
+
+def make_service_registry() -> dict[str, Callable[..., "ExtractionResult"]]:
+    """Build the default service registry with lazy-imported extractors.
+
+    Each entry is a callable with signature ``(date_str: str, headless: bool)``
+    that returns an ``ExtractionResult``.
+
+    Returns:
+        A dict mapping extractor names to their service callables.
+    """
+    # Lazy imports — avoid loading Playwright dependencies at module level.
+    from apps.admissions.services import run_admission_extraction
+    from apps.census.services import run_official_census_extraction
+    from apps.deaths.services import run_death_extraction
+    from apps.discharges.extraction_service import run_discharge_extraction
+
+    def _discharge(
+        date_str: str, headless: bool = True
+    ) -> "ExtractionResult":
+        return run_discharge_extraction(date=date_str, headless=headless)
+
+    def _admission(
+        date_str: str, headless: bool = True
+    ) -> "ExtractionResult":
+        return run_admission_extraction(
+            start_date=date_str, end_date=date_str, headless=headless
+        )
+
+    def _death(
+        date_str: str, headless: bool = True
+    ) -> "ExtractionResult":
+        return run_death_extraction(
+            start_date=date_str, end_date=date_str, headless=headless
+        )
+
+    def _census(
+        date_str: str, headless: bool = True
+    ) -> "ExtractionResult":
+        return run_official_census_extraction(date=date_str, headless=headless)
+
+    return {
+        "discharges": _discharge,
+        "admissions": _admission,
+        "deaths": _death,
+        "official_census": _census,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Orchestration engine
+# ---------------------------------------------------------------------------
+
+
+def execute_recovery_plan(
+    plan: RecoveryPlan,
+    *,
+    headless: bool = True,
+    service_registry: dict[str, Callable[..., "ExtractionResult"]] | None = None,
+) -> RecoveryRunResult:
+    """Execute a ``RecoveryPlan`` by calling extractor services directly.
+
+    Iterates over each date in ``plan.dates`` and each extractor name in
+    ``plan.extractors``, calls the matching service function, and collects
+    per-step results into a ``RecoveryRunResult``.
+
+    Args:
+        plan: The plan describing dates, extractors, and execution flags.
+        headless: Whether to run Playwright in headless mode.
+        service_registry: Optional dict of extractor-name -> callable.
+            Defaults to the result of :func:`make_service_registry`.
+
+    Returns:
+        A ``RecoveryRunResult`` aggregating all step outcomes.
+
+    Raises:
+        ValueError: If an extractor name in the plan is not in the registry.
+    """
+    if service_registry is None:
+        service_registry = make_service_registry()
+
+    # Sort plan extractors into deterministic default order.
+    ordered_extractors = validate_extractors(plan.extractors)
+
+    unknown = [e for e in ordered_extractors if e not in service_registry]
+    if unknown:
+        raise ValueError(f"Unknown extractor(s) in plan: {', '.join(unknown)}")
+
+    steps: list[RecoveryStepResult] = []
+
+    for day in plan.dates:
+        date_label = _date_to_str(day)
+
+        for extractor_name in ordered_extractors:
+            service_fn = service_registry[extractor_name]
+
+            try:
+                service_result = service_fn(date_label, headless=headless)
+
+                step = RecoveryStepResult(
+                    date=day,
+                    date_label=date_label,
+                    extractor=extractor_name,
+                    success=service_result.success,
+                    extraction_type=service_result.extraction_type,
+                    metrics=dict(service_result.metrics),
+                    skipped=False,
+                    failure_reason=service_result.failure_reason,
+                    error_message=service_result.error_message,
+                    ingestion_run_id=service_result.ingestion_run_id,
+                )
+            except Exception as exc:
+                # Catch unexpected exceptions from service calls and convert
+                # them into a safe failed step (credential-free message).
+                tb = traceback.format_exception_only(type(exc), exc)
+                safe_msg = "".join(tb).strip()
+                step = RecoveryStepResult(
+                    date=day,
+                    date_label=date_label,
+                    extractor=extractor_name,
+                    success=False,
+                    extraction_type=f"{extractor_name}_extraction",
+                    metrics={},
+                    skipped=False,
+                    failure_reason="unexpected_error",
+                    error_message=safe_msg,
+                    ingestion_run_id=None,
+                )
+
+            steps.append(step)
+
+    return RecoveryRunResult(
+        start_date=plan.dates[0] if plan.dates else date.min,
+        end_date=plan.dates[-1] if plan.dates else date.min,
+        steps=steps,
+    )
 
 
 # ---------------------------------------------------------------------------
