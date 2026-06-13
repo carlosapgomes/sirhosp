@@ -102,6 +102,7 @@ def _create_pipeline_run(
     user,
     admission: Admission,
     *,
+    summary_run,
     phase1_cost: Decimal = Decimal("0.50"),
     phase2_cost: Decimal = Decimal("0.30"),
     phase1_reused: bool = False,
@@ -109,7 +110,8 @@ def _create_pipeline_run(
     """Create a pipeline run with two step runs."""
     from decimal import Decimal as D
 
-    run = SummaryPipelineRun.objects.create(
+    pipeline_run = SummaryPipelineRun.objects.create(
+        summary_run=summary_run,  # STC-S4: link to originating SummaryRun
         admission=admission,
         requested_by=user,
         mode=SummaryPipelineRun.Mode.GENERATE,
@@ -123,7 +125,7 @@ def _create_pipeline_run(
 
     # Phase 1 step run
     SummaryPipelineStepRun.objects.create(
-        pipeline_run=run,
+        pipeline_run=pipeline_run,
         step_type=SummaryPipelineStepRun.StepType.PHASE1_CANONICAL,
         status=(
             SummaryPipelineStepRun.Status.SKIPPED
@@ -149,7 +151,7 @@ def _create_pipeline_run(
 
     # Phase 2 step run
     SummaryPipelineStepRun.objects.create(
-        pipeline_run=run,
+        pipeline_run=pipeline_run,
         step_type=SummaryPipelineStepRun.StepType.PHASE2_RENDER,
         status=SummaryPipelineStepRun.Status.SUCCEEDED,
         provider_name="openai",
@@ -169,7 +171,7 @@ def _create_pipeline_run(
         finished_at=datetime(2026, 5, 4, 9, 5, tzinfo=timezone.utc),
     )
 
-    return run
+    return pipeline_run
 
 
 def _create_exchange_rate(rate: Decimal = Decimal("5.60")) -> ExchangeRateSnapshot:
@@ -200,6 +202,7 @@ class TestStatusCostVisibility:
         run = _make_run(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.50"),
             phase2_cost=Decimal("0.30"),
         )
@@ -227,6 +230,7 @@ class TestStatusCostVisibility:
         run = _make_run(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.50"),
             phase2_cost=Decimal("0.30"),
         )
@@ -268,6 +272,7 @@ class TestStatusCostVisibility:
         run = _make_run(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.50"),
             phase2_cost=Decimal("0.30"),
         )
@@ -293,6 +298,7 @@ class TestStatusCostVisibility:
         run = _make_run(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.00"),
             phase2_cost=Decimal("0.30"),
             phase1_reused=True,
@@ -331,6 +337,7 @@ class TestStatusCostVisibility:
         run = _make_run(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.50"),
             phase2_cost=Decimal("0.30"),
         )
@@ -367,6 +374,7 @@ class TestReadCostVisibility:
         run = _make_run_with_state(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.50"),
             phase2_cost=Decimal("0.30"),
         )
@@ -392,6 +400,7 @@ class TestReadCostVisibility:
         run = _make_run_with_state(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.00"),
             phase2_cost=Decimal("0.30"),
             phase1_reused=True,
@@ -434,6 +443,7 @@ class TestReadCostVisibility:
         run = _make_run_with_state(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.50"),
             phase2_cost=Decimal("0.30"),
         )
@@ -459,6 +469,7 @@ class TestReadCostVisibility:
         run = _make_run_with_state(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.50"),
             phase2_cost=Decimal("0.30"),
         )
@@ -487,6 +498,7 @@ class TestReadCostVisibility:
         run = _make_run_with_state(admission)
         _create_pipeline_run(
             user, admission,
+            summary_run=run,
             phase1_cost=Decimal("0.00"),
             phase2_cost=Decimal("0.00"),
         )
