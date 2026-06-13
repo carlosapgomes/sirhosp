@@ -557,3 +557,119 @@ class TestDefaultExtractorOrderInCommand:
             args, _kwargs = mock_exec.call_args
             plan = args[0]
             assert plan.extractors == DEFAULT_EXTRACTOR_ORDER
+
+
+# ---------------------------------------------------------------------------
+# Optional dry-run end-to-end: exercises command + orchestrator without
+# mocking execute_recovery_plan. Mocks individual service functions to
+# prove no extractor is called during dry-run.
+# ---------------------------------------------------------------------------
+
+
+class TestDryRunEndToEnd:
+    """
+    Exercises the command and orchestrator together in dry-run mode.
+
+    Unlike other command tests that mock ``execute_recovery_plan``, this
+    test lets the real command and orchestrator run, while patching the
+    four extractor service functions so they raise if called. The
+    assertion proves the dry-run completes successfully without invoking
+    any extractor service.
+
+    This validates the wiring between the command and orchestrator is
+    correct without relying on Playwright automation or real credentials.
+    """
+
+    # Patch paths for each service function (the module where the function
+    # lives, not where it is imported).
+    _DISCHARGE_PATH = (
+        "apps.discharges.extraction_service.run_discharge_extraction"
+    )
+    _ADMISSION_PATH = "apps.admissions.services.run_admission_extraction"
+    _DEATH_PATH = "apps.deaths.services.run_death_extraction"
+    _CENSUS_PATH = "apps.census.services.run_official_census_extraction"
+
+    @patch(_DISCHARGE_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_ADMISSION_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_DEATH_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_CENSUS_PATH, side_effect=RuntimeError("should not be called"))
+    def test_dry_run_exercises_command_and_orchestrator_without_calling_services(
+        self,
+        mock_census: object,
+        mock_death: object,
+        mock_admission: object,
+        mock_discharge: object,
+    ):
+        """Dry-run with real orchestrator wiring — no service called."""
+        out = StringIO()
+        call_command(
+            "recover_historical_data",
+            "--date", "01/06/2026",
+            "--dry-run",
+            stdout=out,
+        )
+        output = out.getvalue()
+
+        # Command ran to completion and dry-run label is present.
+        assert "DRY RUN" in output.upper()
+        assert "01/06/2026" in output
+        assert "discharges" in output
+        assert "admissions" in output
+        assert "deaths" in output
+        assert "official_census" in output
+
+    @patch(_DISCHARGE_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_ADMISSION_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_DEATH_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_CENSUS_PATH, side_effect=RuntimeError("should not be called"))
+    def test_dry_run_exits_successfully_with_real_orchestrator(
+        self,
+        mock_census: object,
+        mock_death: object,
+        mock_admission: object,
+        mock_discharge: object,
+    ):
+        """Dry-run via real orchestrator does not call any service."""
+        out = StringIO()
+        try:
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                "--dry-run",
+                stdout=out,
+            )
+        except SystemExit as exc:
+            pytest.fail(f"Dry-run should not cause SystemExit, got {exc.code}")
+
+        output = out.getvalue()
+        assert "Skipped" in output or "SKIPPED" in output or "skipped" in output.lower()
+        assert "Failed: 0" in output or "failed: 0" in output.lower()
+
+    @patch(_DISCHARGE_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_ADMISSION_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_DEATH_PATH, side_effect=RuntimeError("should not be called"))
+    @patch(_CENSUS_PATH, side_effect=RuntimeError("should not be called"))
+    def test_dry_run_range_exercises_orchestrator(
+        self,
+        mock_census: object,
+        mock_death: object,
+        mock_admission: object,
+        mock_discharge: object,
+    ):
+        """Dry-run with date range via real orchestrator."""
+        out = StringIO()
+        try:
+            call_command(
+                "recover_historical_data",
+                "--start-date", "01/06/2026",
+                "--end-date", "03/06/2026",
+                "--dry-run",
+                stdout=out,
+            )
+        except SystemExit as exc:
+            pytest.fail(f"Dry-run range should not cause SystemExit, got {exc.code}")
+
+        output = out.getvalue()
+        assert "DRY RUN" in output.upper()
+        assert "01/06/2026" in output
+        assert "03/06/2026" in output

@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 #
-# recover-historical-data.sh
+# recover-historical-data.sh  [LEGACY]
+#
+# =============================================================================
+# CANONICAL ENTRY POINT
+#
+# The official recovery command is:
+#
+#   python manage.py recover_historical_data --date DD/MM/AAAA
+#
+# This shell script is a LEGACY HELPER that predates the Django command. It
+# remains available for operators with existing automation or documentation
+# that references it directly. New workflows should use the Django command.
+#
+# The Django command supports:
+# - Single date (--date DD/MM/AAAA) or inclusive range
+# - Extractor selection (--extractor admissions --extractor deaths)
+# - Dry-run planning (--dry-run), fail-fast (--fail-fast)
+# - Direct Python service calls (no subprocess/management-command boundary)
+# =============================================================================
 #
 # Re-executa os comandos de extração de altas, admissões, óbitos e censo
 # oficial para um intervalo de datas, dia a dia.

@@ -111,13 +111,9 @@ class Command(BaseCommand):
                 raise CommandError(str(exc)) from exc
             days = [parsed_date]
         else:
-            if not start_date_arg:
-                raise CommandError("--start-date is required when using date range.")
-            if not end_date_arg:
-                raise CommandError("--end-date is required when using date range.")
             try:
-                parsed_start = _parse_date(start_date_arg)
-                parsed_end = _parse_date(end_date_arg)
+                parsed_start = _parse_date(start_date_arg)  # type: ignore[arg-type]  # guarded above
+                parsed_end = _parse_date(end_date_arg)      # type: ignore[arg-type]  # guarded above
             except ValueError as exc:
                 raise CommandError(str(exc)) from exc
             try:
