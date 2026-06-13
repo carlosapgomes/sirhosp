@@ -673,3 +673,206 @@ class TestDryRunEndToEnd:
         assert "DRY RUN" in output.upper()
         assert "01/06/2026" in output
         assert "03/06/2026" in output
+
+
+# ---------------------------------------------------------------------------
+# Retry argument tests
+# ---------------------------------------------------------------------------
+
+
+class TestRetryArgument:
+    """--max-retries argument parsing and validation."""
+
+    def test_default_max_retries_is_three(self):
+        """Default max_retries should be 3."""
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = _make_success_result()
+            out = StringIO()
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                stdout=out,
+            )
+            _ = out.getvalue()
+            args, _kwargs = mock_exec.call_args
+            plan = args[0]
+            assert plan.max_retries == 3
+
+    def test_custom_max_retries_passed_to_plan(self):
+        """Explicit --max-retries value is passed to the plan."""
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = _make_success_result()
+            out = StringIO()
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                "--max-retries", "5",
+                stdout=out,
+            )
+            _ = out.getvalue()
+            args, _kwargs = mock_exec.call_args
+            plan = args[0]
+            assert plan.max_retries == 5
+
+    def test_max_retries_zero_disables_retries(self):
+        """--max-retries 0 disables retries."""
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = _make_success_result()
+            out = StringIO()
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                "--max-retries", "0",
+                stdout=out,
+            )
+            _ = out.getvalue()
+            args, _kwargs = mock_exec.call_args
+            plan = args[0]
+            assert plan.max_retries == 0
+
+    def test_negative_max_retries_fails(self):
+        """Negative --max-retries fails before extraction."""
+        with pytest.raises(CommandError) as exc_info:
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                "--max-retries", "-1",
+            )
+        assert "non-negative" in str(exc_info.value).lower()
+
+
+class TestRetryCommandOutput:
+    """Command output shows retry rounds when they occur."""
+
+    def test_retry_rounds_in_output_when_retries_used(self):
+        """Output includes 'Retry rounds' line when retries happened."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=True,
+                    extraction_type="discharge_extraction",
+                    metrics={"total_records": 5},
+                ),
+            ],
+            retry_rounds_used=2,
+            retry_attempts=2,
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            out = StringIO()
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                stdout=out,
+            )
+            output = out.getvalue()
+            assert "Retry rounds" in output
+            assert "2 attempt(s)" in output
+
+    def test_no_retry_output_when_no_retries(self):
+        """Output does not mention retries when none occurred."""
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = _make_success_result()
+            out = StringIO()
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                stdout=out,
+            )
+            output = out.getvalue()
+            assert "Retry" not in output
+
+    def test_retry_output_with_successful_retries_exits_zero(self):
+        """With retries that succeed, the command should exit zero."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=True,
+                    extraction_type="discharge_extraction",
+                    metrics={"total_records": 5},
+                ),
+            ],
+            retry_rounds_used=1,
+            retry_attempts=1,
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            out = StringIO()
+            try:
+                call_command(
+                    "recover_historical_data",
+                    "--date", "01/06/2026",
+                    stdout=out,
+                )
+            except SystemExit as exc:
+                pytest.fail(
+                    f"Successful retries should not cause SystemExit, got {exc.code}"
+                )
+
+    def test_retry_output_with_failure_after_retries_exits_nonzero(self):
+        """With retries exhausted, the command exits non-zero."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=False,
+                    extraction_type="discharge_extraction",
+                    failure_reason="timeout",
+                    error_message="Timed out",
+                ),
+            ],
+            retry_rounds_used=3,
+            retry_attempts=3,
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            with pytest.raises(SystemExit) as exc_info:
+                call_command(
+                    "recover_historical_data",
+                    "--date", "01/06/2026",
+                )
+            assert exc_info.value.code != 0
+
+    def test_summary_includes_retry_fields_when_retried(self):
+        """Command output summary includes retry rounds and attempts."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=True,
+                    extraction_type="discharge_extraction",
+                    metrics={"total_records": 5},
+                ),
+            ],
+            retry_rounds_used=1,
+            retry_attempts=1,
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            out = StringIO()
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                stdout=out,
+            )
+            output = out.getvalue()
+            assert "Retry rounds: 1" in output
+            assert "(1 attempt(s))" in output

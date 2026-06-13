@@ -87,6 +87,16 @@ class Command(BaseCommand):
             dest="fail_fast",
             help="Stop after the first failed extraction.",
         )
+        parser.add_argument(
+            "--max-retries",
+            type=int,
+            default=3,
+            dest="max_retries",
+            help=(
+                "Maximum retry rounds for failed steps after the initial "
+                "batch. 0 disables retries. Default: 3."
+            ),
+        )
 
     def handle(self, *args, **options):
         # -- Resolve date arguments -------------------------------------------
@@ -132,11 +142,18 @@ class Command(BaseCommand):
         dry_run = bool(options.get("dry_run", False))
         fail_fast = bool(options.get("fail_fast", False))
 
+        max_retries = options.get("max_retries", 3)
+        if not isinstance(max_retries, int) or max_retries < 0:
+            raise CommandError(
+                "--max-retries must be a non-negative integer."
+            )
+
         plan = RecoveryPlan(
             dates=days,
             extractors=extractors,
             dry_run=dry_run,
             fail_fast=fail_fast,
+            max_retries=max_retries,
         )
 
         # -- Print header -----------------------------------------------------
@@ -155,6 +172,14 @@ class Command(BaseCommand):
                 status = f"FAILED ({step.failure_reason})"
             self.stdout.write(
                 f"  {step.date_label} - {step.extractor:<20s} {status}"
+            )
+
+        # -- Print retry rounds (if any) --------------------------------------
+        if result.retry_rounds_used:
+            self.stdout.write("")
+            self.stdout.write(
+                f"Retry rounds: {result.retry_rounds_used} "
+                f"({result.retry_attempts} attempt(s))"
             )
 
         # -- Print summary ----------------------------------------------------

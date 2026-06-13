@@ -291,11 +291,88 @@ def execute_recovery_plan(
                 should_stop = True
                 break
 
+    # --- Retry rounds (end-of-batch) --------------------------------------
+    retry_rounds_used = 0
+    retry_attempts = 0
+
+    if not plan.dry_run and not plan.fail_fast and plan.max_retries > 0:
+        failed = [s for s in steps if not s.success and not s.skipped]
+
+        for _round_num in range(1, plan.max_retries + 1):
+            if not failed:
+                break
+            retry_rounds_used = _round_num
+
+            retry_results: list[RecoveryStepResult] = []
+            for failed_step in failed:
+                retry_attempts += 1
+                date_label = _date_to_str(failed_step.date)
+                service_fn = service_registry[failed_step.extractor]
+
+                try:
+                    service_result = service_fn(date_label, headless=headless)
+                    new_step = RecoveryStepResult(
+                        date=failed_step.date,
+                        date_label=date_label,
+                        extractor=failed_step.extractor,
+                        success=service_result.success,
+                        extraction_type=service_result.extraction_type,
+                        metrics=dict(service_result.metrics),
+                        skipped=False,
+                        failure_reason=service_result.failure_reason,
+                        error_message=service_result.error_message,
+                        ingestion_run_id=service_result.ingestion_run_id,
+                    )
+                except Exception:
+                    new_step = RecoveryStepResult(
+                        date=failed_step.date,
+                        date_label=date_label,
+                        extractor=failed_step.extractor,
+                        success=False,
+                        extraction_type=f"{failed_step.extractor}_extraction",
+                        metrics={},
+                        skipped=False,
+                        failure_reason="unexpected_error",
+                        error_message="Unexpected extractor failure.",
+                        ingestion_run_id=None,
+                    )
+
+                retry_results.append(new_step)
+
+            # Replace old failed steps with retry results in the steps list.
+            _replace_steps_by_key(steps, retry_results)
+            failed = [s for s in steps if not s.success and not s.skipped]
+
     return RecoveryRunResult(
         start_date=plan.dates[0] if plan.dates else date.min,
         end_date=plan.dates[-1] if plan.dates else date.min,
         steps=steps,
+        retry_rounds_used=retry_rounds_used,
+        retry_attempts=retry_attempts,
     )
+
+
+def _replace_steps_by_key(
+    steps: list[RecoveryStepResult],
+    replacements: list[RecoveryStepResult],
+) -> None:
+    """Replace steps in *steps* with matching steps from *replacements*.
+
+    Matching is done by ``(date, extractor)`` identity. The replacement list
+    is expected to have the same or fewer entries than the number of steps
+    to replace. Steps not matched are left unchanged.
+
+    Args:
+        steps: Mutable list of steps to update in-place.
+        replacements: New step results that should replace old ones.
+    """
+    replacement_map: dict[tuple[date, str], RecoveryStepResult] = {
+        (s.date, s.extractor): s for s in replacements
+    }
+    for i, step in enumerate(steps):
+        key = (step.date, step.extractor)
+        if key in replacement_map:
+            steps[i] = replacement_map[key]
 
 
 # ---------------------------------------------------------------------------
@@ -352,11 +429,16 @@ class RecoveryRunResult:
         start_date: Inclusive start date of the recovery period.
         end_date: Inclusive end date of the recovery period.
         steps: Ordered list of per-step results.
+        retry_rounds_used: Number of retry rounds actually executed.
+        retry_attempts: Total number of individual step retry attempts
+            across all rounds.
     """
 
     start_date: date
     end_date: date
     steps: list[RecoveryStepResult] = field(default_factory=list)
+    retry_rounds_used: int = 0
+    retry_attempts: int = 0
 
     # -- computed properties ------------------------------------------------
 
@@ -386,13 +468,17 @@ class RecoveryRunResult:
     @property
     def summary(self) -> str:
         """Human-readable one-line summary of results."""
-        return (
-            f"Days: {len(set(s.date for s in self.steps))} | "
-            f"Steps: {self.total_steps} | "
-            f"Succeeded: {self.successful_steps} | "
-            f"Failed: {self.failed_steps} | "
-            f"Skipped: {self.skipped_steps}"
-        )
+        parts = [
+            f"Days: {len(set(s.date for s in self.steps))}",
+            f"Steps: {self.total_steps}",
+            f"Succeeded: {self.successful_steps}",
+            f"Failed: {self.failed_steps}",
+            f"Skipped: {self.skipped_steps}",
+        ]
+        if self.retry_rounds_used:
+            parts.append(f"Retry rounds: {self.retry_rounds_used}")
+            parts.append(f"Retry attempts: {self.retry_attempts}")
+        return " | ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -409,12 +495,16 @@ class RecoveryPlan:
         extractors: Ordered list of extractor names to run.
         dry_run: When ``True``, show plan without executing.
         fail_fast: When ``True``, stop after first failure.
+        max_retries: Maximum number of end-of-batch retry rounds
+            to attempt for failed steps. ``0`` disables retries.
+            Default ``3``.
     """
 
     dates: list[date]
     extractors: list[str]
     dry_run: bool = False
     fail_fast: bool = False
+    max_retries: int = 3
 
     @property
     def total_dates(self) -> int:

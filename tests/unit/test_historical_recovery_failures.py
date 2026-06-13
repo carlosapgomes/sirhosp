@@ -316,6 +316,7 @@ class TestContinueOnFailure:
         plan = RecoveryPlan(
             dates=[date(2026, 6, 1), date(2026, 6, 2)],
             extractors=DEFAULT_EXTRACTOR_ORDER,
+            max_retries=0,
         )
         result = execute_recovery_plan(plan, service_registry=registry)
 
@@ -324,6 +325,8 @@ class TestContinueOnFailure:
         assert result.failed_steps == 1
         assert result.successful_steps == 7
         assert result.success is False
+        assert result.retry_rounds_used == 0
+        assert result.retry_attempts == 0
 
     def test_all_succeed_is_successful(self):
         fakes, registry = make_service_registry_for_test()
@@ -845,3 +848,501 @@ class TestCombinedScenarios:
             assert step.skipped is True
         for name in DEFAULT_EXTRACTOR_ORDER:
             assert len(fakes[name].calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Retry round tests
+# ---------------------------------------------------------------------------
+
+
+class TestRetryRounds:
+    """End-of-batch retry for failed steps."""
+
+    # -- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _make_persistent_fail(
+        name: str,
+    ) -> Callable[..., ExtractionResult]:
+        """Create a service that always returns failure."""
+        fail_result = ExtractionResult(
+            extraction_type=f"{name}_extraction",
+            target_start=date(2026, 6, 1),
+            target_end=date(2026, 6, 1),
+            success=False,
+            failure_reason="timeout",
+            error_message="Timed out",
+        )
+
+        def fn(date_str: str, headless: bool = True) -> ExtractionResult:
+            return fail_result
+
+        return fn
+
+    # -- test: retry after full batch ---------------------------------------
+
+    def test_retry_failed_steps_after_full_batch(self):
+        """Failed steps are retried after the full initial batch completes."""
+        call_counts: dict[str, int] = {}
+
+        def make_service(name: str) -> Callable:
+            def fn(date_str: str, headless: bool = True) -> ExtractionResult:
+                call_counts.setdefault(name, 0)
+                call_counts[name] += 1
+                # Fail only on first call for "admissions"
+                if name == "admissions" and call_counts[name] == 1:
+                    return ExtractionResult(
+                        extraction_type="admission_extraction",
+                        target_start=date(2026, 6, 1),
+                        target_end=date(2026, 6, 1),
+                        success=False,
+                        failure_reason="timeout",
+                        error_message="Timed out",
+                    )
+                return ExtractionResult(
+                    extraction_type=f"{name}_extraction",
+                    target_start=date(2026, 6, 1),
+                    target_end=date(2026, 6, 1),
+                    success=True,
+                )
+
+            return fn
+
+        registry: dict[str, Callable] = {
+            name: make_service(name) for name in DEFAULT_EXTRACTOR_ORDER
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=DEFAULT_EXTRACTOR_ORDER,
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        # Initial batch: 4 steps. Retry round: 1 step (admissions).
+        assert result.total_steps == 4
+        assert result.success is True
+        assert result.failed_steps == 0
+        assert result.retry_rounds_used == 1
+        assert result.retry_attempts == 1
+
+        # Verify admissions was called twice (initial + retry)
+        assert call_counts.get("admissions", 0) == 2
+        # All other services called once
+        for name in ["discharges", "deaths", "official_census"]:
+            assert call_counts.get(name, 0) == 1, (
+                f"{name} was called {call_counts.get(name, 0)} times"
+            )
+
+    def test_retry_does_not_rerun_successful_steps(self):
+        """Successful steps are never retried, only failed ones."""
+        call_counts: dict[str, int] = {}
+
+        def make_service(name: str) -> Callable:
+            def fn(date_str: str, headless: bool = True) -> ExtractionResult:
+                call_counts.setdefault(name, 0)
+                call_counts[name] += 1
+                if name == "discharges" and call_counts[name] == 1:
+                    return ExtractionResult(
+                        extraction_type="discharge_extraction",
+                        target_start=date(2026, 6, 1),
+                        target_end=date(2026, 6, 1),
+                        success=False,
+                        failure_reason="timeout",
+                        error_message="Timed out",
+                    )
+                return ExtractionResult(
+                    extraction_type=f"{name}_extraction",
+                    target_start=date(2026, 6, 1),
+                    target_end=date(2026, 6, 1),
+                    success=True,
+                )
+
+            return fn
+
+        registry: dict[str, Callable] = {
+            name: make_service(name) for name in DEFAULT_EXTRACTOR_ORDER
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=DEFAULT_EXTRACTOR_ORDER,
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        # Only discharges was retried (once)
+        assert result.retry_rounds_used == 1
+        assert result.retry_attempts == 1
+        assert call_counts.get("discharges", 0) == 2
+        # Admissions, deaths, census called once each (initial batch only)
+        for name in ["admissions", "deaths", "official_census"]:
+            assert call_counts.get(name, 0) == 1, (
+                f"{name} should not be retried, called {call_counts.get(name, 0)} times"
+            )
+
+    # -- test: retry success makes final result successful ------------------
+
+    def test_retry_success_makes_final_result_successful(self):
+        """When a retry succeeds, the final result is successful."""
+        call_counts: dict[str, int] = {}
+
+        def flaky_service(date_str: str, headless: bool = True) -> ExtractionResult:
+            call_counts.setdefault("discharges", 0)
+            call_counts["discharges"] += 1
+            if call_counts["discharges"] == 1:
+                return ExtractionResult(
+                    extraction_type="discharge_extraction",
+                    target_start=date(2026, 6, 1),
+                    target_end=date(2026, 6, 1),
+                    success=False,
+                    failure_reason="source_unavailable",
+                    error_message="Source temporarily unavailable",
+                )
+            return ExtractionResult(
+                extraction_type="discharge_extraction",
+                target_start=date(2026, 6, 1),
+                target_end=date(2026, 6, 1),
+                success=True,
+            )
+
+        registry = {"discharges": flaky_service}
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["discharges"],
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        assert result.success is True
+        assert result.failed_steps == 0
+        assert result.retry_rounds_used == 1
+        # The final step in the list reflects the retry outcome (success)
+        assert result.steps[0].success is True
+
+    # -- test: failures after retry exhaustion ------------------------------
+
+    def test_failures_after_retry_exhaustion_still_fail(self):
+        """Failures persisting after all retry rounds still exit non-zero."""
+        registry: dict[str, Callable] = {
+            "discharges": self._make_persistent_fail("discharges"),
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["discharges"],
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        assert result.success is False
+        assert result.failed_steps == 1
+        # Initial batch (1) + 3 retry rounds = 4 attempts
+        assert result.retry_rounds_used == 3
+        assert result.retry_attempts == 3
+
+    def test_retry_exhaustion_still_shows_failed_step(self):
+        """After retry exhaustion, the step remains failed with correct reason."""
+        registry: dict[str, Callable] = {
+            "admissions": self._make_persistent_fail("admissions"),
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["admissions"],
+            max_retries=2,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        assert result.success is False
+        assert result.failed_steps == 1
+        assert result.retry_rounds_used == 2
+        # Final step still shows failure reason
+        assert result.steps[0].success is False
+        assert result.steps[0].failure_reason == "timeout"
+
+    # -- test: max_retries 0 ------------------------------------------------
+
+    def test_max_retries_zero_disables_retries(self):
+        """max_retries=0 preserves original no-retry behavior."""
+        registry: dict[str, Callable] = {
+            "discharges": self._make_persistent_fail("discharges"),
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["discharges"],
+            max_retries=0,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        assert result.success is False
+        assert result.failed_steps == 1
+        assert result.retry_rounds_used == 0
+        assert result.retry_attempts == 0
+
+    # -- test: dry-run does not retry ---------------------------------------
+
+    def test_dry_run_does_not_run_retries(self):
+        """Dry-run must not execute retry rounds."""
+        registry: dict[str, Callable] = {
+            "discharges": self._make_persistent_fail("discharges"),
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["discharges"],
+            dry_run=True,
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        # Dry-run produces skipped steps, no failures, no retries
+        assert result.total_steps == 1
+        assert result.steps[0].skipped is True
+        assert result.success is True
+        assert result.retry_rounds_used == 0
+        assert result.retry_attempts == 0
+
+    # -- test: fail-fast does not retry -------------------------------------
+
+    def test_fail_fast_does_not_run_retries(self):
+        """Fail-fast must not execute retry rounds after a failure."""
+        registry: dict[str, Callable] = {
+            "discharges": self._make_persistent_fail("discharges"),
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["discharges"],
+            fail_fast=True,
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        assert result.total_steps == 1
+        assert result.success is False
+        assert result.failed_steps == 1
+        assert result.retry_rounds_used == 0
+        assert result.retry_attempts == 0
+
+    # -- test: unexpected exception can be retried --------------------------
+
+    def test_unexpected_exception_can_be_retried(self):
+        """Unexpected exceptions on first call can succeed on retry."""
+        call_counts: dict[str, int] = {}
+
+        def flaky_crash_service(
+            date_str: str, headless: bool = True
+        ) -> ExtractionResult:
+            call_counts.setdefault("deaths", 0)
+            call_counts["deaths"] += 1
+            if call_counts["deaths"] == 1:
+                raise RuntimeError("Temporary crash")
+            return ExtractionResult(
+                extraction_type="death_extraction",
+                target_start=date(2026, 6, 1),
+                target_end=date(2026, 6, 1),
+                success=True,
+            )
+
+        registry = {"deaths": flaky_crash_service}
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["deaths"],
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        assert result.success is True
+        assert result.failed_steps == 0
+        assert result.retry_rounds_used == 1
+        assert result.retry_attempts == 1
+        # Final step reflects retry success
+        assert result.steps[0].success is True
+        assert result.steps[0].failure_reason == ""
+
+    def test_unexpected_exception_on_retry_still_credential_safe(self):
+        """Exceptions during retry round are still credential-safe."""
+        call_counts: dict[str, int] = {}
+
+        def always_crash(
+            date_str: str, headless: bool = True
+        ) -> ExtractionResult:
+            call_counts.setdefault("deaths", 0)
+            call_counts["deaths"] += 1
+            raise RuntimeError("password=secret_leaked")
+
+        registry = {"deaths": always_crash}
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["deaths"],
+            max_retries=2,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        assert result.success is False
+        assert result.failed_steps == 1
+        assert result.retry_rounds_used == 2
+        assert result.retry_attempts == 2
+        # The error message must be safe
+        for step in result.steps:
+            assert "password" not in step.error_message.lower()
+            assert "secret_leaked" not in step.error_message
+
+    # -- test: retry over multiple dates ------------------------------------
+
+    def test_retry_multiple_dates_fails_on_one_date(self):
+        """Retry across multiple dates: only failed date steps are retried."""
+        call_counts: dict[tuple[str, str], int] = {}
+
+        def make_flaky(name: str) -> Callable:
+            def fn(date_str: str, headless: bool = True) -> ExtractionResult:
+                key = (date_str, name)
+                call_counts[key] = call_counts.get(key, 0) + 1
+                # Fail only on first call for discharges on 01/06
+                if name == "discharges" and date_str == "01/06/2026":
+                    if call_counts[key] == 1:
+                        return ExtractionResult(
+                            extraction_type="discharge_extraction",
+                            target_start=date(2026, 6, 1),
+                            target_end=date(2026, 6, 1),
+                            success=False,
+                            failure_reason="timeout",
+                            error_message="Timed out",
+                        )
+                return ExtractionResult(
+                    extraction_type=f"{name}_extraction",
+                    target_start=date(2026, 6, 1),
+                    target_end=date(2026, 6, 1),
+                    success=True,
+                )
+
+            return fn
+
+        registry: dict[str, Callable] = {
+            name: make_flaky(name) for name in DEFAULT_EXTRACTOR_ORDER
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1), date(2026, 6, 2)],
+            extractors=DEFAULT_EXTRACTOR_ORDER,
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        # Initial: 8 steps, 1 failure. Retry: 1 step (discharges on 01/06).
+        assert result.total_steps == 8
+        assert result.success is True
+        assert result.failed_steps == 0
+        assert result.retry_rounds_used == 1
+        assert result.retry_attempts == 1
+
+        # Verify only the failed step was retried
+        assert call_counts.get(("01/06/2026", "discharges"), 0) == 2
+        assert call_counts.get(("02/06/2026", "discharges"), 0) == 1
+        for name in ["admissions", "deaths", "official_census"]:
+            assert call_counts.get(("01/06/2026", name), 0) == 1
+            assert call_counts.get(("02/06/2026", name), 0) == 1
+
+    # -- test: retry rounds count -------------------------------------------
+
+    def test_multiple_retry_rounds_accuracy(self):
+        """Retry stops after max_retries rounds when failure persists."""
+        registry: dict[str, Callable] = {
+            "discharges": self._make_persistent_fail("discharges"),
+        }
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["discharges"],
+            max_retries=5,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        assert result.success is False
+        assert result.failed_steps == 1
+        assert result.retry_rounds_used == 5
+        assert result.retry_attempts == 5
+
+    def test_retry_stops_early_when_all_succeed(self):
+        """Retry rounds stop early if all failed steps succeed on one round."""
+        call_counts: dict[str, int] = {}
+
+        def twice_fail_then_ok(
+            date_str: str, headless: bool = True
+        ) -> ExtractionResult:
+            call_counts.setdefault("discharges", 0)
+            call_counts["discharges"] += 1
+            if call_counts["discharges"] <= 3:
+                # Fail on initial batch + first 2 retry rounds
+                return ExtractionResult(
+                    extraction_type="discharge_extraction",
+                    target_start=date(2026, 6, 1),
+                    target_end=date(2026, 6, 1),
+                    success=False,
+                    failure_reason="timeout",
+                    error_message="Timed out",
+                )
+            return ExtractionResult(
+                extraction_type="discharge_extraction",
+                target_start=date(2026, 6, 1),
+                target_end=date(2026, 6, 1),
+                success=True,
+            )
+
+        registry = {"discharges": twice_fail_then_ok}
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["discharges"],
+            max_retries=5,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        # Initial (fail) + 3 retries (fail, fail, succeed) = 4 calls total
+        assert result.success is True
+        assert result.failed_steps == 0
+        assert result.retry_rounds_used == 3
+        assert result.retry_attempts == 3
+        assert call_counts.get("discharges", 0) == 4
+
+    # -- test: summary includes retry info ----------------------------------
+
+    def test_summary_includes_retry_info_when_retried(self):
+        """Summary string includes retry rounds and attempts when retries occurred."""
+        call_counts: dict[str, int] = {}
+
+        def flaky(date_str: str, headless: bool = True) -> ExtractionResult:
+            call_counts.setdefault("discharges", 0)
+            call_counts["discharges"] += 1
+            if call_counts["discharges"] == 1:
+                return ExtractionResult(
+                    extraction_type="discharge_extraction",
+                    target_start=date(2026, 6, 1),
+                    target_end=date(2026, 6, 1),
+                    success=False,
+                    failure_reason="timeout",
+                    error_message="Timed out",
+                )
+            return ExtractionResult(
+                extraction_type="discharge_extraction",
+                target_start=date(2026, 6, 1),
+                target_end=date(2026, 6, 1),
+                success=True,
+            )
+
+        registry = {"discharges": flaky}
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=["discharges"],
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        summary = result.summary
+        assert "Retry rounds:" in summary
+        assert "Retry attempts:" in summary
+
+    def test_summary_no_retry_info_when_not_retried(self):
+        """Summary string does not include retry info when no retries occurred."""
+        fakes, registry = make_service_registry_for_test()
+        plan = RecoveryPlan(
+            dates=[date(2026, 6, 1)],
+            extractors=DEFAULT_EXTRACTOR_ORDER,
+            max_retries=3,
+        )
+        result = execute_recovery_plan(plan, service_registry=registry)
+
+        summary = result.summary
+        assert "Retry" not in summary
