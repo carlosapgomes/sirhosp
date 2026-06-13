@@ -23,6 +23,7 @@ from django.db.models import (
     Max,
     OuterRef,
     Q,
+    QuerySet,
     Subquery,
     Value,
 )
@@ -2055,6 +2056,7 @@ def sector_indicators(request: HttpRequest) -> HttpResponse:
     # not the census 'origin' field (which contains bed codes).
     origem = request.GET.get("origem", "").strip()
 
+    dest_qs: QuerySet
     if origem:
         # Find movements whose previous movement was in sector `origem`
         prev_sector_subq = PatientMovement.objects.filter(
@@ -2103,7 +2105,7 @@ def sector_indicators(request: HttpRequest) -> HttpResponse:
                 long_stay_counts.get(m.sector, 0) + 1
             )
 
-    long_stay = sorted(
+    long_stay: list[dict[str, Any]] = sorted(
         [{"sector": s, "count": c} for s, c in long_stay_counts.items()],
         key=lambda x: -x["count"],
     )

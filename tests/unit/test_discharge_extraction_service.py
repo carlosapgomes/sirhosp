@@ -29,7 +29,7 @@ from apps.discharges.models import DailyDischargeCount, DischargeRecord
 # ---------------------------------------------------------------------------
 
 
-def _make_discharge_xls_rows(records_count: int = 3):
+def _make_discharge_xls_rows(records_count: int = 3) -> list[tuple]:
     """Create synthetic XLS row tuples matching the expected column layout.
 
     Column layout (0-indexed):
@@ -43,7 +43,7 @@ def _make_discharge_xls_rows(records_count: int = 3):
       H(7): Local (L:UN08H or U:0 T)
       I(8): Saida (DD/MM/YYYY HH:MM)
     """
-    rows = [
+    rows: list[tuple] = [
         # Header row (will be skipped by parser)
         (
             "ID", "Prontuario", "Nome", "Internacao", "Equipe",

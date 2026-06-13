@@ -27,13 +27,13 @@ from apps.discharges.models import DailyDischargeCount, DischargeRecord
 # ---------------------------------------------------------------------------
 
 
-def _make_discharge_xls_rows(records_count: int = 3):
+def _make_discharge_xls_rows(records_count: int = 3) -> list[tuple]:
     """Create synthetic XLS row tuples matching the expected column layout.
 
     All alta_em dates use the same reference date (01/06/2026) for
     predictable DailyDischargeCount association.
     """
-    rows = [
+    rows: list[tuple] = [
         # Header row (will be skipped by parser)
         (
             "ID", "Prontuario", "Nome", "Internacao", "Equipe",
