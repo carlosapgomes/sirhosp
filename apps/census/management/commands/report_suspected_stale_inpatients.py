@@ -5,7 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
-from django.db.models import Exists, Max, OuterRef, Subquery
+from django.db.models import Exists, F, Max, OuterRef, Subquery
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
@@ -72,36 +72,37 @@ class Command(BaseCommand):
         #    Só considera internações com pelo menos stale_hours de
         #    existência — evita que admissões recém-criadas sem
         #    evolução extraída sejam tratadas como suspeitas.
+        #    Além disso, considera apenas a ÚLTIMA admissão de cada
+        #    paciente (pk = latest_pk), evitando duplicatas e garantindo
+        #    que o check de eventos seja contra a admissão correta.
+        latest_pk_subq = Subquery(
+            Admission.objects.filter(
+                patient=OuterRef("patient")
+            ).order_by("-admission_date", "-id").values("pk")[:1]
+        )
         active = Admission.objects.filter(
             discharge_date__isnull=True,
             admission_date__lt=cutoff,
         ).annotate(
             latest_patient_discharge=latest_discharge,
+            _latest_pk=latest_pk_subq,
         ).filter(
             latest_patient_discharge__isnull=True,
+            _latest_pk=F("pk"),
         )
 
-        # 3) PK da última admissão do paciente (por data, desempate por id)
-        latest_adm_pk = Subquery(
-            Admission.objects.filter(
-                patient=OuterRef("patient")
-            ).order_by("-admission_date", "-id").values("pk")[:1]
-        )
-
-        # 4) Existe alguma evolução na ÚLTIMA admissão do paciente
-        #    nas últimas N horas? (Não na admissão corrente — evita
-        #    falsos positivos quando há admissão antiga órfã sem alta
-        #    mas a admissão mais recente tem evoluções.)
+        # 3) Existe alguma evolução nesta admissão (que já é a última
+        #    do paciente) nas últimas N horas?
         recent_event_exists = Exists(
             ClinicalEvent.objects.filter(
-                admission_id=latest_adm_pk,
+                admission=OuterRef("pk"),
                 happened_at__gte=cutoff,
             )
         )
 
-        # 5) Última evolução da ÚLTIMA admissão (info contextual)
+        # 4) Última evolução desta admissão (para informação contextual)
         last_event_qs = ClinicalEvent.objects.filter(
-            admission_id=latest_adm_pk
+            admission=OuterRef("pk")
         ).order_by("-happened_at")
 
         # 6) Dados do censo mais recente (setor/leito/especialidade atuais)

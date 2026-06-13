@@ -150,7 +150,7 @@ def test_excludes_patient_with_old_orphan_admission_when_latest_has_recent_event
         patient_source_key="PX", source_system="tasy", name="Paciente Duas Admissões"
     )
     # Admissão antiga sem alta (bug no sistema fonte)
-    old_adm = Admission.objects.create(
+    Admission.objects.create(
         patient=p,
         source_admission_key="AX-old",
         source_system="tasy",

@@ -109,7 +109,6 @@ class TestIngestionMetricsTabs:
 
         IWBO-S3: Runs table is visible only when a batch is selected.
         """
-        now = timezone.now()
         batch = _make_batch()
         run = _make_run(
             batch=batch,
