@@ -15,29 +15,37 @@ and event counters.
 #### Scenario: Persist lifecycle timestamps and counters on completed run
 
 - **WHEN** a run reaches a terminal state (`succeeded` or `failed`)
-- **THEN** the run persists lifecycle timestamps for queue, processing start, and finish
-- **AND** the run persists admissions counters (`admissions_seen`, `admissions_created`, `admissions_updated`)
-- **AND** the run persists event counters (`events_processed`, `events_created`, `events_skipped`, `events_revised`)
+- **THEN** the run persists lifecycle timestamps for queue, processing start,
+  and finish
+- **AND** the run persists admissions counters (`admissions_seen`,
+  `admissions_created`, `admissions_updated`)
+- **AND** the run persists event counters (`events_processed`,
+  `events_created`, `events_skipped`, `events_revised`)
 
 #### Scenario: Show lifecycle and counters on run status page
 
 - **WHEN** user opens run status page
-- **THEN** run status displays lifecycle timing fields (queue wait, execution duration, total duration)
+- **THEN** run status displays lifecycle timing fields (queue wait, execution
+  duration, total duration)
 - **AND** status displays admissions and event counters for operational traceability
 
 ### Requirement: Run intent and admission context are observable
 
-Ingestion run tracking MUST expose operational intent metadata for admission-first workflows.
+Ingestion run tracking MUST expose operational intent metadata for
+admission-first workflows.
 
 #### Scenario: Persist run intent metadata
 
-- **WHEN** a run is created for admission sync, full-admission sync, or custom-period sync
-- **THEN** run metadata persists the intent type and relevant context (registro, admission identifier, effective date range)
+- **WHEN** a run is created for admission sync, full-admission sync, or
+  custom-period sync
+- **THEN** run metadata persists the intent type and relevant context (registro,
+  admission identifier, effective date range)
 - **AND** status view renders this metadata for operator traceability
 
 ### Requirement: Status guidance reflects admission-first next step
 
-Run status UI SHALL provide explicit guidance according to admissions synchronization outcome.
+Run status UI SHALL provide explicit guidance according to admissions
+synchronization outcome.
 
 #### Scenario: Admissions sync finished with admissions available
 
@@ -47,12 +55,14 @@ Run status UI SHALL provide explicit guidance according to admissions synchroniz
 #### Scenario: Admissions sync finished with zero admissions
 
 - **WHEN** admissions sync run finishes with zero admissions found
-- **THEN** status page shows explicit message that extraction is unavailable without admission
+- **THEN** status page shows explicit message that extraction is unavailable
+  without admission
 - **AND** no action to start evolution extraction is shown
 
 ### Requirement: Run failure outcomes are categorized for operational analysis
 
-Ingestion run tracking MUST classify terminal failures into normalized operational categories.
+Ingestion run tracking MUST classify terminal failures into normalized
+operational categories.
 
 #### Scenario: Persist timeout as normalized failure category
 
@@ -69,11 +79,13 @@ Ingestion run tracking MUST classify terminal failures into normalized operation
 
 ### Requirement: Run stage metrics are persisted for critical execution stages
 
-Ingestion run tracking SHALL persist per-stage execution metrics for operational diagnostics.
+Ingestion run tracking SHALL persist per-stage execution metrics for operational
+diagnostics.
 
 #### Scenario: Persist successful stage execution
 
-- **WHEN** a run executes a critical stage (admissions capture, gap planning, extraction, persistence) successfully
+- **WHEN** a run executes a critical stage (admissions capture, gap planning,
+  extraction, persistence) successfully
 - **THEN** the system persists stage start/end timestamps
 - **AND** the system persists stage status as `succeeded`
 
@@ -83,7 +95,7 @@ Ingestion run tracking SHALL persist per-stage execution metrics for operational
 - **THEN** the system persists stage status as `failed`
 - **AND** the system persists stage-level error context linked to the parent run
 
-## ADDED Requirements (run-status-progress-feedback)
+<!-- Added by run-status-progress-feedback. -->
 
 ### Requirement: Run status page exposes stage-level progress to users
 
@@ -103,7 +115,7 @@ status page.
 - **THEN** the response contains an HTML fragment with stage names and statuses
 - **AND** the fragment is suitable for HTMX partial swap
 
-## ADDED Requirements (ingestion-worker-batch-observability)
+<!-- Added by ingestion-worker-batch-observability. -->
 
 ### Requirement: Worker identity is recorded when processing runs
 
@@ -130,3 +142,101 @@ processed by the asynchronous ingestion worker.
 - **AND** `process_ingestion_runs` claims a queued run
 - **THEN** the system uses a safe fallback based on host/process information
 - **AND** the run remains processable even if hostname resolution is limited
+
+### Requirement: Historical extraction services preserve ingestion run observability
+
+Admission and death historical extraction service executions SHALL persist
+`IngestionRun` lifecycle status and per-stage metrics equivalent to the existing
+management command behavior.
+
+#### Scenario: Successful admission service execution records lifecycle and stages
+
+- **WHEN** admission extraction is executed through the service layer and
+  succeeds
+- **THEN** an `IngestionRun` is persisted with intent identifying admission
+  extraction
+- **AND** the run reaches status `succeeded` with a finish timestamp
+- **AND** successful extraction and persistence stage metrics are linked to the
+  run
+
+#### Scenario: Successful death service execution records lifecycle and stages
+
+- **WHEN** death extraction is executed through the service layer and succeeds
+- **THEN** an `IngestionRun` is persisted with intent identifying death
+  extraction
+- **AND** the run reaches status `succeeded` with a finish timestamp
+- **AND** successful extraction and persistence stage metrics are linked to the
+  run
+
+#### Scenario: Failed service execution records normalized failure metadata
+
+- **WHEN** admission or death extraction fails through the service layer
+- **THEN** the linked `IngestionRun` is marked `failed`
+- **AND** the run persists a safe error message
+- **AND** the run persists the normalized failure reason when it can be
+  classified
+- **AND** the failed stage metric includes safe diagnostic context without
+  credentials
+
+#### Scenario: Timeout service execution records timeout metadata
+
+- **WHEN** admission or death extraction times out during source-system
+  automation
+- **THEN** the linked `IngestionRun` is marked `failed`
+- **AND** the run failure reason is `timeout`
+- **AND** the run timeout flag is set
+
+### Requirement: Census and discharge extraction services preserve observability
+
+Official census and discharge historical extraction service executions SHALL
+persist `IngestionRun` lifecycle status and per-stage metrics equivalent to the
+existing management command behavior.
+
+#### Scenario: Successful official census service execution records lifecycle
+
+- **WHEN** official census extraction is executed through the service layer and
+  succeeds
+- **THEN** an `IngestionRun` is persisted with intent identifying official
+  census extraction
+- **AND** the run reaches status `succeeded` with a finish timestamp
+- **AND** successful extraction and persistence stage metrics are linked to the
+  run
+
+#### Scenario: Successful discharge service execution records lifecycle
+
+- **WHEN** discharge extraction is executed through the service layer and
+  succeeds
+- **THEN** an `IngestionRun` is persisted with intent identifying discharge
+  extraction
+- **AND** the run reaches status `succeeded` with a finish timestamp
+- **AND** successful extraction and persistence stage metrics are linked to the
+  run
+
+#### Scenario: Failed census or discharge service records failure metadata
+
+- **WHEN** official census or discharge extraction fails through the service
+  layer after an `IngestionRun` has been created
+- **THEN** the linked `IngestionRun` is marked `failed`
+- **AND** the run persists a safe error message
+- **AND** the run persists the normalized failure reason when it can be
+  classified
+- **AND** the failed stage metric includes safe diagnostic context without
+  credentials
+
+#### Scenario: Census or discharge timeout records timeout metadata
+
+- **WHEN** official census or discharge extraction times out during
+  source-system automation
+- **THEN** the linked `IngestionRun` is marked `failed`
+- **AND** the run failure reason is `timeout`
+- **AND** the run timeout flag is set
+- **AND** the failed stage metric does not expose credential values or
+  command-line credential flags
+
+#### Scenario: Unexpected outer failure does not leave a running ingestion run
+
+- **WHEN** official census or discharge extraction encounters an unexpected
+  exception after creating an `IngestionRun`
+- **THEN** the service marks the linked run as `failed`
+- **AND** the service returns a structured failed extraction result with the
+  linked ingestion run id
