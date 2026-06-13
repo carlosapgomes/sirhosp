@@ -1,8 +1,11 @@
 # SIRHOSP
 
-## SIRHOSP - Sistema Interno de Relatórios Hospitalares - Extração Inteligente de Dados Clínicos
+## SIRHOSP - Sistema Interno de Relatórios Hospitalares
 
-Sistema interno para extração automatizada de dados clínicos do sistema fonte hospitalar, armazenamento em banco paralelo e geração de consultas rápidas, buscas textuais e resumos direcionados para gestão, qualidade, jurídico e diretoria.
+Sistema interno para extração automatizada de dados clínicos
+ do sistema fonte hospitalar, armazenamento em banco paralelo
+ e geração de consultas rápidas, buscas textuais e resumos
+ direcionados para gestão, qualidade, jurídico e diretoria.
 
 ## Status
 
@@ -154,11 +157,15 @@ O container usa a seguinte ordem de precedência (da mais alta para a mais baixa
 2. Variáveis exportadas pelo shell antes do container
 3. Variáveis definidas em `/app/.env` (apenas para vars ausentes)
 
-Isso permite que o Compose defina valores canônicos (ex: `DATABASE_URL`, `SECRET_KEY`) enquanto o `.env` local adiciona apenas o que faltar.
+Isso permite que o Compose defina valores canônicos
+ (ex: `DATABASE_URL`, `SECRET_KEY`) enquanto o `.env` local
+ adiciona apenas o que faltar.
 
 **Variáveis obrigatórias para produção:**
 
-- `DJANGO_SECRET_KEY` - Chave secreta do Django (gerar com `python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`)
+- `DJANGO_SECRET_KEY` - Chave secreta do Django
+  (gerar com `python -c "from django.core.management.utils
+  import get_random_secret_key; print(get_random_secret_key())"`)
 - `DJANGO_ALLOWED_HOSTS` - Hosts permitidos (ex: `localhost,127.0.0.1,meu-servidor.local`)
 - `POSTGRES_PASSWORD` - Senha do banco PostgreSQL
 - `SOURCE_SYSTEM_URL` - URL do sistema legado (fonte para scraping)
@@ -286,6 +293,56 @@ docker compose -f compose.yml -f compose.dev.yml exec -T web \
   --filter-name HGRS
 ```
 
+### Recuperação histórica de dados
+
+O comando `recover_historical_data` orquestra extração retroativa para uma data
+ou intervalo, chamando os quatro extratores (altas, admissões, óbitos e censo
+oficial) via funções Python diretamente.
+
+```bash
+# Data única
+uv run python manage.py recover_historical_data --date 15/05/2026
+
+# Intervalo inclusivo
+uv run python manage.py recover_historical_data \
+  --start-date 01/06/2026 --end-date 03/06/2026
+
+# Subconjunto de extratores
+uv run python manage.py recover_historical_data --date 01/06/2026 \
+  --extractor discharges --extractor deaths
+
+# Planejamento sem executar (dry-run)
+uv run python manage.py recover_historical_data --date 01/06/2026 --dry-run
+
+# Parar na primeira falha (diagnóstico)
+uv run python manage.py recover_historical_data --date 01/06/2026 --fail-fast
+```
+
+**Retry automático de steps falhos:**
+
+Após o batch inicial completo, steps que falharam são retentados
+automaticamente em rounds ao fim do batch. O comportamento padrão:
+
+- `--max-retries 3` (default): até 3 rounds de retry após o batch inicial
+- `--max-retries 0`: desativa retries (comportamento original)
+- `--fail-fast` + retry: fail-fast **não executa** retry rounds
+- `--dry-run` + retry: dry-run **não executa** retry rounds
+- Valor negativo em `--max-retries`: erro de validação antes da extração
+
+```bash
+# Usar 5 rounds de retry (default é 3)
+uv run python manage.py recover_historical_data --date 01/06/2026 \
+  --max-retries 5
+
+# Desativar retries
+uv run python manage.py recover_historical_data --date 01/06/2026 \
+  --max-retries 0
+```
+
+Apenas steps com `success=False` (não-skipped) do round anterior são
+retentados. Steps bem-sucedidos nunca são repetidos. O resumo final reflete
+o estado após todos os rounds de retry.
+
 ### Modo Desenvolvimento
 
 ```bash
@@ -296,7 +353,8 @@ docker compose -f compose.yml -f compose.dev.yml build web worker
 docker compose -f compose.yml -f compose.dev.yml up -d db web worker summary_worker
 
 # Aplicar migrações
-docker compose -f compose.yml -f compose.dev.yml exec -T web uv run --no-sync python manage.py migrate
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py migrate
 
 # Verificar health
 curl http://localhost:8000/health/
@@ -313,7 +371,8 @@ docker compose -f compose.yml -f compose.dev.yml down -v
 - Bind mount do código (`.:/app`) para hot-reload
 - Django runserver com DEBUG=1
 - Volumes para persistência de dados
-- `summary_worker` roda por padrão em pipeline de duas fases (`process_summary_runs --pipeline`)
+- `summary_worker` roda por padrão em pipeline de duas fases
+  (`process_summary_runs --pipeline`)
 - **VPN Tailscale opcional:** sidecar userspace/SOCKS5 para acessar o sistema
   legado hospitalar via VPN sem conectar o host — ver
   [docs/dev-tailscale.md](docs/dev-tailscale.md) para configuração e uso
@@ -328,7 +387,8 @@ docker compose -f compose.yml -f compose.prod.yml build web worker
 docker compose -f compose.yml -f compose.prod.yml up -d db web worker summary_worker
 
 # Aplicar migrações
-docker compose -f compose.yml -f compose.prod.yml exec -T web uv run --no-sync python manage.py migrate
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py migrate
 
 # Verificar health
 curl http://localhost:8000/health/
@@ -346,7 +406,8 @@ docker compose -f compose.yml -f compose.prod.yml down -v
 - Gunicorn com 2 workers
 - `UV_NO_CACHE=1` para evitar escrita em runtime
 - Health checks robustos
-- `summary_worker` roda por padrão em pipeline de duas fases (`process_summary_runs --pipeline`)
+- `summary_worker` roda por padrão em pipeline de duas fases
+  (`process_summary_runs --pipeline`)
 
 ### Smoke Test
 

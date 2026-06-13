@@ -15,8 +15,12 @@ config:
   default: true
 
   # MD013/line-length — manter linhas com no máximo 80 colunas para melhorar a
-  # legibilidade em revisão, terminal e editor.
-  MD013: true
+  # legibilidade em revisão, terminal e editor. Code blocks são excluídos
+  # porque comandos bash e URLs instrumentais (ex: docker compose, pip, curl)
+  # não podem ser arbitrariamente quebrados.
+  MD013:
+    line_length: 80
+    code_blocks: false
 
   # MD041/first-line-heading — todo documento Markdown deve começar com H1.
   MD041: true
