@@ -31,48 +31,87 @@
       Nenhum dado de fluxo disponível para o período selecionado.
     </div>
   {% else %}
-    <!-- ====== TABELA DE FLUXO ====== -->
-    <div class="table-responsive">
-      <table class="table table-sm table-hover align-middle" id="flow-table">
-        <thead class="table-light">
-          <tr>
-            <th scope="col">Data</th>
-            <th scope="col" class="text-end">ADC</th>
-            <th scope="col" class="text-end">Snapshots</th>
-            <th scope="col" class="text-end">Admissões</th>
-            <th scope="col" class="text-end">Altas</th>
-            <th scope="col" class="text-end">Óbitos</th>
-            <th scope="col" class="text-end">Líquido</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in flow_series %}
-          <tr>
-            <td>{{ row.date|date:"d/m/Y" }}</td>
-            <td class="text-end font-monospace">
-              {% if row.adc is not None %}
-                {{ row.adc|floatformat:1 }}
-              {% else %}
-                —
-              {% endif %}
-            </td>
-            <td class="text-end">{{ row.n_snapshots }}</td>
-            <td class="text-end">{{ row.admissions }}</td>
-            <td class="text-end">{{ row.discharges }}</td>
-            <td class="text-end">{{ row.deaths }}</td>
-            <td class="text-end font-monospace">
-              {% if row.net_flow > 0 %}
-                <span class="text-success">+{{ row.net_flow }}</span>
-              {% elif row.net_flow < 0 %}
-                <span class="text-danger">{{ row.net_flow }}</span>
-              {% else %}
-                <span class="text-muted">0</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+
+    <!-- ====== GRÁFICO DE PRESSÃO HOSPITALAR (Chart.js) ====== -->
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-white border-0">
+        <h5 class="card-title mb-1">Pressão Hospitalar</h5>
+        <p class="text-muted small mb-0">
+          Barras: admissões (↑) e altas+óbitos (↓) &mdash; Linha: ADC (estoque)
+        </p>
+      </div>
+      <div class="card-body">
+        <div style="position: relative; height: 400px;">
+          <canvas id="flowChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- ====== LEGENDA DO GRÁFICO ====== -->
+    <div class="d-flex gap-4 flex-wrap small text-muted mb-3">
+      <div class="d-flex align-items-center gap-2">
+        <span style="display:inline-block;width:12px;height:12px;background:#0D6EFD;border-radius:2px;"></span>
+        Admissões
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <span style="display:inline-block;width:12px;height:12px;background:#DC3545;border-radius:2px;"></span>
+        Altas + Óbitos
+      </div>
+      <div class="d-flex align-items-center gap-2">
+        <span style="display:inline-block;width:20px;height:3px;background:#212529;"></span>
+        ADC (estoque)
+      </div>
+    </div>
+
+    <!-- ====== TABELA DE FLUXO (detalhe) ====== -->
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-white border-0">
+        <h5 class="card-title mb-1">Dados</h5>
+      </div>
+      <div class="card-body p-0">
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle mb-0" id="flow-table">
+            <thead class="table-light">
+              <tr>
+                <th scope="col">Data</th>
+                <th scope="col" class="text-end">ADC</th>
+                <th scope="col" class="text-end">Snapshots</th>
+                <th scope="col" class="text-end">Admissões</th>
+                <th scope="col" class="text-end">Altas</th>
+                <th scope="col" class="text-end">Óbitos</th>
+                <th scope="col" class="text-end">Líquido</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in flow_series %}
+              <tr>
+                <td>{{ row.date|date:"d/m/Y" }}</td>
+                <td class="text-end font-monospace">
+                  {% if row.adc is not None %}
+                    {{ row.adc|floatformat:1 }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td class="text-end">{{ row.n_snapshots }}</td>
+                <td class="text-end">{{ row.admissions }}</td>
+                <td class="text-end">{{ row.discharges }}</td>
+                <td class="text-end">{{ row.deaths }}</td>
+                <td class="text-end font-monospace">
+                  {% if row.net_flow > 0 %}
+                    <span class="text-success">+{{ row.net_flow }}</span>
+                  {% elif row.net_flow < 0 %}
+                    <span class="text-danger">{{ row.net_flow }}</span>
+                  {% else %}
+                    <span class="text-muted">0</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <p class="text-muted small mt-2">
@@ -82,4 +121,128 @@
     </p>
   {% endif %}
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{{ chart_data|json_script:"flow-chart-data" }}
+<script>
+  'use strict';
+
+  function safeJSON(id, fallback) {
+    var el = document.getElementById(id);
+    if (!el) return fallback;
+    try { return JSON.parse(el.textContent); }
+    catch(e) {
+      console.warn('Prisma: JSON parse error ' + id, e);
+      return fallback;
+    }
+  }
+
+  if (typeof Chart === 'undefined') {
+    console.error('Prisma: Chart.js nao carregou');
+  } else {
+    (function() {
+      var data = safeJSON('flow-chart-data', {});
+      if (!data.labels || !data.labels.length) return;
+      var canvas = document.getElementById('flowChart');
+      if (!canvas) return;
+      var ctx = canvas.getContext('2d');
+
+      // Negate discharges_deaths for diverging bar (downward)
+      var negOutflow = data.discharges_deaths.map(function(v) { return -v; });
+
+      new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: data.labels,
+          datasets: [
+            {
+              label: 'Admissões',
+              data: data.admissions,
+              backgroundColor: 'rgba(13, 110, 253, 0.7)',
+              borderColor: '#0D6EFD',
+              borderWidth: 1,
+              order: 2,
+            },
+            {
+              label: 'Altas + Óbitos',
+              data: negOutflow,
+              backgroundColor: 'rgba(220, 53, 69, 0.7)',
+              borderColor: '#DC3545',
+              borderWidth: 1,
+              order: 2,
+            },
+            {
+              label: 'ADC',
+              type: 'line',
+              data: data.adc,
+              borderColor: '#212529',
+              backgroundColor: '#212529',
+              borderWidth: 2,
+              pointRadius: 3,
+              pointBackgroundColor: '#212529',
+              spanGaps: false,
+              yAxisID: 'y1',
+              order: 1,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {
+            mode: 'index',
+            intersect: false,
+          },
+          plugins: {
+            legend: {
+              display: false,
+            },
+            tooltip: {
+              callbacks: {
+                label: function(context) {
+                  var val = context.raw;
+                  if (context.dataset.label === 'Altas + Óbitos') {
+                    val = Math.abs(val);
+                  }
+                  return context.dataset.label + ': ' + val;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: {
+                maxTicksLimit: 15,
+                maxRotation: 45,
+              },
+            },
+            y: {
+              beginAtZero: true,
+              title: {
+                display: true,
+                text: 'Pacientes / dia',
+              },
+              ticks: {
+                stepSize: 1,
+              },
+            },
+            y1: {
+              position: 'right',
+              beginAtZero: true,
+              title: {
+                display: true,
+                text: 'ADC (leitos)',
+              },
+              grid: {
+                drawOnChartArea: false,
+              },
+            },
+          },
+        },
+      });
+    })();
+  }
+</script>
 {% endblock %}

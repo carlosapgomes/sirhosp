@@ -30,10 +30,21 @@ def hospital_flow_view(request):
 
     flow_series = compute_hospital_flow(start, today)
 
+    # Chart.js serializable data
+    chart_data = {
+        "labels": [row["date"].isoformat() for row in flow_series],
+        "admissions": [row["admissions"] for row in flow_series],
+        "discharges_deaths": [
+            row["discharges"] + row["deaths"] for row in flow_series
+        ],
+        "adc": [row["adc"] for row in flow_series],
+    }
+
     return render(request, "census/hospital_flow.html", {
         "page_title": "Fluxo Hospitalar",
         "active_menu": "fluxo",
         "flow_series": flow_series,
+        "chart_data": chart_data,
         "window": window,
         "window_options": [30, 90, 180],
     })

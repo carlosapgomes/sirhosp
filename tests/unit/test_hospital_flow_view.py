@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 
 import pytest
@@ -191,3 +192,69 @@ class TestHospitalFlowSidebar:
         content = response.content.decode()
         assert "Fluxo Hospitalar" in content
         assert "/census/fluxo/" in content or "fluxo" in content
+
+
+@pytest.mark.django_db
+class TestHospitalFlowViewChartData:
+    """chart_data context tests for Chart.js (Slice S3)."""
+
+    def test_context_has_chart_data(self, admin_client):
+        """Context always has chart_data dict with expected keys."""
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        assert "chart_data" in response.context
+        cd = response.context["chart_data"]
+        assert "labels" in cd
+        assert "admissions" in cd
+        assert "discharges_deaths" in cd
+        assert "adc" in cd
+
+    def test_chart_data_arrays_have_same_length(self, admin_client):
+        """All chart_data arrays have the same length."""
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        cd = response.context["chart_data"]
+        n = len(cd["labels"])
+        assert len(cd["admissions"]) == n
+        assert len(cd["discharges_deaths"]) == n
+        assert len(cd["adc"]) == n
+
+    def test_chart_data_is_json_serializable(self, admin_client):
+        """chart_data is serializable via json.dumps (no exception)."""
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        cd = response.context["chart_data"]
+        dumped = json.dumps(cd, default=str)
+        assert isinstance(dumped, str)
+
+    def test_chart_data_without_snapshot_adc_is_none(self, admin_client):
+        """Days without census snapshot have adc=None in chart_data."""
+        url = reverse("census:hospital_flow") + "?window=30"
+        response = admin_client.get(url)
+        cd = response.context["chart_data"]
+        for val in cd["adc"]:
+            assert val is None
+
+    def test_chart_data_with_snapshot_reflects_data(
+        self, admin_client, make_snapshot
+    ):
+        """When data exists, chart_data reflects the computed values."""
+        tz = timezone.get_current_timezone()
+        target = date.today()
+
+        t = datetime(target.year, target.month, target.day, 8, 0, tzinfo=tz)
+        for i in range(2):
+            make_snapshot(captured_at=t, leito=f"L-{i:02d}")
+
+        DailyAdmissionCount.objects.create(date=target, count=5)
+        DailyDischargeCount.objects.create(date=target, count=1)
+        DailyDeathCount.objects.create(date=target, count=0)
+
+        url = reverse("census:hospital_flow") + "?window=30"
+        response = admin_client.get(url)
+        cd = response.context["chart_data"]
+
+        idx = cd["labels"].index(target.isoformat())
+        assert cd["admissions"][idx] == 5
+        assert cd["discharges_deaths"][idx] == 1  # 1 discharge + 0 deaths
+        assert cd["adc"][idx] == 2.0
