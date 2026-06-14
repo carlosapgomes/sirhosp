@@ -43,6 +43,10 @@
         <strong>{{ run.admission.patient.patient_source_key }}</strong>
       </div>
       <div class="col-sm-6">
+        <span class="text-muted">Admissão:</span>
+        <strong>{{ run.admission.source_admission_key }}</strong>
+      </div>
+      <div class="col-sm-6">
         <span class="text-muted">Internação:</span>
         <strong>
           {% if run.admission.admission_date %}
