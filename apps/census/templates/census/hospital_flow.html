@@ -17,14 +17,36 @@
   </p>
 
   <!-- ====== SELETOR DE JANELA ====== -->
-  <div class="btn-group btn-group-sm mb-3" role="group" aria-label="Selecionar janela de tempo">
-    {% for opt in window_options %}
-      <a href="?window={{ opt }}"
-         class="btn {% if window == opt %}btn-primary{% else %}btn-outline-primary{% endif %}">
-        {{ opt }} dias
-      </a>
-    {% endfor %}
+  <div class="d-flex flex-wrap gap-3 align-items-center mb-3">
+    <div class="btn-group btn-group-sm" role="group" aria-label="Selecionar janela de tempo">
+      {% for opt in window_options %}
+        <a href="?window={{ opt }}{% if selected_sector %}&amp;sector={{ selected_sector }}{% endif %}"
+           class="btn {% if window == opt %}btn-primary{% else %}btn-outline-primary{% endif %}">
+          {{ opt }} dias
+        </a>
+      {% endfor %}
+    </div>
+
+    <!-- ====== SELETOR DE SETOR ====== -->
+    <form method="get" class="d-inline-flex align-items-center gap-2">
+      <input type="hidden" name="window" value="{{ window }}">
+      <label for="sector-select" class="form-label small mb-0 text-nowrap">Setor:</label>
+      <select name="sector" id="sector-select" class="form-select form-select-sm" style="width:auto;max-width:250px;">
+        <option value="" {% if not selected_sector %}selected{% endif %}>Hospital (todos)</option>
+        {% for s in sectors %}
+          <option value="{{ s }}" {% if selected_sector == s %}selected{% endif %}>{{ s }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-sm btn-outline-secondary">Filtrar</button>
+    </form>
   </div>
+
+  {% if selected_sector %}
+    <div class="alert alert-info small py-2 mb-3">
+      <strong>Estoque filtrado por setor:</strong> {{ selected_sector }}.
+      Fluxo (admissões/altas/óbitos) permanece hospital-total.
+    </div>
+  {% endif %}
 
   {% if not flow_series %}
     <div class="alert alert-info">

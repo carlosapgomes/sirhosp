@@ -258,3 +258,96 @@ class TestHospitalFlowViewChartData:
         assert cd["admissions"][idx] == 5
         assert cd["discharges_deaths"][idx] == 1  # 1 discharge + 0 deaths
         assert cd["adc"][idx] == 2.0
+
+
+@pytest.mark.django_db
+class TestHospitalFlowViewSector:
+    """Sector drill-down tests (Slice S4)."""
+
+    def test_sector_not_provided_default_empty(self, admin_client):
+        """Without ?sector= param, selected_sector is empty string."""
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        assert response.context["selected_sector"] == ""
+
+    def test_sector_provided_in_context(self, admin_client):
+        """With ?sector=X, selected_sector is 'X'."""
+        url = reverse("census:hospital_flow") + "?sector=UTI+GERAL"
+        response = admin_client.get(url)
+        assert response.context["selected_sector"] == "UTI GERAL"
+
+    def test_sectors_list_in_context(self, admin_client):
+        """Context has 'sectors' list."""
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        assert "sectors" in response.context
+        assert isinstance(response.context["sectors"], list)
+
+    def test_sectors_contains_distinct_sectors(self, admin_client, make_snapshot):
+        """sectors list contains distinct sector names when snapshots exist."""
+        tz = timezone.get_current_timezone()
+        t = datetime(date.today().year, date.today().month, date.today().day, 8, 0, tzinfo=tz)
+
+        make_snapshot(captured_at=t, leito="L-01", setor="UTI GERAL")
+        make_snapshot(captured_at=t, leito="L-02", setor="ENFERMARIA")
+
+        url = reverse("census:hospital_flow") + "?window=30"
+        response = admin_client.get(url)
+        sectors = response.context["sectors"]
+        assert "UTI GERAL" in sectors
+        assert "ENFERMARIA" in sectors
+        assert sectors == sorted(sectors)  # must be ordered
+
+    def test_sectors_has_no_duplicates(self, admin_client, make_snapshot):
+        """sectors list has no duplicate names."""
+        tz = timezone.get_current_timezone()
+        t = datetime(date.today().year, date.today().month, date.today().day, 8, 0, tzinfo=tz)
+
+        make_snapshot(captured_at=t, leito="L-01", setor="UTI GERAL")
+        make_snapshot(captured_at=t, leito="L-02", setor="UTI GERAL")
+
+        url = reverse("census:hospital_flow") + "?window=30"
+        response = admin_client.get(url)
+        sectors = response.context["sectors"]
+        assert len(sectors) == 1
+        assert sectors == ["UTI GERAL"]
+
+    def test_flow_with_sector_filter_stock_only(self, admin_client, make_snapshot):
+        """Sector filter affects ADC (stock) but flow remains hospital-total."""
+        tz = timezone.get_current_timezone()
+        target = date.today()
+        t = datetime(target.year, target.month, target.day, 8, 0, tzinfo=tz)
+
+        # 1 occupied in UTI GERAL, 2 in ENFERMARIA
+        make_snapshot(captured_at=t, leito="L-01", setor="UTI GERAL")
+        make_snapshot(captured_at=t, leito="L-02", setor="ENFERMARIA")
+        make_snapshot(captured_at=t, leito="L-03", setor="ENFERMARIA")
+
+        DailyAdmissionCount.objects.create(date=target, count=5)
+        DailyDischargeCount.objects.create(date=target, count=1)
+        DailyDeathCount.objects.create(date=target, count=0)
+
+        # Total (no sector): ADC = 3.0 (all occupied)
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        series_all = response.context["flow_series"]
+        row_all = [r for r in series_all if r["date"] == target][0]
+        assert row_all["adc"] == 3.0
+        assert row_all["admissions"] == 5
+
+        # Filtered (sector=UTI GERAL): ADC = 1.0, flow still 5/1/0
+        url = reverse("census:hospital_flow") + "?sector=UTI+GERAL"
+        response = admin_client.get(url)
+        series_uti = response.context["flow_series"]
+        row_uti = [r for r in series_uti if r["date"] == target][0]
+        assert row_uti["adc"] == 1.0
+        assert row_uti["admissions"] == 5  # flow unchanged
+        assert row_uti["discharges"] == 1  # flow unchanged
+        assert row_uti["deaths"] == 0  # flow unchanged
+
+    def test_window_preserved_with_sector(self, admin_client):
+        """Sector selector preserves window parameter."""
+        url = reverse("census:hospital_flow") + "?window=30&sector=UTI+GERAL"
+        response = admin_client.get(url)
+        assert response.context["window"] == 30
+        assert response.context["selected_sector"] == "UTI GERAL"

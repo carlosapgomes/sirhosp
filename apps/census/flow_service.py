@@ -22,6 +22,30 @@ from apps.deaths.models import DailyDeathCount
 from apps.discharges.models import DailyDischargeCount
 
 
+def list_sectors(start: date, end: date) -> list[str]:
+    """Return distinct, ordered sector names present in CensusSnapshot for the period.
+
+    Args:
+        start: Start date (inclusive).
+        end: End date (inclusive).
+
+    Returns:
+        Sorted list of distinct sector names.
+    """
+    if end < start:
+        raise ValueError("end must be >= start")
+
+    return list(
+        CensusSnapshot.objects.filter(
+            captured_at__date__gte=start,
+            captured_at__date__lte=end,
+        )
+        .values_list("setor", flat=True)
+        .distinct()
+        .order_by("setor")
+    )
+
+
 def compute_hospital_flow(
     start: date,
     end: date,

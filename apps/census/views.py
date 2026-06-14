@@ -8,7 +8,7 @@ from django.contrib.auth.decorators import login_required
 from django.db.models import Count, Max
 from django.shortcuts import render
 
-from apps.census.flow_service import compute_hospital_flow
+from apps.census.flow_service import compute_hospital_flow, list_sectors
 from apps.census.models import BedStatus, CensusSnapshot
 from apps.patients.models import Patient
 
@@ -28,7 +28,13 @@ def hospital_flow_view(request):
     today = date.today()
     start = today - timedelta(days=window - 1)
 
-    flow_series = compute_hospital_flow(start, today)
+    sector = request.GET.get("sector", "") or None
+    if sector is not None:
+        sector = sector.strip()
+        if not sector:
+            sector = None
+
+    flow_series = compute_hospital_flow(start, today, sector=sector)
 
     # Chart.js serializable data
     chart_data = {
@@ -40,6 +46,8 @@ def hospital_flow_view(request):
         "adc": [row["adc"] for row in flow_series],
     }
 
+    sectors = list_sectors(start, today)
+
     return render(request, "census/hospital_flow.html", {
         "page_title": "Fluxo Hospitalar",
         "active_menu": "fluxo",
@@ -47,6 +55,8 @@ def hospital_flow_view(request):
         "chart_data": chart_data,
         "window": window,
         "window_options": [30, 90, 180],
+        "selected_sector": sector or "",
+        "sectors": sectors,
     })
 
 
