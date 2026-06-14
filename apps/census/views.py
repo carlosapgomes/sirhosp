@@ -2,12 +2,41 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from django.contrib.auth.decorators import login_required
 from django.db.models import Count, Max
 from django.shortcuts import render
 
+from apps.census.flow_service import compute_hospital_flow
 from apps.census.models import BedStatus, CensusSnapshot
 from apps.patients.models import Patient
+
+
+@login_required
+def hospital_flow_view(request):
+    """Display hospital flow (stock vs. admissions/discharges/deaths) as a table."""
+    raw_window = request.GET.get("window", "90")
+    valid_windows = {30, 90, 180}
+    try:
+        window = int(raw_window)
+    except (ValueError, TypeError):
+        window = 90
+    if window not in valid_windows:
+        window = 90
+
+    today = date.today()
+    start = today - timedelta(days=window - 1)
+
+    flow_series = compute_hospital_flow(start, today)
+
+    return render(request, "census/hospital_flow.html", {
+        "page_title": "Fluxo Hospitalar",
+        "active_menu": "fluxo",
+        "flow_series": flow_series,
+        "window": window,
+        "window_options": [30, 90, 180],
+    })
 
 
 @login_required

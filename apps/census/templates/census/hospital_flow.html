@@ -1,0 +1,85 @@
+{% extends "base_sidebar.html" %}
+{% load static %}
+{% block title %}Fluxo Hospitalar — Prisma{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Fluxo Hospitalar</li>
+  </ol>
+</nav>
+
+<div class="container-fluid py-3">
+  <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Fluxo Hospitalar</h2>
+  <p class="text-muted small mb-3">
+    Estoque (ADC dos snapshots) versus fluxo (admissões, altas e óbitos).
+  </p>
+
+  <!-- ====== SELETOR DE JANELA ====== -->
+  <div class="btn-group btn-group-sm mb-3" role="group" aria-label="Selecionar janela de tempo">
+    {% for opt in window_options %}
+      <a href="?window={{ opt }}"
+         class="btn {% if window == opt %}btn-primary{% else %}btn-outline-primary{% endif %}">
+        {{ opt }} dias
+      </a>
+    {% endfor %}
+  </div>
+
+  {% if not flow_series %}
+    <div class="alert alert-info">
+      Nenhum dado de fluxo disponível para o período selecionado.
+    </div>
+  {% else %}
+    <!-- ====== TABELA DE FLUXO ====== -->
+    <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle" id="flow-table">
+        <thead class="table-light">
+          <tr>
+            <th scope="col">Data</th>
+            <th scope="col" class="text-end">ADC</th>
+            <th scope="col" class="text-end">Snapshots</th>
+            <th scope="col" class="text-end">Admissões</th>
+            <th scope="col" class="text-end">Altas</th>
+            <th scope="col" class="text-end">Óbitos</th>
+            <th scope="col" class="text-end">Líquido</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in flow_series %}
+          <tr>
+            <td>{{ row.date|date:"d/m/Y" }}</td>
+            <td class="text-end font-monospace">
+              {% if row.adc is not None %}
+                {{ row.adc|floatformat:1 }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td class="text-end">{{ row.n_snapshots }}</td>
+            <td class="text-end">{{ row.admissions }}</td>
+            <td class="text-end">{{ row.discharges }}</td>
+            <td class="text-end">{{ row.deaths }}</td>
+            <td class="text-end font-monospace">
+              {% if row.net_flow > 0 %}
+                <span class="text-success">+{{ row.net_flow }}</span>
+              {% elif row.net_flow < 0 %}
+                <span class="text-danger">{{ row.net_flow }}</span>
+              {% else %}
+                <span class="text-muted">0</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <p class="text-muted small mt-2">
+      <strong>ADC:</strong> média de leitos ocupados nos snapshots do dia
+      (inclui observação de emergência).
+      <strong>Líquido:</strong> admissões − altas − óbitos.
+    </p>
+  {% endif %}
+</div>
+{% endblock %}
