@@ -351,3 +351,107 @@ class TestHospitalFlowViewSector:
         response = admin_client.get(url)
         assert response.context["window"] == 30
         assert response.context["selected_sector"] == "UTI GERAL"
+
+
+@pytest.mark.django_db
+class TestHospitalFlowViewResidualQC:
+    """Residual quality-control panel tests (Slice S5)."""
+
+    def test_admin_has_residual_series_in_context(self, admin_client):
+        """Admin sees residual_series in context."""
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        assert "residual_series" in response.context
+
+    def test_admin_has_residual_quality_in_context(self, admin_client):
+        """Admin sees residual_quality in context."""
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        assert "residual_quality" in response.context
+
+    def test_non_admin_has_no_residual_series(self, client, django_user_model):
+        """Non-admin context does NOT have residual_series."""
+        user = django_user_model.objects.create_user(
+            username="regular", password="pass", is_staff=False
+        )
+        client.force_login(user)
+        url = reverse("census:hospital_flow")
+        response = client.get(url)
+        assert "residual_series" not in response.context
+
+    def test_non_admin_has_no_residual_quality(self, client, django_user_model):
+        """Non-admin context does NOT have residual_quality."""
+        user = django_user_model.objects.create_user(
+            username="regular2", password="pass", is_staff=False
+        )
+        client.force_login(user)
+        url = reverse("census:hospital_flow")
+        response = client.get(url)
+        assert "residual_quality" not in response.context
+
+    def test_admin_template_renders_qc_section(self, admin_client):
+        """Admin sees the QC section title in rendered HTML."""
+        url = reverse("census:hospital_flow")
+        response = admin_client.get(url)
+        content = response.content.decode()
+        assert "Indicador de qualidade" in content
+
+    def test_non_admin_template_not_render_qc_section(self, client, django_user_model):
+        """Non-admin does NOT see QC section in rendered HTML."""
+        user = django_user_model.objects.create_user(
+            username="regular3", password="pass", is_staff=False
+        )
+        client.force_login(user)
+        url = reverse("census:hospital_flow")
+        response = client.get(url)
+        content = response.content.decode()
+        assert "Indicador de qualidade" not in content
+
+    def test_residual_pct_calculation(self, admin_client, make_snapshot):
+        """residual_series has correct residual_pct for synthetic data.
+
+        Two consecutive days:
+          Day 1: ADC=6.0 (6 occupied), adm=10, dis=0, deaths=0
+                 → net_flow=10, residual=None
+          Day 2: ADC=6.0 (6 occupied), adm=0,  dis=3, deaths=3
+                 → net_flow=-6, delta_adc=0, residual=6
+                 → residual_pct = abs(6)/6.0*100 = 100.0
+        """
+        tz = timezone.get_current_timezone()
+        today = date.today()
+        day1 = today - __import__("datetime").timedelta(days=1)
+
+        t1 = datetime(day1.year, day1.month, day1.day, 8, 0, tzinfo=tz)
+        t2 = datetime(today.year, today.month, today.day, 8, 0, tzinfo=tz)
+
+        # Day 1: 6 occupied, 10 admissions
+        for i in range(6):
+            make_snapshot(captured_at=t1, leito=f"L-D1-{i:03d}")
+        DailyAdmissionCount.objects.create(date=day1, count=10)
+
+        # Day 2: 6 occupied, 0 admissions, 3 discharges, 3 deaths
+        for i in range(6):
+            make_snapshot(captured_at=t2, leito=f"L-D2-{i:03d}")
+        DailyAdmissionCount.objects.create(date=today, count=0)
+        DailyDischargeCount.objects.create(date=today, count=3)
+        DailyDeathCount.objects.create(date=today, count=3)
+
+        url = reverse("census:hospital_flow") + "?window=5"
+        response = admin_client.get(url)
+        series = response.context["residual_series"]
+
+        # Find day2 entry
+        day2_entry = [r for r in series if r["date"] == today]
+        assert len(day2_entry) == 1
+        row = day2_entry[0]
+        assert row["residual"] == 6
+        assert row["residual_pct"] == 100.0
+
+    def test_residual_pct_none_when_no_data(self, admin_client):
+        """Days without data (adc=None, residual=None) yield residual_pct=None."""
+        url = reverse("census:hospital_flow") + "?window=30"
+        response = admin_client.get(url)
+        series = response.context["residual_series"]
+        assert len(series) == 30
+        for row in series:
+            assert row["residual_pct"] is None

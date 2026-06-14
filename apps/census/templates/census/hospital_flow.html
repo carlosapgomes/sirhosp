@@ -141,6 +141,77 @@
       (inclui observação de emergência).
       <strong>Líquido:</strong> admissões − altas − óbitos.
     </p>
+
+    <!-- ====== PAINEL DE RESÍDUO QC (admin only) ====== -->
+    {% if user.is_staff %}
+    <div class="card border-0 shadow-sm mt-3">
+      <div class="card-header bg-white border-0 d-flex align-items-center gap-2">
+        <h5 class="card-title mb-0">Indicador de qualidade dos dados (resíduo)</h5>
+        {% if residual_quality == "ok" %}
+          <span class="badge bg-success">OK</span>
+        {% elif residual_quality == "warn" %}
+          <span class="badge bg-warning text-dark">ATENÇÃO</span>
+        {% elif residual_quality == "alert" %}
+          <span class="badge bg-danger">ALERTA</span>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-2">
+          Resíduo da identidade
+          ΔADC − (admissões − altas − óbitos).
+          Próximo de zero indica consistência entre fontes.
+          <strong>Limiares:</strong> verde ≤ 3%, amarelo &gt; 3%, vermelho &gt; 5%.
+        </p>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th scope="col">Data</th>
+                <th scope="col" class="text-end">Resíduo</th>
+                <th scope="col" class="text-end">% ADC</th>
+                <th scope="col" class="text-center">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in residual_series %}
+              <tr>
+                <td>{{ r.date|date:"d/m/Y" }}</td>
+                <td class="text-end font-monospace">
+                  {% if r.residual is not None %}
+                    {{ r.residual|floatformat:1 }}
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td class="text-end font-monospace">
+                  {% if r.residual_pct is not None %}
+                    {{ r.residual_pct|floatformat:2 }}%
+                  {% else %}
+                    —
+                  {% endif %}
+                </td>
+                <td class="text-center">
+                  {% if r.residual_pct is not None %}
+                    {% if r.residual_pct > 5 %}
+                      <span class="badge bg-danger" title="Acima de 5%">🔴</span>
+                    {% elif r.residual_pct > 3 %}
+                      <span class="badge bg-warning text-dark" title="Entre 3% e 5%">🟡</span>
+                    {% else %}
+                      <span class="badge bg-success" title="Até 3%">🟢</span>
+                    {% endif %}
+                  {% else %}
+                    <span class="text-muted">—</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
   {% endif %}
 </div>
 {% endblock %}

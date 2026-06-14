@@ -48,7 +48,7 @@ def hospital_flow_view(request):
 
     sectors = list_sectors(start, today)
 
-    return render(request, "census/hospital_flow.html", {
+    context = {
         "page_title": "Fluxo Hospitalar",
         "active_menu": "fluxo",
         "flow_series": flow_series,
@@ -57,7 +57,41 @@ def hospital_flow_view(request):
         "window_options": [30, 90, 180],
         "selected_sector": sector or "",
         "sectors": sectors,
-    })
+    }
+
+    # ---- QC residual panel (admin only) ----
+    if request.user.is_staff:
+        residual_series = []
+        residual_pcts: list[float] = []
+        for row in flow_series:
+            residual = row.get("residual")
+            adc = row.get("adc")
+            if residual is not None and adc is not None and adc != 0:
+                residual_pct = abs(residual) / adc * 100.0
+                residual_pcts.append(residual_pct)
+            else:
+                residual_pct = None
+            residual_series.append({
+                "date": row["date"],
+                "residual": residual,
+                "residual_pct": residual_pct,
+            })
+
+        if residual_pcts:
+            max_pct = max(residual_pcts)
+            if max_pct > 5.0:
+                residual_quality = "alert"
+            elif max_pct > 3.0:
+                residual_quality = "warn"
+            else:
+                residual_quality = "ok"
+        else:
+            residual_quality = "ok"
+
+        context["residual_series"] = residual_series
+        context["residual_quality"] = residual_quality
+
+    return render(request, "census/hospital_flow.html", context)
 
 
 @login_required
