@@ -5,6 +5,13 @@
 # =============================================================================
 
 services:
+  # Override db para usar porta de host configurável, igual ao dev.
+  # POSTGRES_HOST_PORT: porta exposta no host (default: 5432).
+  # POSTGRES_PORT: porta interna do container (sempre 5432).
+  db:
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+
   web:
     build:
       context: .
