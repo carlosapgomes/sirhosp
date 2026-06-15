@@ -40,7 +40,8 @@ services:
       db:
         condition: service_healthy
     networks:
-      - hospital_edge
+      default:
+      hospital_edge:
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health/ || exit 1"]
       interval: 10s
@@ -83,7 +84,8 @@ services:
       db:
         condition: service_healthy
     networks:
-      - hospital_edge
+      default:
+      hospital_edge:
     command: ["uv", "run", "--no-sync", "python", "manage.py", "process_ingestion_runs", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped
 
@@ -126,7 +128,8 @@ services:
       db:
         condition: service_healthy
     networks:
-      - hospital_edge
+      default:
+      hospital_edge:
     command: ["uv", "run", "--no-sync", "python", "manage.py", "process_summary_runs", "--pipeline", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped
 
