@@ -64,7 +64,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: prod
-    # container_name: sirhosp-worker
+    container_name: sirhosp-worker
     # Produção: código já está na imagem, sem bind mount
     # Necessário para reaper de processos filhos (Playwright/Chromium)
     # e evitar acúmulo de processos defunct.
