@@ -2,12 +2,96 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from django.contrib.auth.decorators import login_required
 from django.db.models import Count, Max
 from django.shortcuts import render
 
+from apps.census.flow_service import compute_hospital_flow, list_sectors
 from apps.census.models import BedStatus, CensusSnapshot
 from apps.patients.models import Patient
+
+
+@login_required
+def hospital_flow_view(request):
+    """Display hospital flow (stock vs. admissions/discharges/deaths) as a table."""
+    raw_window = request.GET.get("window", "90")
+    valid_windows = {30, 90, 180}
+    try:
+        window = int(raw_window)
+    except (ValueError, TypeError):
+        window = 90
+    if window not in valid_windows:
+        window = 90
+
+    today = date.today()
+    start = today - timedelta(days=window - 1)
+
+    sector = request.GET.get("sector", "") or None
+    if sector is not None:
+        sector = sector.strip()
+        if not sector:
+            sector = None
+
+    flow_series = compute_hospital_flow(start, today, sector=sector)
+
+    # Chart.js serializable data
+    chart_data = {
+        "labels": [row["date"].isoformat() for row in flow_series],
+        "admissions": [row["admissions"] for row in flow_series],
+        "discharges_deaths": [
+            row["discharges"] + row["deaths"] for row in flow_series
+        ],
+        "adc": [row["adc"] for row in flow_series],
+    }
+
+    sectors = list_sectors(start, today)
+
+    context = {
+        "page_title": "Fluxo Hospitalar",
+        "active_menu": "fluxo",
+        "flow_series": flow_series,
+        "chart_data": chart_data,
+        "window": window,
+        "window_options": [30, 90, 180],
+        "selected_sector": sector or "",
+        "sectors": sectors,
+    }
+
+    # ---- QC residual panel (admin only) ----
+    if request.user.is_staff:
+        residual_series = []
+        residual_pcts: list[float] = []
+        for row in flow_series:
+            residual = row.get("residual")
+            adc = row.get("adc")
+            if residual is not None and adc is not None and adc != 0:
+                residual_pct = abs(residual) / adc * 100.0
+                residual_pcts.append(residual_pct)
+            else:
+                residual_pct = None
+            residual_series.append({
+                "date": row["date"],
+                "residual": residual,
+                "residual_pct": residual_pct,
+            })
+
+        if residual_pcts:
+            max_pct = max(residual_pcts)
+            if max_pct > 5.0:
+                residual_quality = "alert"
+            elif max_pct > 3.0:
+                residual_quality = "warn"
+            else:
+                residual_quality = "ok"
+        else:
+            residual_quality = "ok"
+
+        context["residual_series"] = residual_series
+        context["residual_quality"] = residual_quality
+
+    return render(request, "census/hospital_flow.html", context)
 
 
 @login_required

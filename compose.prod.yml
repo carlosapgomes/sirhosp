@@ -34,9 +34,13 @@ services:
       - UV_CACHE_DIR=/opt/.uv_cache
       - UV_NO_CACHE=1
       - GUNICORN_WORKER_TMP_DIR=/tmp/gunicorn
+      # Proxy SOCKS5 para acessar o sistema legado via tailnet do hospital
+      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-socks5://sirhosp-tailscale-proxy:1055}
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - hospital_edge
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health/ || exit 1"]
       interval: 10s
@@ -73,9 +77,13 @@ services:
       - UV_PROJECT_ENVIRONMENT=/opt/venv
       - UV_CACHE_DIR=/opt/.uv_cache
       - UV_NO_CACHE=1
+      # Proxy SOCKS5 para acessar o sistema legado via tailnet do hospital
+      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-socks5://sirhosp-tailscale-proxy:1055}
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - hospital_edge
     command: ["uv", "run", "--no-sync", "python", "manage.py", "process_ingestion_runs", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped
 
@@ -112,8 +120,42 @@ services:
       - UV_PROJECT_ENVIRONMENT=/opt/venv
       - UV_CACHE_DIR=/opt/.uv_cache
       - UV_NO_CACHE=1
+      # Proxy SOCKS5 para acessar o sistema legado via tailnet do hospital
+      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-socks5://sirhosp-tailscale-proxy:1055}
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - hospital_edge
     command: ["uv", "run", "--no-sync", "python", "manage.py", "process_summary_runs", "--pipeline", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Sidecar Tailscale para proxy SOCKS5 do hospital (produção)
+  # Provê acesso à tailnet do hospital para Playwright scraping.
+  # -------------------------------------------------------------------------
+  tailscale_app:
+    image: tailscale/tailscale:latest
+    container_name: sirhosp-tailscale-proxy
+    hostname: sirhosp-tailscale-proxy
+    init: true
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:?TS_AUTHKEY is required for hospital tailnet}
+      - TS_HOSTNAME=sirhosp-tailscale-proxy
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=true
+      - TS_SOCKS5_SERVER=0.0.0.0:1055
+      - TS_EXTRA_ARGS=--accept-routes --accept-dns=false
+    volumes:
+      - sirhosp_tailscale_state:/var/lib/tailscale
+    networks:
+      - hospital_edge
+    restart: unless-stopped
+
+volumes:
+  sirhosp_tailscale_state:
+    driver: local
+
+networks:
+  hospital_edge:
+    external: true
