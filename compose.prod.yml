@@ -42,6 +42,8 @@ services:
     networks:
       default:
       hospital_edge:
+        aliases:
+          - prisma
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health/ || exit 1"]
       interval: 10s
