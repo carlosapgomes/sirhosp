@@ -11,6 +11,10 @@ WorkingDirectory=/opt/sirhosp
 ExecStart=docker compose -f compose.yml -f compose.prod.yml exec -T web \
     uv run --no-sync python manage.py run_adaptive_census_cycles --loop
 
+# Stale recovery is enabled by default in --loop mode.
+# To disable temporarily, add: --disable-stale-recovery
+# See deploy/README.md section 7 for details.
+
 # Restart automatically on failure or crash
 Restart=on-failure
 RestartSec=10

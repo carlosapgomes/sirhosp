@@ -52,26 +52,26 @@
 
 ## 4. Slice SIRS-S4 - Operations documentation and final verification
 
-- [ ] 4.1 Update deploy/operator documentation with heartbeat, stale recovery
+- [X] 4.1 Update deploy/operator documentation with heartbeat, stale recovery
   defaults, dry-run command, apply command and orchestrator integration.
-- [ ] 4.2 Document recommended production defaults for Docker rootless workers and
+- [X] 4.2 Document recommended production defaults for Docker rootless workers and
   host `systemd` orchestrator, including how to disable recovery temporarily.
-- [ ] 4.3 Document operational interpretation: failed stale run is a partial job
+- [X] 4.3 Document operational interpretation: failed stale run is a partial job
   loss, not a discarded batch, and no automatic requeue is performed.
-- [ ] 4.4 Validate S4 with markdown lint, OpenSpec validation and any affected
+- [X] 4.4 Validate S4 with markdown lint, OpenSpec validation and any affected
   static checks.
-- [ ] 4.5 Create `/tmp/sirhosp-slice-SIRS-S4-report.md` with documentation diff,
+- [X] 4.5 Create `/tmp/sirhosp-slice-SIRS-S4-report.md` with documentation diff,
   commands, results, risks and next step.
 
 ## 5. Final verification
 
-- [ ] 5.1 Run `openspec validate stale-ingestion-run-recovery --type change --strict`.
-- [ ] 5.2 Run `./scripts/test-in-container.sh check`.
-- [ ] 5.3 Run relevant unit/integration tests in container for all touched code.
-- [ ] 5.4 Run `./scripts/test-in-container.sh lint`.
-- [ ] 5.5 Run `./scripts/test-in-container.sh typecheck` and document any
+- [X] 5.1 Run `openspec validate stale-ingestion-run-recovery --type change --strict`.
+- [X] 5.2 Run `./scripts/test-in-container.sh check`.
+- [X] 5.3 Run relevant unit/integration tests in container for all touched code.
+- [X] 5.4 Run `./scripts/test-in-container.sh lint`.
+- [X] 5.5 Run `./scripts/test-in-container.sh typecheck` and document any
   pre-existing or justified exceptions.
-- [ ] 5.6 Run `./scripts/markdown-lint.sh` or targeted markdownlint for all
+- [X] 5.6 Run `./scripts/markdown-lint.sh` or targeted markdownlint for all
   changed Markdown files.
-- [ ] 5.7 Stop after final report; do not archive the change without explicit
+- [X] 5.7 Stop after final report; do not archive the change without explicit
   operator approval.

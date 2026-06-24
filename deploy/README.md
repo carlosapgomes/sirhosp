@@ -221,12 +221,163 @@ docker compose -f compose.yml -f compose.prod.yml ps
 
 ---
 
-## 7. Troubleshooting
+## 7. Stale ingestion run recovery
+
+### 7.1 Why job-level stale recovery exists
+
+O orquestrador adaptativo de censo pode ficar bloqueado
+indefinidamente quando uma única `IngestionRun` permanece em
+`running` após o worker morrer ou perder o controle do job.
+Um job abandonado não deve impedir 4-5 ciclos de censo por dia.
+
+### 7.2 Heartbeat and worker life signal
+
+O worker de ingestão atualiza `worker_heartbeat_at` no banco a
+cada 60 segundos enquanto processa uma `IngestionRun`. Este
+heartbeat é a fonte de verdade sobre a atividade do worker —
+não depende de PID, Docker socket ou acesso ao processo do
+container. O orquestrador no host (systemd) lê o heartbeat
+diretamente no PostgreSQL mesmo com workers em Docker
+rootless.
+
+- **Intervalo de heartbeat:** 60 segundos
+- **Margem de heartbeat stale:** 10 minutos
+  (`--heartbeat-grace-minutes 10`)
+
+### 7.3 Default stale limits by intent
+
+Cada `intent` possui um limite de idade individual diferente:
+
+| Intent | Limite stale |
+| --- | ---: |
+| `admissions_only` | 20 min |
+| `demographics_only` | 20 min |
+| `full_sync` | 60 min |
+| `census_extraction` | 120 min |
+| vazio/desconhecido | 60 min |
+
+Uma run é candidata a stale quando:
+
+1. `status = 'running'`
+2. Idade individual > limite por `intent`
+3. `worker_heartbeat_at` ausente ou mais antigo que 10 min
+
+### 7.4 Heartbeat grace and sweep circuit breaker
+
+- **Heartbeat grace** (`--heartbeat-grace-minutes`, default 10):
+  uma run com heartbeat mais recente que este valor é
+  considerada ativa.
+- **Circuit breaker** (`--max-runs-per-sweep`, default 20): se
+  o número de candidatos exceder este limite, a execução
+  aborta sem mutar dados e emite alerta operacional. Isso
+  protege contra falsos positivos em massa durante falha
+  sistêmica.
+
+### 7.5 Dry-run command (manual inspection)
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py recover_stale_ingestion_runs --dry-run
+```
+
+Exibe candidatos sem alterar o banco: run IDs, intents, idade,
+worker_label, heartbeat. A saída contém apenas identificadores
+operacionais, nunca nomes de pacientes ou dados clínicos.
+
+Parâmetros opcionais:
+
+```bash
+# Sobrescrever limites por intent
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py recover_stale_ingestion_runs --dry-run \
+  --heartbeat-grace-minutes 15 \
+  --max-runs-per-sweep 50 \
+  --default-limit-minutes 120
+```
+
+### 7.6 Apply command (manual intervention)
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py recover_stale_ingestion_runs --apply
+```
+
+Marca runs candidatas como `failed` terminal:
+
+- `status = 'failed'`
+- `finished_at = now()`
+- `timed_out = True`
+- `failure_reason = 'timeout'`
+- `next_retry_at = None`
+- `error_message` seguro (run_id, intent, age, limit)
+
+Não faz requeue automático. Fecha o batch se a fila do batch
+drenar.
+
+### 7.7 Orchestrator loop integration
+
+Em modo `--loop`, o orquestrador
+`run_adaptive_census_cycles` executa stale recovery
+automaticamente **antes** de verificar elegibilidade da fila.
+Isso significa que runs abandonadas são limpas antes de
+decidir se um novo ciclo de censo pode começar.
+
+**Comportamento padrão (recomendado para produção):** stale
+recovery ativo no loop. O systemd unit
+`sirhosp-census-orchestrator.service` já opera com recovery
+habilitado.
+
+**Desabilitar recovery temporariamente:**
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py run_adaptive_census_cycles --loop \
+  --disable-stale-recovery
+```
+
+Uso típico: durante diagnóstico de falha sistêmica, para
+evitar que o circuit breaker dispare repetidamente.
+
+### 7.8 Terminal failed semantics (no requeue)
+
+Uma run marcada como `failed` pelo stale recovery é terminal:
+
+- A perda é de **um job**, não do batch inteiro.
+- O batch pode fechar e liberar o próximo ciclo de censo.
+- Não há requeue automático. Pacientes perdidos serão
+  reenfileirados pelo próximo censo se ainda estiverem ativos.
+
+### 7.9 Safe rollback / disable procedure
+
+1. **Desabilitar recovery no orquestrador:** adicione
+   `--disable-stale-recovery` ao `ExecStart` do systemd unit
+   e recarregue:
+
+   ```bash
+   systemctl daemon-reload
+   systemctl restart sirhosp-census-orchestrator.service
+   ```
+
+2. **Parar uso manual do comando:** simplesmente não execute
+   `recover_stale_ingestion_runs --apply`.
+
+3. **Reverter heartbeat:** a coluna `worker_heartbeat_at` é
+   nullable e não afeta outras operações. Pode permanecer no
+   schema sem uso.
+
+4. **Monitorar:** com recovery desabilitado, runs abandonadas
+   voltam a bloquear o orquestrador. O troubleshooting da
+   seção 8 se aplica.
+
+---
+
+## 8. Troubleshooting
 
 | Problema | Verificação |
 | --- | --- |
 | Orquestrador não inicia | `journalctl -u sirhosp-census-orch -n 30`: fila |
-| Stale running detected | `IngestionRun` `running` > 3h; intervir |
+| Stale running detected | `IngestionRun` `running` > 3h; ver seção 7 |
+| Stale recovery circuit breaker | Comando abortou sem mutar; ver workers/logs |
 | Extração de censo falha | `docker compose logs web`: credenciais |
 | Altas não extrai | `journalctl -u sirhosp-discharges -n 30`: credenciais |
 | Worker não processa | `docker compose logs worker`: fila, conexão DB |
