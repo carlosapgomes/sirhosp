@@ -1,13 +1,6 @@
-# census-snapshot-processing Specification
+# census-snapshot-processing Specification Delta
 
-## Purpose
-
-Define how a captured census snapshot is processed into patients and
-enqueued ingestion runs, and how `PatientMovement` records are upserted from
-the snapshot. Supports both the legacy most-recent-snapshot path and explicit
-run-scoped processing used by the adaptive census orchestrator.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: process_census_snapshot triggers PatientMovement upsert
 
