@@ -2,6 +2,15 @@
 
 Data base: 09/05/2026
 
+> **Nota de obsolescência (06/2026):** a estratégia de agendamento do censo
+> mudou. O `extract_census` não é mais disparado por um `systemd timer` fixo
+> de 8h, e sim pelo **orquestrador adaptativo**
+> (`run_adaptive_census_cycles --loop`), que só dispara um novo ciclo quando a
+> fila de ingestão está drenada. As referências a "systemd timer a cada 8h"
+> neste documento refletem o estado anterior à mudança e foram mantidas como
+> registro histórico do plano original. Consulte `deploy/README.md` para o
+> caminho operacional atual.
+
 ---
 
 ## 1. Diagnóstico — o problema dos dados
@@ -48,9 +57,9 @@ Após a limpeza dos 72h, ainda restam 11 pacientes com `discharge_date` preenchi
 
 | Comando                   | O que faz                                                                                              | Quando roda             |
 | ------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------- |
-| `extract_census`          | Varre o sistema fonte via Playwright e persiste todas as linhas do censo em `CensusSnapshot`           | systemd timer a cada 8h |
-| `process_census_snapshot` | Lê o último `CensusSnapshot`, cria/atualiza `Patient` e enfileira runs de admissão (`admissions_only`) | Após `extract_census`   |
-| `sync_current_inpatients` | Não implementado (reservado)                                                                           | —                       |
+| `extract_census`          | Varre o sistema fonte via Playwright e persiste todas as linhas do censo em `CensusSnapshot`           | Orquestrador adaptativo (ver nota acima) |
+| `process_census_snapshot` | Lê o último `CensusSnapshot`, cria/atualiza `Patient` e enfileira runs de admissão (`admissions_only`) | Após `extract_census`                    |
+| `sync_current_inpatients` | Não implementado (reservado)                                                                           | —                                        |
 
 ### Detecção de altas não registradas (criados nesta sessão)
 
@@ -126,16 +135,21 @@ Seguindo a Portaria 312/2002:
 
 ### 4.3 Dois momentos de captura
 
-| Captura                  | Frequência                             | Método                                                          | Gera                                                      |
-| ------------------------ | -------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------- |
-| **Ampla (Objetivo A)**   | A cada 8h (manter systemd timer atual) | Nosso `extract_census` via Playwright                           | CSV com ocupação total, todos os setores, todos os leitos |
-| **Oficial (Objetivo B)** | 1×/dia, madrugada (≈01:00)             | Novo `extract_official_census` via Playwright na segunda página | CSV com leitos de internação, para índices MS             |
+| Captura              | Frequência                         |
+| -------------------- | ---------------------------------- |
+| Ampla (Objetivo A)   | Orquestrador adaptativo (`--loop`) |
+| Oficial (Objetivo B) | 1×/dia, madrugada (≈01:00)         |
+
+- **Ampla:** `extract_census` via Playwright; gera ocupação total de
+  todos os setores.
+- **Oficial:** `extract_official_census` (novo), segunda página do TASY;
+  gera leitos de internação para índices MS.
 
 ### 4.4 Pipeline de geração de relatórios
 
 ````text
 ┌────────────────────┐
-│ extract_census     │  8/8h — scraping amplo
+│ extract_census     │  Orquestrador adaptativo — scraping amplo
 │ (amplo)            │
 └────────┬───────────┘
          │
@@ -244,7 +258,7 @@ Varre sistema fonte (todos os setores) e persiste CensusSnapshot.
 Flags:
   --headless                  Modo headless (sem navegador visível)
 
-Uso: systemd timer a cada 8h
+Uso: orquestrador adaptativo (run_adaptive_census_cycles --loop)
 ```text
 
 ### `process_census_snapshot`
