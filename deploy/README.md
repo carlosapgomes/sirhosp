@@ -1,6 +1,7 @@
 # Deploy — SIRHOSP
 
-Instruções para deploy em produção e ativação do agendamento automático de censo.
+Instruções para deploy em produção, ativação do worker contínuo e do
+orquestrador adaptativo de censo.
 
 ---
 
@@ -25,12 +26,11 @@ SOURCE_SYSTEM_PASSWORD=...
 ├── compose.yml              ← db
 ├── compose.prod.yml          ← web (Gunicorn) + worker
 ├── .env                      ← credenciais e secrets
-├── deploy/
-│   ├── census-scheduler.sh   ← script de extração + processamento
-│   └── systemd/
-│       ├── sirhosp-census.service
-│       └── sirhosp-census.timer
-└── ...
+└── deploy/
+    └── systemd/
+        ├── sirhosp-census-orchestrator.service  ← [OPCIONAL] long-running
+        ├── sirhosp-discharges.service
+        └── sirhosp-discharges.timer
 ```
 
 ---
@@ -57,64 +57,98 @@ docker compose -f compose.yml -f compose.prod.yml exec web \
 
 ---
 
-## 4. Ativar agendamento automático do censo
+## 4. Worker de ingestão
 
-O censo hospitalar é extraído a cada **8 horas** (00:00, 08:00, 16:00)
-via systemd timer. O ciclo executa dois passos:
+O worker está configurado no `compose.prod.yml` com `--loop --sleep-seconds 5`.
+Ele processa automaticamente os `IngestionRun` enfileirados pelo
+`process_census_snapshot` (disparado pelo orquestrador) ou por outros comandos.
 
-1. `extract_census` — Playwright extrai dados do sistema fonte
-2. `process_census_snapshot` — cria/atualiza pacientes e enfileira extrações
-
-O worker (já rodando no container) processa as extrações enfileiradas automaticamente.
-
-### 4.1 Instalar o script
+**Escalar workers** (paralelismo):
 
 ```bash
-# Tornar executável
-chmod +x /opt/sirhosp/deploy/census-scheduler.sh
-
-# Testar manualmente (opcional, valida credenciais)
-/opt/sirhosp/deploy/census-scheduler.sh
+docker compose -f compose.yml -f compose.prod.yml up -d --scale worker=3
 ```
 
-### 4.2 Instalar units do systemd
+---
+
+## 5. Orquestrador adaptativo de censo
+
+O censo hospitalar é extraído pelo **orquestrador adaptativo**, que monitora a
+fila de ingestão e dispara `extract_census` + `process_census_snapshot` apenas
+quando for seguro (fila drenada, cooldown respeitado, sem batch aberto).
+
+Não há timer fixo: o orquestrador executa em modo contínuo
+(`--loop`), dormindo entre verificações e aplicando backoff em caso de falha.
+
+### 5.1 Executar como serviço systemd (recomendado para produção)
+
+O arquivo `deploy/systemd/sirhosp-census-orchestrator.service` é um serviço
+long-running, **não** um timer `OnCalendar`.
 
 ```bash
-# Copiar units para o systemd
-cp /opt/sirhosp/deploy/systemd/sirhosp-census.service /etc/systemd/system/
-cp /opt/sirhosp/deploy/systemd/sirhosp-census.timer /etc/systemd/system/
+# Copiar unit para o systemd
+cp /opt/sirhosp/deploy/systemd/sirhosp-census-orchestrator.service \
+  /etc/systemd/system/
 
 # Recarregar configuração
 systemctl daemon-reload
 
-# Habilitar e iniciar o timer
-systemctl enable --now sirhosp-census.timer
+# Habilitar e iniciar o serviço
+systemctl enable --now sirhosp-census-orchestrator.service
 
 # Verificar status
-systemctl status sirhosp-census.timer
-systemctl list-timers --no-pager | grep sirhosp
+systemctl status sirhosp-census-orchestrator.service
 ```
 
-### 4.3 Comandos úteis
+### 5.2 Executar em foreground (debug / testes)
 
 ```bash
-# Ver próximo disparo
-systemctl list-timers sirhosp-census.timer
+cd /opt/sirhosp
 
-# Disparar manualmente (para teste)
-systemctl start sirhosp-census.service
+# Um ciclo (comportamento dry-run: diagnóstico, sem mutação)
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py run_adaptive_census_cycles --dry-run
 
-# Ver logs do último ciclo
-journalctl -u sirhosp-census.service -n 50 --no-pager
+# Um ciclo real
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py run_adaptive_census_cycles --once
+
+# Modo contínuo (foreground)
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py run_adaptive_census_cycles --loop
+```
+
+### 5.3 Execução manual (fallback)
+
+Caso o orquestrador não esteja disponível, o operador pode executar o ciclo
+manualmente:
+
+```bash
+cd /opt/sirhosp
+
+# Passo 1: extrair censo do sistema fonte
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py extract_census
+
+# Passo 2: processar o snapshot (cria/atualiza pacientes, enfileira extrações)
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py process_census_snapshot
+```
+
+### 5.4 Comandos úteis
+
+```bash
+# Ver logs do orquestrador
+journalctl -u sirhosp-census-orchestrator.service -n 50 --no-pager
 
 # Ver logs em tempo real
-journalctl -u sirhosp-census.service -f
+journalctl -u sirhosp-census-orchestrator.service -f
 
-# Desabilitar agendamento
-systemctl disable --now sirhosp-census.timer
+# Parar o serviço
+systemctl stop sirhosp-census-orchestrator.service
 
-# Ver histórico de execuções
-journalctl -u sirhosp-census.service --output=short
+# Desabilitar o serviço
+systemctl disable --now sirhosp-census-orchestrator.service
 ```
 
 ---
@@ -175,19 +209,6 @@ systemctl disable --now sirhosp-discharges.timer
 
 ---
 
-## 5. Worker de ingestão
-
-O worker já está configurado no `compose.prod.yml` com `--loop --sleep-seconds 5`.
-Ele processa automaticamente os `IngestionRun` enfileirados pelo `process_census_snapshot`.
-
-**Escalar workers** (paralelismo):
-
-```bash
-docker compose -f compose.yml -f compose.prod.yml up -d --scale worker=3
-```
-
----
-
 ## 6. Healthcheck
 
 ```bash
@@ -202,9 +223,12 @@ docker compose -f compose.yml -f compose.prod.yml ps
 
 ## 7. Troubleshooting
 
-| Problema            | Verificação                                                                   |
-| ------------------- | ----------------------------------------------------------------------------- |
-| Censo não extrai    | `journalctl -u sirhosp-census.service -n 30` — ver credenciais, conectividade |
-| Altas não extrai    | `journalctl -u sirhosp-discharges.service -n 30` — ver credenciais, PDF       |
-| Worker não processa | `docker compose logs worker` — ver fila, conexão DB                           |
-| Container não sobe  | `docker compose logs web` — ver `.env`, secrets, porta ocupada                |
+| Problema | Verificação |
+| --- | --- |
+| Orquestrador não inicia | `journalctl -u sirhosp-census-orch -n 30`: fila |
+| Stale running detected | `IngestionRun` `running` > 3h; intervir |
+| Extração de censo falha | `docker compose logs web`: credenciais |
+| Altas não extrai | `journalctl -u sirhosp-discharges -n 30`: credenciais |
+| Worker não processa | `docker compose logs worker`: fila, conexão DB |
+| Container não sobe | `docker compose logs web`: `.env`, secrets, porta |
+| Lock preso no orquestrador | Lock advisory liberado ao fechar sessão DB |

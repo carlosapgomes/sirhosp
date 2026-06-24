@@ -1,0 +1,27 @@
+[Unit]
+Description=SIRHOSP — Adaptive census orchestrator (continuous loop)
+Documentation=https://github.com/carlosapgomes/sirhosp
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sirhosp
+ExecStart=docker compose -f compose.yml -f compose.prod.yml exec -T web \
+    uv run --no-sync python manage.py run_adaptive_census_cycles --loop
+
+# Restart automatically on failure or crash
+Restart=on-failure
+RestartSec=10
+
+# Graceful shutdown: SIGTERM is caught by the command's signal handler
+TimeoutStopSec=30
+
+# Logs go to journal (accessible via journalctl -u sirhosp-census-orchestrator)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sirhosp-census-orchestrator
+
+[Install]
+WantedBy=multi-user.target

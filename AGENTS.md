@@ -10,9 +10,10 @@
 - Automação: Playwright + Python
 - Extração de PDF: PyMuPDF
 - Workflow: DevLoop + OpenSpec
-- Execução programada: `systemd timers` (ver `deploy/README.md` e `deploy/systemd/`)
-- Agendamento censo: `systemd timer` a cada 8h executa `extract_census` → `process_census_snapshot`
-- Worker contínuo: `process_ingestion_runs --loop --sleep-seconds 5` processa runs enfileirados
+- Execução programada: `systemd services` e `timers` (ver `deploy/README.md` e `deploy/systemd/`)
+- Agendamento censo: orquestrador adaptativo via `run_adaptive_census_cycles --loop`
+- Worker contínuo: `process_ingestion_runs --loop --sleep-seconds 5`
+  processa runs enfileirados
 - Processamento assíncrono fase 1: **sem Celery/Redis**; coordenação via PostgreSQL
 
 ## 2. Comandos de validação (Quality Gate)
@@ -90,10 +91,13 @@ uv run python manage.py extract_medical_evolutions
 uv run python manage.py extract_prescriptions
 uv run python manage.py refresh_admission_summaries
 uv run python manage.py process_summary_runs --pipeline
+uv run python manage.py run_adaptive_census_cycles
 ```
 
-**Agendamento automático:** Configurar `systemd timer` conforme `deploy/README.md`.
-O timer executa `extract_census` + `process_census_snapshot` a cada 8h.
+**Agendamento automático:** Configurar orquestrador adaptativo de censo e
+worker contínuo conforme `deploy/README.md`.
+O orquestrador (`run_adaptive_census_cycles --loop`) dispara ciclos de censo
+quando a fila de ingestão estiver drenada.
 O worker (`process_ingestion_runs --loop`) processa os runs enfileirados.
 Para sumários, o padrão operacional é `process_summary_runs --pipeline --loop`.
 
@@ -106,11 +110,16 @@ git config core.hooksPath .githooks
 ## 4. Arquitetura e constraints
 
 - Manter o projeto como **monólito modular Django** na fase 1.
-- Não introduzir Celery, Redis ou microserviços sem decisão explícita em ADR/OpenSpec.
-- Usar PostgreSQL tanto para persistência clínica quanto para coordenação operacional básica de jobs.
-- Separar claramente código de **modo laboratório** e **modo produção** das automações Playwright.
-- Não versionar dados reais de pacientes, PDFs reais, dumps reais ou credenciais.
-- Tratar o MVP `resumo-evolucoes-clinicas` como fonte de reaproveitamento técnico, não como arquitetura final.
+- Não introduzir Celery, Redis ou microserviços sem decisão explícita em
+  ADR/OpenSpec.
+- Usar PostgreSQL tanto para persistência clínica quanto para coordenação
+  operacional básica de jobs.
+- Separar claramente código de **modo laboratório** e **modo produção** das
+  automações Playwright.
+- Não versionar dados reais de pacientes, PDFs reais, dumps reais ou
+  credenciais.
+- Tratar o MVP `resumo-evolucoes-clinicas` como fonte de reaproveitamento
+  técnico, não como arquitetura final.
 - Preservar separação entre portal web, domínio clínico e conectores de ingestão.
 
 ## 5. Política de testes
@@ -138,8 +147,15 @@ git config core.hooksPath .githooks
 - [ ] `./scripts/test-in-container.sh check` sem erro
 - [ ] testes relevantes passando (`./scripts/test-in-container.sh unit` ou `quality-gate`)
 - [ ] `./scripts/test-in-container.sh lint` sem erro
-- [ ] `./scripts/test-in-container.sh typecheck` sem erro relevante ou com exceções justificadas
-- [ ] markdown lint sem erro quando houver mudança em `.md` — validação **obrigatória** com `markdownlint-cli2` via `./scripts/markdown-lint.sh` (config: `.markdownlint-cli2.yaml`). Proibido `<!-- markdownlint-disable -->`; corrija a causa raiz ou desabilite a regra no `.markdownlint-cli2.yaml` com justificativa.
+- [ ] `./scripts/test-in-container.sh typecheck` sem erro relevante ou
+  exceções justificadas
+- [ ] markdown lint sem erro quando houver mudança em `.md` — validação
+  **obrigatória** com `markdownlint-cli2` via
+  `./scripts/markdown-lint.sh`
+  (config: `.markdownlint-cli2.yaml`). Proibido
+  `<!-- markdownlint-disable -->`;
+  corrija a causa raiz ou desabilite a regra no `.markdownlint-cli2.yaml` com
+  justificativa.
 - [ ] artefatos OpenSpec atualizados quando aplicável
 - [ ] sem credenciais nem dados reais no diff
 - [ ] commit claro e rastreável

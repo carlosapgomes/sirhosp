@@ -2,7 +2,8 @@
 
 ## Propósito
 
-Resumo executivo para retomada rápida do desenvolvimento do SIRHOSP e onboarding técnico da equipe.
+Resumo executivo para retomada rápida do desenvolvimento do SIRHOSP e
+onboarding técnico da equipe.
 
 ## Fontes autoritativas
 
@@ -16,7 +17,7 @@ Resumo executivo para retomada rápida do desenvolvimento do SIRHOSP e onboardin
 
 ## Objetivo do sistema
 
-### SIRHOSP - Sistema Interno de Relatórios Hospitalares - Extração Inteligente de Dados Clínicos
+### SIRHOSP - Sistema Interno de Relatórios Hospitalares
 
 Sistema interno para extração automatizada de dados clínicos do sistema fonte
 hospitalar, armazenamento em banco paralelo PostgreSQL e oferta de consulta
@@ -35,8 +36,9 @@ diretoria e gestão de prontuários.
 
 - **Portal web Django**: autenticação, dashboard, busca, serviços e administração.
 - **Domínio clínico**: pacientes, internações, documentos clínicos, jobs e resumos.
-- **Conectores de ingestão**: automações Playwright e parsers para extração do sistema fonte.
-- **Coordenação operacional**: PostgreSQL + management commands + systemd timers/cron.
+- **Conectores de ingestão**: automações Playwright e parsers para extração
+  do sistema fonte.
+- **Coordenação operacional**: PostgreSQL + management commands + systemd services/timers.
 - **Processamento textual/LLM**: camada separada da captura, com resumos incrementais.
 
 ## Regras não negociáveis
