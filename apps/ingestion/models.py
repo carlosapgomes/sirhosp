@@ -106,6 +106,15 @@ class IngestionRun(models.Model):
         default="",
         help_text="Optional worker identifier for diagnostics.",
     )
+    worker_heartbeat_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Last heartbeat timestamp from the processing worker. "
+        "Set when a run is claimed and refreshed periodically while "
+        "the worker actively processes this run. Null before the first "
+        "claim. Used by stale-recovery to distinguish a live worker "
+        "from an abandoned run.",
+    )
 
     class Meta:
         ordering = ["-started_at"]

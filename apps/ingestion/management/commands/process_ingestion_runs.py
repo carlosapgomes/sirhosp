@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -58,6 +59,86 @@ DEMOGRAPHICS_SCRIPT_PATH = str(
     / "patient_demographics"
     / "extract_patient_demographics.py"
 )
+
+
+class WorkerHeartbeat:
+    """Context manager that periodically refreshes worker_heartbeat_at.
+
+    Starts a daemon background thread that updates run.worker_heartbeat_at
+    every ``interval_seconds`` while the worker processes the run. Stops
+    automatically when:
+    - The context exits (``__exit__``).
+    - The run reaches a terminal state (``succeeded`` or ``failed``).
+
+    This allows another process (e.g. stale-recovery) to decide whether
+    a ``running`` run is alive based on the heartbeat timestamp alone,
+    without needing access to Docker, PID or process namespace.
+
+    Usage::
+
+        with WorkerHeartbeat(run, interval_seconds=60):
+            ...  # long-running extraction
+
+    The heartbeat is set to ``timezone.now()`` immediately on entry and
+    refreshed every ``interval_seconds`` thereafter until exit or terminal
+    state.
+    """
+
+    def __init__(
+        self,
+        run: IngestionRun,
+        interval_seconds: float = 60,
+    ):
+        self._run = run
+        self._interval = timedelta(seconds=interval_seconds)
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self):
+        # Set initial heartbeat immediately.
+        self._run.worker_heartbeat_at = timezone.now()
+        self._run.save(update_fields=["worker_heartbeat_at"])
+        self._start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._stop()
+
+    def _start(self):
+        def _beat():
+            while not self._stop_event.wait(self._interval.total_seconds()):
+                # Refresh from DB to avoid overwriting concurrent state changes.
+                # If the run reached terminal state, stop heartbeating.
+                try:
+                    self._run.refresh_from_db(fields=["status"])
+                    if self._run.status in ("succeeded", "failed"):
+                        break
+                    self._run.worker_heartbeat_at = timezone.now()
+                    self._run.save(
+                        update_fields=["worker_heartbeat_at"]
+                    )
+                except (OperationalError, ProgrammingError):
+                    # If DB is temporarily unavailable, skip only this beat.
+                    # Keep the heartbeat alive so a transient DB issue does not
+                    # turn an otherwise healthy long-running job into a stale
+                    # recovery candidate.
+                    close_old_connections()
+                    continue
+                except Exception:
+                    # Unexpected heartbeat failures should not crash the worker.
+                    # Stop heartbeating; stale recovery can later classify the
+                    # run if the worker really lost control of it.
+                    break
+
+        self._thread = threading.Thread(target=_beat, daemon=True)
+        self._thread.start()
+
+    def _stop(self):
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=5)
+        self._thread = None
 
 
 class Command(BaseCommand):
@@ -414,6 +495,8 @@ class Command(BaseCommand):
         """Process a single IngestionRun through its full lifecycle.
 
         Dispatches to admissions-only or full-sync based on intent.
+        Heartbeat is refreshed via WorkerHeartbeat context manager
+        while the run is being processed.
         """
         params = run.parameters_json or {}
         intent = params.get("intent", "") or run.intent
@@ -434,20 +517,24 @@ class Command(BaseCommand):
             attempt_number=run.attempt_count,
         )
 
-        if intent == "admissions_only":
-            self._process_admissions_only(
-                run=run,
-                script_path=script_path,
-                headless=headless,
-            )
-        elif intent == "demographics_only":
-            self._process_demographics_only(run=run)
-        else:
-            self._process_full_sync(
-                run=run,
-                script_path=script_path,
-                headless=headless,
-            )
+        # SIRS-S1: Start heartbeat while processing.
+        # The heartbeat thread will refresh worker_heartbeat_at every 60s
+        # and stops automatically when the context exits.
+        with WorkerHeartbeat(run, interval_seconds=60):
+            if intent == "admissions_only":
+                self._process_admissions_only(
+                    run=run,
+                    script_path=script_path,
+                    headless=headless,
+                )
+            elif intent == "demographics_only":
+                self._process_demographics_only(run=run)
+            else:
+                self._process_full_sync(
+                    run=run,
+                    script_path=script_path,
+                    headless=headless,
+                )
 
     # ------------------------------------------------------------------
     # Admissions-only processing (AFMF-S2)
