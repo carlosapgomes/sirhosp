@@ -26,6 +26,7 @@ from django.db import close_old_connections, transaction
 from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
+from apps.ingestion.batch_closure import try_close_batch
 from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionExtractor
 from apps.ingestion.gap_planner import plan_extraction_windows
 from apps.ingestion.models import (
@@ -1231,31 +1232,8 @@ class Command(BaseCommand):
 
     @staticmethod
     def _try_close_batch(batch: CensusExecutionBatch | None) -> None:
-        """Close the batch if no queued/running runs remain.
-
-        Sets finished_at and status based on whether any terminally failed
-        runs exist for the batch. Idempotent: no-op if batch is None
-        or already closed.
-        """
-        if batch is None:
-            return
-        if batch.finished_at is not None:
-            return
-
-        active_runs = IngestionRun.objects.filter(
-            batch=batch,
-            status__in=["queued", "running"],
-        ).exists()
-        if active_runs:
-            return
-
-        has_failures = IngestionRun.objects.filter(
-            batch=batch,
-            status="failed",
-        ).exists()
-        batch.finished_at = timezone.now()
-        batch.status = "failed" if has_failures else "succeeded"
-        batch.save(update_fields=["finished_at", "status"])
+        """Close the batch if no queued/running runs remain."""
+        try_close_batch(batch)
 
     # ------------------------------------------------------------------
     # Slice S5: Auto-enqueue full_sync after admissions_only

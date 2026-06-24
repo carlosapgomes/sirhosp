@@ -33,6 +33,7 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from apps.ingestion.models import CensusExecutionBatch, IngestionRun
+from apps.ingestion.stale_recovery import recover_stale_ingestion_runs
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +389,7 @@ def run_loop(
     min_interval_minutes: int = 30,
     failure_backoff_minutes: int = 30,
     stale_running_minutes: int = 180,
+    enable_stale_recovery: bool = True,
     sleep_fn: Callable[[int | float], None] | None = None,
     should_stop: Callable[[], bool] = lambda: False,
 ) -> None:
@@ -424,11 +426,13 @@ def run_loop(
 
     logger.info(
         "Orchestrator loop started "
-        "(sleep=%ds, min_interval=%dmin, backoff=%dmin, stale=%dmin).",
+        "(sleep=%ds, min_interval=%dmin, backoff=%dmin, stale=%dmin, "
+        "recovery=%s).",
         sleep_seconds,
         min_interval_minutes,
         failure_backoff_minutes,
         stale_running_minutes,
+        "enabled" if enable_stale_recovery else "disabled",
     )
 
     _sleep: Callable[[int | float], None] = sleep_fn or time_module.sleep
@@ -436,6 +440,26 @@ def run_loop(
     while not should_stop():
         # 1. Keep database connections healthy
         close_old_connections()
+
+        # SIRS-S3: Run stale recovery before eligibility check
+        if enable_stale_recovery:
+            recovery_result = recover_stale_ingestion_runs(apply=True)
+            if recovery_result.aborted:
+                logger.warning(
+                    "Stale recovery circuit breaker blocked: %s "
+                    "(sleep %ds).",
+                    recovery_result.abort_reason,
+                    sleep_seconds,
+                )
+                _sleep(sleep_seconds)
+                continue
+            if recovery_result.marked_failed_run_ids:
+                logger.info(
+                    "Stale recovery: marked %d run(s) failed, "
+                    "closed %d batch(es).",
+                    len(recovery_result.marked_failed_run_ids),
+                    len(recovery_result.closed_batch_ids),
+                )
 
         # 2. Evaluate eligibility
         decision = compute_orchestrator_state(

@@ -71,6 +71,13 @@ class Command(BaseCommand):
             help="Seconds to sleep when blocked (default: 60).",
         )
         parser.add_argument(
+            "--disable-stale-recovery",
+            action="store_true",
+            default=False,
+            help="Disable automatic stale run recovery in loop mode "
+            "(default: enabled).",
+        )
+        parser.add_argument(
             "--min-interval-minutes",
             type=int,
             default=30,
@@ -96,6 +103,7 @@ class Command(BaseCommand):
         min_interval: int = options["min_interval_minutes"]
         failure_backoff: int = options["failure_backoff_minutes"]
         stale_running: int = options["stale_running_minutes"]
+        disable_stale_recovery: bool = options["disable_stale_recovery"]
 
         if dry_run:
             self._handle_dry_run(min_interval, stale_running)
@@ -105,6 +113,7 @@ class Command(BaseCommand):
                 min_interval=min_interval,
                 failure_backoff=failure_backoff,
                 stale_running=stale_running,
+                enable_stale_recovery=not disable_stale_recovery,
             )
         else:
             # --once (default, also when neither --dry-run nor --loop)
@@ -205,6 +214,7 @@ class Command(BaseCommand):
         min_interval: int,
         failure_backoff: int,
         stale_running: int,
+        enable_stale_recovery: bool = True,
     ) -> None:
         """Run the orchestrator in continuous loop mode.
 
@@ -224,7 +234,8 @@ class Command(BaseCommand):
                 f"(sleep={sleep_seconds}s, "
                 f"min_interval={min_interval}min, "
                 f"backoff={failure_backoff}min, "
-                f"stale={stale_running}min). "
+                f"stale={stale_running}min, "
+                f"recovery={'enabled' if enable_stale_recovery else 'disabled'}). "
                 "Send SIGTERM or SIGINT to stop."
             )
         )
@@ -234,6 +245,7 @@ class Command(BaseCommand):
             min_interval_minutes=min_interval,
             failure_backoff_minutes=failure_backoff,
             stale_running_minutes=stale_running,
+            enable_stale_recovery=enable_stale_recovery,
             should_stop=lambda: _should_stop,
         )
 

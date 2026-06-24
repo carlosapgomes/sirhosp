@@ -29,7 +29,11 @@ Document:
 - heartbeat grace and sweep circuit breaker;
 - dry-run command for manual inspection;
 - apply command for manual intervention;
-- orchestrator loop integration and how to disable it temporarily;
+- orchestrator loop integration: in `--loop` mode, automatic stale recovery is
+  enabled by default and can mark abandoned runs as failed before checking
+  whether a new census cycle may start;
+- how to disable automatic loop recovery temporarily with
+  `--disable-stale-recovery`;
 - terminal failed semantics: one job failed, not the whole batch discarded;
 - no automatic requeue for stale recovery;
 - safe rollback/disable procedure.
@@ -60,7 +64,9 @@ examples:
 ## Acceptance criteria
 
 - Operators can run dry-run stale recovery from docs.
-- Operators can understand when and how the orchestrator applies recovery.
+- Operators can understand that `run_adaptive_census_cycles --loop` applies
+  stale recovery automatically by default before queue eligibility checks.
+- Docs show that `--disable-stale-recovery` disables automatic loop recovery.
 - Docs explain that stale recovery marks failed terminally without requeue.
 - Docs mention heartbeat is DB-based and does not require Docker/PID access.
 - Docs include safe disable/rollback guidance.

@@ -1017,6 +1017,17 @@ class TestCommandOnceMode:
 class TestRunLoopBlockedWaits:
     """Loop waits while blocked, logging reason and sleeping."""
 
+    def _noop_recovery(self):
+        """Return a mock recovery result with no candidates and not aborted."""
+        return mock.MagicMock(
+            aborted=False,
+            marked_failed_run_ids=[],
+            closed_batch_ids=[],
+            candidates=[],
+            apply=True,
+            max_runs_per_sweep=20,
+        )
+
     def test_loop_waits_and_stops_after_one_blocked_iteration(self):
         """Loop waits once while blocked, then stops."""
         from apps.census.orchestration import run_loop
@@ -1039,6 +1050,10 @@ class TestRunLoopBlockedWaits:
 
         with (
             decision_patch,
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=self._noop_recovery(),
+            ),
             mock.patch("apps.census.orchestration.run_single_cycle") as mock_cycle,
             mock.MagicMock() as mock_sleep,
         ):
@@ -1073,6 +1088,10 @@ class TestRunLoopBlockedWaits:
 
         with (
             decision_patch as mock_decision,
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=self._noop_recovery(),
+            ),
             mock.patch("apps.census.orchestration.run_single_cycle") as mock_cycle,
             mock.MagicMock() as mock_sleep,
         ):
@@ -1109,6 +1128,10 @@ class TestRunLoopBlockedWaits:
 
         with (
             decision_patch,
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=self._noop_recovery(),
+            ),
             mock.patch("apps.census.orchestration.run_single_cycle") as mock_cycle,
             mock.MagicMock() as mock_sleep,
         ):
@@ -1146,6 +1169,14 @@ class TestRunLoopExecutesCycle:
             mock.patch(
                 "apps.census.orchestration.compute_orchestrator_state",
                 return_value=eligible_decision,
+            ),
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=mock.MagicMock(
+                    aborted=False, marked_failed_run_ids=[],
+                    closed_batch_ids=[], candidates=[],
+                    apply=True, max_runs_per_sweep=20,
+                ),
             ),
             mock.patch(
                 "apps.census.orchestration.run_single_cycle",
@@ -1197,6 +1228,14 @@ class TestRunLoopExecutesCycle:
                     stale_running_minutes=180: next(decisions),
             ),
             mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=mock.MagicMock(
+                    aborted=False, marked_failed_run_ids=[],
+                    closed_batch_ids=[], candidates=[],
+                    apply=True, max_runs_per_sweep=20,
+                ),
+            ),
+            mock.patch(
                 "apps.census.orchestration.run_single_cycle",
                 return_value={
                     "cycle_executed": True,
@@ -1236,7 +1275,17 @@ class TestRunLoopFailureBackoff:
             OrchestratorDecision(eligible=True, blocked_reason=""),
         ])
 
+        _mock_recovery = mock.patch(
+            "apps.census.orchestration.recover_stale_ingestion_runs",
+            return_value=mock.MagicMock(
+                aborted=False, marked_failed_run_ids=[],
+                closed_batch_ids=[], candidates=[],
+                apply=True, max_runs_per_sweep=20,
+            ),
+        )
+
         with (
+            _mock_recovery,
             mock.patch(
                 "apps.census.orchestration.compute_orchestrator_state",
                 side_effect=lambda min_interval_minutes=30,
@@ -1280,7 +1329,17 @@ class TestRunLoopFailureBackoff:
             OrchestratorDecision(eligible=True, blocked_reason=""),
         ])
 
+        _mock_recovery = mock.patch(
+            "apps.census.orchestration.recover_stale_ingestion_runs",
+            return_value=mock.MagicMock(
+                aborted=False, marked_failed_run_ids=[],
+                closed_batch_ids=[], candidates=[],
+                apply=True, max_runs_per_sweep=20,
+            ),
+        )
+
         with (
+            _mock_recovery,
             mock.patch(
                 "apps.census.orchestration.compute_orchestrator_state",
                 side_effect=lambda min_interval_minutes=30,
@@ -1323,7 +1382,17 @@ class TestRunLoopFailureBackoff:
             OrchestratorDecision(eligible=True, blocked_reason=""),
         ])
 
+        _mock_recovery = mock.patch(
+            "apps.census.orchestration.recover_stale_ingestion_runs",
+            return_value=mock.MagicMock(
+                aborted=False, marked_failed_run_ids=[],
+                closed_batch_ids=[], candidates=[],
+                apply=True, max_runs_per_sweep=20,
+            ),
+        )
+
         with (
+            _mock_recovery,
             mock.patch(
                 "apps.census.orchestration.compute_orchestrator_state",
                 side_effect=lambda min_interval_minutes=30,
@@ -1381,7 +1450,17 @@ class TestRunLoopFailureBackoff:
             },
         ])
 
+        _mock_recovery = mock.patch(
+            "apps.census.orchestration.recover_stale_ingestion_runs",
+            return_value=mock.MagicMock(
+                aborted=False, marked_failed_run_ids=[],
+                closed_batch_ids=[], candidates=[],
+                apply=True, max_runs_per_sweep=20,
+            ),
+        )
+
         with (
+            _mock_recovery,
             mock.patch(
                 "apps.census.orchestration.compute_orchestrator_state",
                 side_effect=lambda min_interval_minutes=30,
@@ -1440,7 +1519,17 @@ class TestRunLoopSignalHandling:
             call_count[0] += 1
             return call_count[0] > 1
 
+        _mock_recovery = mock.patch(
+            "apps.census.orchestration.recover_stale_ingestion_runs",
+            return_value=mock.MagicMock(
+                aborted=False, marked_failed_run_ids=[],
+                closed_batch_ids=[], candidates=[],
+                apply=True, max_runs_per_sweep=20,
+            ),
+        )
+
         with (
+            _mock_recovery,
             mock.patch(
                 "apps.census.orchestration.compute_orchestrator_state",
                 return_value=OrchestratorDecision(eligible=True, blocked_reason=""),
@@ -1475,7 +1564,17 @@ class TestRunLoopSignalHandling:
             call_count[0] += 1
             return call_count[0] > 1
 
+        _mock_recovery = mock.patch(
+            "apps.census.orchestration.recover_stale_ingestion_runs",
+            return_value=mock.MagicMock(
+                aborted=False, marked_failed_run_ids=[],
+                closed_batch_ids=[], candidates=[],
+                apply=True, max_runs_per_sweep=20,
+            ),
+        )
+
         with (
+            _mock_recovery,
             mock.patch(
                 "apps.census.orchestration.compute_orchestrator_state",
                 return_value=OrchestratorDecision(
@@ -1512,7 +1611,17 @@ class TestRunLoopCloseOldConnections:
             call_count[0] += 1
             return call_count[0] > 2
 
+        _mock_recovery = mock.patch(
+            "apps.census.orchestration.recover_stale_ingestion_runs",
+            return_value=mock.MagicMock(
+                aborted=False, marked_failed_run_ids=[],
+                closed_batch_ids=[], candidates=[],
+                apply=True, max_runs_per_sweep=20,
+            ),
+        )
+
         with (
+            _mock_recovery,
             mock.patch(
                 "apps.census.orchestration.compute_orchestrator_state",
                 return_value=OrchestratorDecision(
@@ -1605,3 +1714,360 @@ class TestManagementCommandLoopMode:
         assert sig.parameters["min_interval_minutes"].default == 30
         assert sig.parameters["failure_backoff_minutes"].default == 30
         assert sig.parameters["stale_running_minutes"].default == 180
+        assert sig.parameters["enable_stale_recovery"].default is True
+
+
+# ===========================================================================
+# Slice SIRS-S3: Stale recovery integration
+# ===========================================================================
+
+
+class TestRunLoopStaleRecoveryEnabled:
+    """SIRS-S3: Loop calls stale recovery before eligibility when enabled."""
+
+    def test_loop_calls_recovery_before_eligibility_when_enabled(self):
+        """When enabled, stale recovery is called before compute_orchestrator_state."""
+        from apps.census.orchestration import run_loop
+
+        iteration_count = 0
+
+        def controlled_stop():
+            nonlocal iteration_count
+            iteration_count += 1
+            return iteration_count > 1
+
+        with (
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=mock.MagicMock(
+                    aborted=False,
+                    marked_failed_run_ids=[],
+                    closed_batch_ids=[],
+                    candidates=[],
+                    apply=True,
+                    max_runs_per_sweep=20,
+                ),
+            ) as mock_recovery,
+            mock.patch(
+                "apps.census.orchestration.compute_orchestrator_state",
+                return_value=OrchestratorDecision(
+                    eligible=False,
+                    blocked_reason="Active runs: 1 queued.",
+                    active_queued=1,
+                ),
+            ) as mock_decision,
+            mock.patch(
+                "apps.census.orchestration.run_single_cycle",
+                return_value={"cycle_executed": False, "outcome": "blocked"},
+            ),
+            mock.MagicMock() as mock_sleep,
+        ):
+            run_loop(
+                sleep_seconds=10,
+                sleep_fn=mock_sleep,
+                should_stop=controlled_stop,
+                enable_stale_recovery=True,
+            )
+
+        # Recovery called first, then eligibility
+        mock_recovery.assert_called_once()
+        mock_decision.assert_called_once()
+
+    def test_loop_does_not_call_recovery_when_disabled(self):
+        """When disabled, stale recovery is not called."""
+        from apps.census.orchestration import run_loop
+
+        iteration_count = 0
+
+        def controlled_stop():
+            nonlocal iteration_count
+            iteration_count += 1
+            return iteration_count > 1
+
+        with (
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+            ) as mock_recovery,
+            mock.patch(
+                "apps.census.orchestration.compute_orchestrator_state",
+                return_value=OrchestratorDecision(
+                    eligible=False,
+                    blocked_reason="Active runs: 1 queued.",
+                    active_queued=1,
+                ),
+            ) as mock_decision,
+            mock.patch(
+                "apps.census.orchestration.run_single_cycle",
+            ),
+            mock.MagicMock() as mock_sleep,
+        ):
+            run_loop(
+                sleep_seconds=10,
+                sleep_fn=mock_sleep,
+                should_stop=controlled_stop,
+                enable_stale_recovery=False,
+            )
+
+        mock_recovery.assert_not_called()
+        mock_decision.assert_called_once()
+
+    def test_loop_recovery_circuit_breaker_blocks_cycle_and_sleeps(self):
+        """Circuit breaker prevents cycle, logs, and sleeps."""
+        from apps.census.orchestration import run_loop
+
+        iteration_count = 0
+
+        def controlled_stop():
+            nonlocal iteration_count
+            iteration_count += 1
+            return iteration_count > 1
+
+        with (
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=mock.MagicMock(
+                    aborted=True,
+                    abort_reason="candidate_count_exceeded_limit",
+                    marked_failed_run_ids=[],
+                    closed_batch_ids=[],
+                    candidates=[],
+                    apply=True,
+                    max_runs_per_sweep=20,
+                ),
+            ) as mock_recovery,
+            mock.patch(
+                "apps.census.orchestration.compute_orchestrator_state",
+            ) as mock_decision,
+            mock.patch(
+                "apps.census.orchestration.run_single_cycle",
+            ) as mock_cycle,
+            mock.MagicMock() as mock_sleep,
+        ):
+            run_loop(
+                sleep_seconds=10,
+                sleep_fn=mock_sleep,
+                should_stop=controlled_stop,
+                enable_stale_recovery=True,
+            )
+
+        mock_recovery.assert_called_once()
+        mock_decision.assert_not_called()
+        mock_cycle.assert_not_called()
+        mock_sleep.assert_called_once_with(10)
+
+    def test_loop_recovered_state_allows_eligibility_check(self):
+        """After recovery, orchestrator state is computed with updated DB state."""
+        from apps.census.orchestration import run_loop
+
+        iteration_count = 0
+
+        def controlled_stop():
+            nonlocal iteration_count
+            iteration_count += 1
+            return iteration_count > 1
+
+        with (
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=mock.MagicMock(
+                    aborted=False,
+                    marked_failed_run_ids=[101, 102],
+                    closed_batch_ids=[5],
+                    candidates=[],
+                    apply=True,
+                    max_runs_per_sweep=20,
+                ),
+            ) as mock_recovery,
+            mock.patch(
+                "apps.census.orchestration.compute_orchestrator_state",
+                return_value=OrchestratorDecision(
+                    eligible=True,
+                    blocked_reason="",
+                ),
+            ) as mock_decision,
+            mock.patch(
+                "apps.census.orchestration.run_single_cycle",
+                return_value={
+                    "cycle_executed": True,
+                    "outcome": "success",
+                    "extraction_run_id": 42,
+                    "message": "Success.",
+                },
+            ) as mock_cycle,
+            mock.MagicMock() as mock_sleep,
+        ):
+            run_loop(
+                sleep_seconds=10,
+                sleep_fn=mock_sleep,
+                should_stop=controlled_stop,
+                enable_stale_recovery=True,
+            )
+
+        mock_recovery.assert_called_once()
+        mock_decision.assert_called_once()
+        mock_cycle.assert_called_once()
+
+    def test_loop_recovery_logs_failed_run_count(self):
+        """When recovery marks runs as failed, the count is logged."""
+        from apps.census.orchestration import run_loop
+
+        iteration_count = 0
+
+        def controlled_stop():
+            nonlocal iteration_count
+            iteration_count += 1
+            return iteration_count > 1
+
+        with (
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+                return_value=mock.MagicMock(
+                    aborted=False,
+                    marked_failed_run_ids=[101],
+                    closed_batch_ids=[5],
+                    candidates=[],
+                    apply=True,
+                    max_runs_per_sweep=20,
+                ),
+            ) as mock_recovery,
+            mock.patch(
+                "apps.census.orchestration.compute_orchestrator_state",
+                return_value=OrchestratorDecision(
+                    eligible=False,
+                    blocked_reason="Active runs: 1 queued.",
+                    active_queued=1,
+                ),
+            ) as mock_decision,
+            mock.patch(
+                "apps.census.orchestration.run_single_cycle",
+            ),
+            mock.patch(
+                "apps.census.orchestration.logger",
+            ) as mock_logger,
+            mock.MagicMock() as mock_sleep,
+        ):
+            run_loop(
+                sleep_seconds=10,
+                sleep_fn=mock_sleep,
+                should_stop=controlled_stop,
+                enable_stale_recovery=True,
+            )
+
+        mock_recovery.assert_called_once()
+        mock_decision.assert_called_once()
+        # Verify info log mentions recovery
+        info_calls = [
+            c for c in mock_logger.info.call_args_list
+            if "Stale recovery" in str(c)
+        ]
+        assert len(info_calls) >= 1
+
+    def test_loop_disabled_recovery_preserves_stale_warning(self):
+        """When disabled, prior stale-warning behavior is preserved."""
+        from apps.census.orchestration import run_loop
+
+        iteration_count = 0
+
+        def controlled_stop():
+            nonlocal iteration_count
+            iteration_count += 1
+            return iteration_count > 1
+
+        with (
+            mock.patch(
+                "apps.census.orchestration.recover_stale_ingestion_runs",
+            ) as mock_recovery,
+            mock.patch(
+                "apps.census.orchestration.compute_orchestrator_state",
+                return_value=OrchestratorDecision(
+                    eligible=False,
+                    blocked_reason="1 stale running run(s) detected (>180 min).",
+                    stale_running_count=1,
+                    active_running=1,
+                ),
+            ) as mock_decision,
+            mock.patch(
+                "apps.census.orchestration.run_single_cycle",
+            ),
+            mock.MagicMock() as mock_sleep,
+        ):
+            run_loop(
+                sleep_seconds=10,
+                sleep_fn=mock_sleep,
+                should_stop=controlled_stop,
+                enable_stale_recovery=False,
+            )
+
+        mock_recovery.assert_not_called()
+        mock_decision.assert_called_once()
+        # Stale warning comes from compute_orchestrator_state (not recovery)
+        assert "stale" in mock_decision.return_value.blocked_reason
+
+
+class TestManagementCommandStaleRecoveryFlags:
+    """SIRS-S3: Management command supports disable-stale-recovery flag."""
+
+    def test_command_loop_with_disable_stale_recovery(self):
+        """--disable-stale-recovery flag disables recovery in loop."""
+        import apps.census.management.commands.run_adaptive_census_cycles as cmd_module
+
+        with mock.patch.object(cmd_module, "run_loop") as mock_run_loop:
+            out = io.StringIO()
+            call_command(
+                "run_adaptive_census_cycles",
+                "--loop",
+                "--disable-stale-recovery",
+                stdout=out,
+            )
+
+        mock_run_loop.assert_called_once()
+        _, kwargs = mock_run_loop.call_args
+        assert kwargs.get("enable_stale_recovery") is False
+
+    def test_command_loop_without_disable_flag_uses_default_enabled(self):
+        """Without flag, stale recovery is enabled by default."""
+        import apps.census.management.commands.run_adaptive_census_cycles as cmd_module
+
+        with mock.patch.object(cmd_module, "run_loop") as mock_run_loop:
+            out = io.StringIO()
+            call_command(
+                "run_adaptive_census_cycles",
+                "--loop",
+                stdout=out,
+            )
+
+        mock_run_loop.assert_called_once()
+        _, kwargs = mock_run_loop.call_args
+        assert kwargs.get("enable_stale_recovery") is True
+
+    def test_command_dry_run_does_not_call_recovery(self):
+        """--dry-run does not call recovery, only compute_orchestrator_state.
+
+        Recovery lives in ``orchestration.run_loop`` (imported by reference
+        into the command module), not as a top-level name in the command
+        module, so it must be patched where it is defined. The dry-run path
+        also never enters ``run_loop`` at all.
+        """
+        import apps.census.management.commands.run_adaptive_census_cycles as cmd_module
+        from apps.census.orchestration import OrchestratorDecision
+
+        with mock.patch.object(
+            cmd_module,
+            "compute_orchestrator_state",
+            return_value=OrchestratorDecision(eligible=True),
+        ) as mock_decision, mock.patch(
+            "apps.census.orchestration.recover_stale_ingestion_runs"
+        ) as mock_recovery, mock.patch.object(
+            cmd_module,
+            "run_loop",
+        ) as mock_run_loop:
+            out = io.StringIO()
+            call_command(
+                "run_adaptive_census_cycles",
+                "--dry-run",
+                stdout=out,
+            )
+
+        mock_recovery.assert_not_called()
+        mock_run_loop.assert_not_called()
+        mock_decision.assert_called_once()

@@ -19,35 +19,35 @@
 
 ## 2. Slice SIRS-S2 - Stale recovery service and command
 
-- [ ] 2.1 Add failing tests for candidate detection using per-intent age limits,
+- [X] 2.1 Add failing tests for candidate detection using per-intent age limits,
   heartbeat grace, default unknown-intent limit and safe dry-run output.
-- [ ] 2.2 Add failing tests proving apply mode marks abandoned runs as terminal
+- [X] 2.2 Add failing tests proving apply mode marks abandoned runs as terminal
   `failed`, clears retry scheduling, does not requeue and records safe metadata.
-- [ ] 2.3 Add failing tests proving batch closure after recovery and circuit
+- [X] 2.3 Add failing tests proving batch closure after recovery and circuit
   breaker abort without mutations when candidates exceed the sweep limit.
-- [ ] 2.4 Implement reusable stale recovery service and a management command
+- [X] 2.4 Implement reusable stale recovery service and a management command
   `recover_stale_ingestion_runs` with `--dry-run`, `--apply`, heartbeat grace,
   per-intent limits and `--max-runs-per-sweep`.
-- [ ] 2.5 Keep batch-closing logic DRY by extracting or reusing a small helper
+- [X] 2.5 Keep batch-closing logic DRY by extracting or reusing a small helper
   instead of duplicating behavior across worker and recovery code.
-- [ ] 2.6 Validate S2 with focused tests, official container checks for touched
+- [X] 2.6 Validate S2 with focused tests, official container checks for touched
   scope, OpenSpec validation and markdown lint.
-- [ ] 2.7 Create `/tmp/sirhosp-slice-SIRS-S2-report.md` with implementation
+- [X] 2.7 Create `/tmp/sirhosp-slice-SIRS-S2-report.md` with implementation
   evidence for third-party LLM review.
 
 ## 3. Slice SIRS-S3 - Orchestrator integration
 
-- [ ] 3.1 Add failing tests proving the adaptive orchestrator loop invokes stale
+- [X] 3.1 Add failing tests proving the adaptive orchestrator loop invokes stale
   recovery before computing queue eligibility when recovery is enabled.
-- [ ] 3.2 Add failing tests proving recovery circuit-breaker results keep the
+- [X] 3.2 Add failing tests proving recovery circuit-breaker results keep the
   orchestrator waiting and prevent a new census cycle.
-- [ ] 3.3 Wire the orchestrator to call the reusable recovery service with
+- [X] 3.3 Wire the orchestrator to call the reusable recovery service with
   configurable flags while preserving dry-run and one-cycle behavior safety.
-- [ ] 3.4 Ensure orchestrator logs remain safe and report recovery counts without
+- [X] 3.4 Ensure orchestrator logs remain safe and report recovery counts without
   patient names, clinical text or credentials.
-- [ ] 3.5 Validate S3 with focused tests, official container checks for touched
+- [X] 3.5 Validate S3 with focused tests, official container checks for touched
   scope, OpenSpec validation and markdown lint.
-- [ ] 3.6 Create `/tmp/sirhosp-slice-SIRS-S3-report.md` with implementation
+- [X] 3.6 Create `/tmp/sirhosp-slice-SIRS-S3-report.md` with implementation
   evidence for third-party LLM review.
 
 ## 4. Slice SIRS-S4 - Operations documentation and final verification
