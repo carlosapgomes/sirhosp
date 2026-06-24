@@ -53,7 +53,7 @@ class TestExtractCensusLifecycleMetrics:
     def test_success_flow_records_lifecycle_and_stages(self):
         """Happy path: subprocess succeeds, CSV is parsed, metrics persisted."""
         # Arrange -----------------------------------------------------------
-        csv_rows = _synthetic_csv_rows()
+        csv_rows = _synthetic_rows_n_sectors(45, rows_per_sector=2)
 
         with tempfile.TemporaryDirectory() as real_tmp:
             tmp_path = Path(real_tmp)
@@ -244,7 +244,7 @@ class TestExtractCensusLifecycleMetrics:
 
     def test_stage_finished_before_run_finished(self):
         """Stages must be completed before (or at same time as) run finish."""
-        csv_rows = _synthetic_csv_rows()
+        csv_rows = _synthetic_rows_n_sectors(45, rows_per_sector=2)
 
         with tempfile.TemporaryDirectory() as real_tmp:
             tmp_path = Path(real_tmp)
@@ -283,3 +283,187 @@ class TestExtractCensusLifecycleMetrics:
                     f"Stage '{stage.stage_name}' finished at {stage.finished_at} "
                     f"but run finished at {run.finished_at}"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Completeness gate tests (GCEC-S1)
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_rows_n_sectors(num_sectors: int, rows_per_sector: int = 2) -> list[dict]:
+    """Generate synthetic census rows for N distinct sectors.
+
+    Each sector has ``rows_per_sector`` rows: one occupied and one empty.
+    No real patient data is used.
+    """
+    rows: list[dict] = []
+    for i in range(1, num_sectors + 1):
+        sector = f"SETOR {i:03d}"
+        rows.append({
+            "setor": sector,
+            "leito": f"LEITO{i:03d}A",
+            "prontuario": f"PRONT{i:05d}",
+            "nome": f"PACIENTE {i}",
+            "especialidade": "CLI",
+            "bed_status": "occupied",
+            "setor_codigo": str(i),
+            "data_internacao": "01/01/2026",
+            "tempo_internacao": 10,
+            "data_movimentacao": "",
+            "tipo_alta": "",
+            "origem": "",
+        })
+        rows.append({
+            "setor": sector,
+            "leito": f"LEITO{i:03d}B",
+            "prontuario": "",
+            "nome": "DESOCUPADO",
+            "especialidade": "",
+            "bed_status": "empty",
+            "setor_codigo": str(i),
+            "data_internacao": "",
+            "tempo_internacao": None,
+            "data_movimentacao": "",
+            "tipo_alta": "",
+            "origem": "",
+        })
+    return rows
+
+
+@pytest.mark.django_db
+class TestExtractCensusCompletenessGate:
+    """Verify the completeness gate rejects CSVs with < 40 distinct sectors."""
+
+    # ------------------------------------------------------------------
+    # Helper to set up mocks for completeness tests
+    # ------------------------------------------------------------------
+
+    def _run_command(self, csv_rows: list[dict], expect_failure: bool = True):
+        """Run extract_census with mocked subprocess and parse_census_csv.
+
+        Args:
+            csv_rows: Rows that parse_census_csv should return.
+            expect_failure: If True, expect SystemExit; if False, run cleanly.
+        """
+        with tempfile.TemporaryDirectory() as real_tmp:
+            tmp_path = Path(real_tmp)
+            csv_path = tmp_path / "censo-20260426.csv"
+            csv_path.write_text(
+                "setor_codigo,setor,qrt_leito,prontuario,nome,esp,dt_mvt,alta,origem\n"
+            )
+
+            fake_result = MagicMock()
+            fake_result.returncode = 0
+            fake_tmp_ctx = MagicMock()
+            fake_tmp_ctx.__enter__.return_value = str(real_tmp)
+
+            with (
+                patch(
+                    "apps.census.management.commands.extract_census.run_subprocess",
+                    return_value=fake_result,
+                ),
+                patch(
+                    "apps.census.management.commands.extract_census.parse_census_csv",
+                    return_value=csv_rows,
+                ),
+                patch("pathlib.Path.exists", return_value=True),
+                patch(
+                    "tempfile.TemporaryDirectory",
+                    return_value=fake_tmp_ctx,
+                ),
+            ):
+                if expect_failure:
+                    with pytest.raises(SystemExit):
+                        call_command("extract_census")
+                else:
+                    call_command("extract_census")
+
+    # ------------------------------------------------------------------
+    # Scenario 1: 39 sectors fails
+    # ------------------------------------------------------------------
+
+    def test_39_sectors_rejected(self):
+        """39 distinct sectors must fail the command."""
+        rows = _synthetic_rows_n_sectors(39)
+        self._run_command(rows, expect_failure=True)
+
+    # ------------------------------------------------------------------
+    # Scenario 2: zero CensusSnapshot rows persisted after failure
+    # ------------------------------------------------------------------
+
+    def test_39_sectors_creates_zero_snapshots(self):
+        """After rejection, no CensusSnapshot rows should exist."""
+        rows = _synthetic_rows_n_sectors(39)
+        self._run_command(rows, expect_failure=True)
+        from apps.census.models import CensusSnapshot
+        assert CensusSnapshot.objects.count() == 0
+
+    # ------------------------------------------------------------------
+    # Scenario 3: IngestionRun marked failed with invalid_payload
+    # ------------------------------------------------------------------
+
+    def test_39_sectors_marks_run_failed(self):
+        """After rejection, IngestionRun.status='failed' with invalid_payload."""
+        rows = _synthetic_rows_n_sectors(39)
+        self._run_command(rows, expect_failure=True)
+
+        run = IngestionRun.objects.first()
+        assert run is not None
+        assert run.status == "failed"
+        assert run.failure_reason == "invalid_payload"
+        assert run.timed_out is False
+
+    # ------------------------------------------------------------------
+    # Scenario 4: stage metrics include aggregate values (no PII)
+    # ------------------------------------------------------------------
+
+    def test_39_sectors_records_aggregate_metrics(self):
+        """Stage metrics for rejected extraction include safe aggregate values."""
+        rows = _synthetic_rows_n_sectors(39)
+        self._run_command(rows, expect_failure=True)
+
+        run = IngestionRun.objects.first()
+        assert run is not None
+
+        # Find persistence stage metric
+        pers_metrics = run.stage_metrics.filter(
+            stage_name="census_persistence"
+        )
+        assert pers_metrics.count() == 1
+        pm = pers_metrics.first()
+        assert pm.status == "failed"
+
+        details = pm.details_json
+        assert details.get("sector_count") == 39
+        assert details.get("row_count") == len(rows)
+        assert details.get("minimum_required_sectors") == 40
+        assert "completeness_status" in details
+
+        # Ensure no PII in details
+        flat = str(details).lower()
+        assert "pront" not in flat
+        assert "paciente" not in flat
+
+    # ------------------------------------------------------------------
+    # Scenario 5: 40+ sectors still succeeds
+    # ------------------------------------------------------------------
+
+    def test_40_sectors_accepted(self):
+        """40 distinct sectors must pass the completeness gate."""
+        rows = _synthetic_rows_n_sectors(40)
+        self._run_command(rows, expect_failure=False)
+
+        run = IngestionRun.objects.first()
+        assert run is not None
+        assert run.status == "succeeded", (
+            f"Expected succeeded, got status={run.status}"
+        )
+
+    def test_45_sectors_accepted(self):
+        """45 distinct sectors must pass the completeness gate."""
+        rows = _synthetic_rows_n_sectors(45)
+        self._run_command(rows, expect_failure=False)
+
+        run = IngestionRun.objects.first()
+        assert run is not None
+        assert run.status == "succeeded"

@@ -38,6 +38,53 @@ from apps.patients.models import Admission, Patient
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Completeness gate constants and helpers (GCEC-S1)
+# ---------------------------------------------------------------------------
+
+MINIMUM_CENSUS_SECTORS: int = 40
+"""Minimum distinct non-empty sectors required for a valid census extraction."""
+
+
+def validate_census_completeness(
+    parsed_rows: list[dict],
+) -> dict:
+    """Validate census CSV parsed rows have sufficient sector coverage.
+
+    Counts distinct non-empty sectors in the parsed rows and compares
+    against ``MINIMUM_CENSUS_SECTORS``.
+
+    Args:
+        parsed_rows: Output from :func:`parse_census_csv`.
+
+    Returns:
+        A dict with:
+        - ``accepted``: True if sector count >= minimum.
+        - ``sector_count``: Number of distinct non-empty sectors.
+        - ``row_count``: Total parsed rows.
+        - ``minimum_required_sectors``: The threshold used.
+        - ``completeness_status``: ``"accepted"`` or ``"rejected"``.
+    """
+    distinct_sectors: set[str] = set()
+    for row in parsed_rows:
+        sector = (row.get("setor") or "").strip()
+        if sector:
+            distinct_sectors.add(sector)
+
+    sector_count = len(distinct_sectors)
+    row_count = len(parsed_rows)
+    accepted = sector_count >= MINIMUM_CENSUS_SECTORS
+
+    return {
+        "accepted": accepted,
+        "sector_count": sector_count,
+        "row_count": row_count,
+        "minimum_required_sectors": MINIMUM_CENSUS_SECTORS,
+        "completeness_status": "accepted" if accepted else "rejected",
+    }
+
+
+
 def classify_bed_status(prontuario: str, nome: str) -> str:
     """Classify bed status from census row data.
 

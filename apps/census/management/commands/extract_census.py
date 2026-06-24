@@ -8,7 +8,10 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from apps.census.models import CensusSnapshot
-from apps.census.services import parse_census_csv
+from apps.census.services import (
+    parse_census_csv,
+    validate_census_completeness,
+)
 from apps.ingestion.extractors.subprocess_utils import (
     SubprocessTimeoutError,
     run_subprocess,
@@ -180,6 +183,32 @@ class Command(BaseCommand):
                 parsed_rows = parse_census_csv(csv_path)
                 self.stdout.write(f"  Rows parsed: {len(parsed_rows)}")
 
+                # -- Completeness gate (GCEC-S1) -----------------------
+                completeness = validate_census_completeness(parsed_rows)
+                if not completeness["accepted"]:
+                    sector_count = completeness["sector_count"]
+                    min_required = completeness["minimum_required_sectors"]
+                    err_msg = (
+                        f"Census extraction incomplete: {sector_count} sectors "
+                        f"found, minimum required is {min_required}. "
+                        f"No snapshots persisted."
+                    )
+                    self.stderr.write(err_msg)
+                    self._record_stage(
+                        run=run,
+                        stage_name="census_persistence",
+                        status="failed",
+                        started_at=persist_stage_start,
+                        details_json=completeness,
+                    )
+                    run.status = "failed"
+                    run.error_message = err_msg
+                    run.finished_at = timezone.now()
+                    run.failure_reason = "invalid_payload"
+                    run.timed_out = False
+                    run.save()
+                    sys.exit(1)
+
                 # Bulk create CensusSnapshot rows
                 captured_at = timezone.now()
                 snapshots = [
@@ -219,12 +248,17 @@ class Command(BaseCommand):
                 self.stderr.write(f"Census persistence failed: {exc}")
                 sys.exit(1)
 
+            # Record accepted completeness metrics
+            accepted_details = {
+                **completeness,
+                "rows_persisted": len(snapshots),
+            }
             self._record_stage(
                 run=run,
                 stage_name="census_persistence",
                 status="succeeded",
                 started_at=persist_stage_start,
-                details_json={"rows_persisted": len(snapshots)},
+                details_json=accepted_details,
             )
 
             # Update run status
