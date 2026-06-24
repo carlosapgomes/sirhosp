@@ -1,11 +1,11 @@
 # SIRHOSP
 
-## SIRHOSP - Sistema Interno de Relatórios Hospitalares
+## Sistema Interno de Relatórios Hospitalares
 
-Sistema interno para extração automatizada de dados clínicos
- do sistema fonte hospitalar, armazenamento em banco paralelo
- e geração de consultas rápidas, buscas textuais e resumos
- direcionados para gestão, qualidade, jurídico e diretoria.
+Sistema interno para extração automatizada de dados clínicos do sistema fonte
+hospitalar, armazenamento em banco paralelo e geração de consultas rápidas,
+buscas textuais e resumos direcionados para gestão, qualidade, jurídico e
+diretoria.
 
 ## Status
 
@@ -157,16 +157,15 @@ O container usa a seguinte ordem de precedência (da mais alta para a mais baixa
 2. Variáveis exportadas pelo shell antes do container
 3. Variáveis definidas em `/app/.env` (apenas para vars ausentes)
 
-Isso permite que o Compose defina valores canônicos
- (ex: `DATABASE_URL`, `SECRET_KEY`) enquanto o `.env` local
- adiciona apenas o que faltar.
+Isso permite que o Compose defina valores canônicos (ex: `DATABASE_URL`,
+`SECRET_KEY`) enquanto o `.env` local adiciona apenas o que faltar.
 
 **Variáveis obrigatórias para produção:**
 
-- `DJANGO_SECRET_KEY` - Chave secreta do Django
-  (gerar com `python -c "from django.core.management.utils
-  import get_random_secret_key; print(get_random_secret_key())"`)
-- `DJANGO_ALLOWED_HOSTS` - Hosts permitidos (ex: `localhost,127.0.0.1,meu-servidor.local`)
+- `DJANGO_SECRET_KEY` - Chave secreta do Django. Gere com:
+  `python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"`
+- `DJANGO_ALLOWED_HOSTS` - Hosts permitidos (ex:
+  `localhost,127.0.0.1,meu-servidor.local`)
 - `POSTGRES_PASSWORD` - Senha do banco PostgreSQL
 - `SOURCE_SYSTEM_URL` - URL do sistema legado (fonte para scraping)
 - `SOURCE_SYSTEM_USERNAME` - Usuário do sistema legado
@@ -293,55 +292,96 @@ docker compose -f compose.yml -f compose.dev.yml exec -T web \
   --filter-name HGRS
 ```
 
-### Recuperação histórica de dados
+### Recuperação histórica consolidada
 
-O comando `recover_historical_data` orquestra extração retroativa para uma data
-ou intervalo, chamando os quatro extratores (altas, admissões, óbitos e censo
-oficial) via funções Python diretamente.
+O ponto de entrada canônico para recuperar dados históricos é o comando Django:
 
 ```bash
-# Data única
-uv run python manage.py recover_historical_data --date 15/05/2026
+uv run python manage.py recover_historical_data --date DD/MM/AAAA
+```
 
-# Intervalo inclusivo
+Ele executa, de forma determinística, os serviços de extração de:
+
+1. altas (`discharges`);
+2. admissões (`admissions`);
+3. óbitos (`deaths`);
+4. censo oficial (`official_census`).
+
+A ordem acima é a ordem padrão, preservando o fluxo operacional legado. Os
+comandos individuais `extract_discharges`, `extract_admissions`,
+`extract_deaths` e `extract_official_census` continuam disponíveis como
+wrappers compatíveis.
+
+#### Teste seguro com dry-run
+
+Use `--dry-run` para validar o plano sem chamar Playwright nem os extratores
+reais:
+
+```bash
 uv run python manage.py recover_historical_data \
-  --start-date 01/06/2026 --end-date 03/06/2026
-
-# Subconjunto de extratores
-uv run python manage.py recover_historical_data --date 01/06/2026 \
-  --extractor discharges --extractor deaths
-
-# Planejamento sem executar (dry-run)
-uv run python manage.py recover_historical_data --date 01/06/2026 --dry-run
-
-# Parar na primeira falha (diagnóstico)
-uv run python manage.py recover_historical_data --date 01/06/2026 --fail-fast
+  --date 01/06/2026 \
+  --dry-run
 ```
 
-**Retry automático de steps falhos:**
-
-Após o batch inicial completo, steps que falharam são retentados
-automaticamente em rounds ao fim do batch. O comportamento padrão:
-
-- `--max-retries 3` (default): até 3 rounds de retry após o batch inicial
-- `--max-retries 0`: desativa retries (comportamento original)
-- `--fail-fast` + retry: fail-fast **não executa** retry rounds
-- `--dry-run` + retry: dry-run **não executa** retry rounds
-- Valor negativo em `--max-retries`: erro de validação antes da extração
+Para intervalo inclusivo:
 
 ```bash
-# Usar 5 rounds de retry (default é 3)
-uv run python manage.py recover_historical_data --date 01/06/2026 \
-  --max-retries 5
-
-# Desativar retries
-uv run python manage.py recover_historical_data --date 01/06/2026 \
-  --max-retries 0
+uv run python manage.py recover_historical_data \
+  --start-date 01/06/2026 \
+  --end-date 03/06/2026 \
+  --dry-run
 ```
 
-Apenas steps com `success=False` (não-skipped) do round anterior são
-retentados. Steps bem-sucedidos nunca são repetidos. O resumo final reflete
-o estado após todos os rounds de retry.
+#### Seleção de extratores
+
+Use `--extractor` para limitar o escopo. O argumento pode ser repetido:
+
+```bash
+uv run python manage.py recover_historical_data \
+  --date 01/06/2026 \
+  --extractor admissions \
+  --extractor deaths \
+  --dry-run
+```
+
+Valores aceitos:
+
+- `discharges`
+- `admissions`
+- `deaths`
+- `official_census`
+
+#### Execução real
+
+Remova `--dry-run` somente em ambiente configurado com credenciais do sistema
+fonte. Para teste manual, comece por um único dia e um único extrator:
+
+```bash
+uv run python manage.py recover_historical_data \
+  --date 01/06/2026 \
+  --extractor admissions \
+  --fail-fast
+```
+
+`--fail-fast` interrompe a recuperação na primeira falha, facilitando o
+diagnóstico manual. Sem `--fail-fast`, o comando tenta executar os próximos
+passos e retorna código diferente de zero se houver qualquer falha agregada.
+
+#### Execução no Docker dev
+
+```bash
+docker compose -f compose.yml -f compose.dev.yml exec -T web \
+  uv run --no-sync python manage.py recover_historical_data \
+  --date 01/06/2026 \
+  --dry-run
+```
+
+#### Script legado
+
+`scripts/recover-historical-data.sh` é um helper legado mantido por
+compatibilidade. Para novos fluxos operacionais, prefira
+`python manage.py recover_historical_data`, que usa diretamente os serviços
+Python e não depende de subprocessos de management commands.
 
 ### Modo Desenvolvimento
 
