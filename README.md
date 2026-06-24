@@ -292,6 +292,13 @@ docker compose -f compose.yml -f compose.dev.yml exec -T web \
   --filter-name HGRS
 ```
 
+> **Ciclos de censo adaptativos:** a extração e o processamento do censo
+> amplo (`extract_census` + `process_census_snapshot`) são orquestrados de forma
+> adaptativa por `run_adaptive_census_cycles --loop`, que só dispara um novo
+> ciclo quando a fila de ingestão está drenada. Para instalação como serviço
+> systemd, modo foreground (`--dry-run` / `--once` / `--loop`) e fallback
+> manual, consulte [`deploy/README.md`](deploy/README.md).
+
 ### Recuperação histórica consolidada
 
 O ponto de entrada canônico para recuperar dados históricos é o comando Django:
