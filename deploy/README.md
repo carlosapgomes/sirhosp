@@ -367,6 +367,191 @@ manual via `web`):
 
 ---
 
+## 5a. Recuperação histórica dedicada (runtime batch-only)
+
+A recuperação histórica consolidada (`recover_historical_data`) executa
+Playwright/Chromium para extrair altas, admissões, óbitos e censo oficial de um
+período retroativo. Em produção, o operador utiliza o serviço dedicado
+`historical_recovery` em vez do container `web`, isolando o portal do impacto de
+IO, memória e logs de batches manuais.
+
+O runtime é **batch-only**: usado exclusivamente com `docker compose run --rm`.
+Não é um daemon long-running, não executa em loop, não possui timer systemd e
+não usa Celery/Redis. Cada execução é um container efêmero que persiste apenas
+os resultados duráveis no PostgreSQL.
+
+### 5a.1 Por que um runtime dedicado?
+
+- Isola o portal web (Gunicorn) de picos de memória, CPU e escrita efêmera
+  durante batches pesados.
+- Reduz escrita no overlay Docker/NVMe: temporários do Playwright/Chromium vão
+  para tmpfs em RAM.
+- Permite parametrizar tmpfs e `/dev/shm` para batches históricos sem afetar
+  workers contínuos.
+- Evita que falhas de `ENOSPC` no recovery impactem usuários do portal.
+
+### 5a.2 Execução dry-run (planejamento seguro)
+
+O modo `--dry-run` imprime o plano sem chamar Playwright nem os extratores
+reais. Use sempre antes de uma execução real para validar o escopo:
+
+```bash
+cd /opt/sirhosp
+
+docker compose -f compose.yml -f compose.prod.yml --profile recovery run \
+  --rm historical_recovery uv run --no-sync python manage.py \
+  recover_historical_data --date 01/06/2026 --dry-run
+```
+
+### 5a.3 Execução real — data única
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml --profile recovery run \
+  --rm historical_recovery uv run --no-sync python manage.py \
+  recover_historical_data --date 01/06/2026
+```
+
+### 5a.4 Execução real — intervalo de datas
+
+Use `--start-date` e `--end-date` para um intervalo inclusivo:
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml --profile recovery run \
+  --rm historical_recovery uv run --no-sync python manage.py \
+  recover_historical_data --start-date 01/06/2026 --end-date 05/06/2026
+```
+
+### 5a.5 Seleção de extratores
+
+Use `--extractor` para limitar o escopo. O argumento pode ser repetido para
+múltiplos extratores:
+
+```bash
+# Extrator único
+docker compose -f compose.yml -f compose.prod.yml --profile recovery run \
+  --rm historical_recovery uv run --no-sync python manage.py \
+  recover_historical_data --date 01/06/2026 --extractor admissions --dry-run
+
+# Múltiplos extratores (repetir --extractor)
+docker compose -f compose.yml -f compose.prod.yml --profile recovery run \
+  --rm historical_recovery uv run --no-sync python manage.py \
+  recover_historical_data --date 01/06/2026 --extractor admissions \
+  --extractor discharges --dry-run
+```
+
+Valores aceitos para `--extractor`:
+
+| Extrator | Descrição |
+| --- | --- |
+| `discharges` | Altas do dia |
+| `admissions` | Admissões do dia |
+| `deaths` | Óbitos do dia |
+| `official_census` | Censo oficial (arquivo TXT via ZIP) |
+
+Os extratores selecionados executam na ordem determinística padrão
+(`discharges`, `admissions`, `deaths`, `official_census`),
+independentemente da ordem em que `--extractor` foi informado.
+
+### 5a.6 Validação do runtime volátil
+
+Antes de iniciar um batch real, valide tmpfs, `/dev/shm`, status do container
+host e escrita em disco:
+
+```bash
+# Inspecionar tmpfs e /dev/shm dentro do runtime (container efêmero)
+docker compose -f compose.yml -f compose.prod.yml --profile recovery run \
+  --rm historical_recovery sh -c \
+  'df -h /tmp /var/tmp /dev/shm; ls -d /tmp/xdg-*'
+
+# Status do container (se ainda ativo)
+docker compose -f compose.yml -f compose.prod.yml --profile recovery ps \
+  historical_recovery
+
+# Logs (ex.: após execução)
+docker compose -f compose.yml -f compose.prod.yml --profile recovery logs \
+  historical_recovery
+
+# Estatísticas de recursos (CPU, memória, Block I/O)
+docker stats --no-stream
+
+# RAM e swap do host
+free -h
+
+# Escrita em disco (monitore wMB/s do device principal, ex.: sda, nvme0n1)
+iostat -x 5
+```
+
+> Com tmpfs, a escrita física deve ser baixa durante o recovery (a maior parte
+> permanece em RAM). Picos sustentados indicam que temporários podem estar
+> vazando para o overlay Docker.
+
+### 5a.7 Variáveis de sizing
+
+O runtime `historical_recovery` usa variáveis próprias, independentes dos
+`WORKER_*` e `CENSUS_ORCHESTRATOR_*`:
+
+| Variável | Padrão | Descrição |
+| --- | --- | --- |
+| `HISTORICAL_RECOVERY_SHM_SIZE` | `1g` | Chrome (`/dev/shm`) |
+| `HISTORICAL_RECOVERY_TMPFS_TMP_SIZE` | `2g` | Máximo de `/tmp` |
+| `HISTORICAL_RECOVERY_TMPFS_VAR_TMP_SIZE` | `256m` | `/var/tmp` |
+| `HISTORICAL_RECOVERY_TMPFS_CACHE_SIZE` | `512m` | `~/.cache` |
+| `HISTORICAL_RECOVERY_TMPFS_CONFIG_SIZE` | `128m` | `~/.config` |
+
+Overrides são feitos no `.env`, sem editar o Compose:
+
+```bash
+# Exemplos sintéticos (não usar valores reais em commit)
+HISTORICAL_RECOVERY_SHM_SIZE=2g
+HISTORICAL_RECOVERY_TMPFS_TMP_SIZE=4g
+HISTORICAL_RECOVERY_TMPFS_VAR_TMP_SIZE=512m
+HISTORICAL_RECOVERY_TMPFS_CACHE_SIZE=1g
+HISTORICAL_RECOVERY_TMPFS_CONFIG_SIZE=256m
+```
+
+> **Aviso:** nunca imprimir nem versionar secrets.
+> `docker compose config` interpola variáveis do `.env`, incluindo
+> `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD` e credenciais do sistema fonte.
+> Use `--profile recovery` ao inspecionar apenas o runtime de recuperação.
+
+### 5a.8 Troubleshooting
+
+| Problema | Causa | Ação |
+| --- | --- | --- |
+| `ENOSPC` `/tmp` | tmpfs cheio | Subir `HISTORICAL_RECOVERY_TMPFS_TMP_SIZE` |
+| Chromium (shm) | `/dev/shm` pequeno | Subir `HISTORICAL_RECOVERY_SHM_SIZE` |
+| Container não inicia | Config ausente | `docker compose logs` |
+
+### 5a.9 Paralelismo e segurança
+
+> **Aviso:** não execute múltiplos batches pesados de recuperação histórica em
+> paralelo sem decisão operacional explícita. Contenção em tmpfs e no sistema
+> fonte pode causar `ENOSPC`, timeouts e dados inconsistentes. Execute um batch
+> por vez.
+
+### 5a.10 Rollback e fallback
+
+Para parar de usar o runtime dedicado e voltar à execução via `web` durante
+diagnóstico de emergência:
+
+1. Simplesmente não use o perfil `recovery`. O runtime dedicado não interfere
+   com outros serviços.
+2. Execute a recuperação pelo container `web` conforme os comandos originais:
+
+   ```bash
+   docker compose -f compose.yml -f compose.prod.yml exec -T web \
+     uv run --no-sync python manage.py recover_historical_data \
+     --date 01/06/2026 --dry-run
+   ```
+
+3. Corrija o problema no runtime (ex.: ajuste de variáveis, `.env`).
+4. Reabilite o runtime dedicado quando estiver funcional.
+
+> A persistência clínica está no PostgreSQL e não depende do runtime. Nenhum
+> dado é perdido ao alternar entre `historical_recovery` e `web`.
+
+---
+
 ## 4b. Ativar agendamento automático de extração de altas
 
 A extração de altas do dia é executada **3 vezes ao dia** (11:00, 19:00, 23:55)
