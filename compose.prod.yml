@@ -126,6 +126,13 @@ services:
       - UV_NO_CACHE=1
       # Proxy SOCKS5 para acessar o sistema legado via tailnet do hospital
       - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-socks5://sirhosp-tailscale-proxy:1055}
+      # Runtime IO control: redireciona temporários e caches para /tmp (tmpfs),
+      # reduzindo escrita efêmera no overlay Docker/NVMe em workers contínuos.
+      - TMPDIR=/tmp
+      - TEMP=/tmp
+      - TMP=/tmp
+      - XDG_CACHE_HOME=/tmp/xdg-cache
+      - XDG_CONFIG_HOME=/tmp/xdg-config
     depends_on:
       db:
         condition: service_healthy
@@ -134,6 +141,23 @@ services:
       hospital_edge:
     command: ["uv", "run", "--no-sync", "python", "manage.py", "process_ingestion_runs", "--loop", "--sleep-seconds", "5"]
     restart: unless-stopped
+    # shm_size: memória compartilhada para Chromium headless. Padrão 512m,
+    # ajustável via WORKER_SHM_SIZE (subir para 768m/1g em falhas por /dev/shm).
+    shm_size: "${WORKER_SHM_SIZE:-512m}"
+    # tmpfs: armazenamento volátil em RAM para temporários/caches/config.
+    # Limites conservadores por réplica; somados suportam até 15 workers em
+    # host com ~62 GiB RAM. Teto ajustável via WORKER_TMPFS_* sem editar Compose.
+    tmpfs:
+      - "/tmp:size=${WORKER_TMPFS_TMP_SIZE:-1g},mode=1777"
+      - "/var/tmp:size=${WORKER_TMPFS_VAR_TMP_SIZE:-128m},mode=1777"
+      - "/home/10001/.cache:size=${WORKER_TMPFS_CACHE_SIZE:-256m},uid=10001,gid=10001,mode=700"
+      - "/home/10001/.config:size=${WORKER_TMPFS_CONFIG_SIZE:-64m},uid=10001,gid=10001,mode=700"
+    # Rotação de logs Docker: limita crescimento em execução contínua.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   summary_worker:
     build:

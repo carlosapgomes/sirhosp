@@ -71,6 +71,88 @@ docker compose -f compose.yml -f compose.prod.yml up -d --scale worker=3
 
 ---
 
+## 4a. Worker: armazenamento volátil (tmpfs)
+
+O `worker` de produção escreve temporários, caches e config em **tmpfs**
+(RAM volátil) em vez do overlay Docker/NVMe. Isso reduz escrita efêmera de
+Playwright/Chromium e Python, preservando a vida útil do disco.
+
+### 4a.1 Limites padrão por réplica
+
+| Montagem | Padrão | Variável de override |
+| --- | --- | --- |
+| `/tmp` | `1g` | `WORKER_TMPFS_TMP_SIZE` |
+| `/var/tmp` | `128m` | `WORKER_TMPFS_VAR_TMP_SIZE` |
+| `/home/10001/.cache` | `256m` | `WORKER_TMPFS_CACHE_SIZE` |
+| `/home/10001/.config` | `64m` | `WORKER_TMPFS_CONFIG_SIZE` |
+| `/dev/shm` (`shm_size`) | `512m` | `WORKER_SHM_SIZE` |
+
+Os limites são conservadores e suportam até 15 workers em um host com
+~62 GiB de RAM. Overrides são opcionais e não exigem editar o Compose.
+
+### 4a.2 Escalar até 15 workers
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml up -d \
+  --scale worker=15
+```
+
+### 4a.3 Overrides via `.env`
+
+```bash
+# Exemplos sintéticos (não usar valores reais em commit)
+WORKER_SHM_SIZE=768m
+WORKER_TMPFS_TMP_SIZE=2g
+WORKER_TMPFS_VAR_TMP_SIZE=256m
+WORKER_TMPFS_CACHE_SIZE=512m
+WORKER_TMPFS_CONFIG_SIZE=128m
+```
+
+> **Aviso:** nunca imprimir nem versionar secrets.
+`docker compose config` interpola variáveis do `.env`, incluindo
+`DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD` e credenciais do sistema fonte.
+Não redirecione essa saída para arquivos rastreados nem a cole em canais
+de log. Use apenas para validação local e descarte a saída.
+
+### 4a.4 Validação operacional
+
+Inspecione `/tmp` e `/dev/shm` dentro de um worker:
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml exec worker \
+  sh -c 'df -h /tmp /var/tmp /dev/shm && ls -ld /tmp/xdg-cache /tmp/xdg-config'
+```
+
+Inspecione Block I/O, RAM e swap do host e dos containers:
+
+```bash
+# Block I/O e memória dos containers (procure BlockIO/MemUsage)
+docker stats --no-stream
+
+# RAM e swap do host
+free -h
+swapon --show
+```
+
+### 4a.5 Problemas conhecidos
+
+- **`ENOSPC` em `/tmp`** (tmpfs cheio em picos de evolução clínica): suba
+  `WORKER_TMPFS_TMP_SIZE` para `2g` no `.env` e recrie os workers.
+- **Chromium falha por memória compartilhada** (`/dev/shm` insuficiente):
+  suba `WORKER_SHM_SIZE` para `768m` ou `1g`.
+
+### 4a.6 Rollback
+
+Remover os overrides do `.env` (ou redefinir os limites para valores
+menores) e recriar os containers reverte o runtime volátil ao tamanho
+padrão sem alterar persistência clínica ou PostgreSQL:
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml up -d --force-recreate worker
+```
+
+---
+
 ## 5. Orquestrador adaptativo de censo
 
 O censo hospitalar é extraído pelo **orquestrador adaptativo**, que monitora a
