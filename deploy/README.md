@@ -162,10 +162,36 @@ quando for seguro (fila drenada, cooldown respeitado, sem batch aberto).
 Não há timer fixo: o orquestrador executa em modo contínuo
 (`--loop`), dormindo entre verificações e aplicando backoff em caso de falha.
 
+### Por que um serviço dedicado?
+
+Em produção, o orquestrador roda em um container dedicado (`census_orchestrator`)
+com armazenamento volátil próprio (tmpfs), memória compartilhada parametrizável
+para Chromium e limites de log. Isso:
+
+- evita que a automação pesada do censo compartilhe temporários e runtime com o
+  portal web (Gunicorn);
+- reduz escrita efêmera no overlay Docker/NVMe — as escritas do Playwright vão
+  para tmpfs em RAM;
+- permite monitorar e dimensionar o custo real do orquestrador separadamente do
+  worker e do web;
+- evita que picos de `ENOSPC` no orquestrador afetem usuários do portal.
+
+> **Aviso:** não execute o loop contínuo do orquestrador simultaneamente via
+> `exec -T web` **e** pelo serviço dedicado `census_orchestrator`. Os dois
+> loops competem pelo advisory lock e podem causar ciclos sobrepostos e
+> comportamento imprevisível. Use **apenas um** dos métodos de execução
+> contínua.
+
 ### 5.1 Executar como serviço systemd (recomendado para produção)
 
 O arquivo `deploy/systemd/sirhosp-census-orchestrator.service` é um serviço
 long-running, **não** um timer `OnCalendar`.
+
+O serviço usa `docker compose --profile orchestrator up
+--abort-on-container-exit`. O `ExecStart` roda em foreground — quando o
+container morre (exit code != 0), o Compose encerra e o systemd reinicia
+com `Restart=on-failure` e `RestartSec=10`. Isso garante que o orquestrador
+volte a operar automaticamente após falhas transientes.
 
 ```bash
 # Copiar unit para o systemd
@@ -182,28 +208,40 @@ systemctl enable --now sirhosp-census-orchestrator.service
 systemctl status sirhosp-census-orchestrator.service
 ```
 
-### 5.2 Executar em foreground (debug / testes)
+### 5.2 Executar com o serviço dedicado (debug / testes)
+
+Os comandos abaixo usam o serviço `census_orchestrator` diretamente via Docker
+Compose (profile `orchestrator`). Isso valida o mesmo runtime volátil
+(tmpfs, `/dev/shm`) da operação em produção.
 
 ```bash
 cd /opt/sirhosp
 
-# Um ciclo (comportamento dry-run: diagnóstico, sem mutação)
-docker compose -f compose.yml -f compose.prod.yml exec -T web \
-  uv run --no-sync python manage.py run_adaptive_census_cycles --dry-run
+# Iniciar o serviço dedicado em background (loop contínuo)
+docker compose -f compose.yml -f compose.prod.yml --profile orchestrator up -d \
+  census_orchestrator
 
-# Um ciclo real
-docker compose -f compose.yml -f compose.prod.yml exec -T web \
-  uv run --no-sync python manage.py run_adaptive_census_cycles --once
+# Um ciclo dry-run (diagnóstico, sem mutação) — container efêmero
+docker compose -f compose.yml -f compose.prod.yml --profile orchestrator run \
+  --rm census_orchestrator uv run --no-sync python manage.py \
+  run_adaptive_census_cycles --dry-run
 
-# Modo contínuo (foreground)
-docker compose -f compose.yml -f compose.prod.yml exec -T web \
-  uv run --no-sync python manage.py run_adaptive_census_cycles --loop
+# Um ciclo real — container efêmero
+docker compose -f compose.yml -f compose.prod.yml --profile orchestrator run \
+  --rm census_orchestrator uv run --no-sync python manage.py \
+  run_adaptive_census_cycles --once
+
+# Modo contínuo em foreground (logs no terminal)
+docker compose -f compose.yml -f compose.prod.yml --profile orchestrator up \
+  census_orchestrator
 ```
 
-### 5.3 Execução manual (fallback)
+### 5.3 Execução manual via web (fallback)
 
-Caso o orquestrador não esteja disponível, o operador pode executar o ciclo
-manualmente:
+Caso o serviço dedicado não esteja disponível (ex.: durante migração ou
+rollback), o operador pode executar o ciclo manualmente pelo container `web`.
+Use apenas para diagnóstico pontual; não mantenha loops long-running por este
+método.
 
 ```bash
 cd /opt/sirhosp
@@ -217,21 +255,115 @@ docker compose -f compose.yml -f compose.prod.yml exec -T web \
   uv run --no-sync python manage.py process_census_snapshot
 ```
 
-### 5.4 Comandos úteis
+### 5.4 Comandos de monitoramento
 
 ```bash
-# Ver logs do orquestrador
+# Ver logs do serviço systemd
 journalctl -u sirhosp-census-orchestrator.service -n 50 --no-pager
 
-# Ver logs em tempo real
+# Logs em tempo real
 journalctl -u sirhosp-census-orchestrator.service -f
 
-# Parar o serviço
-systemctl stop sirhosp-census-orchestrator.service
+# Status do container Docker
+docker compose -f compose.yml -f compose.prod.yml --profile orchestrator ps \
+  census_orchestrator
 
-# Desabilitar o serviço
-systemctl disable --now sirhosp-census-orchestrator.service
+# Logs Docker do container
+docker compose -f compose.yml -f compose.prod.yml --profile orchestrator logs \
+  census_orchestrator
+
+# Estatísticas de recursos (CPU, memória, Block I/O)
+docker stats --no-stream sirhosp-census-orchestrator
 ```
+
+### 5.5 Validação do runtime volátil
+
+> **Pré-condição:** garanta que o serviço `census_orchestrator` está rodando
+> (seções 5.1 ou 5.2) antes de executar os comandos `exec` abaixo.
+
+#### Inspecionar tmpfs e /dev/shm dentro do orquestrador
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml --profile orchestrator exec \
+  census_orchestrator sh -c 'df -h /tmp /var/tmp /dev/shm; ls -d /tmp/xdg-*'
+```
+
+A saída deve mostrar sistemas de arquivos `tmpfs` com os limites
+configurados e `/dev/shm` com o tamanho definido em `CENSUS_ORCHESTRATOR_SHM_SIZE`.
+
+#### Verificar escrita em disco do host
+
+Compare `wMB/s` (write MB/s) do device antes e durante a extração:
+
+```bash
+# Monitorar escrita no device principal (ex.: sda, nvme0n1)
+iostat -x 5
+```
+
+Com tmpfs, a escrita física deve ser baixa durante o censo (a maior parte
+permanece em RAM). Picos sustentados indicam que temporários podem estar
+vazando para o overlay Docker.
+
+### 5.6 Variáveis de sizing do orquestrador
+
+O orquestrador usa variáveis próprias, independentes dos `WORKER_*`:
+
+| Variável | Padrão | Descrição |
+| --- | --- | --- |
+| `CENSUS_ORCHESTRATOR_SHM_SIZE` | `512m` | Chrome (`/dev/shm`) |
+| `CENSUS_ORCHESTRATOR_TMPFS_TMP_SIZE` | `1g` | Máximo de `/tmp` |
+| `CENSUS_ORCHESTRATOR_TMPFS_VAR_TMP_SIZE` | `128m` | `/var/tmp` |
+| `CENSUS_ORCHESTRATOR_TMPFS_CACHE_SIZE` | `256m` | `~/.cache` |
+| `CENSUS_ORCHESTRATOR_TMPFS_CONFIG_SIZE` | `64m` | `~/.config` |
+
+Overrides são feitos no `.env`, sem editar o Compose:
+
+```bash
+# Exemplos sintéticos (não usar valores reais em commit)
+CENSUS_ORCHESTRATOR_SHM_SIZE=768m
+CENSUS_ORCHESTRATOR_TMPFS_TMP_SIZE=2g
+CENSUS_ORCHESTRATOR_TMPFS_VAR_TMP_SIZE=256m
+CENSUS_ORCHESTRATOR_TMPFS_CACHE_SIZE=512m
+CENSUS_ORCHESTRATOR_TMPFS_CONFIG_SIZE=128m
+```
+
+> **Aviso:** nunca imprimir nem versionar secrets.
+> `docker compose config` interpola variáveis do `.env`, incluindo
+> `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD` e credenciais do sistema fonte.
+> Use `--profile orchestrator` ao inspecionar apenas o orquestrador.
+
+### 5.7 Troubleshooting
+
+| Problema | Causa provável | Ação |
+| --- | --- | --- |
+| `ENOSPC` (`/tmp`) | tmpfs cheio | Ajustar TMPFS_TMP_SIZE |
+| Chromium (shm) | `/dev/shm` cheio | Ajustar `CENSUS_ORCHESTRATOR_SHM_SIZE` |
+| Container não sobe | Config/.env | Ver logs do container |
+
+### 5.8 Rollback e desabilitação
+
+Para parar o orquestrador dedicado e voltar ao método anterior (execução
+manual via `web`):
+
+1. **Desabilitar o serviço systemd:**
+
+   ```bash
+   systemctl disable --now sirhosp-census-orchestrator.service
+   ```
+
+2. **Parar o container Compose (se estiver rodando fora do systemd):**
+
+   ```bash
+   docker compose -f compose.yml -f compose.prod.yml --profile orchestrator down
+   ```
+
+3. **Usar comandos manuais via `web`** conforme a seção 5.3 enquanto o
+   problema é resolvido.
+
+4. **Reverter overrides de variáveis** no `.env` (ou removê-las) e recriar
+   o serviço quando reabilitar.
+
+5. **Para reativar:** repita o passo 5.1 (copiar unit, habilitar e iniciar).
 
 ---
 
