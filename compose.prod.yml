@@ -228,6 +228,81 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # =========================================================================
+  # Serviço dedicado para recuperação histórica manual (batch-only)
+  # Uso: docker compose run --rm historical_recovery ...
+  # Perfil explícito para não iniciar com up normal.
+  # =========================================================================
+  historical_recovery:
+    profiles: ["recovery"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod
+    container_name: sirhosp-historical-recovery
+    # Necessário para reaper de processos filhos (Playwright/Chromium)
+    # e evitar acúmulo de processos defunct.
+    init: true
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required in production}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-false}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - POSTGRES_DB=${POSTGRES_DB:-sirhosp}
+      - POSTGRES_USER=${POSTGRES_USER:-sirhosp}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=${POSTGRES_INTERNAL_PORT:-5432}
+      # Credenciais do sistema legado (conector Playwright integrado)
+      - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
+      - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
+      - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
+      # uv: ambiente virtual em /opt/venv (dentro da imagem)
+      # UV_NO_CACHE: desabilita cache em runtime para evitar problemas de permissão
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - UV_CACHE_DIR=/opt/.uv_cache
+      - UV_NO_CACHE=1
+      # Proxy SOCKS5 para acessar o sistema legado via tailnet do hospital
+      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-socks5://sirhosp-tailscale-proxy:1055}
+      # Runtime IO control: redireciona temporários e caches para /tmp (tmpfs),
+      # reduzindo escrita efêmera no overlay Docker/NVMe em batches manuais.
+      - TMPDIR=/tmp
+      - TEMP=/tmp
+      - TMP=/tmp
+      - XDG_CACHE_HOME=/tmp/xdg-cache
+      - XDG_CONFIG_HOME=/tmp/xdg-config
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      default:
+      hospital_edge:
+    # Comando padrão seguro e não-mutante: apenas exibe help.
+    # Operadores sobrescrevem comando em execuções reais.
+    command:
+      - uv
+      - run
+      - --no-sync
+      - python
+      - manage.py
+      - recover_historical_data
+      - --help
+    # Sem restart: serviço batch-only, executado via run --rm.
+    shm_size: "${HISTORICAL_RECOVERY_SHM_SIZE:-1g}"
+    # tmpfs: armazenamento volátil em RAM para temporários/caches/config.
+    # Limites próprios para batches de recuperação histórica, independentes
+    # dos workers contínuos. Ajustável via HISTORICAL_RECOVERY_TMPFS_*.
+    tmpfs:
+      - "/tmp:size=${HISTORICAL_RECOVERY_TMPFS_TMP_SIZE:-2g},mode=1777"
+      - "/var/tmp:size=${HISTORICAL_RECOVERY_TMPFS_VAR_TMP_SIZE:-256m},mode=1777"
+      - "/home/10001/.cache:size=${HISTORICAL_RECOVERY_TMPFS_CACHE_SIZE:-512m},uid=10001,gid=10001,mode=700"
+      - "/home/10001/.config:size=${HISTORICAL_RECOVERY_TMPFS_CONFIG_SIZE:-128m},uid=10001,gid=10001,mode=700"
+    # Rotação de logs Docker: limita crescimento em batches longos.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   summary_worker:
     build:
       context: .
