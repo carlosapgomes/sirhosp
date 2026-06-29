@@ -8,8 +8,12 @@ Wants=network-online.target docker.service
 Type=simple
 User=root
 WorkingDirectory=/opt/sirhosp
-ExecStart=docker compose -f compose.yml -f compose.prod.yml exec -T web \
-    uv run --no-sync python manage.py run_adaptive_census_cycles --loop
+# Inicia o serviço dedicado census_orchestrator (profile orchestrator).
+# O serviço roda run_adaptive_census_cycles --loop dentro do container.
+ExecStart=docker compose -f compose.yml -f compose.prod.yml --profile orchestrator up --abort-on-container-exit census_orchestrator
+
+# Para o serviço dedicado sem afetar web/worker.
+ExecStop=docker compose -f compose.yml -f compose.prod.yml --profile orchestrator stop census_orchestrator
 
 # Stale recovery is enabled by default in --loop mode.
 # To disable temporarily, add: --disable-stale-recovery

@@ -159,6 +159,75 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  census_orchestrator:
+    profiles: ["orchestrator"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: prod
+    container_name: sirhosp-census-orchestrator
+    # Necessário para reaper de processos filhos (Playwright/Chromium)
+    # e evitar acúmulo de processos defunct.
+    init: true
+    environment:
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?DJANGO_SECRET_KEY is required in production}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-false}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - POSTGRES_DB=${POSTGRES_DB:-sirhosp}
+      - POSTGRES_USER=${POSTGRES_USER:-sirhosp}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=${POSTGRES_INTERNAL_PORT:-5432}
+      # Credenciais do sistema legado (conector Playwright integrado)
+      - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
+      - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
+      - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
+      # uv: ambiente virtual em /opt/venv (dentro da imagem)
+      - UV_PROJECT_ENVIRONMENT=/opt/venv
+      - UV_CACHE_DIR=/opt/.uv_cache
+      - UV_NO_CACHE=1
+      # Proxy SOCKS5 para acessar o sistema legado via tailnet do hospital
+      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-socks5://sirhosp-tailscale-proxy:1055}
+      # Runtime IO control: redireciona temporários e caches para /tmp (tmpfs),
+      # reduzindo escrita efêmera no overlay Docker/NVMe no orquestrador.
+      - TMPDIR=/tmp
+      - TEMP=/tmp
+      - TMP=/tmp
+      - XDG_CACHE_HOME=/tmp/xdg-cache
+      - XDG_CONFIG_HOME=/tmp/xdg-config
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      default:
+      hospital_edge:
+    command:
+      - uv
+      - run
+      - --no-sync
+      - python
+      - manage.py
+      - run_adaptive_census_cycles
+      - --loop
+    restart: unless-stopped
+    # shm_size: memória compartilhada para Chromium headless. Padrão 512m,
+    # ajustável via CENSUS_ORCHESTRATOR_SHM_SIZE.
+    shm_size: "${CENSUS_ORCHESTRATOR_SHM_SIZE:-512m}"
+    # tmpfs: armazenamento volátil em RAM para temporários/caches/config.
+    # Limites conservadores próprios do orquestrador; parametrizáveis via
+    # CENSUS_ORCHESTRATOR_TMPFS_* sem editar Compose.
+    tmpfs:
+      - "/tmp:size=${CENSUS_ORCHESTRATOR_TMPFS_TMP_SIZE:-1g},mode=1777"
+      - "/var/tmp:size=${CENSUS_ORCHESTRATOR_TMPFS_VAR_TMP_SIZE:-128m},mode=1777"
+      - "/home/10001/.cache:size=${CENSUS_ORCHESTRATOR_TMPFS_CACHE_SIZE:-256m},uid=10001,gid=10001,mode=700"
+      - "/home/10001/.config:size=${CENSUS_ORCHESTRATOR_TMPFS_CONFIG_SIZE:-64m},uid=10001,gid=10001,mode=700"
+    # Rotação de logs Docker: limita crescimento em execução contínua.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   summary_worker:
     build:
       context: .
