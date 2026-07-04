@@ -136,6 +136,7 @@ class FakeExtractionSession:
         self._open_tab_fail: bool = False
         self._tab_classes: list[str] = ["tabs-first tabs-last tabs-selected"]
         self._on_open_tab_cb = None
+        self._last_open_timeout: int | None = None
 
     # --- Fake state mutators (test helpers) ---
 
@@ -175,8 +176,9 @@ class FakeExtractionSession:
     def click_selector(self, selector: str) -> None:
         self._clicked_selectors.append(selector)
 
-    def open_tab(self, url: str) -> bool:
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:
         self._opened_urls.append(url)
+        self._last_open_timeout = timeout
         if self._open_tab_fail:
             return False
         # If there's a URL-specific HTML override, use it.
@@ -632,6 +634,30 @@ class TestLifecycleWithFakes:
 
         # No tab close on data extraction failure
         assert session.closed_tab_calls == 0
+
+
+# ===========================================================================
+# Timeout propagation to the session handle
+# ===========================================================================
+
+
+class TestTimeoutPropagationToHandle:
+    """Tests that the adapter forwards ``timeout`` to the handle's open_tab."""
+
+    def test_timeout_reaches_session_handle(self) -> None:
+        """The timeout kwarg is propagated to ``SessionHandle.open_tab``."""
+        session = FakeExtractionSession()
+        session.set_html(VALID_FULL_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        adapter.get_admission_snapshot(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            timeout=60,
+        )
+
+        assert session._last_open_timeout == 60
 
 
 # ===========================================================================

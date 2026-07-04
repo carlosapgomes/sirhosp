@@ -34,7 +34,7 @@ class FakeSessionHandle:
         self._tab_classes: list[str] = []
         self._connected: bool = True
         self._clicked_selectors: list[str] = []
-        self._opened_urls: list[str] = []
+        self._opened_urls: list[tuple[str, int]] = []
         self._closed_tab_calls: int = 0
         self._restart_calls: int = 0
         self._on_open_tab: Callable[[], None] | None = None
@@ -74,8 +74,8 @@ class FakeSessionHandle:
     def click_selector(self, selector: str) -> None:
         self._clicked_selectors.append(selector)
 
-    def open_tab(self, url: str) -> bool:
-        self._opened_urls.append(url)
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:
+        self._opened_urls.append((url, timeout))
         if self._on_open_tab is not None:
             self._on_open_tab()
         return not self._open_tab_fail
@@ -98,7 +98,7 @@ class FakeSessionHandle:
 
     @property
     def opened_urls(self) -> list[str]:
-        return list(self._opened_urls)
+        return [url for url, _ in self._opened_urls]
 
     @property
     def closed_tab_calls(self) -> int:

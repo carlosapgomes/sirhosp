@@ -75,8 +75,14 @@ class SessionHandle(Protocol):
         """Click the element matching the given CSS selector."""
         ...
 
-    def open_tab(self, url: str) -> bool:
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:
         """Open a new tab with the given URL and wait for render.
+
+        Args:
+            url: URL to navigate to.
+            timeout: Maximum time in seconds to wait for the tab to open and
+                render. Implementations backed by Playwright MUST honor this
+                value in their navigation/wait calls.
 
         Returns:
             True if the tab opened and rendered successfully, False otherwise.
