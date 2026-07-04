@@ -38,6 +38,9 @@ class SessionControllerConfig:
             time falls below this value.
         safe_renewal_tab_url: URL of a safe legacy tab to open for proactive
             session renewal.
+        base_admissions_url: URL template for the admissions page.
+            Supports ``{patient_record}``, ``{start_date}``, ``{end_date}``
+            placeholders.
     """
 
     max_jobs_per_session: int = 50
@@ -45,6 +48,7 @@ class SessionControllerConfig:
     max_consecutive_failures: int = 3
     renewal_threshold_seconds: int = 600
     safe_renewal_tab_url: str = ""
+    base_admissions_url: str = "/admissions/{patient_record}"
 
 
 # ---------------------------------------------------------------------------
