@@ -153,6 +153,30 @@ docker compose -f compose.yml -f compose.prod.yml up -d --force-recreate worker
 
 ---
 
+## 4c. Persistent-session ingestion worker (NOT rollout-ready)
+
+> **⚠️ Status: NOT production rollout-ready.**
+>
+> Um worker alternativo de ingestão com sessão persistente
+> (`process_ingestion_runs_persistent_session`) está implementado e testado
+> em unidade, mas **não pode servir tráfego de produção**.
+>
+> Bloqueadores:
+>
+> - **Full-sync não implementado:** runs `full_sync` falham com
+>   `full_sync_not_implemented`. A persistência real de evoluções depende
+>   de extrair `_ingest_evolutions`/`_upsert_patient` do worker legado
+>   para um serviço compartilhado.
+> - **Contrato de container real:** `PlaywrightSessionHandle` existe mas
+>   não satisfaz o contrato de containers sintéticos
+>   (`#admission-snapshot-data` / `#evolution-data`) contra a UI real do
+>   sistema legado.
+>
+> Plano de rollout futuro e experimentos controlados de lab/staging:
+> `docs/operations/persistent-worker-rollout.md`
+
+---
+
 ## 5. Orquestrador adaptativo de censo
 
 O censo hospitalar é extraído pelo **orquestrador adaptativo**, que monitora a
