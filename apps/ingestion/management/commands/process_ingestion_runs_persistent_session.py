@@ -19,9 +19,14 @@ Design (see ``openspec/changes/add-persistent-session-ingestion-worker/design.md
   stages, retries, failures, heartbeat, labels, and batch closure.
 - Uses ``WorkerHeartbeat`` from the existing worker for heartbeat.
 
-Non-goals (deferred):
-- Full-sync evolution extraction (implemented in PSW-S5).
-- Real Playwright ``SessionHandle`` implementation (implemented in PSW-S5).
+PSW-S8 status:
+- Full-sync evolution extraction IS implemented: ``_process_full_sync`` uses
+  the adapter's ``extract_evolutions`` and the shared ``ingest_evolutions``
+  service (same path as the current worker).
+- The real ``PlaywrightSessionHandle`` contract REMAINS BLOCKED: the adapter
+  expects synthetic container divs (``<div id="admission-snapshot-data">``,
+  ``<div id="evolution-data">``) that do not exist in the real legacy UI.
+  A bridge/translation layer is needed before production rollout.
 
 Usage::
 
@@ -45,6 +50,7 @@ from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
 from apps.ingestion.batch_closure import try_close_batch
+from apps.ingestion.evolution_ingestion import ingest_evolutions
 from apps.ingestion.extractors.errors import (
     ExtractionError,
     InvalidJsonError,
@@ -53,6 +59,7 @@ from apps.ingestion.extractors.errors import (
 from apps.ingestion.extractors.persistent_extraction_adapter import (
     PersistentExtractionAdapter,
 )
+from apps.ingestion.gap_planner import plan_extraction_windows
 
 # ---------------------------------------------------------------------------
 # Reuse WorkerHeartbeat from the existing worker
@@ -429,14 +436,11 @@ class Command(BaseCommand):
         with WorkerHeartbeat(run, interval_seconds=60):
             if intent == "admissions_only":
                 self._process_admissions_only(run, adapter)
+            elif intent == "full_sync":
+                self._process_full_sync(run, adapter)
             else:
-                # Full-sync ingestion is intentionally NOT implemented in this
-                # slice: persisting evolutions requires reusing the legacy
-                # worker's `_ingest_evolutions`/`_upsert_patient` logic, which
-                # is coupled to the current command and needs a dedicated
-                # shared-service extraction slice (see tasks.md blocker). Fail
-                # the run honestly instead of fabricating counters.
-                self._mark_full_sync_unsupported(run)
+                # Unknown intent — treat as full_sync (backward compat)
+                self._process_full_sync(run, adapter)
 
     # ------------------------------------------------------------------
     # Admissions-only processing via persistent adapter
@@ -558,66 +562,246 @@ class Command(BaseCommand):
         )
 
     # ------------------------------------------------------------------
-    # Full-sync is intentionally unsupported in this slice (PSW-S5 blocker)
+    # Full-sync processing via persistent adapter (PSW-S8)
     # ------------------------------------------------------------------
 
-    _FULL_SYNC_NOT_IMPLEMENTED = (
-        "full_sync ingestion is not yet implemented in the persistent worker: "
-        "evolution/ingestion persistence requires extracting the legacy "
-        "worker's _ingest_evolutions/_upsert_patient into a shared service "
-        "(see openspec tasks.md blocker)."
-    )
+    def _process_full_sync(
+        self,
+        run: IngestionRun,
+        adapter: PersistentExtractionAdapter,
+    ) -> None:
+        """Process full-sync run through the persistent adapter.
 
-    def _mark_full_sync_unsupported(self, run: IngestionRun) -> None:
-        """Fail a full-sync run honestly instead of fabricating persistence.
-
-        Records a ``full_sync_not_implemented`` stage and transitions the run
-        to a terminal failure (no fake counters). The run is NOT retried: the
-        gap is a missing feature, not a transient fault.
+        Lifecycle (matches current worker's ``_process_full_sync`` semantics):
+        1. Capture admissions snapshot (fails run if error).
+        2. Plan extraction windows (cache-first).
+        3. If full coverage: succeed with zero events.
+        4. Extract evolutions for gap windows.
+        5. Ingest evolutions via shared ``ingest_evolutions`` service.
+        6. Transition to 'succeeded' with metrics.
+        7. On any failure after admissions: preserve admissions + fail run.
         """
-        stage_start = timezone.now()
-        self._record_stage(
-            run,
-            "full_sync_dispatch",
-            "blocked",
-            stage_start,
-            details_json={"reason": "full_sync_not_implemented"},
+        from apps.ingestion.services import (
+            backfill_admission_ward_from_census,
+            upsert_admission_snapshot,
         )
+        from apps.patients.models import Patient
 
-        now = timezone.now()
-        attempt = (
-            IngestionRunAttempt.objects
-            .filter(run=run)
-            .order_by("-attempt_number")
-            .first()
-        )
-        if attempt is not None:
-            attempt.finished_at = now
-            attempt.status = "failed"
-            attempt.failure_reason = "full_sync_not_implemented"
-            attempt.timed_out = False
-            attempt.error_message = self._FULL_SYNC_NOT_IMPLEMENTED
-            attempt.save(update_fields=[
-                "finished_at", "status", "failure_reason",
-                "timed_out", "error_message",
-            ])
+        params = run.parameters_json or {}
+        patient_record = params.get("patient_record", "")
+        start_date = params.get("start_date", "")
+        end_date = params.get("end_date", "")
 
-        run.status = "failed"
-        run.failure_reason = "full_sync_not_implemented"
-        run.error_message = self._FULL_SYNC_NOT_IMPLEMENTED
-        run.finished_at = now
-        run.next_retry_at = None
-        run.save(update_fields=[
-            "status", "failure_reason", "error_message",
-            "finished_at", "next_retry_at",
-        ])
-        self._try_close_batch(run.batch)
-        self.stderr.write(
-            self.style.WARNING(
-                f"  Run #{run.pk} uses full_sync intent, which is not yet "
-                f"supported by the persistent worker — marked failed "
-                f"(full_sync_not_implemented)."
+        # Resolve default dates
+        snap_start = start_date or "2000-01-01"
+        snap_end = end_date or timezone.now().strftime("%Y-%m-%d")
+
+        # ------------------------------------------------------------------
+        # Step 1: Capture admissions snapshot (mandatory — fail-fast)
+        # ------------------------------------------------------------------
+        adm_stage_start = timezone.now()
+        try:
+            admissions_data = adapter.get_admission_snapshot(
+                patient_record=patient_record,
+                start_date=snap_start,
+                end_date=snap_end,
+                timeout=_ADMISSIONS_TIMEOUT,
             )
+        except (InvalidJsonError, SnapshotContainerMissingError) as exc:
+            # Data-level failure — tab was opened, cleanup required
+            self._record_stage(
+                run, "admissions_capture", "failed", adm_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            adapter.cleanup_after_failure()
+            self._mark_run_failed(run, exc)
+            return
+        except ExtractionError as exc:
+            # Session-level failure — no tab was opened
+            self._record_stage(
+                run, "admissions_capture", "failed", adm_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            return
+        except Exception as exc:
+            self._record_stage(
+                run, "admissions_capture", "failed", adm_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            return
+
+        # Create/get patient and upsert admissions
+        patient, _ = Patient.objects.get_or_create(
+            source_system="tasy",
+            patient_source_key=patient_record,
+            defaults={"name": ""},
+        )
+        adm_metrics = {"seen": len(admissions_data), "created": 0, "updated": 0}
+        if admissions_data:
+            upsert_result = upsert_admission_snapshot(
+                patient=patient,
+                admissions_snapshot=admissions_data,
+            )
+            adm_metrics["created"] = upsert_result.get("created", 0)
+            adm_metrics["updated"] = upsert_result.get("updated", 0)
+
+        # Enrich active admissions with ward/bed from the latest census
+        # (admission snapshot does not carry setor/leito). Same behavior as
+        # the current worker's _capture_admissions.
+        backfill_admission_ward_from_census(patient)
+
+        self._record_stage(
+            run, "admissions_capture", "succeeded", adm_stage_start,
+        )
+
+        # ------------------------------------------------------------------
+        # Step 2: Plan extraction windows (cache-first)
+        # ------------------------------------------------------------------
+        gap_stage_start = timezone.now()
+        try:
+            plan = plan_extraction_windows(
+                patient_source_key=patient_record,
+                source_system="tasy",
+                start_date=snap_start,
+                end_date=snap_end,
+            )
+        except Exception as exc:
+            self._record_stage(
+                run, "gap_planning", "failed", gap_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            return
+
+        run.gaps_json = plan["gaps"]
+        self._record_stage(
+            run, "gap_planning", "succeeded", gap_stage_start,
+        )
+
+        if plan["skip_extraction"]:
+            # Full coverage — evolution_extraction skipped
+            self._record_stage(
+                run, "evolution_extraction", "skipped",
+                started_at=timezone.now(),
+            )
+            run.admissions_seen = adm_metrics["seen"]
+            run.admissions_created = adm_metrics["created"]
+            run.admissions_updated = adm_metrics["updated"]
+            run.events_processed = 0
+            run.events_created = 0
+            run.events_skipped = 0
+            run.events_revised = 0
+            run.status = "succeeded"
+            run.finished_at = timezone.now()
+            run.failure_reason = ""
+            run.timed_out = False
+            run.save()
+            self._mark_latest_attempt_succeeded(run)
+            self._try_close_batch(run.batch)
+            self.stdout.write(
+                f"  Run #{run.pk} full-sync succeeded (persistent session) — "
+                f"skipped extraction (full coverage)."
+            )
+            return
+
+        # ------------------------------------------------------------------
+        # Step 3: Extract evolutions for each gap window
+        # ------------------------------------------------------------------
+        ev_stage_start = timezone.now()
+        all_evolutions: list[dict] = []
+        try:
+            for window in plan["windows"]:
+                evolutions = adapter.extract_evolutions(
+                    patient_record=patient_record,
+                    start_date=window["start_date"],
+                    end_date=window["end_date"],
+                    timeout=120,
+                )
+                all_evolutions.extend(evolutions)
+        except (InvalidJsonError, SnapshotContainerMissingError) as exc:
+            # Data-level failure with tab opened — cleanup
+            self._record_stage(
+                run, "evolution_extraction", "failed", ev_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            adapter.cleanup_after_failure()
+            self._mark_run_failed(run, exc)
+            return
+        except ExtractionError as exc:
+            # Session-level failure
+            self._record_stage(
+                run, "evolution_extraction", "failed", ev_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            return
+        except Exception as exc:
+            self._record_stage(
+                run, "evolution_extraction", "failed", ev_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            return
+
+        self._record_stage(
+            run, "evolution_extraction", "succeeded", ev_stage_start,
+        )
+
+        # ------------------------------------------------------------------
+        # Step 4: Ingest evolutions via shared service
+        # ------------------------------------------------------------------
+        ingest_stage_start = timezone.now()
+        try:
+            ev_created, ev_skipped, ev_revised = ingest_evolutions(
+                all_evolutions, run, patient=patient,
+            )
+        except Exception as exc:
+            self._record_stage(
+                run, "ingestion_persistence", "failed", ingest_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            return
+
+        self._record_stage(
+            run, "ingestion_persistence", "succeeded", ingest_stage_start,
+            details_json={
+                "processed": len(all_evolutions),
+                "created": ev_created,
+                "skipped": ev_skipped,
+                "revised": ev_revised,
+            },
+        )
+
+        # Persist metrics and mark succeeded
+        run.events_processed = len(all_evolutions)
+        run.events_created = ev_created
+        run.events_skipped = ev_skipped
+        run.events_revised = ev_revised
+        run.admissions_seen = adm_metrics["seen"]
+        run.admissions_created = adm_metrics["created"]
+        run.admissions_updated = adm_metrics["updated"]
+        run.status = "succeeded"
+        run.finished_at = timezone.now()
+        run.failure_reason = ""
+        run.timed_out = False
+        run.save()
+
+        self._mark_latest_attempt_succeeded(run)
+        self._try_close_batch(run.batch)
+
+        self.stdout.write(
+            f"  Run #{run.pk} full-sync succeeded (persistent session) "
+            f"(admissions_seen={adm_metrics['seen']}, "
+            f"admissions_created={adm_metrics['created']}, "
+            f"admissions_updated={adm_metrics['updated']}, "
+            f"gaps={len(plan['windows'])}, "
+            f"processed={len(all_evolutions)}, "
+            f"created={ev_created}, "
+            f"skipped={ev_skipped}, "
+            f"revised={ev_revised})"
         )
 
     # ------------------------------------------------------------------

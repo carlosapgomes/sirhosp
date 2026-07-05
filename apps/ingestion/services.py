@@ -46,6 +46,60 @@ def compute_content_hash(content_text: str) -> str:
     return hashlib.sha256(content_text.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Census-backed admission ward/bed backfill (shared by both workers)
+# ---------------------------------------------------------------------------
+
+
+def backfill_admission_ward_from_census(patient: Patient) -> None:
+    """Backfill ward/bed on a patient's active admissions from latest census.
+
+    The admission snapshot extracted by ``path2.py`` does not include
+    ward/sector information. This queries the latest occupied ``CensusSnapshot``
+    for the patient and updates any active (``discharge_date`` IS NULL)
+    admission with the census ward/bed.
+
+    Shared by the legacy (``process_ingestion_runs``) and persistent-session
+    (``process_ingestion_runs_persistent_session``) workers so both preserve
+    identical admission-enrichment behavior.
+    """
+    from apps.census.models import CensusSnapshot
+
+    latest_census = (
+        CensusSnapshot.objects.filter(
+            prontuario=patient.patient_source_key,
+            bed_status="occupied",
+        )
+        .order_by("-captured_at")
+        .first()
+    )
+
+    if latest_census is None:
+        return
+
+    setor = latest_census.setor
+    leito = latest_census.leito
+
+    if not setor and not leito:
+        return
+
+    active_admissions = Admission.objects.filter(
+        patient=patient,
+        discharge_date__isnull=True,
+    )
+
+    for admission in active_admissions:
+        changed = False
+        if setor and admission.ward != setor:
+            admission.ward = setor
+            changed = True
+        if leito and admission.bed != leito:
+            admission.bed = leito
+            changed = True
+        if changed:
+            admission.save(update_fields=["ward", "bed", "updated_at"])
+
+
 def _parse_naive_datetime(value: str | None) -> datetime | None:
     """Parse a naive datetime string and localize to institutional TZ."""
     if value is None:

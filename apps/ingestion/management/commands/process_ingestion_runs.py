@@ -37,7 +37,6 @@ from apps.ingestion.models import (
     IngestionRunAttempt,
 )
 from apps.ingestion.services import queue_demographics_only_run
-from apps.patients.models import Admission
 
 # Default path to internalized legacy Playwright script (MVP path2).
 DEFAULT_SCRIPT_PATH = str(
@@ -1116,46 +1115,13 @@ class Command(BaseCommand):
     def _backfill_admission_ward_from_census(patient) -> None:
         """Backfill ward/bed on active admissions from latest census data.
 
-        The admission snapshot extracted by path2.py does not include
-        ward/sector information. This method queries the latest
-        CensusSnapshot for the patient and updates any active
-        (discharge_date IS NULL) admission with the census ward/bed.
+        Thin wrapper over the shared
+        :func:`apps.ingestion.services.backfill_admission_ward_from_census`
+        service. Kept for backward compatibility with existing call sites.
         """
-        from apps.census.models import CensusSnapshot
+        from apps.ingestion.services import backfill_admission_ward_from_census
 
-        latest_census = (
-            CensusSnapshot.objects.filter(
-                prontuario=patient.patient_source_key,
-                bed_status="occupied",
-            )
-            .order_by("-captured_at")
-            .first()
-        )
-
-        if latest_census is None:
-            return
-
-        setor = latest_census.setor
-        leito = latest_census.leito
-
-        if not setor and not leito:
-            return
-
-        active_admissions = Admission.objects.filter(
-            patient=patient,
-            discharge_date__isnull=True,
-        )
-
-        for admission in active_admissions:
-            changed = False
-            if setor and admission.ward != setor:
-                admission.ward = setor
-                changed = True
-            if leito and admission.bed != leito:
-                admission.bed = leito
-                changed = True
-            if changed:
-                admission.save(update_fields=["ward", "bed", "updated_at"])
+        backfill_admission_ward_from_census(patient)
 
     # ------------------------------------------------------------------
     # Ingestion helpers

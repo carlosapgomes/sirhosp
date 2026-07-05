@@ -10,6 +10,7 @@ All tests use fakes / mocks — no real Playwright browser involved.
 
 from __future__ import annotations
 
+import datetime
 import os
 from unittest.mock import ANY, MagicMock, patch
 
@@ -703,7 +704,7 @@ class TestSessionReadiness:
 
 
 # =========================================================================
-# Full-sync Lifecycle (PSW-S5)
+# Full-sync Lifecycle (PSW-S8)
 # =========================================================================
 
 
@@ -724,20 +725,41 @@ def _queue_full_sync_run(**kwargs):
     return IngestionRun.objects.create(**defaults)
 
 
+_ADMISSION_SNAPSHOT_DATA = [
+    {
+        "admission_key": "ADM-001",
+        "admission_start": "2024-01-15",
+        "admission_end": "2024-01-20",
+        "ward": "Enfermaria A",
+        "bed": "001",
+    },
+]
+
+_EVOLUTION_DATA = [
+    {
+        "admission_key": "ADM-001",
+        "happened_at": "2024-01-16T10:30:00",
+        "event_type": "medical_evolution",
+        "content": "Patient stable, vital signs normal.",
+        "profession": "medica",
+    },
+]
+
+
 @pytest.mark.django_db
 class TestFullSyncLifecycle:
-    """Full-sync is intentionally unsupported in PSW-S5 (honest blocker).
+    """Full-sync lifecycle through the persistent adapter (PSW-S8).
 
-    The persistent worker must NOT fabricate persistence. Until a dedicated
-    ingestion-wiring slice extracts the legacy worker's evolution persistence
-    into a shared service, full-sync runs fail with a clear, terminal
-    ``full_sync_not_implemented`` reason and no fake counters.
+    The persistent worker now wires admissions capture, gap planning,
+    evolution extraction through the adapter, and shared evolution
+    ingestion. All tests use fakes/mocks — no real legacy access.
     """
 
-    def test_full_sync_run_fails_as_not_implemented(self):
-        """A full_sync run is failed honestly with a blocker reason."""
+    def test_full_sync_success_persists_expected_counters(self):
+        """Full-sync success persists expected counters and stage metrics."""
         run = _queue_full_sync_run()
-        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.return_value = _EVOLUTION_DATA
 
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -745,48 +767,124 @@ class TestFullSyncLifecycle:
             call_command("process_ingestion_runs_persistent_session")
 
         run.refresh_from_db()
-        assert run.status == "failed"
-        assert run.failure_reason == "full_sync_not_implemented"
-        assert "not yet implemented" in (run.error_message or "")
+        assert run.status == "succeeded"
         assert run.finished_at is not None
 
-    def test_full_sync_does_not_call_extraction_or_persistence(self):
-        """No source extraction or fake persistence runs for full_sync."""
+        # Admissions metrics
+        assert run.admissions_seen == 1
+
+        # Evolution counters
+        assert run.events_processed == 1
+        assert run.events_created >= 1
+
+        # Stage metrics: all four stages succeeded
+        stages = {
+            s.stage_name: s
+            for s in IngestionRunStageMetric.objects.filter(run=run)
+        }
+        assert stages["admissions_capture"].status == "succeeded"
+        assert stages["gap_planning"].status == "succeeded"
+        assert stages["evolution_extraction"].status == "succeeded"
+        assert stages["ingestion_persistence"].status == "succeeded"
+
+        # Attempt succeeded
+        attempt = IngestionRunAttempt.objects.filter(run=run).first()
+        assert attempt is not None
+        assert attempt.status == "succeeded"
+
+    def test_gap_planning_succeeds(self):
+        """Gap planning stage is recorded as succeeded."""
         run = _queue_full_sync_run()
-        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.return_value = _EVOLUTION_DATA
 
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
         ):
             call_command("process_ingestion_runs_persistent_session")
 
-        # Neither adapter extraction method must be invoked.
-        mock_adapter.get_admission_snapshot.assert_not_called()
-        mock_adapter.extract_evolutions.assert_not_called()
         run.refresh_from_db()
-        assert run.status == "failed"
+        # gaps_json was populated
+        assert run.gaps_json is not None
 
-    def test_full_sync_records_blocked_stage(self):
-        """A 'blocked' full_sync_dispatch stage is recorded."""
-        run = _queue_full_sync_run()
-        mock_adapter = _make_adapter_mock(snapshot_result=[])
+    def test_full_sync_full_coverage_skips_extraction(self):
+        """When full coverage is detected, evolution extraction is skipped.
+
+        Pre-creates a ClinicalEvent with a happened_at date within the run
+        window so ``plan_extraction_windows`` reports full coverage.
+        """
+        from django.utils import timezone as dj_timezone
+
+        from apps.clinical_docs.models import ClinicalEvent
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            source_system="tasy",
+            patient_source_key="FS001",
+            name="Test Patient",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM-COVERAGE",
+            admission_date=dj_timezone.make_aware(
+                datetime.datetime(2024, 6, 14, 0, 0, 0)
+            ),
+        )
+        ClinicalEvent.objects.create(
+            patient=patient,
+            admission=admission,
+            event_identity_key="cov-key-001",
+            content_hash="abc123",
+            happened_at=dj_timezone.make_aware(
+                datetime.datetime(2024, 6, 15, 10, 0, 0)
+            ),
+            profession_type="medical_evolution",
+            content_text="Pre-existing event that provides full coverage",
+            author_name="Dr. Test",
+            raw_payload_json={},
+        )
+
+        run = _queue_full_sync_run(
+            parameters_json={
+                "patient_record": "FS001",
+                "intent": "full_sync",
+                "start_date": "2024-06-15",
+                "end_date": "2024-06-15",
+            },
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
 
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
         ):
             call_command("process_ingestion_runs_persistent_session")
 
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        # Extraction was skipped — no evolutions extracted
+        assert run.events_processed == 0
+        assert run.events_created == 0
+
+        # Extraction stage should be "skipped"
         stages = IngestionRunStageMetric.objects.filter(
-            run=run, stage_name="full_sync_dispatch"
+            run=run, stage_name="evolution_extraction"
         )
         assert stages.count() == 1
-        assert stages.first().status == "blocked"
-        assert stages.first().details_json.get("reason") == "full_sync_not_implemented"
+        assert stages.first().status == "skipped"
 
-    def test_full_sync_failure_is_terminal_no_retry(self):
-        """The full-sync blocker is terminal: no requeue / next_retry_at."""
-        run = _queue_full_sync_run(max_attempts=5)
-        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        # extract_evolutions should NOT have been called
+        mock_adapter.extract_evolutions.assert_not_called()
+
+    def test_evolution_extraction_failure_preserves_admissions(self):
+        """Evolution extraction failure preserves admissions and marks run failed."""
+        from apps.patients.models import Admission
+
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.side_effect = ExtractionError(
+            "Evolution extraction failed"
+        )
 
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -795,27 +893,165 @@ class TestFullSyncLifecycle:
 
         run.refresh_from_db()
         assert run.status == "failed"
-        assert run.next_retry_at is None
-        # Not requeued despite attempts remaining: this is a missing feature,
-        # not a transient fault.
 
-    def test_full_sync_failure_closes_batch(self):
-        """Batch closure is attempted after the terminal full-sync failure."""
+        # Admissions were captured and persisted in the database
+        assert Admission.objects.filter(
+            source_admission_key="ADM-001",
+        ).exists()
+
+        # Admissions stage should be succeeded
+        adm_stages = IngestionRunStageMetric.objects.filter(
+            run=run, stage_name="admissions_capture"
+        )
+        assert adm_stages.count() == 1
+        assert adm_stages.first().status == "succeeded"
+
+        # Evolution extraction stage should be failed
+        ev_stages = IngestionRunStageMetric.objects.filter(
+            run=run, stage_name="evolution_extraction"
+        )
+        assert ev_stages.count() == 1
+        assert ev_stages.first().status == "failed"
+
+    def test_ingestion_persistence_failure_marks_run_failed(self):
+        """Ingestion persistence failure fails the run after admissions."""
+        from apps.patients.models import Admission
+
         run = _queue_full_sync_run()
-        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.return_value = _EVOLUTION_DATA
 
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
         ), patch(
-            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session."
-            "try_close_batch"
-        ) as mock_close:
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"
+            ".ingest_evolutions",
+            side_effect=ValueError("Persistence failure"),
+        ):
             call_command("process_ingestion_runs_persistent_session")
 
         run.refresh_from_db()
         assert run.status == "failed"
-        assert run.failure_reason == "full_sync_not_implemented"
-        mock_close.assert_called()
+
+        # Admissions were persisted in the database
+        assert Admission.objects.filter(
+            source_admission_key="ADM-001",
+        ).exists()
+
+        # Ingestion persistence stage failed
+        stages = IngestionRunStageMetric.objects.filter(
+            run=run, stage_name="ingestion_persistence"
+        )
+        assert stages.count() == 1
+        assert stages.first().status == "failed"
+
+    def test_admission_capture_failure_marks_run_failed(self):
+        """If admissions capture fails, the run fails without gap/evolution stages."""
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(fail_mode="session_not_ready")
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+
+        # No gap_planning or evolution_extraction stages
+        stages = IngestionRunStageMetric.objects.filter(run=run)
+        stage_names = {s.stage_name for s in stages}
+        assert "admissions_capture" in stage_names
+        assert "gap_planning" not in stage_names
+        assert "evolution_extraction" not in stage_names
+        assert "ingestion_persistence" not in stage_names
+
+    def test_full_sync_timeout_propagates_to_adapter(self):
+        """Timeout is passed to adapter calls during full-sync."""
+        _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        # get_admission_snapshot called with timeout
+        _, kwargs = mock_adapter.get_admission_snapshot.call_args
+        assert "timeout" in kwargs
+        assert kwargs["timeout"] > 0
+
+    def test_full_sync_uses_ingest_evolutions_from_shared_service(self):
+        """Full-sync persistence uses the shared ingest_evolutions service."""
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.return_value = _EVOLUTION_DATA
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"
+            ".ingest_evolutions"
+        ) as mock_ingest:
+            mock_ingest.return_value = (1, 0, 0)
+            call_command("process_ingestion_runs_persistent_session")
+
+        # ingest_evolutions should have been called with evolutions, run, and patient
+        mock_ingest.assert_called_once()
+        args, kwargs = mock_ingest.call_args
+        assert args[0] == _EVOLUTION_DATA  # evolutions (positional)
+        assert args[1] == run  # run (positional)
+        assert "patient" in kwargs  # patient (keyword)
+
+    def test_cleanup_after_recoverable_evolution_failure(self):
+        """cleanup_after_failure is called after recoverable evolution extraction failure."""
+        run = _queue_full_sync_run(max_attempts=1)
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.side_effect = InvalidJsonError(
+            "Invalid JSON in evolution data"
+        )
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        mock_adapter.cleanup_after_failure.assert_called_once()
+        run.refresh_from_db()
+        assert run.status == "failed"
+
+    def test_admissions_only_still_works(self):
+        """Existing admissions-only functionality still works unchanged."""
+        run = _queue_admissions_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+
+    def test_full_sync_calls_backfill_admission_ward_from_census(self):
+        """Full-sync enriches admissions via the shared census backfill service."""
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.return_value = _EVOLUTION_DATA
+
+        with (
+            patch.object(
+                PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+            ),
+            patch(
+                "apps.ingestion.services.backfill_admission_ward_from_census"
+            ) as mock_backfill,
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        mock_backfill.assert_called_once()
 
 
 # =========================================================================
@@ -855,3 +1091,47 @@ class TestRealHandleGating:
         parser = cmd.create_parser("manage.py", "process_ingestion_runs_persistent_session")
         args = parser.parse_args([])
         assert args.real_handle is False
+
+
+# =========================================================================
+# Real handle contract status (PSW-S8)
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestRealHandleContract:
+    """The real handle contract still depends on synthetic containers.
+
+    PSW-S8 wires full-sync through the persistent adapter but the real
+    ``PlaywrightSessionHandle`` cannot yet satisfy the adapter's synthetic
+    snapshot/evolution container contract against the real legacy UI. The
+    adapter expects ``<div id="admission-snapshot-data">`` and
+    ``<div id="evolution-data">`` with JSON payload — these divs exist only
+    in the synthetic test fixtures.
+
+    A bridge/translation layer would need to extract data from the real
+    legacy DOM/download and render it in the synthetic container format
+    that the adapter consumes. This remains blocked until the real legacy
+    UI page structure is mapped.
+    """
+
+    def test_adapter_still_uses_synthetic_container_contract(self):
+        """Adapter contract still depends on synthetic container divs."""
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            _ADMISSION_DATA_DIV_ID,
+            _DATA_CONTAINER_RE,
+        )
+
+        # The adapter's regex expects <div id="admission-snapshot-data">
+        # which does not exist in the real legacy UI.
+        assert _ADMISSION_DATA_DIV_ID == "admission-snapshot-data"
+        assert _DATA_CONTAINER_RE is not None
+
+    def test_real_handle_contract_blocker_still_documented(self):
+        """The real handle contract blocker is still documented in the command."""
+        import inspect
+        source = inspect.getsource(PersistentWorkerCommand)
+        # The module source contains the blocker documentation
+        assert "--real-handle" in source
+        assert "cannot yet satisfy" in source \
+            or "REMAINS BLOCKED" in source
