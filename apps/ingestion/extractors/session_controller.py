@@ -41,6 +41,11 @@ class SessionControllerConfig:
         base_admissions_url: URL template for the admissions page.
             Supports ``{patient_record}``, ``{start_date}``, ``{end_date}``
             placeholders.
+        base_evolutions_url: URL template for the evolutions page.
+            Supports ``{patient_record}``, ``{start_date}``, ``{end_date}``
+            placeholders. Defaults to
+            ``/evolutions/{patient_record}?start={start_date}&end={end_date}``
+            when empty.
     """
 
     max_jobs_per_session: int = 50
@@ -49,6 +54,7 @@ class SessionControllerConfig:
     renewal_threshold_seconds: int = 600
     safe_renewal_tab_url: str = ""
     base_admissions_url: str = "/admissions/{patient_record}"
+    base_evolutions_url: str = ""
 
 
 # ---------------------------------------------------------------------------

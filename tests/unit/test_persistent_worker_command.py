@@ -700,3 +700,158 @@ class TestSessionReadiness:
 
         # Called at least once (called once per claim cycle iteration)
         mock_adapter.ensure_session_ready.assert_called()
+
+
+# =========================================================================
+# Full-sync Lifecycle (PSW-S5)
+# =========================================================================
+
+
+def _queue_full_sync_run(**kwargs):
+    """Helper to create a queued full_sync IngestionRun."""
+    defaults = {
+        "status": "queued",
+        "intent": "full_sync",
+        "max_attempts": 1,
+        "parameters_json": {
+            "patient_record": "FS001",
+            "intent": "full_sync",
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+        },
+    }
+    defaults.update(kwargs)
+    return IngestionRun.objects.create(**defaults)
+
+
+@pytest.mark.django_db
+class TestFullSyncLifecycle:
+    """Full-sync is intentionally unsupported in PSW-S5 (honest blocker).
+
+    The persistent worker must NOT fabricate persistence. Until a dedicated
+    ingestion-wiring slice extracts the legacy worker's evolution persistence
+    into a shared service, full-sync runs fail with a clear, terminal
+    ``full_sync_not_implemented`` reason and no fake counters.
+    """
+
+    def test_full_sync_run_fails_as_not_implemented(self):
+        """A full_sync run is failed honestly with a blocker reason."""
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "full_sync_not_implemented"
+        assert "not yet implemented" in (run.error_message or "")
+        assert run.finished_at is not None
+
+    def test_full_sync_does_not_call_extraction_or_persistence(self):
+        """No source extraction or fake persistence runs for full_sync."""
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        # Neither adapter extraction method must be invoked.
+        mock_adapter.get_admission_snapshot.assert_not_called()
+        mock_adapter.extract_evolutions.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "failed"
+
+    def test_full_sync_records_blocked_stage(self):
+        """A 'blocked' full_sync_dispatch stage is recorded."""
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        stages = IngestionRunStageMetric.objects.filter(
+            run=run, stage_name="full_sync_dispatch"
+        )
+        assert stages.count() == 1
+        assert stages.first().status == "blocked"
+        assert stages.first().details_json.get("reason") == "full_sync_not_implemented"
+
+    def test_full_sync_failure_is_terminal_no_retry(self):
+        """The full-sync blocker is terminal: no requeue / next_retry_at."""
+        run = _queue_full_sync_run(max_attempts=5)
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.next_retry_at is None
+        # Not requeued despite attempts remaining: this is a missing feature,
+        # not a transient fault.
+
+    def test_full_sync_failure_closes_batch(self):
+        """Batch closure is attempted after the terminal full-sync failure."""
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session."
+            "try_close_batch"
+        ) as mock_close:
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "full_sync_not_implemented"
+        mock_close.assert_called()
+
+
+# =========================================================================
+# Real handle gating & teardown (PSW-S5 safety)
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestRealHandleGating:
+    """The command must NOT auto-launch a real browser; it stays non-rollout-ready."""
+
+    def test_default_session_handle_is_stub(self):
+        """Without --real-handle the command uses the safe stub (no Chromium)."""
+        cmd = PersistentWorkerCommand()
+        cmd._use_real_handle = False
+        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (
+            _StubSessionHandle,
+        )
+
+        handle = cmd._create_session_handle()
+        assert isinstance(handle, _StubSessionHandle)
+
+    def test_shutdown_calls_handle_shutdown_not_restart(self):
+        """_shutdown_adapter must call shutdown(), not restart_browser()."""
+        mock_adapter = MagicMock()
+        mock_adapter.session.shutdown = MagicMock()
+        mock_adapter.session.restart_browser = MagicMock()
+
+        PersistentWorkerCommand._shutdown_adapter(PersistentWorkerCommand(), mock_adapter)
+
+        mock_adapter.session.shutdown.assert_called_once()
+        mock_adapter.session.restart_browser.assert_not_called()
+
+    def test_real_handle_flag_is_off_by_default(self):
+        """The --real-handle flag defaults to False (rollout-ready guard)."""
+        cmd = PersistentWorkerCommand()
+        parser = cmd.create_parser("manage.py", "process_ingestion_runs_persistent_session")
+        args = parser.parse_args([])
+        assert args.real_handle is False

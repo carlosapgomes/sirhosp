@@ -19,9 +19,9 @@ Design (see ``openspec/changes/add-persistent-session-ingestion-worker/design.md
   stages, retries, failures, heartbeat, labels, and batch closure.
 - Uses ``WorkerHeartbeat`` from the existing worker for heartbeat.
 
-Non-goals (deferred to PSW-S5+):
-- Full-sync evolution extraction.
-- Real Playwright ``SessionHandle`` implementation (production wiring).
+Non-goals (deferred):
+- Full-sync evolution extraction (implemented in PSW-S5).
+- Real Playwright ``SessionHandle`` implementation (implemented in PSW-S5).
 
 Usage::
 
@@ -102,6 +102,10 @@ class _StubSessionHandle:
     def restart_browser(self) -> None:
         pass
 
+    def shutdown(self) -> None:
+        """No-op teardown for the stub (no real resources to release)."""
+        pass
+
 
 class Command(BaseCommand):
     """Process queued IngestionRuns using a persistent browser session."""
@@ -127,10 +131,22 @@ class Command(BaseCommand):
             default=5,
             help="Seconds to sleep when no queued runs are found (default: 5).",
         )
+        parser.add_argument(
+            "--real-handle",
+            action="store_true",
+            help=(
+                "Use a real Playwright Chromium session handle instead of the "
+                "safe stub. OFF by default: the real handle cannot yet satisfy "
+                "the adapter's synthetic snapshot/evolution container contract "
+                "against the legacy UI, so it must NOT be treated as "
+                "rollout-ready."
+            ),
+        )
 
     def handle(self, *args, **options):
         loop: bool = options["loop"]
         sleep_seconds: int = options["sleep_seconds"]
+        self._use_real_handle: bool = options["real_handle"]
 
         # The adapter (and its persistent browser/session) is created ONCE
         # at startup and reused across all claimed runs. This is the core
@@ -148,13 +164,19 @@ class Command(BaseCommand):
     def _shutdown_adapter(self, adapter: PersistentExtractionAdapter) -> None:
         """Tear down the persistent session after the run/loop ends.
 
-        Calls the handle's ``restart_browser`` as a synchronous teardown
-        hook. The real Playwright wiring (future slice) must release the
-        exclusive profile here via ``ExclusiveBrowserProfile.release_after_shutdown``
-        after the browser has shut down.
+        Calls the handle's ``shutdown()`` to close the browser and release the
+        exclusive profile (``ExclusiveBrowserProfile.release_after_shutdown``).
+        Falls back gracefully for handles without an explicit ``shutdown``
+        (e.g. the safe stub).
         """
+        session = adapter.session
+        shutdown = getattr(session, "shutdown", None)
         try:
-            adapter.session.restart_browser()
+            if callable(shutdown):
+                shutdown()
+            else:
+                # Stub handle has no shutdown — nothing to tear down.
+                pass
         except Exception as exc:  # noqa: BLE001 - best-effort teardown logging
             self.stderr.write(
                 self.style.WARNING(
@@ -169,10 +191,11 @@ class Command(BaseCommand):
     def _create_adapter(self) -> PersistentExtractionAdapter:
         """Create a new PersistentExtractionAdapter.
 
-        In production, the SessionHandle must be wired by a future slice.
-        For now, this creates the adapter with a minimal handle stub that
-        returns safe defaults (disconnected, empty HTML, etc.) but never
-        performs actual browser actions.
+        The session handle defaults to the safe ``_StubSessionHandle`` (no
+        Chromium) so the command is NOT rollout-ready. Pass ``--real-handle``
+        to opt into the ``PlaywrightSessionHandle``; note that the real handle
+        still cannot satisfy the adapter's synthetic container contract against
+        the legacy UI, so it is for integration experiments only.
 
         Tests patch ``adapter_class`` or the import path to inject fakes.
         """
@@ -187,16 +210,36 @@ class Command(BaseCommand):
         )
         return adapter
 
-    @staticmethod
-    def _create_session_handle():
-        """Create a SessionHandle protocol implementation (stub).
+    def _create_session_handle(self):
+        """Create a SessionHandle protocol implementation.
 
-        Returns a stub that implements the ``SessionHandle`` protocol
-        but never performs real browser actions. Production deployment
-        must override this method or replace ``adapter_class`` with a
-        version wired to a real Playwright-based handle.
+        By default returns the safe ``_StubSessionHandle`` so the command is
+        NOT rollout-ready: launching a real browser is pointless until a
+        concrete adapter contract (snapshot/evolution containers) can be
+        satisfied against the real legacy UI.
+
+        Opt into the real Playwright handle with ``--real-handle``. The real
+        handle is wired with an exclusive ``ExclusiveBrowserProfile``; it is
+        provided for integration experiments only and must not be treated as
+        production-ready.
         """
-        return _StubSessionHandle()
+        if not getattr(self, "_use_real_handle", False):
+            return _StubSessionHandle()
+
+        from apps.ingestion.extractors.browser_profile import (
+            ExclusiveBrowserProfile,
+        )
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        profile = ExclusiveBrowserProfile(label="persistent-worker")
+        handle = PlaywrightSessionHandle(
+            profile=profile,
+            headless=True,
+        )
+        handle.start()
+        return handle
 
     # ------------------------------------------------------------------
     # Worker label
@@ -357,7 +400,7 @@ class Command(BaseCommand):
     ) -> None:
         """Process a single IngestionRun through the persistent adapter.
 
-        Supports only ``admissions_only`` intent in this slice.
+        Dispatches to admissions-only or full-sync based on intent.
         Heartbeat is refreshed via ``WorkerHeartbeat`` context manager.
         """
         params = run.parameters_json or {}
@@ -387,9 +430,13 @@ class Command(BaseCommand):
             if intent == "admissions_only":
                 self._process_admissions_only(run, adapter)
             else:
-                self._process_admissions_only(
-                    run, adapter
-                )  # same path for now (no full-sync)
+                # Full-sync ingestion is intentionally NOT implemented in this
+                # slice: persisting evolutions requires reusing the legacy
+                # worker's `_ingest_evolutions`/`_upsert_patient` logic, which
+                # is coupled to the current command and needs a dedicated
+                # shared-service extraction slice (see tasks.md blocker). Fail
+                # the run honestly instead of fabricating counters.
+                self._mark_full_sync_unsupported(run)
 
     # ------------------------------------------------------------------
     # Admissions-only processing via persistent adapter
@@ -508,6 +555,69 @@ class Command(BaseCommand):
         self.stdout.write(
             f"  Run #{run.pk} admissions-only succeeded (persistent session) "
             f"(admissions_seen={adm_seen})"
+        )
+
+    # ------------------------------------------------------------------
+    # Full-sync is intentionally unsupported in this slice (PSW-S5 blocker)
+    # ------------------------------------------------------------------
+
+    _FULL_SYNC_NOT_IMPLEMENTED = (
+        "full_sync ingestion is not yet implemented in the persistent worker: "
+        "evolution/ingestion persistence requires extracting the legacy "
+        "worker's _ingest_evolutions/_upsert_patient into a shared service "
+        "(see openspec tasks.md blocker)."
+    )
+
+    def _mark_full_sync_unsupported(self, run: IngestionRun) -> None:
+        """Fail a full-sync run honestly instead of fabricating persistence.
+
+        Records a ``full_sync_not_implemented`` stage and transitions the run
+        to a terminal failure (no fake counters). The run is NOT retried: the
+        gap is a missing feature, not a transient fault.
+        """
+        stage_start = timezone.now()
+        self._record_stage(
+            run,
+            "full_sync_dispatch",
+            "blocked",
+            stage_start,
+            details_json={"reason": "full_sync_not_implemented"},
+        )
+
+        now = timezone.now()
+        attempt = (
+            IngestionRunAttempt.objects
+            .filter(run=run)
+            .order_by("-attempt_number")
+            .first()
+        )
+        if attempt is not None:
+            attempt.finished_at = now
+            attempt.status = "failed"
+            attempt.failure_reason = "full_sync_not_implemented"
+            attempt.timed_out = False
+            attempt.error_message = self._FULL_SYNC_NOT_IMPLEMENTED
+            attempt.save(update_fields=[
+                "finished_at", "status", "failure_reason",
+                "timed_out", "error_message",
+            ])
+
+        run.status = "failed"
+        run.failure_reason = "full_sync_not_implemented"
+        run.error_message = self._FULL_SYNC_NOT_IMPLEMENTED
+        run.finished_at = now
+        run.next_retry_at = None
+        run.save(update_fields=[
+            "status", "failure_reason", "error_message",
+            "finished_at", "next_retry_at",
+        ])
+        self._try_close_batch(run.batch)
+        self.stderr.write(
+            self.style.WARNING(
+                f"  Run #{run.pk} uses full_sync intent, which is not yet "
+                f"supported by the persistent worker — marked failed "
+                f"(full_sync_not_implemented)."
+            )
         )
 
     # ------------------------------------------------------------------

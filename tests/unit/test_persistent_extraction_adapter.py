@@ -484,7 +484,7 @@ class TestFailureModes:
         session.set_html(MISSING_DATA_HTML)
         adapter = PersistentExtractionAdapter(session)
 
-        with pytest.raises(ExtractionError, match="no snapshot data container"):
+        with pytest.raises(ExtractionError, match="no data container"):
             adapter.get_admission_snapshot(
                 patient_record="12345",
                 start_date="2024-01-01",
@@ -676,3 +676,213 @@ class TestDefaultConfig:
         assert adapter._controller.config.max_lifetime_seconds == 3600
         assert adapter._controller.config.max_consecutive_failures == 3
         assert adapter._controller.config.renewal_threshold_seconds == 600
+
+
+# ===========================================================================
+# Evolution extraction (PSW-S5)
+# ===========================================================================
+
+_VALID_EVOLUTIONS_JSON = (
+    '['
+    '{"admissionKey": "ADM-001",'
+    ' "happened_at": "2024-01-16T10:30:00",'
+    ' "event_type": "medical_evolution",'
+    ' "content": "Patient stable, vital signs normal.",'
+    ' "profession": "medica"},'
+    '{"admissionKey": "ADM-001",'
+    ' "happened_at": "2024-01-17T14:00:00",'
+    ' "event_type": "nursing_evolution",'
+    ' "content": "Dressing changed, wound healing well.",'
+    ' "profession": "enfermagem"}'
+    ']'
+)
+
+EVOLUTION_PAGE_HTML = f"""<html>
+<body>
+<div id="tempoSessao" class="tempo-sessao">
+  Tempo de Sessão: <span>00</span>:<span>29</span>:<span>01</span>
+</div>
+<div id="evolution-data">
+{_VALID_EVOLUTIONS_JSON}
+</div>
+</body>
+</html>"""
+
+EMPTY_EVOLUTIONS_JSON = "[]"
+
+EMPTY_EVOLUTION_PAGE_HTML = f"""<html>
+<body>
+<div id="tempoSessao" class="tempo-sessao">
+  Tempo de Sessão: <span>00</span>:<span>29</span>:<span>01</span>
+</div>
+<div id="evolution-data">
+{EMPTY_EVOLUTIONS_JSON}
+</div>
+</body>
+</html>"""
+
+MISSING_EVOLUTION_DATA_HTML = """<html>
+<body>
+<div id="tempoSessao" class="tempo-sessao">
+  Tempo de Sessão: <span>00</span>:<span>29</span>:<span>01</span>
+</div>
+<p>No evolution data found.</p>
+</body>
+</html>"""
+
+INVALID_EVOLUTION_JSON_HTML = """<html>
+<body>
+<div id="tempoSessao" class="tempo-sessao">
+  Tempo de Sessão: <span>00</span>:<span>29</span>:<span>01</span>
+</div>
+<div id="evolution-data">
+{invalid json here}
+</div>
+</body>
+</html>"""
+
+
+class TestExtractEvolutions:
+    """Tests for persistent extract_evolutions."""
+
+    def test_returns_normalized_evolutions(self) -> None:
+        """Extracts and returns normalized evolutions from session page HTML."""
+        session = FakeExtractionSession()
+        session.set_html(EVOLUTION_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["admission_key"] == "ADM-001"
+        assert result[1]["admission_key"] == "ADM-001"
+
+    def test_empty_evolutions_returns_empty_list(self) -> None:
+        """Empty evolutions data returns empty list."""
+        session = FakeExtractionSession()
+        session.set_html(EMPTY_EVOLUTION_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert isinstance(result, list)
+        assert len(result) == 0
+
+    def test_navigates_with_timeout(self) -> None:
+        """Timeout is propagated to the session handle."""
+        session = FakeExtractionSession()
+        session.set_html(EVOLUTION_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            timeout=60,
+        )
+
+        assert session._last_open_timeout == 60
+
+    def test_missing_evolution_data_container_raises_extraction_error(self) -> None:
+        """Page missing evolution-data container raises ExtractionError."""
+        session = FakeExtractionSession()
+        session.set_html(MISSING_EVOLUTION_DATA_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(ExtractionError, match="no data container"):
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-12-31",
+            )
+
+    def test_invalid_json_raises_invalid_json_error(self) -> None:
+        """Invalid JSON in evolution container raises InvalidJsonError."""
+        session = FakeExtractionSession()
+        session.set_html(INVALID_EVOLUTION_JSON_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(InvalidJsonError):
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-12-31",
+            )
+
+    def test_ensure_ready_called_before_extraction(self) -> None:
+        """ensure_ready() checkpoint is called before evolution extraction."""
+        session = FakeExtractionSession()
+        session.set_html(EVOLUTION_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        ensure_ready_called = False
+        original = adapter._controller.ensure_ready
+
+        def track() -> bool:
+            nonlocal ensure_ready_called
+            ensure_ready_called = True
+            return original()
+
+        adapter._controller.ensure_ready = track  # type: ignore[assignment]
+
+        adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert ensure_ready_called
+
+    def test_tab_cleanup_called_after_extraction(self) -> None:
+        """close_job_tab_if_present is called after successful extraction."""
+        session = FakeExtractionSession()
+        session.set_html(EVOLUTION_PAGE_HTML)
+        session.set_tab_classes([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        adapter = PersistentExtractionAdapter(session)
+
+        adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert session.closed_tab_calls == 1
+
+    def test_mark_job_processed_called_after_success(self) -> None:
+        """mark_job_processed is called after successful extraction."""
+        session = FakeExtractionSession()
+        session.set_html(EVOLUTION_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert adapter._controller.jobs_processed == 1
+
+    def test_session_failure_before_extraction_raises_extraction_error(self) -> None:
+        """Session not ready raises ExtractionError before evolution extraction."""
+        session = FakeExtractionSession()
+        session.set_connected(False)
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(ExtractionError, match="Session not ready"):
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-12-31",
+            )

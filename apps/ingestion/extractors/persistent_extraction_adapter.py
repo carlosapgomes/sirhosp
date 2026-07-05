@@ -14,6 +14,7 @@ is delegated to a ``SessionHandle`` protocol implementation.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 from urllib.parse import quote
@@ -23,6 +24,7 @@ from apps.ingestion.extractors.admission_snapshot_parser import (
 )
 from apps.ingestion.extractors.errors import (
     ExtractionError,
+    InvalidJsonError,
     SnapshotContainerMissingError,
 )
 from apps.ingestion.extractors.session_controller import (
@@ -47,6 +49,29 @@ _DATA_CONTAINER_RE = re.compile(
     + r'["\'][^>]*>\s*(.*?)\s*</div>',
     re.DOTALL | re.IGNORECASE,
 )
+
+# ---------------------------------------------------------------------------
+# Evolution data extraction constants and patterns (PSW-S5)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_EVOLUTIONS_URL_TEMPLATE = (
+    "/evolutions/{patient_record}?start={start_date}&end={end_date}"
+)
+"""Default URL template for evolution page navigation.
+
+Supports ``{patient_record}``, ``{start_date}``, ``{end_date}`` placeholders.
+"""
+
+_EVOLUTION_DATA_DIV_ID = "evolution-data"
+"""HTML id of the evolution data container div."""
+
+_EVOLUTION_DATA_CONTAINER_RE = re.compile(
+    r'<div[^>]*\bid\s*=\s*["\']'
+    + re.escape(_EVOLUTION_DATA_DIV_ID)
+    + r'["\'][^>]*>\s*(.*?)\s*</div>',
+    re.DOTALL | re.IGNORECASE,
+)
+"""Regex to extract JSON array from a ``<div id="evolution-data">`` container."""
 
 
 def _build_admissions_url(
@@ -77,6 +102,39 @@ def _build_admissions_url(
     )
 
 
+# ---------------------------------------------------------------------------
+# Generic container extraction
+# ---------------------------------------------------------------------------
+
+
+def _extract_json_from_container(
+    html: str,
+    div_id: str,
+    pattern: re.Pattern,
+) -> str:
+    """Extract the JSON string from a named ``<div>`` container.
+
+    Args:
+        html: Full page HTML potentially containing the container.
+        div_id: The ``id`` attribute value of the target div.
+        pattern: Compiled regex to match the div and extract content.
+
+    Returns:
+        Raw JSON string extracted from the container.
+
+    Raises:
+        SnapshotContainerMissingError: If the container is not found.
+    """
+    match = pattern.search(html)
+    if not match:
+        raise SnapshotContainerMissingError(
+            f"Page HTML contains no data container "
+            f"(<div id=\"{div_id}\">). "
+            "Cannot extract data."
+        )
+    return match.group(1)
+
+
 def _extract_json_from_snapshot_container(html: str) -> str:
     """Extract the JSON string from the ``admission-snapshot-data`` div.
 
@@ -90,14 +148,89 @@ def _extract_json_from_snapshot_container(html: str) -> str:
         SnapshotContainerMissingError: If the snapshot data container is not
             found in the page HTML.
     """
-    match = _DATA_CONTAINER_RE.search(html)
-    if not match:
-        raise SnapshotContainerMissingError(
-            f"Page HTML contains no snapshot data container "
-            f"(<div id=\"{_ADMISSION_DATA_DIV_ID}\">). "
-            "Cannot extract admissions."
+    return _extract_json_from_container(
+        html, _ADMISSION_DATA_DIV_ID, _DATA_CONTAINER_RE
+    )
+
+
+# ---------------------------------------------------------------------------
+# Evolution JSON parsing (PSW-S5)
+# ---------------------------------------------------------------------------
+
+
+def _parse_evolutions_json(json_text: str) -> list[dict[str, Any]]:
+    """Parse and normalise a JSON evolution data string.
+
+    Args:
+        json_text: Raw JSON string with evolution data.
+
+    Returns:
+        List of normalised evolution dicts with canonical field names.
+
+    Raises:
+        InvalidJsonError: If JSON is invalid or not a list.
+    """
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError as exc:
+        raise InvalidJsonError(
+            f"Invalid JSON in evolution data: {exc}"
+        ) from exc
+
+    if not isinstance(data, list):
+        raise InvalidJsonError(
+            f"Evolution data JSON root must be a list, "
+            f"got {type(data).__name__}"
         )
-    return match.group(1)
+
+    result: list[dict[str, Any]] = []
+    for item in data:
+        normalised = _normalise_evolution_item(item)
+        result.append(normalised)
+
+    return result
+
+
+def _normalise_evolution_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Normalise a single evolution item to canonical field names.
+
+    Maps raw field names (e.g. ``admissionKey``) to canonical names
+    (e.g. ``admission_key``). Accepts both snake_case and camelCase
+    input field names for flexibility.
+
+    Args:
+        item: Raw evolution dict.
+
+    Returns:
+        Normalised dict with canonical field names.
+    """
+    return {
+        "admission_key": (
+            item.get("admission_key")
+            or item.get("admissionKey")
+            or ""
+        ),
+        "happened_at": (
+            item.get("happened_at")
+            or item.get("createdAt")
+            or ""
+        ),
+        "event_type": (
+            item.get("event_type")
+            or item.get("type")
+            or ""
+        ),
+        "content": (
+            item.get("content")
+            or item.get("content_text")
+            or ""
+        ),
+        "profession": (
+            item.get("profession")
+            or item.get("profession_type")
+            or ""
+        ),
+    }
 
 
 def _parse_admissions_json(json_text: str) -> list[dict[str, Any]]:
@@ -149,6 +282,10 @@ class PersistentExtractionAdapter:
             config.base_admissions_url
             if config and config.base_admissions_url
             else _DEFAULT_ADMISSIONS_URL_TEMPLATE
+        )
+        self._evolutions_url_template: str = (
+            getattr(config, "base_evolutions_url", "")
+            or _DEFAULT_EVOLUTIONS_URL_TEMPLATE
         )
 
     # ------------------------------------------------------------------
@@ -219,6 +356,82 @@ class PersistentExtractionAdapter:
         # JSON to InvalidJsonError and missing required fields to
         # ExtractionError, preserving the existing typed-exception taxonomy.
         result = _parse_admissions_json(json_text)
+
+        # Step 6: Cleanup job tab
+        self._controller.close_job_tab_if_present()
+
+        # Step 7: Mark job as processed
+        self._controller.mark_job_processed()
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Evolution extraction (PSW-S5)
+    # ------------------------------------------------------------------
+
+    def extract_evolutions(
+        self,
+        *,
+        patient_record: str,
+        start_date: str,
+        end_date: str,
+        timeout: int = 120,
+    ) -> list[dict[str, Any]]:
+        """Extract clinical evolutions through the persistent session.
+
+        Lifecycle:
+        1. Check session readiness (``ensure_ready``).
+        2. Renew session if needed (``renew_if_needed``).
+        3. Navigate to evolution page (open tab with timeout).
+        4. Extract JSON data from evolution container in page HTML.
+        5. Parse and normalise evolution data.
+        6. Cleanup job tab (``close_job_tab_if_present``).
+        7. Mark job as processed (``mark_job_processed``).
+
+        Args:
+            patient_record: Patient record identifier (prontuário).
+            start_date: Start date in YYYY-MM-DD format.
+            end_date: End date in YYYY-MM-DD format.
+            timeout: Maximum execution time in seconds, propagated to the
+                session handle's navigation/wait path.
+
+        Returns:
+            List of normalised evolution dicts with canonical field names.
+
+        Raises:
+            ExtractionError: If session is not ready, renewal fails, or
+                page navigation fails.
+            InvalidJsonError: If the extracted data is invalid JSON or
+                not a list.
+        """
+        # Step 1: Check session readiness
+        if not self._controller.ensure_ready():
+            raise ExtractionError("Session not ready for extraction")
+
+        # Step 2: Renew session if needed
+        if not self._controller.renew_if_needed():
+            raise ExtractionError("Session renewal failed before extraction")
+
+        # Step 3: Navigate to evolution page
+        url = _build_admissions_url(
+            self._evolutions_url_template,
+            patient_record=patient_record,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not self._session.open_tab(url, timeout=timeout):
+            raise ExtractionError(
+                f"Failed to navigate to evolution page: {url}"
+            )
+
+        # Step 4: Extract JSON data from evolution container
+        html = self._session.get_page_html()
+        json_text = _extract_json_from_container(
+            html, _EVOLUTION_DATA_DIV_ID, _EVOLUTION_DATA_CONTAINER_RE
+        )
+
+        # Step 5: Parse and normalise evolution data
+        result = _parse_evolutions_json(json_text)
 
         # Step 6: Cleanup job tab
         self._controller.close_job_tab_if_present()
