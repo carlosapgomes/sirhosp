@@ -27,6 +27,7 @@ from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 
 from apps.ingestion.batch_closure import try_close_batch
+from apps.ingestion.evolution_ingestion import ingest_evolutions as shared_ingest_evolutions
 from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionExtractor
 from apps.ingestion.gap_planner import plan_extraction_windows
 from apps.ingestion.models import (
@@ -35,12 +36,7 @@ from apps.ingestion.models import (
     IngestionRun,
     IngestionRunAttempt,
 )
-from apps.ingestion.services import (
-    _persist_event,
-    _upsert_admission,
-    _upsert_patient,
-    queue_demographics_only_run,
-)
+from apps.ingestion.services import queue_demographics_only_run
 from apps.patients.models import Admission
 
 # Default path to internalized legacy Playwright script (MVP path2).
@@ -1173,58 +1169,13 @@ class Command(BaseCommand):
     ) -> tuple[int, int, int]:
         """Ingest a list of evolution dicts, returning (created, skipped, revised).
 
-        For each evolution, admission is resolved via admission_key direct hit
-        or by period-based fallback (Slice S2). Uses transaction.atomic to ensure
-        consistency.
+        Delegates to the shared ``ingest_evolutions`` service. Preserves the
+        exact same behavior: patient upsert, admission resolution with fallback,
+        event persistence, counters, transaction boundaries, and timezone handling.
+
+        This method remains as a thin wrapper for backward compatibility.
         """
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        from django.db import transaction
-
-        from apps.ingestion.services import resolve_admission_for_event
-
-        created = 0
-        skipped = 0
-        revised = 0
-
-        for evo in evolutions:
-            with transaction.atomic():
-                # Ensure patient exists (already upserted in admissions step)
-                _patient = _upsert_patient(evo, run)
-
-                # Resolve admission deterministically (Slice S2 fallback)
-                admission_key = evo.get("admission_key", "")
-                happened_at_str = evo.get("happened_at", "")
-                if happened_at_str:
-                    happened_at = datetime.fromisoformat(happened_at_str)
-                    if happened_at.tzinfo is None:
-                        happened_at = happened_at.replace(
-                            tzinfo=ZoneInfo("America/Sao_Paulo")
-                        )
-                else:
-                    happened_at = timezone.now()
-
-                try:
-                    admission = resolve_admission_for_event(
-                        admission_key=admission_key,
-                        happened_at=happened_at,
-                        patient=patient,
-                    )
-                except Exception:
-                    # Fallback: upsert from evolution data (legacy behaviour)
-                    admission = _upsert_admission(evo, patient)
-
-                _event, action = _persist_event(evo, patient, admission, run)
-
-                if action == "created":
-                    created += 1
-                elif action == "skipped":
-                    skipped += 1
-                elif action == "revised":
-                    revised += 1
-
-        return created, skipped, revised
+        return shared_ingest_evolutions(evolutions, run, patient)
 
     # ------------------------------------------------------------------
     # CQM-S4: Batch closure
