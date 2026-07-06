@@ -3,15 +3,11 @@
 > **⚠️ Status: NOT production rollout-ready.**
 >
 > The persistent-session worker (`process_ingestion_runs_persistent_session`)
-> is implemented and unit-tested, but **cannot serve production traffic**
-> until two blockers are resolved:
+> is implemented and unit-tested, including persistent full-sync persistence,
+> but **cannot serve production traffic** until the remaining real-handle
+> blocker is resolved:
 >
-> 1. **Blocker 5.8 — Full-sync ingestion persistence:** The persistent worker
->    fails `full_sync` runs terminally with `full_sync_not_implemented`.
->    Real full-sync requires extracting the legacy worker's
->    `_ingest_evolutions`/`_upsert_patient` into a shared ingestion service
->    usable by both workers.
-> 2. **Real-handle container contract:** `PlaywrightSessionHandle` exists but
+> 1. **Real-handle container contract:** `PlaywrightSessionHandle` exists but
 >    cannot satisfy the adapter's synthetic snapshot/evolution container
 >    contract (`#admission-snapshot-data` / `#evolution-data`) against the
 >    real legacy UI. Launching Chromium via `--real-handle` is for controlled
@@ -19,7 +15,7 @@
 >
 > This document describes the **intended future rollout plan** and
 > **controlled lab/staging experiment guidance**. Do not apply the scaling or
-> side-by-side procedures in production until both blockers are resolved.
+> side-by-side procedures in production until this blocker is resolved.
 
 ---
 
@@ -27,10 +23,13 @@
 
 ### 1.1 Prerequisites (not yet met)
 
-- Full-sync persistence extracted into a shared ingestion service (blocker 5.8).
 - `PlaywrightSessionHandle` able to extract real snapshot/evolution containers
   from the legacy UI.
 - Containerized validation gate passing (`./scripts/test-in-container.sh quality-gate`).
+
+Full-sync persistence is implemented through the shared
+`apps.ingestion.evolution_ingestion.ingest_evolutions` service, but production
+rollout remains blocked by the real-handle contract.
 
 ### 1.2 Lab/staging experiment (available now)
 
@@ -97,7 +96,8 @@ as its prefix.
 
 ### 2.2 Side-by-side experiment (future, after prerequisites)
 
-After blockers are resolved, deploy an initial controlled experiment:
+After the real-handle contract is resolved, deploy an initial controlled
+experiment:
 
 ```bash
 cd /opt/sirhosp
@@ -105,13 +105,13 @@ cd /opt/sirhosp
 # Current workers (6 replicas, already in production)
 docker compose -f compose.yml -f compose.prod.yml up -d --scale worker=6
 
-# Persistent workers (6 replicas) — EXAMPLE ONLY, DISABLED until blockers resolved.
+# Persistent workers (6 replicas) — EXAMPLE ONLY, DISABLED until handle resolved.
 # docker compose -f compose.yml -f compose.persistent-worker.yml up -d \
 #   --scale persistent_worker=6
 ```
 
 > A dedicated `compose.persistent-worker.yml` override is **not yet provided**
-> because the worker is not rollout-ready. When blockers are resolved, create
+> because the worker is not rollout-ready. When the blocker is resolved, create
 > the override following the same tmpfs/isolation patterns as the current
 > `worker` service in `compose.prod.yml`.
 
@@ -121,7 +121,7 @@ When prerequisites are met, the override would look like:
 
 ```yaml
 # compose.persistent-worker.yml — DISABLED EXAMPLE
-# DO NOT DEPLOY until blocker 5.8 and real-handle container contract resolved.
+# DO NOT DEPLOY until the real-handle container contract is resolved.
 services:
   persistent_worker:
     build:
@@ -542,7 +542,7 @@ workers stop claiming new runs; already-completed runs are durable.
 
 | Problem | Likely cause | Action |
 | --- | --- | --- |
-| `full_sync_not_implemented` | Blocker 5.8 | Feature not yet built |
+| Synthetic container error | Handle contract | Add bridge layer |
 | No runs claimed | Queue empty or stale | Check queued count via shell |
 | Profile collision | Workers sharing tmpfs | Use unique paths per process |
 | `ENOSPC` on `/tmp` | tmpfs too small | Increase TMPFS size |

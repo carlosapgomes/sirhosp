@@ -159,14 +159,11 @@ docker compose -f compose.yml -f compose.prod.yml up -d --force-recreate worker
 >
 > Um worker alternativo de ingestão com sessão persistente
 > (`process_ingestion_runs_persistent_session`) está implementado e testado
-> em unidade, mas **não pode servir tráfego de produção**.
+> em unidade, com persistência full-sync via serviço compartilhado, mas
+> **não pode servir tráfego de produção**.
 >
-> Bloqueadores:
+> Bloqueador restante:
 >
-> - **Full-sync não implementado:** runs `full_sync` falham com
->   `full_sync_not_implemented`. A persistência real de evoluções depende
->   de extrair `_ingest_evolutions`/`_upsert_patient` do worker legado
->   para um serviço compartilhado.
 > - **Contrato de container real:** `PlaywrightSessionHandle` existe mas
 >   não satisfaz o contrato de containers sintéticos
 >   (`#admission-snapshot-data` / `#evolution-data`) contra a UI real do
