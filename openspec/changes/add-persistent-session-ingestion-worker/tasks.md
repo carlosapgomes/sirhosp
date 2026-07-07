@@ -85,16 +85,16 @@
   handle cannot be completed in this slice.
 - [x] 5.7 Run relevant validation and create
   `/tmp/sirhosp-slice-PSW-S5-report.md`.
-- [ ] 5.8 **BLOCKER (persistence resolved in PSW-S7/S8; real-handle contract
-  remains):** Shared evolution ingestion exists in
+- [x] 5.8 **RESOLVED IN CODE (PSW-S9; live validation remains):** Shared
+  evolution ingestion exists in
   `apps.ingestion/evolution_ingestion.py` (PSW-S7) and the persistent worker's
   `_process_full_sync` is now wired to it (PSW-S8), so `full_sync` runs persist
   real admissions + events with full parity (including census ward/bed
   backfill via the shared `backfill_admission_ward_from_census` service).
-  The remaining blocker is the **real-handle container contract**: the
-  `PlaywrightSessionHandle` (opt-in via `--real-handle`) cannot satisfy the
-  adapter's synthetic snapshot/evolution container contract against the real
-  legacy UI. A bridge/translation layer is required before production rollout.
+  The real-handle container contract is resolved in code by
+  `RealHandleBridge` (PSW-S9). Live validation, real bootstrap, and real
+  evolution PDF flow remain scoped to PSW-S10/PSW-S11 before any production
+  rollout.
 
 ## 6. PSW-S6: Runtime rollout and A/B observability
 
@@ -129,12 +129,10 @@
 
 - [x] 8.1 Add failing tests for the real handle/adapter contract using mocks or
   fakes, with no real legacy access.
-- [ ] 8.2 **OPEN BLOCKER (to resolve in PSW-S9):** implement or adapt the
-  real persistent handle contract so it no longer depends on fake-only
-  synthetic containers. The `PlaywrightSessionHandle` still requires synthetic
-  `#admission-snapshot-data` / `#evolution-data` containers that the real
-  legacy UI does not produce; a bridge/translation layer is needed before
-  production rollout.
+- [x] 8.2 **RESOLVED IN CODE (PSW-S9):** adapt the real persistent
+  handle contract so it no longer depends on fake-only synthetic containers
+  from the legacy UI. `RealHandleBridge` translates representative legacy DOM
+  output into the adapter contract. Live validation remains pending.
 - [x] 8.3 Wire persistent `_process_full_sync` to admissions capture, gap
   planning, persistent evolution extraction, and the shared ingestion service.
 - [x] 8.4 Preserve stage metrics, failure taxonomy, retry semantics, cleanup,
@@ -148,18 +146,49 @@
 
 ## 9. PSW-S9: Real handle bridge for legacy UI extraction
 
-- [ ] 9.1 Add failing tests for a bridge/translation layer that converts real
+- [x] 9.1 Add failing tests for a bridge/translation layer that converts real
   legacy UI outputs or stable `path2.py` helper results into the persistent
   adapter's admission/evolution contract, with no real legacy access.
-- [ ] 9.2 Implement the bridge inside the real persistent handle or adapter
+- [x] 9.2 Implement the bridge inside the real persistent handle or adapter
   boundary without launching a fresh browser per job and without subprocess
   execution of `path2.py`.
-- [ ] 9.3 Update `PlaywrightSessionHandle` so `--real-handle` can satisfy
+- [x] 9.3 Update `PlaywrightSessionHandle` so `--real-handle` can satisfy
   admissions and evolution extraction contracts against representative legacy
   HTML/download fakes.
-- [ ] 9.4 Preserve timeout propagation, tab cleanup, session renewal by opening
+- [x] 9.4 Preserve timeout propagation, tab cleanup, session renewal by opening
   tabs, exclusive profile behavior, and safe error taxonomy.
-- [ ] 9.5 Update rollout docs only if the real-handle blocker is resolved;
+- [x] 9.5 Update rollout docs only if the real-handle blocker is resolved;
   otherwise keep production rollout guarded and document remaining blockers.
-- [ ] 9.6 Run relevant validation and create
+- [x] 9.6 Run relevant validation and create
   `/tmp/sirhosp-slice-PSW-S9-report.md`.
+
+## 10. PSW-S10: Safe real-legacy bootstrap smoke
+
+- [ ] 10.1 Add failing tests for `--run-id` and `--max-runs 1` manual
+  validation controls.
+- [ ] 10.2 Add failing tests for real legacy bootstrap using mocked
+  Playwright objects and sanitized credential handling.
+- [ ] 10.3 Implement guarded single-run claim behavior so `--real-handle`
+  manual validation cannot drain the general queue.
+- [ ] 10.4 Implement real session bootstrap: source URL navigation, login,
+  authenticated readiness via `#tempoSessao`, and sanitized failures.
+- [ ] 10.5 Add real URL-template configuration for admissions, evolutions, and
+  safe renewal; fail before claim when required real-handle config is missing.
+- [ ] 10.6 Run relevant validation and create
+  `/tmp/sirhosp-slice-PSW-S10-report.md`.
+
+## 11. PSW-S11: Persistent real evolution PDF flow
+
+- [ ] 11.1 Add failing tests for persistent evolution PDF extraction using
+  fake Playwright pages/frames/downloads and synthetic anonymous PDF/text.
+- [ ] 11.2 Implement a minimal PDF report extraction path that reuses the
+  existing persistent handle/context and never invokes subprocess or a new
+  Playwright browser per job.
+- [ ] 11.3 Normalize PDF text into the existing evolution event contract and
+  preserve PSW-S9 JSON/script and `pre.report-text` fast paths.
+- [ ] 11.4 Wire the PDF fallback through persistent full-sync while preserving
+  shared persistence, stage metrics, retries, cleanup, and failure taxonomy.
+- [ ] 11.5 Keep current subprocess extractor and current worker behavior
+  unchanged.
+- [ ] 11.6 Run relevant validation and create
+  `/tmp/sirhosp-slice-PSW-S11-report.md`.
