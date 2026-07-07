@@ -164,10 +164,11 @@ docker compose -f compose.yml -f compose.prod.yml up -d --force-recreate worker
 >
 > Bloqueador restante:
 >
-> - **Contrato de container real:** `PlaywrightSessionHandle` existe mas
->   não satisfaz o contrato de containers sintéticos
->   (`#admission-snapshot-data` / `#evolution-data`) contra a UI real do
->   sistema legado.
+> - **Validação contra a UI real:** a `RealHandleBridge` (opt-in via
+>   `--real-handle`) traduz o DOM legado (`#tabelaInternacoes`, script/pre
+>   de evolução) para os containers sintéticos esperados pelo adapter em
+>   nível de código, mas **ainda não foi validada contra a UI real** do
+>   sistema legado em ambiente vivo/staging.
 >
 > Plano de rollout futuro e experimentos controlados de lab/staging:
 > `docs/operations/persistent-worker-rollout.md`

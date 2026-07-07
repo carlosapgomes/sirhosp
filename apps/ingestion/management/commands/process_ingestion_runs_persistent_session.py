@@ -19,14 +19,22 @@ Design (see ``openspec/changes/add-persistent-session-ingestion-worker/design.md
   stages, retries, failures, heartbeat, labels, and batch closure.
 - Uses ``WorkerHeartbeat`` from the existing worker for heartbeat.
 
-PSW-S8 status:
-- Full-sync evolution extraction IS implemented: ``_process_full_sync`` uses
-  the adapter's ``extract_evolutions`` and the shared ``ingest_evolutions``
-  service (same path as the current worker).
-- The real ``PlaywrightSessionHandle`` contract REMAINS BLOCKED: the adapter
-  expects synthetic container divs (``<div id="admission-snapshot-data">``,
-  ``<div id="evolution-data">``) that do not exist in the real legacy UI.
-  A bridge/translation layer is needed before production rollout.
+PSW-S9 status:
+- RealHandleBridge IS implemented: wraps PlaywrightSessionHandle to
+  translate real legacy DOM table/script data into the synthetic container
+  format (<div id="admission-snapshot-data">, <div id="evolution-data">)
+  expected by PersistentExtractionAdapter.
+- When ``--real-handle`` is passed, the bridge extracts admission data
+  from the legacy ``#tabelaInternacoes`` table rows and evolution data
+  from ``<script id="evolution-data-json">`` or ``<pre class="report-text">``
+  elements, wrapping them in the adapter's expected container format.
+- The bridge does NOT launch a fresh browser, subprocess, or new
+  Playwright context per job — it delegates all session operations
+  to the already-open persistent handle.
+- Production rollout REMAINS GUARDED: the bridge has been tested with
+  representative legacy HTML fakes but has NOT been validated against
+  the real legacy UI in a live environment. Keep ``--real-handle`` as
+  an opt-in integration experiment flag.
 
 Usage::
 
@@ -142,11 +150,12 @@ class Command(BaseCommand):
             "--real-handle",
             action="store_true",
             help=(
-                "Use a real Playwright Chromium session handle instead of the "
-                "safe stub. OFF by default: the real handle cannot yet satisfy "
-                "the adapter's synthetic snapshot/evolution container contract "
-                "against the legacy UI, so it must NOT be treated as "
-                "rollout-ready."
+                "Use a real Playwright Chromium session handle wrapped in "
+                "RealHandleBridge instead of the safe stub. The bridge "
+                "extracts admission/evolution data from the real legacy DOM "
+                "and wraps it in synthetic containers for the adapter. "
+                "This enables integration experiments but is NOT "
+                "production-validated — keep guarded."
             ),
         )
 
@@ -221,14 +230,16 @@ class Command(BaseCommand):
         """Create a SessionHandle protocol implementation.
 
         By default returns the safe ``_StubSessionHandle`` so the command is
-        NOT rollout-ready: launching a real browser is pointless until a
-        concrete adapter contract (snapshot/evolution containers) can be
-        satisfied against the real legacy UI.
+        NOT rollout-ready out of the box (no Chromium is launched).
 
-        Opt into the real Playwright handle with ``--real-handle``. The real
-        handle is wired with an exclusive ``ExclusiveBrowserProfile``; it is
-        provided for integration experiments only and must not be treated as
-        production-ready.
+        Opt into the real path with ``--real-handle``: it starts a
+        ``PlaywrightSessionHandle`` (exclusive ``ExclusiveBrowserProfile``)
+        and wraps it in ``RealHandleBridge``, which translates the real
+        legacy DOM (``#tabelaInternacoes`` table, evolution script/pre) into
+        the synthetic containers the adapter expects. The bridge resolves the
+        container contract at the code level but is **not validated against
+        the real legacy UI**; keep ``--real-handle`` as an integration-
+        experiment flag until live validation.
         """
         if not getattr(self, "_use_real_handle", False):
             return _StubSessionHandle()
@@ -246,7 +257,13 @@ class Command(BaseCommand):
             headless=True,
         )
         handle.start()
-        return handle
+
+        # Wrap in RealHandleBridge so the adapter receives synthetic
+        # containers with data extracted from the real legacy DOM.
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+        return RealHandleBridge(handle)
 
     # ------------------------------------------------------------------
     # Worker label

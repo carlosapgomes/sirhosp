@@ -1100,38 +1100,48 @@ class TestRealHandleGating:
 
 @pytest.mark.django_db
 class TestRealHandleContract:
-    """The real handle contract still depends on synthetic containers.
+    """The real handle contract now uses RealHandleBridge (PSW-S9).
 
-    PSW-S8 wires full-sync through the persistent adapter but the real
-    ``PlaywrightSessionHandle`` cannot yet satisfy the adapter's synthetic
-    snapshot/evolution container contract against the real legacy UI. The
-    adapter expects ``<div id="admission-snapshot-data">`` and
-    ``<div id="evolution-data">`` with JSON payload — these divs exist only
-    in the synthetic test fixtures.
+    PSW-S9 implements ``RealHandleBridge``, a wrapper around the real
+    ``PlaywrightSessionHandle`` that extracts admission data from the
+    legacy ``#tabelaInternacoes`` table and evolution data from
+    ``<script id="evolution-data-json">``, rendering them inside the
+    adapter's expected synthetic container format.
 
-    A bridge/translation layer would need to extract data from the real
-    legacy DOM/download and render it in the synthetic container format
-    that the adapter consumes. This remains blocked until the real legacy
-    UI page structure is mapped.
+    The adapter still expects ``<div id="admission-snapshot-data">`` and
+    ``<div id="evolution-data">`` — the bridge translates real legacy DOM
+    data into this format. Production rollout remains guarded until the
+    bridge is validated against the real legacy UI in a live environment.
     """
 
     def test_adapter_still_uses_synthetic_container_contract(self):
-        """Adapter contract still depends on synthetic container divs."""
+        """Adapter contract still expects synthetic container divs.
+
+        The RealHandleBridge translates real legacy DOM into this format —
+        the adapter itself remains unchanged.
+        """
         from apps.ingestion.extractors.persistent_extraction_adapter import (
             _ADMISSION_DATA_DIV_ID,
             _DATA_CONTAINER_RE,
         )
 
-        # The adapter's regex expects <div id="admission-snapshot-data">
-        # which does not exist in the real legacy UI.
         assert _ADMISSION_DATA_DIV_ID == "admission-snapshot-data"
         assert _DATA_CONTAINER_RE is not None
 
-    def test_real_handle_contract_blocker_still_documented(self):
-        """The real handle contract blocker is still documented in the command."""
+    def test_real_handle_bridge_exists_and_is_importable(self):
+        """RealHandleBridge is implemented and importable (PSW-S9)."""
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        assert RealHandleBridge is not None
+
+    def test_real_handle_flag_still_documented_as_guarded(self):
+        """The --real-handle flag docs acknowledge the bridge but keep
+        guarded rollout status."""
         import inspect
         source = inspect.getsource(PersistentWorkerCommand)
-        # The module source contains the blocker documentation
         assert "--real-handle" in source
-        assert "cannot yet satisfy" in source \
-            or "REMAINS BLOCKED" in source
+        assert "RealHandleBridge" in source
+        assert "NOT production-validated" in source \
+            or "integration experiment" in source

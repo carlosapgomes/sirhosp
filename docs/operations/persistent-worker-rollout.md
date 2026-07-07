@@ -1,30 +1,44 @@
 # Persistent-Session Ingestion Worker — Runtime Rollout and A/B Observability
 
-> **⚠️ Status: NOT production rollout-ready.**
+> **⚠️ Status: NOT production rollout-ready (post-PSW-S9).**
 >
 > The persistent-session worker (`process_ingestion_runs_persistent_session`)
-> is implemented and unit-tested, including persistent full-sync persistence,
-> but **cannot serve production traffic** until the remaining real-handle
-> blocker is resolved:
+> is implemented and unit-tested, including persistent full-sync persistence
+> and a ``RealHandleBridge`` that translates real legacy DOM data into the
+> adapter's synthetic container contract.
 >
-> 1. **Real-handle container contract:** `PlaywrightSessionHandle` exists but
->    cannot satisfy the adapter's synthetic snapshot/evolution container
->    contract (`#admission-snapshot-data` / `#evolution-data`) against the
->    real legacy UI. Launching Chromium via `--real-handle` is for controlled
->    integration experiments only.
+> **Progress (PSW-S9):**
+>
+> 1. ~~Real-handle container contract~~ — **RESOLVED in code, NOT yet
+>    production-validated.** ``RealHandleBridge`` wraps the
+>    ``PlaywrightSessionHandle`` and extracts admission data from the legacy
+>    ``#tabelaInternacoes`` table rows and evolution data from
+>    ``<script id="evolution-data-json">`` / ``<pre class="report-text">``
+>    elements, rendering them inside ``<div id="admission-snapshot-data">``
+>    and ``<div id="evolution-data">`` containers.
+>
+> 2. **Remaining prerequisite:** The bridge has been tested with
+>    representative legacy HTML fakes but has NOT been validated against the
+>    real legacy UI in a live/staging environment. Launching Chromium via
+>    ``--real-handle`` is still an opt-in integration experiment flag.
 >
 > This document describes the **intended future rollout plan** and
 > **controlled lab/staging experiment guidance**. Do not apply the scaling or
-> side-by-side procedures in production until this blocker is resolved.
+> side-by-side procedures in production until live validation of the bridge
+> is completed.
 
 ---
 
 ## 1. Before you begin
 
-### 1.1 Prerequisites (not yet met)
+### 1.1 Prerequisites (not yet fully met)
 
-- `PlaywrightSessionHandle` able to extract real snapshot/evolution containers
-  from the legacy UI.
+- ~~``PlaywrightSessionHandle`` able to extract real snapshot/evolution
+  containers from the legacy UI.~~ **Implemented (PSW-S9)**:
+  ``RealHandleBridge`` wraps the handle and translates legacy DOM data
+  into the adapter's synthetic container contract.
+- **Live validation against real legacy UI** — not yet performed.
+  The bridge has been tested with representative HTML fakes only.
 - Containerized validation gate passing (`./scripts/test-in-container.sh quality-gate`).
 
 Full-sync persistence is implemented through the shared
