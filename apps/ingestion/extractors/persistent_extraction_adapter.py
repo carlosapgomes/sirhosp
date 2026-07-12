@@ -27,6 +27,7 @@ from apps.ingestion.extractors.errors import (
     InvalidJsonError,
     SnapshotContainerMissingError,
 )
+from apps.ingestion.extractors.playwright_extractor import _TYPE_MAP
 from apps.ingestion.extractors.session_controller import (
     PersistentSessionController,
     SessionControllerConfig,
@@ -254,6 +255,58 @@ def _parse_admissions_json(json_text: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Evolution -> persistence schema enrichment (PSW-S11 fix)
+# ---------------------------------------------------------------------------
+
+
+def _enrich_evolutions_for_persistence(
+    events: list[dict[str, Any]],
+    *,
+    patient_record: str,
+    source_system: str = "tasy",
+) -> list[dict[str, Any]]:
+    """Add the persistible schema fields the shared ingestion service reads.
+
+    Both the lightweight fast paths and the PDF fallback produce the adapter's
+    5-key evolution contract (``admission_key``, ``happened_at``,
+    ``event_type``, ``content``, ``profession``). The shared
+    :func:`~apps.ingestion.evolution_ingestion.ingest_evolutions` service and
+    :func:`~apps.ingestion.services._persist_event` instead read
+    ``content_text``, ``profession_type``, ``author_name``, ``signature_line``,
+    ``patient_source_key``, and ``source_system``.
+
+    This enriches each event in place with those fields (derived from the
+    5-key contract) while keeping the original keys for compatibility.
+    ``patient_source_key`` comes from the run's ``patient_record`` so the
+    correct patient is associated.
+
+    Args:
+        events: Evolution dicts in the 5-key contract (possibly enriched).
+        patient_record: Patient record (prontuário) of the current run.
+        source_system: Canonical source system (default ``"tasy"``).
+
+    Returns:
+        The same list, enriched in place with persistible fields.
+    """
+    for event in events:
+        content = event.get("content", "")
+        event_type = event.get("event_type", "")
+        profession = event.get("profession", "")
+        event.setdefault("patient_source_key", patient_record)
+        event.setdefault("source_system", source_system)
+        event.setdefault("content_text", content)
+        # Map the PDF classifier token to the same canonical profession_type
+        # the subprocess extractor stores for an identical evolution (reuses
+        # ``_TYPE_MAP`` from ``playwright_extractor`` to avoid divergence).
+        event.setdefault(
+            "profession_type", _TYPE_MAP.get(event_type, event_type)
+        )
+        event.setdefault("author_name", profession)
+        event.setdefault("signature_line", event.get("signature_line", ""))
+    return events
+
+
+# ---------------------------------------------------------------------------
 # Persistent Extraction Adapter
 # ---------------------------------------------------------------------------
 
@@ -432,6 +485,30 @@ class PersistentExtractionAdapter:
 
         # Step 5: Parse and normalise evolution data
         result = _parse_evolutions_json(json_text)
+
+        # Step 5b (PSW-S11): PDF report fallback. The lightweight fast paths
+        # (``evolution-data-json`` script, ``pre.report-text``) are tried first
+        # by the bridge. When they yield no events, delegate to the real
+        # legacy PDF flow on sessions that expose it (``RealHandleBridge``),
+        # reusing the already-open persistent page/context — never a new
+        # browser or subprocess. A genuine empty window stays an empty list.
+        if not result and hasattr(self._session, "extract_evolutions_pdf"):
+            result = self._session.extract_evolutions_pdf(
+                start_date=start_date,
+                end_date=end_date,
+                timeout=timeout,
+            )
+
+        # Step 5c (PSW-S11 fix): map the adapter's 5-key evolution contract
+        # (admission_key/happened_at/event_type/content/profession) onto the
+        # schema the shared ingestion service persists
+        # (content_text/profession_type/author_name/signature_line/
+        # patient_source_key/source_system). The adapter knows the
+        # patient_record, so it is the single place to enrich both the
+        # fast-path and the PDF-fallback events for persistence.
+        result = _enrich_evolutions_for_persistence(
+            result, patient_record=patient_record
+        )
 
         # Step 6: Cleanup job tab
         self._controller.close_job_tab_if_present()

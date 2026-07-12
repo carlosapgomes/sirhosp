@@ -527,6 +527,83 @@ class TestTabOperations:
 
 
 # ===========================================================================
+# Bootstrap page access (PSW-S10 final polish)
+# ===========================================================================
+
+
+class TestEnsureCurrentPage:
+    """Tests for ensure_current_page (bootstrap get-or-create page)."""
+
+    def test_creates_page_when_context_has_no_pages(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_page: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """ensure_current_page creates a page when none exists."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        # Context opened without pages (possible with launch_persistent_context).
+        mock_persistent_context.pages = []
+        mock_persistent_context.new_page.return_value = mock_page
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(
+                profile=mock_browser_profile,
+            )
+            handle.start()
+            page = handle.ensure_current_page()
+
+        mock_persistent_context.new_page.assert_called_once()
+        assert page is mock_page
+
+    def test_reuses_existing_page_without_creating_new(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """ensure_current_page reuses the existing page and skips new_page."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        existing_page = MagicMock()
+        mock_persistent_context.pages = [existing_page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(
+                profile=mock_browser_profile,
+            )
+            handle.start()
+            page = handle.ensure_current_page()
+
+        mock_persistent_context.new_page.assert_not_called()
+        assert page is existing_page
+
+    def test_returns_none_when_browser_not_started(
+        self,
+        mock_browser_profile: MagicMock,
+    ) -> None:
+        """ensure_current_page returns None before the browser starts."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+        assert handle.ensure_current_page() is None
+
+
+# ===========================================================================
 # No real legacy access
 # ===========================================================================
 

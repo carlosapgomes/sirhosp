@@ -164,31 +164,31 @@
 
 ## 10. PSW-S10: Safe real-legacy bootstrap smoke
 
-- [ ] 10.1 Add failing tests for `--run-id` and `--max-runs 1` manual
+- [x] 10.1 Add failing tests for `--run-id` and `--max-runs 1` manual
   validation controls.
-- [ ] 10.2 Add failing tests for real legacy bootstrap using mocked
+- [x] 10.2 Add failing tests for real legacy bootstrap using mocked
   Playwright objects and sanitized credential handling.
-- [ ] 10.3 Implement guarded single-run claim behavior so `--real-handle`
+- [x] 10.3 Implement guarded single-run claim behavior so `--real-handle`
   manual validation cannot drain the general queue.
-- [ ] 10.4 Implement real session bootstrap: source URL navigation, login,
+- [x] 10.4 Implement real session bootstrap: source URL navigation, login,
   authenticated readiness via `#tempoSessao`, and sanitized failures.
-- [ ] 10.5 Add real URL-template configuration for admissions, evolutions, and
+- [x] 10.5 Add real URL-template configuration for admissions, evolutions, and
   safe renewal; fail before claim when required real-handle config is missing.
-- [ ] 10.6 Run relevant validation and create
+- [x] 10.6 Run relevant validation and create
   `/tmp/sirhosp-slice-PSW-S10-report.md`.
 
 ## 11. PSW-S11: Persistent real evolution PDF flow
 
-- [ ] 11.1 Add failing tests for persistent evolution PDF extraction using
+- [x] 11.1 Add failing tests for persistent evolution PDF extraction using
   fake Playwright pages/frames/downloads and synthetic anonymous PDF/text.
-- [ ] 11.2 Implement a minimal PDF report extraction path that reuses the
+- [x] 11.2 Implement a minimal PDF report extraction path that reuses the
   existing persistent handle/context and never invokes subprocess or a new
   Playwright browser per job.
-- [ ] 11.3 Normalize PDF text into the existing evolution event contract and
+- [x] 11.3 Normalize PDF text into the existing evolution event contract and
   preserve PSW-S9 JSON/script and `pre.report-text` fast paths.
-- [ ] 11.4 Wire the PDF fallback through persistent full-sync while preserving
+- [x] 11.4 Wire the PDF fallback through persistent full-sync while preserving
   shared persistence, stage metrics, retries, cleanup, and failure taxonomy.
-- [ ] 11.5 Keep current subprocess extractor and current worker behavior
+- [x] 11.5 Keep current subprocess extractor and current worker behavior
   unchanged.
-- [ ] 11.6 Run relevant validation and create
+- [x] 11.6 Run relevant validation and create
   `/tmp/sirhosp-slice-PSW-S11-report.md`.

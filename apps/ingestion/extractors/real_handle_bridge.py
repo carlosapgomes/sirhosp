@@ -43,6 +43,10 @@ import logging
 import re
 from typing import Any
 
+from apps.ingestion.extractors.persistent_evolution_pdf import (
+    EvolutionPdfError,
+    EvolutionPdfFlow,
+)
 from apps.ingestion.extractors.session_controller import SessionHandle
 
 logger = logging.getLogger(__name__)
@@ -381,6 +385,71 @@ class RealHandleBridge:
         shutdown_fn = getattr(self._handle, "shutdown", None)
         if callable(shutdown_fn):
             shutdown_fn()
+
+    # ------------------------------------------------------------------
+    # PSW-S11: persistent evolution PDF flow
+    # ------------------------------------------------------------------
+
+    def extract_evolutions_pdf(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+        admission_key: str = "",
+        timeout: int = 120,
+    ) -> list[dict[str, Any]]:
+        """Extract evolutions from the real legacy PDF report flow.
+
+        Reuses the *already-open* persistent Playwright page/context exposed
+        by the wrapped handle (``ensure_current_page()`` on the real handle,
+        with a ``current_page()`` fallback for compatibility). It never
+        launches a fresh browser, never calls ``subprocess``, and never shells
+        out to ``path2.py``. The actual navigation/tab opening is performed by
+        the adapter (``open_tab``) before this method is called; this method
+        only drives the report generation, PDF download, text extraction, and
+        normalisation on the current page.
+
+        Used by :class:`PersistentExtractionAdapter` as a fallback when the
+        lightweight fast paths (``evolution-data-json`` script and
+        ``pre.report-text``) yield no events.
+
+        Args:
+            start_date: Window start in ``YYYY-MM-DD``.
+            end_date: Window end in ``YYYY-MM-DD``.
+            admission_key: Admission key to stamp on events (may be empty).
+            timeout: Overall hint in seconds; honoured by the download wait.
+
+        Returns:
+            Normalised evolution dicts (possibly empty).
+
+        Raises:
+            EvolutionPdfError: On any sanitised PDF-flow failure.
+        """
+        page = self._resolve_active_page()
+        if page is None:
+            raise EvolutionPdfError(
+                "Persistent handle has no active page for the evolution PDF flow"
+            )
+        flow = EvolutionPdfFlow(page)
+        return flow.extract(
+            start_date=start_date,
+            end_date=end_date,
+            admission_key=admission_key,
+            timeout=timeout,
+        )
+
+    def _resolve_active_page(self) -> Any:
+        """Return the active Playwright page from the wrapped handle.
+
+        The real ``PlaywrightSessionHandle`` exposes ``ensure_current_page()``;
+        older fakes/handles may expose ``current_page()``. Prefer the real
+        accessor and fall back to the legacy one for compatibility.
+        """
+        for getter_name in ("ensure_current_page", "current_page"):
+            getter = getattr(self._handle, getter_name, None)
+            if callable(getter):
+                return getter()
+        return None
 
     # ------------------------------------------------------------------
     # Private: page type detection

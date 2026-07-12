@@ -36,6 +36,38 @@ PSW-S9 status:
   the real legacy UI in a live environment. Keep ``--real-handle`` as
   an opt-in integration experiment flag.
 
+PSW-S10 status:
+- ``--real-handle`` requires BOTH an explicit ``--run-id`` AND ``--max-runs 1``
+  so a manual smoke test processes exactly one selected queued run and cannot
+  accidentally drain the general queue or enter an idle loop. Both are checked
+  before ``_create_adapter()`` (no browser launched) and before any claim.
+  ``--max-runs`` also caps the number of processed runs on the stub path.
+- The real-handle path resolves source-system credentials and real URL
+  templates (admissions, evolutions, safe renewal), validates them, and
+  bootstraps an authenticated legacy session (navigate + login + wait
+  for ``#tempoSessao``) BEFORE any run is claimed.
+- Failures before claim (missing credentials, missing URL templates,
+  bootstrap errors) are sanitized and never mutate queued runs.
+- This is a guarded MANUAL SMOKE path only — it is NOT production
+  rollout-ready.
+
+PSW-S11 status:
+- The persistent ``full_sync`` can now extract evolutions from the real
+  legacy PDF report flow via ``EvolutionPdfFlow``, reusing the already-open
+  persistent page/context. It never invokes ``subprocess``, never shells out
+  to ``path2.py``, never calls ``sync_playwright()`` again, and never launches
+  a fresh browser per job.
+- The PDF flow is a FALLBACK only: the PSW-S9 lightweight fast paths
+  (``evolution-data-json`` script and ``pre.report-text``) are tried first by
+  ``RealHandleBridge``; when they yield no events, the adapter delegates to
+  ``extract_evolutions_pdf``. JSON/script and ``pre.report-text`` paths are
+  unchanged.
+- Failures map to ``EvolutionPdfError`` (sanitized; no credentials/cookies/
+  raw HTML/patient data) and are classified as recoverable data-level
+  failures (tab cleanup runs; retry taxonomy preserved).
+- This is still a guarded MANUAL SMOKE path — it has NOT been validated
+  against the real legacy UI in a live environment.
+
 Usage::
 
     # Single pass
@@ -52,7 +84,7 @@ import os
 import time
 from datetime import timedelta
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, transaction
 from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
@@ -63,6 +95,9 @@ from apps.ingestion.extractors.errors import (
     ExtractionError,
     InvalidJsonError,
     SnapshotContainerMissingError,
+)
+from apps.ingestion.extractors.persistent_evolution_pdf import (
+    EvolutionPdfError,
 )
 from apps.ingestion.extractors.persistent_extraction_adapter import (
     PersistentExtractionAdapter,
@@ -83,6 +118,9 @@ from apps.ingestion.models import IngestionRun, IngestionRunAttempt
 
 _ADMISSIONS_TIMEOUT = 120
 """Default timeout (seconds) for admissions snapshot extraction."""
+
+_LOGIN_TIMEOUT_SECONDS = 60
+"""Default timeout (seconds) for each legacy bootstrap navigation/wait step."""
 
 _PERSISTENT_LABEL_PREFIX = "persistent-worker"
 """Default worker label prefix when SIRHOSP_WORKER_LABEL is not set."""
@@ -154,8 +192,27 @@ class Command(BaseCommand):
                 "RealHandleBridge instead of the safe stub. The bridge "
                 "extracts admission/evolution data from the real legacy DOM "
                 "and wraps it in synthetic containers for the adapter. "
-                "This enables integration experiments but is NOT "
+                "Requires --run-id and --max-runs 1 (manual smoke only); NOT "
                 "production-validated — keep guarded."
+            ),
+        )
+        parser.add_argument(
+            "--run-id",
+            type=int,
+            default=None,
+            help=(
+                "Claim only this IngestionRun id (must be queued and "
+                "eligible). Required with --real-handle to avoid draining "
+                "the production queue during a manual smoke test."
+            ),
+        )
+        parser.add_argument(
+            "--max-runs",
+            type=int,
+            default=None,
+            help=(
+                "Stop after processing this many runs. Useful to bound "
+                "manual smoke tests (e.g. --max-runs 1)."
             ),
         )
 
@@ -163,6 +220,29 @@ class Command(BaseCommand):
         loop: bool = options["loop"]
         sleep_seconds: int = options["sleep_seconds"]
         self._use_real_handle: bool = options["real_handle"]
+        self._run_id: int | None = options.get("run_id")
+        self._max_runs: int | None = options.get("max_runs")
+        self._processed_count: int = 0
+
+        # Safety guard: a real-legacy manual smoke must target exactly one
+        # explicitly selected run so it cannot accidentally drain the
+        # production queue. This is checked before any run is claimed.
+        if self._use_real_handle and self._run_id is None:
+            raise CommandError(
+                "--real-handle requires --run-id to avoid draining the "
+                "production queue. Specify a single queued IngestionRun id "
+                "for the manual smoke."
+            )
+
+        # Safety guard: a real-legacy manual smoke must be bounded to exactly
+        # one run via --max-runs 1 so it cannot enter an idle loop or process
+        # more than the selected run. Checked before _create_adapter() (no
+        # browser launched) and before any claim. Does not affect the stub path.
+        if self._use_real_handle and self._max_runs != 1:
+            raise CommandError(
+                "--real-handle requires --max-runs 1 to bound the manual smoke "
+                "to a single run. Pass --max-runs 1 explicitly."
+            )
 
         # The adapter (and its persistent browser/session) is created ONCE
         # at startup and reused across all claimed runs. This is the core
@@ -209,9 +289,12 @@ class Command(BaseCommand):
 
         The session handle defaults to the safe ``_StubSessionHandle`` (no
         Chromium) so the command is NOT rollout-ready. Pass ``--real-handle``
-        to opt into the ``PlaywrightSessionHandle``; note that the real handle
-        still cannot satisfy the adapter's synthetic container contract against
-        the legacy UI, so it is for integration experiments only.
+        (with ``--run-id``) to opt into the real legacy path: it resolves and
+        validates credentials and real URL templates, starts a
+        ``PlaywrightSessionHandle`` (exclusive ``ExclusiveBrowserProfile``),
+        bootstraps an authenticated session (navigate + login + wait for
+        ``#tempoSessao``), and wraps the handle in ``RealHandleBridge`` which
+        translates the real legacy DOM into the adapter's container format.
 
         Tests patch ``adapter_class`` or the import path to inject fakes.
         """
@@ -219,11 +302,22 @@ class Command(BaseCommand):
             SessionControllerConfig,
         )
 
-        config = SessionControllerConfig(base_admissions_url="/admissions/{patient_record}")
-        adapter = self.adapter_class(
-            session=self._create_session_handle(),
-            config=config,
-        )
+        if getattr(self, "_use_real_handle", False):
+            # Real path: validate config, resolve creds, bootstrap, bridge.
+            # ``_create_session_handle`` also stores the resolved real URL
+            # templates on ``self`` so the adapter can use them.
+            session = self._create_session_handle()
+            config = SessionControllerConfig(
+                base_admissions_url=self._real_url_templates.admissions_url_template,
+                base_evolutions_url=self._real_url_templates.evolutions_url_template,
+                safe_renewal_tab_url=self._real_url_templates.safe_renewal_url,
+            )
+        else:
+            session = self._create_session_handle()
+            config = SessionControllerConfig(
+                base_admissions_url="/admissions/{patient_record}"
+            )
+        adapter = self.adapter_class(session=session, config=config)
         return adapter
 
     def _create_session_handle(self):
@@ -232,38 +326,105 @@ class Command(BaseCommand):
         By default returns the safe ``_StubSessionHandle`` so the command is
         NOT rollout-ready out of the box (no Chromium is launched).
 
-        Opt into the real path with ``--real-handle``: it starts a
-        ``PlaywrightSessionHandle`` (exclusive ``ExclusiveBrowserProfile``)
-        and wraps it in ``RealHandleBridge``, which translates the real
-        legacy DOM (``#tabelaInternacoes`` table, evolution script/pre) into
-        the synthetic containers the adapter expects. The bridge resolves the
+        Opt into the real path with ``--real-handle``: it resolves and
+        validates credentials and real URL templates, starts a
+        ``PlaywrightSessionHandle`` (exclusive ``ExclusiveBrowserProfile``),
+        bootstraps an authenticated legacy session, and wraps it in
+        ``RealHandleBridge``, which translates the real legacy DOM
+        (``#tabelaInternacoes`` table, evolution script/pre) into the
+        synthetic containers the adapter expects. The bridge resolves the
         container contract at the code level but is **not validated against
-        the real legacy UI**; keep ``--real-handle`` as an integration-
-        experiment flag until live validation.
+        the real legacy UI**; keep ``--real-handle`` as a guarded
+        manual-smoke flag until live validation.
         """
         if not getattr(self, "_use_real_handle", False):
             return _StubSessionHandle()
 
+        return self._create_bootstrapped_real_handle()
+
+    def _create_bootstrapped_real_handle(self):
+        """Create, start, bootstrap, and bridge a real PlaywrightSessionHandle.
+
+        Resolves and validates the real legacy URL templates and credentials
+        BEFORE launching Chromium, so a missing-config failure cannot leak a
+        half-started browser or claim any run. On a bootstrap failure after
+        the browser has started, the handle is shut down before the sanitized
+        error is re-raised as :class:`CommandError`.
+        """
         from apps.ingestion.extractors.browser_profile import (
             ExclusiveBrowserProfile,
+        )
+        from apps.ingestion.extractors.legacy_session_bootstrap import (
+            LegacyBootstrapError,
+            bootstrap_legacy_session,
+            resolve_legacy_url_templates,
         )
         from apps.ingestion.extractors.playwright_session_handle import (
             PlaywrightSessionHandle,
         )
-
-        profile = ExclusiveBrowserProfile(label="persistent-worker")
-        handle = PlaywrightSessionHandle(
-            profile=profile,
-            headless=True,
-        )
-        handle.start()
-
-        # Wrap in RealHandleBridge so the adapter receives synthetic
-        # containers with data extracted from the real legacy DOM.
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
         )
+        from apps.ingestion.historical_extraction import (
+            resolve_source_credentials,
+        )
+
+        # Validate configuration BEFORE launching the browser (fail fast).
+        self._real_url_templates = resolve_legacy_url_templates()
+        self._require_real_handle_config()
+        try:
+            credentials = resolve_source_credentials()
+        except ValueError as exc:
+            # resolve_source_credentials raises sanitized ValueErrors listing
+            # the missing setting NAMES (never values). Surface as CommandError.
+            raise CommandError(str(exc)) from exc
+
+        profile = ExclusiveBrowserProfile(label="persistent-worker")
+        handle = PlaywrightSessionHandle(profile=profile, headless=True)
+        handle.start()
+        try:
+            # Bootstrap the authenticated legacy session on the root page.
+            page = handle.ensure_current_page()
+            bootstrap_legacy_session(
+                page,
+                credentials=credentials,
+                login_timeout=_LOGIN_TIMEOUT_SECONDS,
+            )
+        except LegacyBootstrapError as exc:
+            # Best-effort teardown, then surface a sanitized error.
+            try:
+                handle.shutdown()
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
+            raise CommandError(str(exc)) from exc
+        except CommandError:
+            try:
+                handle.shutdown()
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
+            raise
+
         return RealHandleBridge(handle)
+
+    def _require_real_handle_config(self) -> None:
+        """Raise a sanitized CommandError if a required real URL template is missing.
+
+        Checked before the browser is launched and before any run is claimed.
+        """
+        templates = self._real_url_templates
+        missing: list[str] = []
+        if not templates.admissions_url_template:
+            missing.append("SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE")
+        if not templates.evolutions_url_template:
+            missing.append("SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE")
+        if not templates.safe_renewal_url:
+            missing.append("SOURCE_SYSTEM_SAFE_RENEWAL_URL")
+        if missing:
+            raise CommandError(
+                "Cannot start --real-handle: missing real legacy URL "
+                "template(s): " + ", ".join(missing)
+                + ". Configure them before claiming any run."
+            )
 
     # ------------------------------------------------------------------
     # Worker label
@@ -290,24 +451,30 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _claim_eligible_run() -> IngestionRun | None:
+    def _claim_eligible_run(run_id: int | None = None) -> IngestionRun | None:
         """Claim the next eligible queued run respecting next_retry_at.
 
         Eligible = status='queued' AND (next_retry_at IS NULL OR
         next_retry_at <= now). Uses ``select_for_update(skip_locked=True)``
         for safe concurrent access.
+
+        Args:
+            run_id: When provided, claim only that run (still requiring it to
+                be queued and eligible). Used by the manual smoke
+                ``--run-id`` control.
         """
         from django.db.models import Q
 
         now = timezone.now()
-        return (
+        qs = (
             IngestionRun.objects
             .select_for_update(skip_locked=True)
             .filter(status="queued")
             .filter(Q(next_retry_at__isnull=True) | Q(next_retry_at__lte=now))
-            .order_by("pk")
-            .first()
         )
+        if run_id is not None:
+            qs = qs.filter(pk=run_id)
+        return qs.order_by("pk").first()
 
     # ------------------------------------------------------------------
     # Loop mode
@@ -335,6 +502,11 @@ class Command(BaseCommand):
         )
 
         while True:
+            if self._max_runs_reached():
+                self.stdout.write(
+                    f"Reached --max-runs limit ({self._max_runs}); exiting loop."
+                )
+                break
             try:
                 close_old_connections()
                 count = IngestionRun.objects.filter(status="queued").count()
@@ -369,7 +541,36 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     def _process_once(self, adapter: PersistentExtractionAdapter) -> None:
-        """Process all queued runs once and exit."""
+        """Process all queued runs once and exit.
+
+        Honors ``--run-id`` (scope to one run) and ``--max-runs`` (bound the
+        number of processed runs).
+        """
+        run_id = getattr(self, "_run_id", None)
+        if run_id is not None:
+            scoped = IngestionRun.objects.filter(pk=run_id)
+            exists = scoped.exists()
+            eligible = scoped.filter(status="queued").exists()
+            if not exists:
+                self.stderr.write(
+                    self.style.WARNING(
+                        f"Run #{run_id} does not exist; nothing processed."
+                    )
+                )
+                return
+            if not eligible:
+                self.stderr.write(
+                    self.style.WARNING(
+                        f"Run #{run_id} is not eligible (not queued); "
+                        "nothing processed."
+                    )
+                )
+                return
+            self.stdout.write(f"Processing selected run #{run_id}...")
+            self._process_all_queued(adapter)
+            self.stdout.write(self.style.SUCCESS("Done."))
+            return
+
         count = IngestionRun.objects.filter(status="queued").count()
         if count == 0:
             self.stdout.write("No queued runs to process.")
@@ -387,8 +588,17 @@ class Command(BaseCommand):
 
         The persistent ``adapter`` (shared browser/session) is reused for
         every claim in this pass; it is NOT recreated per run.
+
+        Respects ``--run-id`` (claim only that run) and ``--max-runs``
+        (stop after that many processed runs).
         """
         while True:
+            if self._max_runs_reached():
+                self.stdout.write(
+                    f"Reached --max-runs limit ({self._max_runs}); stopping."
+                )
+                break
+
             if not adapter.ensure_session_ready():
                 self.stderr.write(
                     self.style.WARNING(
@@ -398,13 +608,14 @@ class Command(BaseCommand):
                 break
 
             with transaction.atomic():
-                run = self._claim_eligible_run()
+                run = self._claim_eligible_run(getattr(self, "_run_id", None))
                 if run is None:
                     break
                 run.status = "running"
                 run.save(update_fields=["status"])
 
             self._process_run(run, adapter)
+            self._processed_count += 1
 
             # Conservative health gate between jobs: if the shared session
             # has degraded past a threshold, restart it before the next claim
@@ -412,6 +623,16 @@ class Command(BaseCommand):
             if adapter.controller.restart_required():
                 adapter.session.restart_browser()
                 adapter.controller.reset_after_restart()
+
+    def _max_runs_reached(self) -> bool:
+        """Return whether the ``--max-runs`` cap has been reached.
+
+        Returns ``False`` when ``--max-runs`` is unset (unlimited), preserving
+        the default stub behavior of draining the eligible queue.
+        """
+        max_runs = getattr(self, "_max_runs", None)
+        processed = getattr(self, "_processed_count", 0)
+        return max_runs is not None and processed >= max_runs
 
     # ------------------------------------------------------------------
     # Process a single run
@@ -737,7 +958,7 @@ class Command(BaseCommand):
                     timeout=120,
                 )
                 all_evolutions.extend(evolutions)
-        except (InvalidJsonError, SnapshotContainerMissingError) as exc:
+        except (InvalidJsonError, SnapshotContainerMissingError, EvolutionPdfError) as exc:
             # Data-level failure with tab opened — cleanup
             self._record_stage(
                 run, "evolution_extraction", "failed", ev_stage_start,
@@ -833,6 +1054,10 @@ class Command(BaseCommand):
         if isinstance(exc, SnapshotContainerMissingError):
             # Page rendered but the expected data container was absent — a
             # data-level issue, not a session/availability issue.
+            return ("invalid_payload", False)
+        if isinstance(exc, EvolutionPdfError):
+            # PSW-S11: real legacy PDF flow failed after a tab was opened —
+            # data-level/recoverable (e.g. PDF unavailable, invalid PDF).
             return ("invalid_payload", False)
         if isinstance(exc, ExtractionError):
             return ("source_unavailable", False)

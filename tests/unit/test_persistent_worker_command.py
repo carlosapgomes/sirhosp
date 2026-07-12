@@ -16,6 +16,8 @@ from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from django.core.management import call_command
+from django.core.management.base import CommandError
+from django.test import override_settings
 from django.utils import timezone
 
 from apps.ingestion.extractors.errors import (
@@ -24,6 +26,7 @@ from apps.ingestion.extractors.errors import (
     SnapshotContainerMissingError,
 )
 from apps.ingestion.extractors.persistent_extraction_adapter import (
+    PersistentExtractionAdapter,
     _build_admissions_url,
 )
 from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (
@@ -1137,11 +1140,706 @@ class TestRealHandleContract:
         assert RealHandleBridge is not None
 
     def test_real_handle_flag_still_documented_as_guarded(self):
-        """The --real-handle flag docs acknowledge the bridge but keep
-        guarded rollout status."""
+        """The --real-handle flag docs keep it guarded as a manual smoke only."""
         import inspect
         source = inspect.getsource(PersistentWorkerCommand)
         assert "--real-handle" in source
         assert "RealHandleBridge" in source
-        assert "NOT production-validated" in source \
-            or "integration experiment" in source
+        # PSW-S10: the flag is a guarded MANUAL SMOKE path, not production rollout.
+        assert "manual smoke" in source.lower()
+        assert "guarded" in source.lower()
+
+
+# =========================================================================
+# PSW-S10: Safe single-run manual validation controls
+# =========================================================================
+
+
+_REAL_URL_OVERRIDES = {
+    "SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE": "https://legacy.test/admissions/{patient_record}",
+    "SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE": "https://legacy.test/evolutions/{patient_record}",
+    "SOURCE_SYSTEM_SAFE_RENEWAL_URL": "https://legacy.test/safe-renewal",
+}
+
+
+def _clear_source_credentials_env(monkeypatch) -> None:
+    """Remove source-system credential env vars for deterministic tests."""
+    for var in ("SOURCE_SYSTEM_URL", "SOURCE_SYSTEM_USERNAME", "SOURCE_SYSTEM_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.mark.django_db
+class TestRunIdClaim:
+    """--run-id claims only the selected queued run."""
+
+    def test_run_id_claims_only_selected_run(self):
+        """With --run-id, only the selected run is processed; others stay queued."""
+        run1 = _queue_admissions_run(parameters_json={
+            "patient_record": "R1", "intent": "admissions_only",
+        })
+        run2 = _queue_admissions_run(parameters_json={
+            "patient_record": "R2", "intent": "admissions_only",
+        })
+        run3 = _queue_admissions_run(parameters_json={
+            "patient_record": "R3", "intent": "admissions_only",
+        })
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run2.pk,
+            )
+
+        run1.refresh_from_db()
+        run2.refresh_from_db()
+        run3.refresh_from_db()
+        assert run1.status == "queued"  # untouched
+        assert run2.status == "succeeded"  # the selected run
+        assert run3.status == "queued"  # untouched
+
+    def test_run_id_not_queued_processes_nothing(self):
+        """--run-id pointing at a non-queued run processes nothing."""
+        run = _queue_admissions_run()
+        run.status = "running"
+        run.save(update_fields=["status"])
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run.pk,
+            )
+
+        run.refresh_from_db()
+        assert run.status == "running"
+        mock_adapter.get_admission_snapshot.assert_not_called()
+
+    def test_run_id_respects_next_retry_at(self):
+        """--run-id skips a run whose retry is not yet due."""
+        run = _queue_admissions_run(
+            next_retry_at=timezone.now() + timezone.timedelta(hours=1),
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run.pk,
+            )
+
+        run.refresh_from_db()
+        assert run.status == "queued"
+        mock_adapter.get_admission_snapshot.assert_not_called()
+
+    def test_unknown_run_id_processes_nothing(self):
+        """--run-id pointing at a non-existent run processes nothing."""
+        _queue_admissions_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=999_999,
+            )
+
+        mock_adapter.get_admission_snapshot.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestMaxRunsCap:
+    """--max-runs stops after the configured number of processed runs."""
+
+    def test_max_runs_one_stops_after_single_run(self):
+        """--max-runs 1 processes exactly one run even when more are queued."""
+        run1 = _queue_admissions_run(parameters_json={
+            "patient_record": "M1", "intent": "admissions_only",
+        })
+        run2 = _queue_admissions_run(parameters_json={
+            "patient_record": "M2", "intent": "admissions_only",
+        })
+        run3 = _queue_admissions_run(parameters_json={
+            "patient_record": "M3", "intent": "admissions_only",
+        })
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                max_runs=1,
+            )
+
+        run1.refresh_from_db()
+        run2.refresh_from_db()
+        run3.refresh_from_db()
+        processed = sum(
+            1 for r in (run1, run2, run3) if r.status == "succeeded"
+        )
+        queued = sum(
+            1 for r in (run1, run2, run3) if r.status == "queued"
+        )
+        assert processed == 1
+        assert queued == 2
+
+    def test_max_runs_two_processes_two(self):
+        """--max-runs 2 processes exactly two runs."""
+        for i in range(4):
+            _queue_admissions_run(parameters_json={
+                "patient_record": f"X{i}", "intent": "admissions_only",
+            })
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                max_runs=2,
+            )
+
+        succeeded = IngestionRun.objects.filter(status="succeeded").count()
+        queued = IngestionRun.objects.filter(status="queued").count()
+        assert succeeded == 2
+        assert queued == 2
+
+
+@pytest.mark.django_db
+class TestRealHandleGuards:
+    """--real-handle manual smoke guards (PSW-S10)."""
+
+    def test_real_handle_without_run_id_raises_command_error(self):
+        """--real-handle requires --run-id; without it the command aborts."""
+        run = _queue_admissions_run()
+
+        with pytest.raises(CommandError):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                real_handle=True,
+            )
+
+        run.refresh_from_db()
+        # No run mutated — guard fires before any claim.
+        assert run.status == "queued"
+
+    def test_real_handle_cannot_drain_arbitrary_queue(self):
+        """With --real-handle the worker never processes runs it was not told
+        about: missing --run-id aborts before claim."""
+        run1 = _queue_admissions_run(parameters_json={
+            "patient_record": "D1", "intent": "admissions_only",
+        })
+        run2 = _queue_admissions_run(parameters_json={
+            "patient_record": "D2", "intent": "admissions_only",
+        })
+
+        with pytest.raises(CommandError):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                real_handle=True,
+                max_runs=1,
+            )
+
+        run1.refresh_from_db()
+        run2.refresh_from_db()
+        assert run1.status == "queued"
+        assert run2.status == "queued"
+
+    def test_real_handle_without_max_runs_aborts_before_claim(self):
+        """--real-handle --run-id <id> without --max-runs aborts before claim."""
+        run = _queue_admissions_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ) as mock_create:
+            with pytest.raises(CommandError) as exc_info:
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    run_id=run.pk,
+                )
+
+        assert "--max-runs" in str(exc_info.value)
+        # Guard fires before adapter/browser creation and before any claim.
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_real_handle_with_max_runs_not_one_aborts_before_claim(self):
+        """--real-handle --run-id <id> --max-runs 2 aborts before claim."""
+        run = _queue_admissions_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ) as mock_create:
+            with pytest.raises(CommandError) as exc_info:
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    run_id=run.pk,
+                    max_runs=2,
+                )
+
+        assert "--max-runs" in str(exc_info.value)
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_real_handle_with_run_id_and_max_runs_one_is_allowed(self):
+        """--real-handle --run-id <id> --max-runs 1 passes the guard and proceeds."""
+        run = _queue_admissions_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ) as mock_create:
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                real_handle=True,
+                run_id=run.pk,
+                max_runs=1,
+            )
+
+        # Guard passed: adapter created and the run was processed.
+        mock_create.assert_called_once()
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+
+    def test_real_handle_missing_url_templates_fails_before_claim(
+        self, monkeypatch
+    ):
+        """Missing real URL templates abort before any run is claimed."""
+        run = _queue_admissions_run()
+        _clear_source_credentials_env(monkeypatch)
+
+        with override_settings(
+            SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE="",
+            SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE="",
+            SOURCE_SYSTEM_SAFE_RENEWAL_URL="",
+        ):
+            with pytest.raises(CommandError) as exc_info:
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    run_id=run.pk,
+                    max_runs=1,
+                )
+
+        assert "SOURCE_SYSTEM_" in str(exc_info.value)
+        run.refresh_from_db()
+        # Nothing mutated.
+        assert run.status == "queued"
+
+    def test_real_handle_missing_credentials_fails_before_claim(
+        self, monkeypatch
+    ):
+        """Missing source credentials abort before any run is claimed."""
+        run = _queue_admissions_run()
+        _clear_source_credentials_env(monkeypatch)
+
+        # URL templates present, but no credentials.
+        with override_settings(**_REAL_URL_OVERRIDES), override_settings(
+            SOURCE_SYSTEM_URL="",
+            SOURCE_SYSTEM_USERNAME="",
+            SOURCE_SYSTEM_PASSWORD="",
+        ):
+            with pytest.raises(CommandError) as exc_info:
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    run_id=run.pk,
+                    max_runs=1,
+                )
+
+        msg = str(exc_info.value)
+        assert "credential" in msg.lower() or "SOURCE_SYSTEM_" in msg
+        # No password value leaked.
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_real_handle_creates_and_bootstraps_handle(self, monkeypatch):
+        """The real-handle path starts the handle and bootstraps the session."""
+        _clear_source_credentials_env(monkeypatch)
+
+        mock_page = MagicMock()
+        mock_handle = MagicMock()
+        mock_handle.ensure_current_page.return_value = mock_page
+
+        with override_settings(**_REAL_URL_OVERRIDES), override_settings(
+            SOURCE_SYSTEM_URL="https://legacy.test/login",
+            SOURCE_SYSTEM_USERNAME="operador",
+            SOURCE_SYSTEM_PASSWORD="super-secret",
+        ), patch(
+            "apps.ingestion.extractors.playwright_session_handle"
+            ".PlaywrightSessionHandle",
+            return_value=mock_handle,
+        ), patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".bootstrap_legacy_session"
+        ) as mock_bootstrap, patch(
+            "apps.ingestion.extractors.real_handle_bridge.RealHandleBridge"
+        ) as mock_bridge_cls:
+            cmd = PersistentWorkerCommand()
+            cmd._use_real_handle = True
+            result = cmd._create_session_handle()
+
+        # Handle started and page exposed for bootstrap.
+        mock_handle.start.assert_called_once()
+        mock_handle.ensure_current_page.assert_called_once()
+        # Bootstrap invoked with the handle's page and credentials.
+        mock_bootstrap.assert_called_once()
+        bootstrap_args, bootstrap_kwargs = mock_bootstrap.call_args
+        assert bootstrap_args[0] is mock_page
+        creds = bootstrap_kwargs["credentials"]
+        assert creds.username == "operador"
+        assert creds.url == "https://legacy.test/login"
+        # Bridge wraps the started handle.
+        mock_bridge_cls.assert_called_once_with(mock_handle)
+        assert result is mock_bridge_cls.return_value
+
+    def test_real_handle_configures_adapter_with_real_url_templates(
+        self, monkeypatch
+    ):
+        """The adapter receives the resolved real URL templates."""
+        _clear_source_credentials_env(monkeypatch)
+        mock_handle = MagicMock()
+
+        with override_settings(**_REAL_URL_OVERRIDES), override_settings(
+            SOURCE_SYSTEM_URL="https://legacy.test/login",
+            SOURCE_SYSTEM_USERNAME="operador",
+            SOURCE_SYSTEM_PASSWORD="super-secret",
+        ), patch(
+            "apps.ingestion.extractors.playwright_session_handle"
+            ".PlaywrightSessionHandle",
+            return_value=mock_handle,
+        ), patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".bootstrap_legacy_session"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.RealHandleBridge"
+        ) as mock_bridge_cls:
+            captured = {}
+            real_adapter_cls = PersistentWorkerCommand.adapter_class
+
+            class _CapturingAdapter(real_adapter_cls):  # type: ignore[misc, valid-type]
+                def __init__(self, session, config=None):
+                    captured["config"] = config
+                    captured["session"] = session
+                    super().__init__(session=session, config=config)
+
+            cmd = PersistentWorkerCommand()
+            cmd._use_real_handle = True
+            cmd.adapter_class = _CapturingAdapter  # type: ignore[assignment]
+            cmd._create_adapter()
+
+        config = captured["config"]
+        assert (
+            config.base_admissions_url
+            == "https://legacy.test/admissions/{patient_record}"
+        )
+        assert (
+            config.base_evolutions_url
+            == "https://legacy.test/evolutions/{patient_record}"
+        )
+        assert config.safe_renewal_tab_url == "https://legacy.test/safe-renewal"
+        assert captured["session"] is mock_bridge_cls.return_value
+
+    def test_bootstrap_failure_converts_to_command_error_and_shuts_down(
+        self, monkeypatch
+    ):
+        """A bootstrap failure surfaces as CommandError and tears down the browser."""
+        from apps.ingestion.extractors.legacy_session_bootstrap import (
+            LegacyBootstrapError,
+        )
+
+        _clear_source_credentials_env(monkeypatch)
+        mock_handle = MagicMock()
+
+        with override_settings(**_REAL_URL_OVERRIDES), override_settings(
+            SOURCE_SYSTEM_URL="https://legacy.test/login",
+            SOURCE_SYSTEM_USERNAME="operador",
+            SOURCE_SYSTEM_PASSWORD="super-secret",
+        ), patch(
+            "apps.ingestion.extractors.playwright_session_handle"
+            ".PlaywrightSessionHandle",
+            return_value=mock_handle,
+        ), patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".bootstrap_legacy_session",
+            side_effect=LegacyBootstrapError("boom sanitized"),
+        ):
+            cmd = PersistentWorkerCommand()
+            cmd._use_real_handle = True
+            with pytest.raises(CommandError):
+                cmd._create_session_handle()
+
+        mock_handle.shutdown.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestDefaultStubBackwardCompat:
+    """Default stub behavior remains backward compatible (PSW-S10)."""
+
+    def test_stub_drains_eligible_queue_by_default(self):
+        """Without --max-runs/--run-id, the stub path drains all eligible runs."""
+        for i in range(3):
+            _queue_admissions_run(parameters_json={
+                "patient_record": f"S{i}", "intent": "admissions_only",
+            })
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        succeeded = IngestionRun.objects.filter(status="succeeded").count()
+        queued = IngestionRun.objects.filter(status="queued").count()
+        assert succeeded == 3
+        assert queued == 0
+
+    def test_stub_with_run_id_still_works(self):
+        """--run-id works on the stub path too (claims only the selected run)."""
+        run1 = _queue_admissions_run(parameters_json={
+            "patient_record": "T1", "intent": "admissions_only",
+        })
+        run2 = _queue_admissions_run(parameters_json={
+            "patient_record": "T2", "intent": "admissions_only",
+        })
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run1.pk,
+            )
+
+        run1.refresh_from_db()
+        run2.refresh_from_db()
+        assert run1.status == "succeeded"
+        assert run2.status == "queued"
+
+    def test_timeout_values_reach_navigation_call(self):
+        """Timeout values still reach the adapter snapshot call (regression)."""
+        _queue_admissions_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        _, kwargs = mock_adapter.get_admission_snapshot.call_args
+        assert kwargs["timeout"] > 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_loop_mode_exits_when_max_runs_reached():
+    """In loop mode, --max-runs caps total processed runs and exits.
+
+    Uses ``transaction=True`` because ``_run_loop`` calls
+    ``close_old_connections()`` before its queue poll, which is incompatible
+    with the per-test savepoint used by plain ``django_db``. In production the
+    connection auto-reconnects; the transactional fixture models that here.
+    """
+    for i in range(3):
+        _queue_admissions_run(parameters_json={
+            "patient_record": f"L{i}", "intent": "admissions_only",
+        })
+    mock_adapter = _make_adapter_mock(snapshot_result=[])
+    cmd_path = (
+        "apps.ingestion.management.commands"
+        ".process_ingestion_runs_persistent_session"
+    )
+
+    with patch.object(
+        PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+    ), patch(f"{cmd_path}.time.sleep"):
+        call_command(
+            "process_ingestion_runs_persistent_session",
+            loop=True,
+            sleep_seconds=1,
+            max_runs=2,
+        )
+
+    succeeded = IngestionRun.objects.filter(status="succeeded").count()
+    queued = IngestionRun.objects.filter(status="queued").count()
+    assert succeeded == 2
+    assert queued == 1
+
+
+# ===========================================================================
+# PSW-S11: persistent real evolution PDF flow wiring
+# ===========================================================================
+
+
+class _PdfBridgeSession:
+    """Bridge-like fake that produces adapter containers AND exposes
+    ``extract_evolutions_pdf`` so a REAL ``PersistentExtractionAdapter`` can
+    exercise the PSW-S11 PDF fallback end-to-end through the command.
+
+    Mirrors what ``RealHandleBridge`` would produce: a session counter on every
+    page (so controller checkpoints pass), an admissions container on
+    admissions URLs, and an EMPTY evolution container on evolution URLs (so the
+    fast path yields no events and the adapter delegates to the PDF flow).
+    """
+
+    _COUNTER = (
+        '<div id="tempoSessao" class="tempo-sessao">'
+        'Tempo: <span>00</span>:<span>29</span>:<span>01</span>'
+        "</div>"
+    )
+    _ADMISSIONS_JSON = (
+        '[{"admissionKey":"ADM-001","admissionStart":"2024-01-15",'
+        '"admissionEnd":"2024-01-20","ward":"Enfermaria A","bed":"1"}]'
+    )
+
+    def __init__(self) -> None:
+        self._connected = True
+        self._last_url = ""
+        self._closed = 0
+        self.pdf_calls: list[dict] = []
+        self.pdf_return: list[dict] = []
+        self.pdf_error: Exception | None = None
+
+    # --- SessionHandle protocol ---
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def click_selector(self, selector: str) -> None:  # noqa: ARG002
+        pass
+
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+        self._last_url = url
+        return True
+
+    def get_page_html(self) -> str:
+        html = f"<html><body>{self._COUNTER}"
+        low = self._last_url.lower()
+        if "admissions" in low or "consultarinternacoes" in low:
+            html += f'<div id="admission-snapshot-data">{self._ADMISSIONS_JSON}</div>'
+        elif "evolutions" in low or "relatorio" in low or "evolucao" in low:
+            html += '<div id="evolution-data">[]</div>'
+        return html + "</body></html>"
+
+    def get_tab_classes(self) -> list[str]:
+        return ["tabs-first tabs-last tabs-selected", "tabs-last"]
+
+    def close_last_non_root_tab(self) -> None:
+        self._closed += 1
+
+    def restart_browser(self) -> None:
+        pass
+
+    def shutdown(self) -> None:
+        pass
+
+    # --- PSW-S11 PDF capability ---
+
+    def extract_evolutions_pdf(self, **kwargs) -> list[dict]:
+        self.pdf_calls.append(kwargs)
+        if self.pdf_error is not None:
+            raise self.pdf_error
+        return self.pdf_return
+
+
+_PDF_EVENT = [
+    {
+        "admission_key": "ADM-001",
+        "happened_at": "2024-01-16T10:30:00",
+        "event_type": "medical",
+        "content": "Evolução extraída do PDF via sessão persistente.",
+        "profession": "Dr. PDF",
+    }
+]
+
+
+@pytest.mark.django_db
+class TestFullSyncPdfFallback:
+    """PSW-S11: full_sync falls back to the persistent PDF flow and persists
+    events through the shared ingestion service — no subprocess, no new
+    browser."""
+
+    def test_full_sync_uses_pdf_fallback_and_persists_events(self) -> None:
+        from apps.clinical_docs.models import ClinicalEvent
+        from apps.patients.models import Patient
+
+        run = _queue_full_sync_run()
+        session = _PdfBridgeSession()
+        session.pdf_return = list(_PDF_EVENT)
+
+        adapter = PersistentExtractionAdapter(session)
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        # The PDF fallback was actually invoked (fast path was empty).
+        assert len(session.pdf_calls) >= 1
+        # Events flowed through the shared ingestion service.
+        assert run.events_processed >= 1
+        assert run.events_created >= 1
+
+        stages = {
+            s.stage_name: s.status
+            for s in IngestionRunStageMetric.objects.filter(run=run)
+        }
+        assert stages["evolution_extraction"] == "succeeded"
+        assert stages["ingestion_persistence"] == "succeeded"
+
+        # PSW-S11 fix: PDF events MUST reach persistence with the schema the
+        # shared service reads (content_text / profession_type / author_name /
+        # correct patient), not the empty fields the raw 5-key contract would
+        # produce.
+        patient = Patient.objects.get(
+            source_system="tasy", patient_source_key="FS001"
+        )
+        event = ClinicalEvent.objects.get(patient=patient)
+        assert event.content_text == _PDF_EVENT[0]["content"]
+        assert event.profession_type == "medica"  # canonical for 'medical'
+        assert event.author_name == "Dr. PDF"
+        assert event.patient_id == patient.pk
+        assert event.patient.patient_source_key == "FS001"
+
+    def test_full_sync_pdf_failure_is_recoverable_and_cleans_tab(self) -> None:
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+
+        run = _queue_full_sync_run(max_attempts=2)
+        session = _PdfBridgeSession()
+        session.pdf_error = EvolutionPdfError(
+            "Evolution report PDF could not be located on the page"
+        )
+
+        adapter = PersistentExtractionAdapter(session)
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        # Recoverable data-level failure: requeued for retry (attempts remain).
+        assert run.status == "queued"
+        assert run.failure_reason == "invalid_payload"
+        # Sanitized: no secrets or raw payloads leaked into the error message.
+        lowered = (run.error_message or "").lower()
+        for secret in ("password", "cookie", "jsessionid", "authorization"):
+            assert secret not in lowered

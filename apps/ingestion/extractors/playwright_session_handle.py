@@ -254,6 +254,41 @@ class PlaywrightSessionHandle:
         self._context = self._browser
 
     # ------------------------------------------------------------------
+    # Bootstrap-level access (PSW-S10)
+    # ------------------------------------------------------------------
+
+    def ensure_current_page(self):
+        """Return an active page, creating one if none exists.
+
+        Guarantees the bootstrap path has a page to operate on even when the
+        persistent browser context (``launch_persistent_context``) opened
+        without pages. When a page already exists, it is reused and
+        ``new_page()`` is not called.
+
+        Used by the persistent worker's ``--real-handle`` path to obtain the
+        root page for the legacy login bootstrap
+        (:func:`bootstrap_legacy_session`) before the handle is wrapped in
+        ``RealHandleBridge``. This is the only sanctioned escape hatch for
+        Playwright-specific operations not covered by the ``SessionHandle``
+        protocol.
+
+        Returns:
+            The currently active (last used) Playwright ``Page``, or a freshly
+            created page if none exists. Returns ``None`` when the browser
+            context has not been started or a new page cannot be created.
+        """
+        page = self._current_page()
+        if page is not None:
+            return page
+        if self._context is None:
+            return None
+        try:
+            return self._context.new_page()
+        except Exception as exc:  # noqa: BLE001 - degraded to None below
+            logger.warning("Failed to create initial page for bootstrap: %s", exc)
+            return None
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

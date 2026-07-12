@@ -886,3 +886,184 @@ class TestExtractEvolutions:
                 start_date="2024-01-01",
                 end_date="2024-12-31",
             )
+
+
+# ===========================================================================
+# PSW-S11: PDF report fallback
+# ===========================================================================
+
+EMPTY_EVOLUTIONS_WITH_COUNTER_HTML = """<html>
+<body>
+<div id="tempoSessao" class="tempo-sessao">
+  Tempo de Sessão: <span>00</span>:<span>29</span>:<span>01</span>
+</div>
+<div id="evolution-data">
+[]
+</div>
+</body>
+</html>"""
+
+
+class _PdfCapableSession(FakeExtractionSession):
+    """FakeExtractionSession that also exposes extract_evolutions_pdf."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pdf_calls: list[dict] = []
+        self.pdf_return: list[dict] = []
+        self.pdf_error: Exception | None = None
+
+    def extract_evolutions_pdf(self, **kwargs) -> list[dict]:
+        self.pdf_calls.append(kwargs)
+        if self.pdf_error is not None:
+            raise self.pdf_error
+        return self.pdf_return
+
+
+class TestExtractEvolutionsPdfFallback:
+    """PSW-S11: when the lightweight fast paths yield no events, the adapter
+    delegates to the session's PDF flow (when present)."""
+
+    def test_pdf_events_are_enriched_with_persistible_schema(self) -> None:
+        """PSW-S11 fix: PDF-fallback events are enriched with the fields the
+        shared ingestion service persists."""
+        session = _PdfCapableSession()
+        session.set_html(EMPTY_EVOLUTIONS_WITH_COUNTER_HTML)
+        session.pdf_return = [
+            {
+                "admission_key": "ADM-PDF",
+                "happened_at": "2024-01-15T10:00:00",
+                "event_type": "nursing",
+                "content": "from pdf body",
+                "profession": "Enf. Maria",
+                "signature_line": "Elaborado por Enf. Maria, Coren 1 em: 15/01/2024",
+            }
+        ]
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="PRONT-42",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+        )
+
+        event = result[0]
+        # Persistible fields (what ingest_evolutions/_persist_event reads).
+        assert event["patient_source_key"] == "PRONT-42"
+        assert event["source_system"] == "tasy"
+        assert event["content_text"] == "from pdf body"
+        # 'nursing' -> canonical 'enfermagem' (same map as the subprocess path).
+        assert event["profession_type"] == "enfermagem"
+        assert event["author_name"] == "Enf. Maria"
+        assert event["signature_line"].startswith("Elaborado")
+        # Original 5-key contract keys are preserved for compatibility.
+        assert event["content"] == "from pdf body"
+        assert event["event_type"] == "nursing"
+        assert event["profession"] == "Enf. Maria"
+
+    def test_empty_fast_path_delegates_to_pdf_flow(self) -> None:
+        session = _PdfCapableSession()
+        session.set_html(EMPTY_EVOLUTIONS_WITH_COUNTER_HTML)
+        session.pdf_return = [
+            {
+                "admission_key": "ADM-PDF",
+                "happened_at": "2024-01-15T10:00:00",
+                "event_type": "medical",
+                "content": "from pdf",
+                "profession": "Dr. PDF",
+            }
+        ]
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            timeout=77,
+        )
+
+        assert len(result) == 1
+        assert result[0]["admission_key"] == "ADM-PDF"
+        assert result[0]["content"] == "from pdf"
+        # The PDF flow received the window + timeout.
+        assert len(session.pdf_calls) == 1
+        call = session.pdf_calls[0]
+        assert call["start_date"] == "2024-01-01"
+        assert call["end_date"] == "2024-01-31"
+        assert call["timeout"] == 77
+
+    def test_non_empty_fast_path_skips_pdf_flow(self) -> None:
+        """When the fast path returns events, the PDF flow is NOT invoked."""
+        session = _PdfCapableSession()
+        session.set_html(EVOLUTION_PAGE_HTML)  # has 2 events
+        session.pdf_return = []  # would be wrong if called
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert len(result) == 2
+        assert session.pdf_calls == []  # PDF fallback not used
+
+    def test_pdf_flow_error_propagates(self) -> None:
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+
+        session = _PdfCapableSession()
+        session.set_html(EMPTY_EVOLUTIONS_WITH_COUNTER_HTML)
+        session.pdf_error = EvolutionPdfError(
+            "Evolution report PDF could not be located on the page"
+        )
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(EvolutionPdfError, match="could not be located"):
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-12-31",
+            )
+
+    def test_session_without_pdf_capability_does_not_fall_back(self) -> None:
+        """A plain session (no extract_evolutions_pdf) returns [] as before."""
+        session = FakeExtractionSession()
+        session.set_html(EMPTY_EVOLUTION_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert result == []
+
+    def test_pdf_fallback_still_runs_tab_cleanup_and_mark(self) -> None:
+        """After the PDF fallback, tab cleanup + mark_job_processed still run."""
+        session = _PdfCapableSession()
+        session.set_html(EMPTY_EVOLUTIONS_WITH_COUNTER_HTML)
+        session.set_tab_classes(
+            ["tabs-first tabs-last tabs-selected", "tabs-last"]
+        )
+        session.pdf_return = [
+            {
+                "admission_key": "",
+                "happened_at": "2024-01-15T10:00:00",
+                "event_type": "medical",
+                "content": "x",
+                "profession": "",
+            }
+        ]
+        adapter = PersistentExtractionAdapter(session)
+
+        adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert session.closed_tab_calls == 1
+        assert adapter._controller.jobs_processed == 1

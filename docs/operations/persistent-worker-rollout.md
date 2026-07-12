@@ -1,31 +1,48 @@
 # Persistent-Session Ingestion Worker — Runtime Rollout and A/B Observability
 
-> **⚠️ Status: NOT production rollout-ready (post-PSW-S9).**
+> **⚠️ Status: NOT production rollout-ready (post-PSW-S11).**
 >
 > The persistent-session worker (`process_ingestion_runs_persistent_session`)
-> is implemented and unit-tested, including persistent full-sync persistence
-> and a ``RealHandleBridge`` that translates real legacy DOM data into the
-> adapter's synthetic container contract.
+> is implemented and unit-tested, including persistent full-sync persistence,
+> a ``RealHandleBridge`` that translates real legacy DOM data into the
+> adapter's synthetic container contract, a guarded real-legacy bootstrap
+> and manual smoke path, and a persistent real evolution **PDF** extraction
+> flow.
 >
-> **Progress (PSW-S9):**
+> **Progress:**
 >
-> 1. ~~Real-handle container contract~~ — **RESOLVED in code, NOT yet
->    production-validated.** ``RealHandleBridge`` wraps the
+> 1. **PSW-S9 — real-handle container contract resolved in code** (not yet
+>    production-validated). ``RealHandleBridge`` wraps the
 >    ``PlaywrightSessionHandle`` and extracts admission data from the legacy
 >    ``#tabelaInternacoes`` table rows and evolution data from
 >    ``<script id="evolution-data-json">`` / ``<pre class="report-text">``
 >    elements, rendering them inside ``<div id="admission-snapshot-data">``
 >    and ``<div id="evolution-data">`` containers.
 >
-> 2. **Remaining prerequisite:** The bridge has been tested with
->    representative legacy HTML fakes but has NOT been validated against the
->    real legacy UI in a live/staging environment. Launching Chromium via
->    ``--real-handle`` is still an opt-in integration experiment flag.
+> 2. **PSW-S10 — real bootstrap and guarded manual smoke.** ``--real-handle``
+>    now resolves credentials and real URL templates, bootstraps an
+>    authenticated legacy session (navigate, login, and wait for
+>    ``#tempoSessao``), and requires ``--run-id`` and ``--max-runs 1`` so a
+>    manual smoke processes exactly one selected run and cannot drain the
+>    queue or enter an idle loop.
+>
+> 3. **PSW-S11 — persistent real evolution PDF flow.** When the PSW-S9
+>    lightweight fast paths (``evolution-data-json`` script,
+>    ``pre.report-text``) yield no events, the adapter delegates to
+>    ``RealHandleBridge.extract_evolutions_pdf``, which reuses the
+>    already-open persistent page/context to apply the date window, generate
+>    the report, download the PDF, extract text with PyMuPDF, and normalise
+>    it into the evolution contract. No subprocess, no ``path2.py`` shell-out,
+>    no fresh browser per job. This path has been validated with synthetic
+>    PDF/text and fake Playwright objects only.
+>
+> 4. **Remaining prerequisites (blockers for production rollout):** live
+>    validation of the bridge, bootstrap, and PDF flow against the real
+>    legacy UI, and operational threshold tuning (max-jobs, max-lifetime).
 >
 > This document describes the **intended future rollout plan** and
 > **controlled lab/staging experiment guidance**. Do not apply the scaling or
-> side-by-side procedures in production until live validation of the bridge
-> is completed.
+> side-by-side procedures in production until the prerequisites above are met.
 
 ---
 
@@ -37,13 +54,24 @@
   containers from the legacy UI.~~ **Implemented (PSW-S9)**:
   ``RealHandleBridge`` wraps the handle and translates legacy DOM data
   into the adapter's synthetic container contract.
-- **Live validation against real legacy UI** — not yet performed.
-  The bridge has been tested with representative HTML fakes only.
+- ~~Real-legacy bootstrap + guarded manual smoke.~~ **Implemented
+  (PSW-S10)**: ``--real-handle`` resolves credentials and real URL
+  templates, bootstraps an authenticated legacy session, and requires
+  ``--run-id`` + ``--max-runs 1``.
+- **Live validation against the real legacy UI** — not yet performed.
+  The bridge, bootstrap, and PDF flow have been tested with representative
+  HTML/PDF fakes and mocked Playwright only.
+- ~~**PSW-S11: persistent real evolution PDF flow** — not yet implemented.~~
+  **Implemented (PSW-S11)**: ``RealHandleBridge.extract_evolutions_pdf``
+  reuses the already-open persistent page/context to download and normalise
+  the real legacy evolution PDF, as a fallback after the PSW-S9 fast paths.
+- **Operational threshold tuning** (max-jobs, max-lifetime) — pending.
 - Containerized validation gate passing (`./scripts/test-in-container.sh quality-gate`).
 
 Full-sync persistence is implemented through the shared
-`apps.ingestion.evolution_ingestion.ingest_evolutions` service, but production
-rollout remains blocked by the real-handle contract.
+`apps.ingestion.evolution_ingestion.ingest_evolutions` service. Production
+rollout remains blocked by the remaining prerequisites above (live
+validation, threshold tuning).
 
 ### 1.2 Lab/staging experiment (available now)
 
@@ -65,17 +93,37 @@ The worker defaults to the `_StubSessionHandle`, which returns empty results
 and never launches a browser. It is safe for integration experiments and
 command-line validation.
 
-To test with a real Chromium session (lab only, never production):
+To test with a real Chromium session (lab only, never production), use the
+**guarded manual smoke** path added in PSW-S10. ``--real-handle`` requires
+BOTH ``--run-id`` and ``--max-runs 1`` so a manual smoke processes exactly
+one selected queued run and cannot drain the queue or enter an idle loop. It
+also bootstraps a real authenticated legacy session (navigate + login + wait
+for ``#tempoSessao``) before any run is claimed.
+
+Before running, the operator MUST configure (settings or env vars):
+
+- ``SOURCE_SYSTEM_URL``, ``SOURCE_SYSTEM_USERNAME``, ``SOURCE_SYSTEM_PASSWORD``
+- ``SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE``
+  (e.g. ``https://legacy/consultarInternacoes?prontuario={patient_record}``)
+- ``SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE`` (used by the persistent
+  evolution/PDF path)
+- ``SOURCE_SYSTEM_SAFE_RENEWAL_URL``
+
+If any of these is missing, the command fails with a sanitized, actionable
+message before claiming any run.
 
 ```bash
+# MANUAL SMOKE ONLY (placeholders shown — never commit real values):
+# Pick one known queued IngestionRun id and process only it.
 uv run python manage.py process_ingestion_runs_persistent_session \
-    --real-handle --loop --sleep-seconds 5
+    --real-handle --run-id <INGESTION_RUN_ID> --max-runs 1
 ```
 
-> `--real-handle` launches Chromium with an exclusive browser profile but
-> will fail all real extractions because the legacy UI does not produce the
-> adapter's expected synthetic containers. Only use this for integration
-> experiments on the branch.
+> This is a **manual smoke only** path, NOT production rollout. Credentials
+> and passwords are never logged; bootstrap and PDF-flow failures are
+> sanitized. The bridge and PDF flow have been tested with representative
+> legacy HTML/PDF fakes but are NOT yet validated against the real legacy UI
+> in a live environment.
 
 ---
 
@@ -110,8 +158,8 @@ as its prefix.
 
 ### 2.2 Side-by-side experiment (future, after prerequisites)
 
-After the real-handle contract is resolved, deploy an initial controlled
-experiment:
+After the remaining prerequisites are met (live validation against the real
+legacy UI and threshold tuning), deploy an initial controlled experiment:
 
 ```bash
 cd /opt/sirhosp
@@ -119,15 +167,17 @@ cd /opt/sirhosp
 # Current workers (6 replicas, already in production)
 docker compose -f compose.yml -f compose.prod.yml up -d --scale worker=6
 
-# Persistent workers (6 replicas) — EXAMPLE ONLY, DISABLED until handle resolved.
+# Persistent workers (6 replicas) — EXAMPLE ONLY, not yet rollout-ready
+# (blocked by live validation, PSW-S11, and threshold tuning).
 # docker compose -f compose.yml -f compose.persistent-worker.yml up -d \
 #   --scale persistent_worker=6
 ```
 
 > A dedicated `compose.persistent-worker.yml` override is **not yet provided**
-> because the worker is not rollout-ready. When the blocker is resolved, create
-> the override following the same tmpfs/isolation patterns as the current
-> `worker` service in `compose.prod.yml`.
+> because the worker is not rollout-ready. When the blockers are resolved
+> (live validation, threshold tuning), create the override following
+> the same tmpfs/isolation patterns as the current `worker` service in
+> `compose.prod.yml`.
 
 #### 2.2.1 Disabled example: `compose.persistent-worker.yml` (future reference)
 
@@ -135,7 +185,7 @@ When prerequisites are met, the override would look like:
 
 ```yaml
 # compose.persistent-worker.yml — DISABLED EXAMPLE
-# DO NOT DEPLOY until the real-handle container contract is resolved.
+# DO NOT DEPLOY until live validation and threshold tuning are done.
 services:
   persistent_worker:
     build:

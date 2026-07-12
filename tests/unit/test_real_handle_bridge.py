@@ -1,9 +1,12 @@
-"""Tests for RealHandleBridge (PSW-S9).
+"""Tests for RealHandleBridge (PSW-S9 / PSW-S11).
 
 Prove that the bridge can translate real legacy UI HTML/download data into
 the synthetic container format expected by ``PersistentExtractionAdapter``,
 without requiring the real legacy DOM to produce ``#admission-snapshot-data``
 and ``#evolution-data`` containers.
+
+PSW-S11 adds the persistent evolution PDF flow delegation tests
+(``TestRealHandleBridgeEvolutionPdf``).
 
 All tests use mocked Playwright pages or synthetic anonymous HTML.
 No real legacy access required.
@@ -12,6 +15,9 @@ No real legacy access required.
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
+
+import pytest
 
 from apps.ingestion.extractors.persistent_extraction_adapter import (
     _ADMISSION_DATA_DIV_ID,
@@ -821,3 +827,120 @@ class TestBridgeWithoutJSEvaluation:
         data = json.loads(match.group(1))
         assert len(data) == 3
         assert data[0]["admissionKey"] == "ADM-RK-001"
+
+
+# ===========================================================================
+# PSW-S11: persistent evolution PDF flow delegation
+# ===========================================================================
+
+
+class TestRealHandleBridgeEvolutionPdf:
+    """The bridge delegates the real legacy PDF flow to EvolutionPdfFlow,
+    reusing the wrapped handle's already-open page — no new browser,
+    no subprocess, no path2.py shell-out."""
+
+    def test_extract_evolutions_pdf_prefers_ensure_current_page(self) -> None:
+        """The real handle exposes ``ensure_current_page()``, not ``current_page()``.
+
+        The bridge MUST obtain the page from ``ensure_current_page()`` when the
+        handle does not expose ``current_page()``, otherwise the real-handle PDF
+        fallback fails with "no active page".
+        """
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        fake_page = object()  # sentinel
+        # Real PlaywrightSessionHandle exposes ensure_current_page(), NOT
+        # current_page(). FakePlaywrightHandle has neither by default.
+        handle.ensure_current_page = lambda: fake_page  # type: ignore[attr-defined]
+        assert not hasattr(handle, "current_page")
+
+        with patch(
+            "apps.ingestion.extractors.real_handle_bridge.EvolutionPdfFlow"
+        ) as flow_cls:
+            flow_cls.return_value.extract.return_value = []
+
+            bridge.extract_evolutions_pdf(
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+
+        # The flow was built with the page returned by ensure_current_page().
+        flow_cls.assert_called_once_with(fake_page)
+
+    def test_extract_evolutions_pdf_uses_handle_current_page(self) -> None:
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        fake_page = object()  # sentinel
+        handle.current_page = lambda: fake_page  # type: ignore[attr-defined]
+
+        with patch(
+            "apps.ingestion.extractors.real_handle_bridge.EvolutionPdfFlow"
+        ) as flow_cls:
+            flow_cls.return_value.extract.return_value = [
+                {
+                    "admission_key": "ADM-1",
+                    "happened_at": "2024-01-15T10:00:00",
+                    "event_type": "medical",
+                    "content": "ok",
+                    "profession": "Dr. X",
+                }
+            ]
+
+            events = bridge.extract_evolutions_pdf(
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                timeout=90,
+            )
+
+        # EvolutionPdfFlow was built with the handle's existing page.
+        flow_cls.assert_called_once_with(fake_page)
+        flow_cls.return_value.extract.assert_called_once()
+        _, kwargs = flow_cls.return_value.extract.call_args
+        assert kwargs["start_date"] == "2024-01-01"
+        assert kwargs["end_date"] == "2024-01-31"
+        assert kwargs["timeout"] == 90
+        assert len(events) == 1
+        assert events[0]["event_type"] == "medical"
+
+    def test_extract_evolutions_pdf_no_page_raises_sanitized_error(self) -> None:
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        # Handle without current_page() -> no active page for the PDF flow.
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with pytest.raises(EvolutionPdfError, match="no active page"):
+            bridge.extract_evolutions_pdf(
+                start_date="2024-01-01", end_date="2024-01-31"
+            )
+
+    def test_extract_evolutions_pdf_propagates_sanitized_flow_error(self) -> None:
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        handle.current_page = lambda: object()  # type: ignore[attr-defined]
+
+        with patch(
+            "apps.ingestion.extractors.real_handle_bridge.EvolutionPdfFlow"
+        ) as flow_cls:
+            flow_cls.return_value.extract.side_effect = EvolutionPdfError(
+                "Evolution report PDF could not be located on the page"
+            )
+
+            with pytest.raises(EvolutionPdfError, match="could not be located"):
+                bridge.extract_evolutions_pdf(
+                    start_date="2024-01-01", end_date="2024-01-31"
+                )
