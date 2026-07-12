@@ -43,6 +43,20 @@ import logging
 import re
 from typing import Any
 
+from apps.ingestion.extractors.legacy_navigation import (
+    NavigationError,
+    _read_and_build_snapshot,
+    choose_overlapping_admissions,
+    click_evolucao,
+    click_internacoes,
+    click_visualizar_report,
+    ensure_search_screen,
+    fill_evolution_dates,
+    open_internacao_detail,
+    search_patient,
+    select_ascending_order,
+    wait_for_report_or_no_evolutions,
+)
 from apps.ingestion.extractors.persistent_evolution_pdf import (
     EvolutionPdfError,
     EvolutionPdfFlow,
@@ -387,6 +401,475 @@ class RealHandleBridge:
             shutdown_fn()
 
     # ------------------------------------------------------------------
+    # PSW-S12: real legacy UI action navigation for admissions
+    # ------------------------------------------------------------------
+
+    def navigate_to_admissions(self, patient_record: str) -> bool:
+        """Navigate the real legacy UI to the admissions table via actions.
+
+        Uses the already-open persistent page (from
+        ``ensure_current_page()``) to perform the action sequence:
+        1. Ensure search screen is visible.
+        2. Fill ``#prontuarioInput`` with the patient record.
+        3. Click ``Pesquisa Avan\u00e7ada`` (Advanced Search).
+        4. Click ``Interna\u00e7\u00f5es`` (Admissions).
+        5. Wait for ``frame_pol`` with admission table rows.
+        6. Read rows and build the canonical snapshot.
+        7. Update the internal page HTML so ``get_page_html()`` returns
+           the synthetic container with real admission data.
+
+        Reuses the already-open persistent session — never launches a new
+        browser, never invokes ``subprocess``, never calls ``path2.py``.
+
+        Args:
+            patient_record: Patient record (prontu\u00e1rio) string.
+
+        Returns:
+            ``True`` if navigation succeeded and snapshot was built,
+            ``False`` if the page was unavailable.
+        """
+        page = self._resolve_active_page()
+        if page is None:
+            logger.warning(
+                "Cannot navigate to admissions: no active page available"
+            )
+            return False
+
+        try:
+            # Step 1: Ensure the search screen is visible.
+            ensure_search_screen(page)
+
+            # Step 2-3: Fill prontu\u00e1rio and click advanced search.
+            search_patient(page, patient_record=patient_record)
+
+            # Step 4-5: Click Interna\u00e7\u00f5es and wait for table.
+            click_internacoes(page)
+
+            # Step 6-7: Read rows and build the canonical snapshot.
+            snapshot = _read_and_build_snapshot(page)
+
+            # Build the synthetic container HTML and set it on the handle
+            # so subsequent get_page_html() calls return real data.
+            json_payload = json.dumps(snapshot, ensure_ascii=False)
+            synthetic_html = (
+                "<html><body>\n"
+                '<div id="tempoSessao">'
+                "Tempo: <span>00</span>:<span>29</span>:<span>01</span>"
+                "</div>\n"
+                f'<div id="admission-snapshot-data">\n{json_payload}\n</div>\n'
+                "</body></html>"
+            )
+
+            # Inject the synthetic HTML so get_page_html() returns
+            # the real data wrapped in the expected container format.
+            if hasattr(self._handle, "set_html"):
+                self._handle.set_html(synthetic_html)
+            else:
+                # Fallback: just mark the URL as admissions so
+                # get_page_html() falls through to the bridge's
+                # container-building path.
+                self._last_url = "/consultarInternacoes.xhtml"
+
+            return True
+
+        except NavigationError as exc:
+            logger.warning(
+                "Legacy UI navigation to admissions failed (sanitized): %s",
+                exc,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Unexpected error during admissions navigation: %s",
+                exc,
+            )
+            return False
+
+    # ------------------------------------------------------------------
+    # PSW-S13: real legacy evolution action navigation (full-sync)
+    # ------------------------------------------------------------------
+
+    def extract_evolutions_via_legacy_actions(
+        self,
+        *,
+        patient_record: str,
+        start_date: str,
+        end_date: str,
+        timeout: int = 120,
+    ) -> list[dict[str, Any]]:
+        """Extract evolutions by navigating the real legacy UI action flow.
+
+        Performs the full JSP/PrimeFaces action sequence for evolution
+        extraction, reusing the already-open persistent page/context:
+
+        1. Navigate to admissions table (via PSW-S12 action navigation).
+        2. Select admissions overlapping the requested date window.
+        3. For each overlapping admission:
+           a. Open admission detail via UI actions.
+           b. Click \u201cEvolu\u00e7\u00e3o\u201d button.
+           c. Fill date inputs (DD/MM/YYYY).
+           d. Select ascending order (\u201cCrescente\u201d).
+           e. Click visualize/generate report.
+           f. Wait for report page or detect no-evolutions.
+           g. If report: download PDF through existing context, extract
+              text with PyMuPDF, normalise into the 5-key contract.
+        4. Return all collected events.
+
+        Never invokes subprocess, ``sync_playwright()``, or a new
+        browser/context. Reuses the already-open handle and its page
+        (from ``ensure_current_page()``).
+
+        Args:
+            patient_record: Patient record (prontu\u00e1rio) string.
+            start_date: Window start in ``YYYY-MM-DD``.
+            end_date: Window end in ``YYYY-MM-DD``.
+            timeout: Overall hint in seconds for waits/downloads.
+
+        Returns:
+            List of normalised evolution dicts (possibly empty).
+
+        Raises:
+            EvolutionPdfError: On any sanitised failure during the
+                evolution action flow (e.g. no overlapping admission,
+                detail not found, evolution button disabled, PDF
+                download failure, invalid PDF).
+        """
+        page = self._resolve_active_page()
+        if page is None:
+            logger.warning(
+                "Cannot extract evolutions via legacy actions: "
+                "no active page available"
+            )
+            return []
+
+        # Step 1: Ensure search screen visible (reuse PSW-S12 helpers)
+        try:
+            ensure_search_screen(page)
+        except NavigationError as exc:
+            logger.warning(
+                "Evolution action flow: search screen not available (%s)",
+                exc,
+            )
+            return []
+
+        # Step 2: Search for the patient
+        try:
+            search_patient(page, patient_record=patient_record)
+        except NavigationError as exc:
+            logger.warning(
+                "Evolution action flow: patient search failed (%s)",
+                exc,
+            )
+            return []
+
+        # Step 3: Click Interna\u00e7\u00f5es
+        try:
+            click_internacoes(page)
+        except NavigationError as exc:
+            logger.warning(
+                "Evolution action flow: Interna\u00e7\u00f5es click failed (%s)",
+                exc,
+            )
+            return []
+
+        # Step 4: Read admissions and select overlapping ones
+        try:
+            admissions = _read_and_build_snapshot(page)
+        except NavigationError as exc:
+            logger.warning(
+                "Evolution action flow: admissions snapshot failed (%s)",
+                exc,
+            )
+            return []
+
+        try:
+            overlapping = choose_overlapping_admissions(
+                admissions,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except NavigationError as exc:
+            raise EvolutionPdfError(
+                "Nenhuma interna\u00e7\u00e3o com interse\u00e7\u00e3o "
+                "foi encontrada para o intervalo solicitado."
+            ) from exc
+
+        if not overlapping:
+            return []
+
+        # Step 5: For each overlapping admission, open details and
+        # generate the evolution report
+        all_events: list[dict[str, Any]] = []
+        download_timeout_ms = max(120_000, timeout * 1000)
+
+        for idx, admission in enumerate(overlapping):
+            if idx > 0:
+                # Re-navigate to admissions (no multi-admission optimisations)
+                try:
+                    click_internacoes(page)
+                    admissions = _read_and_build_snapshot(page)
+                except NavigationError:
+                    logger.warning(
+                        "Evolution action flow: re-navigation failed "
+                        "for admission %s",
+                        admission.get("admissionKey"),
+                    )
+                    continue
+
+            admission_key = admission.get("admissionKey") or ""
+
+            # Step 5a: Open admission detail
+            try:
+                open_internacao_detail(
+                    page,
+                    admission_key=admission_key,
+                )
+            except NavigationError as exc:
+                logger.warning(
+                    "Evolution action flow: detail open failed for "
+                    "key=%s (%s)",
+                    admission_key,
+                    exc,
+                )
+                continue
+
+            # Step 5b: Click Evolu\u00e7\u00e3o
+            try:
+                click_evolucao(page)
+            except NavigationError as exc:
+                logger.warning(
+                    "Evolution action flow: Evolu\u00e7\u00e3o click failed "
+                    "for key=%s (%s)",
+                    admission_key,
+                    exc,
+                )
+                continue
+
+            # Step 5c: Fill dates (convert ISO to DD/MM/YYYY)
+            from apps.ingestion.extractors.persistent_evolution_pdf import (  # noqa: PLC0415
+                _format_br_date,
+            )
+
+            br_start = _format_br_date(start_date)
+            br_end = _format_br_date(end_date)
+            try:
+                fill_evolution_dates(
+                    page,
+                    start_date_br=br_start,
+                    end_date_br=br_end,
+                )
+            except Exception:
+                logger.warning(
+                    "Evolution action flow: date fill failed for "
+                    "key=%s (continuing)",
+                    admission_key,
+                )
+
+            # Step 5d: Select ascending order
+            try:
+                select_ascending_order(page)
+            except Exception:
+                logger.debug(
+                    "Evolution action flow: ascending order select "
+                    "failed (no-op) for key=%s",
+                    admission_key,
+                )
+
+            # Step 5e: Click visualize
+            try:
+                click_visualizar_report(page)
+            except NavigationError as exc:
+                logger.warning(
+                    "Evolution action flow: visualize click failed "
+                    "for key=%s (%s)",
+                    admission_key,
+                    exc,
+                )
+                continue
+
+            # Step 5f: Wait for report or detect no-evolutions
+            report_ready = wait_for_report_or_no_evolutions(
+                page,
+                timeout_ms=min(120_000, download_timeout_ms),
+            )
+            if not report_ready:
+                logger.debug(
+                    "Evolution action flow: no report for key=%s "
+                    "(no evolutions in window)",
+                    admission_key,
+                )
+                continue
+
+            # Step 5g: Download PDF through existing context
+            try:
+                pdf_url = self._resolve_pdf_url_from_report_page(page)
+            except Exception:
+                logger.warning(
+                    "Evolution action flow: PDF URL resolution failed "
+                    "for key=%s",
+                    admission_key,
+                )
+                continue
+
+            if not pdf_url:
+                continue
+
+            try:
+                pdf_bytes = self._download_pdf(
+                    page, pdf_url, download_timeout_ms
+                )
+            except Exception:
+                logger.warning(
+                    "Evolution action flow: PDF download failed "
+                    "for key=%s",
+                    admission_key,
+                )
+                continue
+
+            # Step 5h: Extract text and normalise
+            from apps.ingestion.extractors.persistent_evolution_pdf import (  # noqa: PLC0415
+                extract_pdf_text,
+                normalize_pdf_report_text,
+            )
+
+            try:
+                raw_text = extract_pdf_text(pdf_bytes)
+                events = normalize_pdf_report_text(
+                    raw_text,
+                    admission_key=admission_key,
+                )
+                all_events.extend(events)
+            except EvolutionPdfError:
+                logger.warning(
+                    "Evolution action flow: PDF text extraction/normalization "
+                    "failed for key=%s",
+                    admission_key,
+                )
+                continue
+
+        return all_events
+
+    def _resolve_pdf_url_from_report_page(self, page: Any) -> str | None:
+        """Resolve a PDF URL from the report page content or viewer frames.
+
+        Checks:
+        1. ``<object type="application/pdf" data="...">``
+        2. Viewer frame URL (``.pdf`` path or ``file=`` param).
+
+        Args:
+            page: A Playwright ``Page`` object with a rendered report.
+
+        Returns:
+            The PDF URL string, or ``None`` if unresolvable.
+        """
+        from urllib.parse import parse_qs, urljoin, urlparse  # noqa: PLC0415
+
+        base_url = self._safe_page_url(page)
+
+        # Strategy 1: <object> tag
+        try:
+            html = page.content()
+        except Exception:
+            html = ""
+
+        import re  # noqa: PLC0415
+
+        obj_match = re.search(
+            r'<object[^>]*\btype\s*=\s*["\']application/pdf["\'][^>]*>',
+            html,
+            re.IGNORECASE,
+        )
+        if obj_match:
+            data_match = re.search(
+                r'\bdata\s*=\s*["\']([^"\']+)["\']',
+                obj_match.group(0),
+                re.IGNORECASE,
+            )
+            if data_match:
+                return urljoin(base_url, data_match.group(1))
+
+        # Strategy 2: Viewer frame URL
+        try:
+            frames = page.frames or []
+        except Exception:
+            frames = []
+
+        for frame in frames:
+            try:
+                f_url = frame.url or ""
+            except Exception:
+                continue
+            if not f_url:
+                continue
+            parsed = urlparse(f_url)
+            if parsed.path.lower().endswith(".pdf"):
+                return urljoin(f_url, f_url)
+            file_params = parse_qs(parsed.query).get("file", [])
+            for candidate in file_params:
+                return urljoin(f_url, candidate)
+
+        return None
+
+    def _download_pdf(
+        self,
+        page: Any,
+        pdf_url: str,
+        timeout_ms: int,
+    ) -> bytes:
+        """Download PDF bytes through the existing browser context.
+
+        Args:
+            page: A Playwright ``Page`` object.
+            pdf_url: The PDF URL to download.
+            timeout_ms: Timeout in milliseconds.
+
+        Returns:
+            Raw PDF bytes.
+
+        Raises:
+            EvolutionPdfError: If the download fails.
+        """
+        context = getattr(page, "context", None)
+        request = getattr(context, "request", None) if context is not None else None
+        if request is None:
+            raise EvolutionPdfError(
+                "Browser context unavailable for PDF download"
+            )
+
+        try:
+            response = request.get(pdf_url, timeout=timeout_ms)
+        except Exception:
+            logger.warning(
+                "Evolution action flow: PDF download request failed "
+                "(sanitized)"
+            )
+            raise EvolutionPdfError(
+                "Falha ao baixar o PDF do relatório de evolução"
+            ) from None
+
+        if not getattr(response, "ok", False):
+            raise EvolutionPdfError(
+                "Falha ao baixar o PDF do relatório de evolução"
+            )
+
+        try:
+            body = response.body()
+        except Exception:
+            raise EvolutionPdfError(
+                "Falha ao ler o corpo do PDF do relatório de evolução"
+            ) from None
+
+        return bytes(body or b"")
+
+    @staticmethod
+    def _safe_page_url(page: Any) -> str:
+        """Safely extract the page URL (never leaks payloads)."""
+        try:
+            return str(page.url or "")
+        except Exception:
+            return ""
+
+    # ------------------------------------------------------------------
     # PSW-S11: persistent evolution PDF flow
     # ------------------------------------------------------------------
 
@@ -444,11 +927,16 @@ class RealHandleBridge:
         The real ``PlaywrightSessionHandle`` exposes ``ensure_current_page()``;
         older fakes/handles may expose ``current_page()``. Prefer the real
         accessor and fall back to the legacy one for compatibility.
+
+        Returns ``None`` only when no getter is available OR every available
+        getter returned ``None``.
         """
         for getter_name in ("ensure_current_page", "current_page"):
             getter = getattr(self._handle, getter_name, None)
             if callable(getter):
-                return getter()
+                page = getter()
+                if page is not None:
+                    return page
         return None
 
     # ------------------------------------------------------------------

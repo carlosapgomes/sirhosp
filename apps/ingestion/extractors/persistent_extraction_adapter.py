@@ -388,18 +388,33 @@ class PersistentExtractionAdapter:
         if not self._controller.renew_if_needed():
             raise ExtractionError("Session renewal failed before extraction")
 
-        # Step 3: Navigate to admissions page (timeout propagated to the
-        # session handle's navigation/wait path).
-        url = _build_admissions_url(
-            self._admissions_url_template,
-            patient_record=patient_record,
-            start_date=start_date,
-            end_date=end_date,
+        # Step 3: Navigate to admissions page.
+        # Priority: UI action navigation (``navigate_to_admissions``) when
+        # the session supports it — this is the path for real legacy
+        # Java/JSP/PrimeFaces systems that don't expose reloadable deep
+        # links. Fallback: URL template (``open_tab``) for stub/test compat.
+        _navigate_to_admissions = getattr(
+            self._session, "navigate_to_admissions", None
         )
-        if not self._session.open_tab(url, timeout=timeout):
-            raise ExtractionError(
-                f"Failed to navigate to admissions page: {url}"
+        if callable(_navigate_to_admissions):
+            # Action-based UI navigation (PSW-S12).
+            if not _navigate_to_admissions(patient_record=patient_record):
+                raise ExtractionError(
+                    "Failed to navigate to admissions page "
+                    "via legacy UI actions"
+                )
+        else:
+            # URL template fallback (legacy/test path).
+            url = _build_admissions_url(
+                self._admissions_url_template,
+                patient_record=patient_record,
+                start_date=start_date,
+                end_date=end_date,
             )
+            if not self._session.open_tab(url, timeout=timeout):
+                raise ExtractionError(
+                    f"Failed to navigate to admissions page: {url}"
+                )
 
         # Step 4: Extract JSON data from page HTML
         html = self._session.get_page_html()
@@ -465,7 +480,12 @@ class PersistentExtractionAdapter:
         if not self._controller.renew_if_needed():
             raise ExtractionError("Session renewal failed before extraction")
 
-        # Step 3: Navigate to evolution page
+        # Step 3: Navigate to evolution page.
+        # First priority: URL template (``open_tab``) + container parsing
+        # for stub/test compatibility and JSON/pre fast paths. The bridge
+        # returns evolution data from lightweight fast paths
+        # (``evolution-data-json`` script, ``pre.report-text``) when
+        # available.
         url = _build_admissions_url(
             self._evolutions_url_template,
             patient_record=patient_record,
@@ -499,7 +519,25 @@ class PersistentExtractionAdapter:
                 timeout=timeout,
             )
 
-        # Step 5c (PSW-S11 fix): map the adapter's 5-key evolution contract
+        # Step 5c (PSW-S13): Real legacy action navigation fallback.
+        # When fast paths (JSON script + pre.report-text + PDF fallback)
+        # yield no events AND the session exposes the legacy action flow,
+        # navigate the real JSP/PrimeFaces UI to extract evolutions.
+        # The action method handles admissions selection, detail
+        # navigation, date filling, report generation, PDF download,
+        # text extraction, and normalisation internally, returning the
+        # 5-key evolution contract. A genuine empty window stays [].
+        if not result and hasattr(
+            self._session, "extract_evolutions_via_legacy_actions"
+        ):
+            result = self._session.extract_evolutions_via_legacy_actions(
+                patient_record=patient_record,
+                start_date=start_date,
+                end_date=end_date,
+                timeout=timeout,
+            )
+
+        # Step 6 (PSW-S11 fix): map the adapter's 5-key evolution contract
         # (admission_key/happened_at/event_type/content/profession) onto the
         # schema the shared ingestion service persists
         # (content_text/profession_type/author_name/signature_line/
@@ -510,10 +548,10 @@ class PersistentExtractionAdapter:
             result, patient_record=patient_record
         )
 
-        # Step 6: Cleanup job tab
+        # Step 7: Cleanup job tab
         self._controller.close_job_tab_if_present()
 
-        # Step 7: Mark job as processed
+        # Step 8: Mark job as processed
         self._controller.mark_job_processed()
 
         return result

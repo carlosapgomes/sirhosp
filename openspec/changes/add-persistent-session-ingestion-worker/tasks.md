@@ -192,3 +192,43 @@
   unchanged.
 - [x] 11.6 Run relevant validation and create
   `/tmp/sirhosp-slice-PSW-S11-report.md`.
+
+## 12. PSW-S12: Real legacy patient/admissions navigation
+
+- [x] 12.1 Add failing tests proving `--real-handle --run-id <id>
+  --max-runs 1` no longer requires admissions/evolutions URL templates before
+  starting the smoke path.
+- [x] 12.2 Add failing tests for action-based patient search and admissions
+  table navigation using fake Playwright page/frame objects modeled after
+  `path2.py` (`#prontuarioInput`, `Pesquisa Avançada`, `Internações`,
+  `frame_pol`, and `#tabelaInternacoes:resultList_data`).
+- [x] 12.3 Implement a focused real legacy navigation helper/bridge path for
+  admissions snapshot capture through UI actions, without subprocess,
+  `path2.py` shell-out, or a new browser/context per job.
+- [x] 12.4 Update the persistent real-handle command wiring so `admissions_only`
+  smoke uses the action-navigation path and preserves guardrails, stage
+  metrics, retries, sanitized errors, and tab-cleanup semantics.
+- [x] 12.5 Keep full-sync real evolution navigation explicitly pending for
+  PSW-S13; do not claim production rollout readiness.
+- [x] 12.6 Run relevant validation and create
+  `/tmp/sirhosp-slice-PSW-S12-report.md`.
+
+## 13. PSW-S13: Real legacy full-sync evolution navigation
+
+- [x] 13.1 Add failing tests for selecting admissions overlapping a requested
+  full-sync window and for sanitized failure when none is eligible.
+- [x] 13.2 Add failing tests for the real evolution action sequence using fake
+  Playwright page/frame objects: open details, click `Evolução`, fill
+  `DD/MM/YYYY` dates, select ascending order when present, visualize report,
+  and handle no-evolutions windows.
+- [x] 13.3 Implement the minimal detail/evolution/PDF navigation path modeled
+  after `path2.py`, reusing the already-open persistent page/context and never
+  invoking subprocess, `sync_playwright()`, or a new browser/context per job.
+- [x] 13.4 Wire persistent `full_sync` to the real action-navigation/PDF path
+  while preserving PSW-S9 fast paths, PSW-S11 PDF normalization, shared
+  persistence, stage metrics, retries, sanitized errors, and cleanup semantics.
+- [x] 13.5 Keep current subprocess extractor and current worker behavior
+  unchanged; keep production rollout blocked pending live validation and
+  threshold tuning.
+- [x] 13.6 Run relevant validation and create
+  `/tmp/sirhosp-slice-PSW-S13-report.md`.

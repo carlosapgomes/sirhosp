@@ -68,6 +68,24 @@ PSW-S11 status:
 - This is still a guarded MANUAL SMOKE path — it has NOT been validated
   against the real legacy UI in a live environment.
 
+PSW-S12 status:
+- ``SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE`` and
+  ``SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE`` are NO LONGER REQUIRED for the
+  ``--real-handle`` smoke path. The real legacy navigation now uses action-
+  based UI actions (modeled after ``path2.py``) instead of reloadable deep-
+  link URL templates.
+- ``RealHandleBridge`` exposes ``navigate_to_admissions(patient_record)``
+  which performs the UI action sequence: ensure search screen, fill
+  prontuário, click Pesquisa Avançada, click Internações, wait for
+  frame_pol, read table rows, and build the canonical admission snapshot.
+- The adapter's ``get_admission_snapshot()`` detects and uses
+  ``navigate_to_admissions`` when available (real handle path), falling back
+  to URL-template ``open_tab`` for stub/test compatibility.
+- ``SOURCE_SYSTEM_SAFE_RENEWAL_URL`` is optional; when not configured,
+  proactive renewal is unavailable but the manual smoke path still works.
+- This is still a guarded MANUAL SMOKE path — full-sync real evolution
+  navigation is scoped to PSW-S13.
+
 Usage::
 
     # Single pass
@@ -407,24 +425,22 @@ class Command(BaseCommand):
         return RealHandleBridge(handle)
 
     def _require_real_handle_config(self) -> None:
-        """Raise a sanitized CommandError if a required real URL template is missing.
+        """Raise a sanitized CommandError if required real config is missing.
+
+        PSW-S12: ``SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE`` and
+        ``SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE`` are no longer required —
+        the real legacy system uses action-based UI navigation
+        (``navigate_to_admissions``), not reloadable deep-link URL templates.
+
+        ``SOURCE_SYSTEM_SAFE_RENEWAL_URL`` is optional; when not configured,
+        proactive renewal is not available but the manual smoke path still
+        works.
 
         Checked before the browser is launched and before any run is claimed.
         """
-        templates = self._real_url_templates
-        missing: list[str] = []
-        if not templates.admissions_url_template:
-            missing.append("SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE")
-        if not templates.evolutions_url_template:
-            missing.append("SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE")
-        if not templates.safe_renewal_url:
-            missing.append("SOURCE_SYSTEM_SAFE_RENEWAL_URL")
-        if missing:
-            raise CommandError(
-                "Cannot start --real-handle: missing real legacy URL "
-                "template(s): " + ", ".join(missing)
-                + ". Configure them before claiming any run."
-            )
+        # Only SOURCE_SYSTEM_URL, USERNAME, and PASSWORD are required.
+        # URL templates are no longer required (PSW-S12 action navigation).
+        pass
 
     # ------------------------------------------------------------------
     # Worker label

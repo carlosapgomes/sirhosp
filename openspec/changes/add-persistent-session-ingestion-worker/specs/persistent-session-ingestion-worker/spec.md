@@ -217,6 +217,17 @@ fake-only synthetic containers.
   the persistent extraction contract
 - **AND** the bridge does not launch a fresh browser or subprocess for each job
 
+#### Scenario: Real handle uses action navigation for JSP legacy UI
+
+- **GIVEN** the real legacy system does not expose reloadable patient,
+  admission, or evolution URLs
+- **WHEN** the persistent worker runs with `--real-handle`
+- **THEN** admissions and evolutions are reached through action-based
+  Playwright navigation modeled after the known legacy scripts
+- **AND** the real path does not require admissions or evolutions URL templates
+  to process a guarded single-run smoke
+- **AND** it reuses the already-open persistent browser session/context
+
 #### Scenario: Persistent full-sync is not rollout-ready while contract blocked
 
 - **WHEN** the real handle cannot yet satisfy the legacy data contract

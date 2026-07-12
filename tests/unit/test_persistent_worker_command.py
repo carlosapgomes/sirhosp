@@ -1415,17 +1415,139 @@ class TestRealHandleGuards:
         run.refresh_from_db()
         assert run.status == "succeeded"
 
-    def test_real_handle_missing_url_templates_fails_before_claim(
+    # ==================================================================
+    # PSW-S12: URL templates no longer required for --real-handle
+    # ==================================================================
+
+    def test_real_handle_no_admissions_template_starts_successfully(
         self, monkeypatch
     ):
-        """Missing real URL templates abort before any run is claimed."""
-        run = _queue_admissions_run()
+        """PSW-S12: Missing admissions URL template no longer blocks --real-handle.
+
+        The real legacy system uses action-based UI navigation, not reloadable
+        deep-link URL templates. The manual smoke must proceed with only
+        source URL, username, password, and safe_renewal_url.
+        """
         _clear_source_credentials_env(monkeypatch)
+
+        run = _queue_admissions_run()
+        mock_handle = MagicMock()
+        mock_handle.ensure_current_page.return_value = MagicMock()
+
+        with override_settings(
+            SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE="",
+            SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE="",
+            SOURCE_SYSTEM_SAFE_RENEWAL_URL="https://legacy.test/safe",
+            SOURCE_SYSTEM_URL="https://legacy.test/login",
+            SOURCE_SYSTEM_USERNAME="operador",
+            SOURCE_SYSTEM_PASSWORD="super-secret",
+        ), patch(
+            "apps.ingestion.extractors.playwright_session_handle"
+            ".PlaywrightSessionHandle",
+            return_value=mock_handle,
+        ), patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".bootstrap_legacy_session"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.RealHandleBridge"
+        ) as mock_bridge_cls:
+            mock_bridge = MagicMock()
+            mock_bridge.is_connected.return_value = True
+            mock_bridge.get_page_html.return_value = (
+                '<html><body><div id="tempoSessao">'
+                '<span>00</span>:<span>29</span>:<span>01</span>'
+                '</div>'
+                '<div id="admission-snapshot-data">[]</div>'
+                '</body></html>'
+            )
+            mock_bridge.get_tab_classes.return_value = [
+                "tabs-first tabs-last tabs-selected",
+            ]
+            mock_bridge.navigate_to_admissions.return_value = True
+            mock_bridge_cls.return_value = mock_bridge
+
+            # Should NOT raise CommandError about missing templates.
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                real_handle=True,
+                run_id=run.pk,
+                max_runs=1,
+            )
+
+        run.refresh_from_db()
+        # Run was processed despite missing URL templates.
+        assert run.status == "succeeded"
+
+    def test_real_handle_no_admissions_template_and_no_renewal_starts(
+        self, monkeypatch
+    ):
+        """PSW-S12: Even without safe_renewal_url, the smoke path must start
+        (conservative: safe_renewal_url is optional, not required).
+        """
+        _clear_source_credentials_env(monkeypatch)
+
+        run = _queue_admissions_run()
+        mock_handle = MagicMock()
+        mock_handle.ensure_current_page.return_value = MagicMock()
 
         with override_settings(
             SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE="",
             SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE="",
             SOURCE_SYSTEM_SAFE_RENEWAL_URL="",
+            SOURCE_SYSTEM_URL="https://legacy.test/login",
+            SOURCE_SYSTEM_USERNAME="operador",
+            SOURCE_SYSTEM_PASSWORD="super-secret",
+        ), patch(
+            "apps.ingestion.extractors.playwright_session_handle"
+            ".PlaywrightSessionHandle",
+            return_value=mock_handle,
+        ), patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".bootstrap_legacy_session"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.RealHandleBridge"
+        ) as mock_bridge_cls:
+            mock_bridge = MagicMock()
+            mock_bridge.is_connected.return_value = True
+            mock_bridge.get_page_html.return_value = (
+                '<html><body><div id="tempoSessao">'
+                '<span>00</span>:<span>29</span>:<span>01</span>'
+                '</div>'
+                '<div id="admission-snapshot-data">[]</div>'
+                '</body></html>'
+            )
+            mock_bridge.get_tab_classes.return_value = [
+                "tabs-first tabs-last tabs-selected",
+            ]
+            mock_bridge.navigate_to_admissions.return_value = True
+            mock_bridge_cls.return_value = mock_bridge
+
+            # Should NOT raise CommandError — URL templates are optional.
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                real_handle=True,
+                run_id=run.pk,
+                max_runs=1,
+            )
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+
+    def test_real_handle_missing_source_url_still_fails_before_claim(
+        self, monkeypatch
+    ):
+        """Missing SOURCE_SYSTEM_URL still fails before any claim (PSW-S12)."""
+        _clear_source_credentials_env(monkeypatch)
+
+        run = _queue_admissions_run()
+
+        with override_settings(
+            SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE="",
+            SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE="",
+            SOURCE_SYSTEM_SAFE_RENEWAL_URL="",
+            SOURCE_SYSTEM_URL="",
+            SOURCE_SYSTEM_USERNAME="operador",
+            SOURCE_SYSTEM_PASSWORD="super-secret",
         ):
             with pytest.raises(CommandError) as exc_info:
                 call_command(
@@ -1435,15 +1557,14 @@ class TestRealHandleGuards:
                     max_runs=1,
                 )
 
-        assert "SOURCE_SYSTEM_" in str(exc_info.value)
+        assert "SOURCE_SYSTEM_URL" in str(exc_info.value)
         run.refresh_from_db()
-        # Nothing mutated.
         assert run.status == "queued"
 
-    def test_real_handle_missing_credentials_fails_before_claim(
+    def test_real_handle_missing_credentials_still_fails_before_claim(
         self, monkeypatch
     ):
-        """Missing source credentials abort before any run is claimed."""
+        """Missing source credentials still abort before any run is claimed (PSW-S12)."""
         run = _queue_admissions_run()
         _clear_source_credentials_env(monkeypatch)
 

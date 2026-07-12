@@ -196,6 +196,27 @@ Rationale: persistence parity is now solved, so the remaining rollout blocker is
 isolated to source-system extraction through the already-open persistent
 browser/session.
 
+### Decision 11: Use action-based legacy navigation, not URL templates
+
+Manual validation confirmed the legacy system is Java/JSP/PrimeFaces and does
+not expose reloadable patient/admission/evolution URLs that can be safely opened
+from templates. The real persistent handle must therefore model the working
+Playwright action flow from
+`automation/source_system/medical_evolution/path2.py`: search by prontuário,
+open `Internações`, read `frame_pol` rows, open admission details, open
+`Evolução`, fill dates, generate the report, and download the PDF through the
+existing authenticated context.
+
+`SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE` and
+`SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE` are treated as an invalid rollout
+assumption for the real legacy path. They may remain only as test/stub
+compatibility until PSW-S12/PSW-S13 remove their real-smoke requirement.
+
+Rationale: direct URL templates would give misleading smoke-test results or fail
+against the real JSP navigation model. Action navigation keeps the persistent
+worker aligned with the known-good integrated Playwright script while still
+preserving the no-subprocess/no-new-browser requirement.
+
 ## Risks / Trade-offs
 
 - Profile/cache growth -> use exclusive profiles, tmpfs limits, safe cache
@@ -211,6 +232,9 @@ browser/session.
   service before enabling persistent full-sync.
 - Real handle contract mismatch -> keep rollout blocked until the handle can
   supply real legacy admission/evolution data to the adapter contract.
+- Invalid URL-template assumption -> real legacy smoke must use action-based
+  JSP/PrimeFaces navigation modeled after `path2.py`, not reloadable deep
+  links.
 - Selector drift -> isolate selectors and test known synthetic HTML.
 - Popup-detection regex is order-sensitive (expects `id` then
   `aria-hidden="false"` then `display: block` on the same element).
@@ -230,13 +254,15 @@ browser/session.
 6. Extract evolution persistence into a shared service and keep the current
    worker behavior unchanged.
 7. Resolve the real handle contract for legacy admission/evolution data.
-8. Do not start production side-by-side load until full-sync persistence and the
-   real-handle contract are resolved.
-9. After prerequisites are met, start a small side-by-side experiment with
-   distinct label prefixes.
-10. Compare run count, success rate, timeout rate, durations, retries, and stale
+8. Replace real-smoke URL-template navigation with action-based legacy
+   navigation modeled after `path2.py`.
+9. Do not start production side-by-side load until full-sync persistence, real
+   action navigation, and the real-handle contract are resolved.
+10. After prerequisites are met, start a small side-by-side experiment with
+    distinct label prefixes.
+11. Compare run count, success rate, timeout rate, durations, retries, and stale
     recovery incidents by group.
-11. Roll back by stopping persistent workers and scaling current workers back.
+12. Roll back by stopping persistent workers and scaling current workers back.
 
 ## Open Questions
 
@@ -245,4 +271,6 @@ browser/session.
 - What max-jobs and max-lifetime defaults are best for production?
 - How will the real handle satisfy the legacy snapshot/evolution container
   contract without synthetic HTML injection?
+- Which minimal action-navigation helper should become the shared source of
+  truth between the persistent real handle and the existing Playwright scripts?
 - When will full-sync persistence be extracted into a shared ingestion service?

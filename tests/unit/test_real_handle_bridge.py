@@ -15,7 +15,7 @@ No real legacy access required.
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -210,6 +210,10 @@ class FakePlaywrightHandle:
 
     def shutdown(self) -> None:
         self._shutdown_calls += 1
+
+    def ensure_current_page(self):
+        """Return None by default (PSW-S12). Override in specific tests."""
+        return None
 
     def evaluate_js(self, expression: str) -> object:
         """Simulate Playwright's page.evaluate()."""
@@ -626,6 +630,37 @@ class TestBridgeToAdapterIntegration:
         )
 
         handle = FakePlaywrightHandle()
+
+        # Set up ensure_current_page to return a fake page that supports
+        # the navigation helpers (PSW-S12: navigate_to_admissions).
+        fake_page = MagicMock()
+        fake_frame = MagicMock()
+        fake_frame.eval_on_selector_all.return_value = [
+            {
+                "dataRi": "0",
+                "dataRk": "ADM-RK-001",
+                "cells": ["15/01/2024", "20/01/2024", "Enfermaria A",
+                          "Leito 101", "Detalhes"],
+                "hasDetailsLink": True,
+            },
+            {
+                "dataRi": "1",
+                "dataRk": "ADM-RK-002",
+                "cells": ["01/03/2024", "", "UTI", "Leito 005",
+                          "Detalhes"],
+                "hasDetailsLink": True,
+            },
+            {
+                "dataRi": "2",
+                "dataRk": "",
+                "cells": ["10/05/2024", "15/05/2024", "", "",
+                          "Detalhes"],
+                "hasDetailsLink": True,
+            },
+        ]
+        fake_page.frame.return_value = fake_frame
+        handle.ensure_current_page = lambda: fake_page  # type: ignore[method-assign]
+
         # Set counter HTML initially for readiness checks
         handle.set_html("""<html><body>
         <div id="tempoSessao">
@@ -854,7 +889,7 @@ class TestRealHandleBridgeEvolutionPdf:
         fake_page = object()  # sentinel
         # Real PlaywrightSessionHandle exposes ensure_current_page(), NOT
         # current_page(). FakePlaywrightHandle has neither by default.
-        handle.ensure_current_page = lambda: fake_page  # type: ignore[attr-defined]
+        handle.ensure_current_page = lambda: fake_page  # type: ignore[method-assign]
         assert not hasattr(handle, "current_page")
 
         with patch(
@@ -944,3 +979,361 @@ class TestRealHandleBridgeEvolutionPdf:
                 bridge.extract_evolutions_pdf(
                     start_date="2024-01-01", end_date="2024-01-31"
                 )
+
+
+# ===========================================================================
+# PSW-S13: extract_evolutions_via_legacy_actions
+# ===========================================================================
+
+
+class TestBridgeExtractEvolutionsViaLegacyActions:
+    """Tests for the real-handle legacy evolution action flow (PSW-S13).
+
+    The bridge exposes ``extract_evolutions_via_legacy_actions()`` which
+    performs the full JSP/PrimeFaces action sequence for evolution extraction:
+    search patient -> open admissions -> select overlapping -> open details
+    -> click Evolução -> fill dates -> select ascending -> visualize ->
+    download PDF -> normalize text.
+    """
+
+    def test_method_exists_and_returns_list(self) -> None:
+        """Bridge exposes the method and it returns a list (empty with fakes)."""
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        handle = FakePlaywrightHandle()
+        handle.set_html(LEGACY_ADMISSIONS_TABLE_HTML)
+        bridge = RealHandleBridge(handle)
+
+        # When no active page is available, the method returns [] gracefully.
+        result = bridge.extract_evolutions_via_legacy_actions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            timeout=30,
+        )
+
+        assert isinstance(result, list)
+        assert result == []
+
+    def test_no_active_page_returns_empty_list(self) -> None:
+        """Returns empty list when no active page is available."""
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        # No ensure_current_page -> no active page
+        result = bridge.extract_evolutions_via_legacy_actions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+        )
+
+        assert result == []
+
+    def test_adapter_uses_legacy_actions_when_yield_no_json_events(
+        self,
+    ) -> None:
+        """Adapter calls legacy action flow when fast paths yield no events
+        and the session supports it."""
+        # Import helper to generate valid PDF bytes inline
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+        from tests.unit.test_persistent_evolution_pdf import (  # noqa: PLC0415
+            REPRESENTATIVE_REPORT_TEXT,
+            _build_pdf_bytes,
+        )
+
+        handle = FakePlaywrightHandle()
+
+        # Return HTML with NO evolution data (empty container)
+        # so fast paths yield []
+        handle.set_html(
+            '<html><body>'
+            '<div id="tempoSessao"><span>00</span>:<span>27</span>:'
+            '<span>30</span></div>'
+            '<div id="evolution-data">[]</div>'
+            '</body></html>'
+        )
+
+        valid_pdf_bytes = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+
+        mock_row_locator = MagicMock()
+        mock_row_locator.wait_for = MagicMock()
+        initial_frame = MagicMock()
+        initial_frame.locator.return_value = mock_row_locator
+        initial_frame.eval_on_selector_all.return_value = [
+            {
+                "dataRi": "0",
+                "dataRk": "ADM-RK-001",
+                "cells": ["15/01/2024", "20/01/2024", "A", "B",
+                          "Detalhes"],
+                "hasDetailsLink": True,
+            },
+        ]
+        # Configure the frame to appear as a report page immediately
+        # so wait_for_report_or_no_evolutions does NOT poll for 120s.
+        def frame_side_effect(name):
+            nonlocal initial_frame
+            return initial_frame
+
+        page = MagicMock()
+        page.frame.side_effect = frame_side_effect
+        page.content.return_value = (
+            '<html><body>'
+            '<object type="application/pdf" '
+            'data="https://example.com/report.pdf"></object>'
+            '</body></html>'
+        )
+        page.url = "https://legacy.example.com/"
+        page.context.request.get.return_value.ok = True
+        page.context.request.get.return_value.body.return_value = (
+            valid_pdf_bytes
+        )
+
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+
+        bridge = RealHandleBridge(handle)
+        adapter = PersistentExtractionAdapter(
+            bridge,
+            config=SessionControllerConfig(
+                base_evolutions_url="/evolutions/{patient_record}",
+            ),
+        )
+
+        # Fast paths yield [] via the empty evolution-data container
+        # (open_tab -> bridge get_page_html -> evolution-data div -> []);
+        # PDF fallback (extract_evolutions_pdf) exists on the bridge;
+        # legacy action fallback (extract_evolutions_via_legacy_actions)
+        # also exists. With fakes, the action path proceeds through
+        # admissions selection, downloads a valid PDF via the existing
+        # context, extracts text, normalises, and returns events.
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+        )
+
+        assert isinstance(result, list)
+        assert len(result) >= 1
+
+    def test_existing_json_fast_path_still_works(self) -> None:
+        """Adapter still uses JSON script tag fast path when present."""
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        handle = FakePlaywrightHandle()
+        handle.set_html(LEGACY_EVOLUTIONS_PAGE_JSON)
+
+        bridge = RealHandleBridge(handle)
+        adapter = PersistentExtractionAdapter(
+            bridge,
+            config=SessionControllerConfig(
+                base_evolutions_url="/evolutions/{patient_record}",
+            ),
+        )
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+        )
+
+        # JSON fast path should return events
+        assert len(result) >= 1
+
+    def test_no_subprocess_or_new_browser(self) -> None:
+        """The legacy actions path reuses the existing page/context.
+
+        Spies on ``subprocess`` entry points and ``sync_playwright`` while
+        running the full action flow (search -> admissions -> detail ->
+        Evolução -> dates -> visualize -> PDF download -> normalize) to prove
+        none of them is ever invoked, and that the existing handle/page/
+        context is reused rather than replaced.
+        """
+        from unittest.mock import patch
+
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+        from tests.unit.test_persistent_evolution_pdf import (  # noqa: PLC0415
+            REPRESENTATIVE_REPORT_TEXT,
+            _build_pdf_bytes,
+        )
+
+        handle = FakePlaywrightHandle()
+        valid_pdf_bytes = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+
+        # A fake frame whose URL already looks like the report page so
+        # ``wait_for_report_or_no_evolutions`` resolves immediately, and
+        # whose ``locator(...).count()`` returns 1 (for ``#printLinks``).
+        frame = MagicMock()
+        frame.url = (
+            "https://legacy.example.com/"
+            "relatorioAnaEvoInternacaoPdf.xhtml"
+        )
+        frame_locator = MagicMock()
+        frame_locator.count.return_value = 1
+        frame_locator.first.wait_for = MagicMock()
+        frame_locator.first.click = MagicMock()
+        frame.locator.return_value = frame_locator
+        frame.get_by_role.return_value = frame_locator
+        frame.eval_on_selector_all.return_value = [
+            {
+                "dataRi": "0",
+                "dataRk": "ADM-001",
+                "cells": [
+                    "15/01/2024",
+                    "20/01/2024",
+                    "A",
+                    "B",
+                    "Detalhes",
+                ],
+                "hasDetailsLink": True,
+            },
+        ]
+
+        page = MagicMock()
+        page.frame.return_value = frame
+        page.content.return_value = (
+            "<html><body>"
+            '<object type="application/pdf" '
+            'data="https://example.com/report.pdf"></object>'
+            "</body></html>"
+        )
+        page.url = "https://legacy.example.com/"
+        page.context.request.get.return_value.ok = True
+        page.context.request.get.return_value.body.return_value = (
+            valid_pdf_bytes
+        )
+
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("subprocess.Popen") as mock_popen,
+            patch("subprocess.check_output") as mock_check_output,
+            patch("subprocess.call") as mock_call,
+            patch("playwright.sync_api.sync_playwright") as mock_sync,
+        ):
+            result = bridge.extract_evolutions_via_legacy_actions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                timeout=30,
+            )
+
+        # The full action flow executed and produced events.
+        assert isinstance(result, list)
+        assert len(result) >= 1
+
+        # No subprocess of any kind and no Playwright re-entry.
+        mock_run.assert_not_called()
+        mock_popen.assert_not_called()
+        mock_check_output.assert_not_called()
+        mock_call.assert_not_called()
+        mock_sync.assert_not_called()
+
+        # PDF was fetched through the existing page context (reused),
+        # proving no new browser/context was spun up.
+        page.context.request.get.assert_called()
+
+        # The existing handle was reused, not replaced or restarted.
+        assert handle.is_connected() is True
+
+    def test_legacy_action_events_carry_persistible_fields(self) -> None:
+        """Adapter enriches legacy-action events with persistible fields.
+
+        The bridge's ``extract_evolutions_via_legacy_actions`` returns the
+        5-key contract (admission_key/happened_at/event_type/content/
+        profession). The adapter's enrichment must add the schema the
+        shared ingestion service persists (content_text, profession_type,
+        author_name, patient_source_key, source_system), proving the
+        PSW-S13 action flow plugs into the existing persistence path.
+        """
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        # Session where fast paths yield [] (empty evolution-data) and the
+        # PSW-S11 PDF fallback also yields [], so the adapter reaches the
+        # PSW-S13 legacy action fallback. The action method returns a
+        # single known event in the 5-key contract.
+        session = MagicMock()
+        session.is_connected.return_value = True
+        session.get_tab_classes.return_value = [
+            "tabs-first tabs-last tabs-selected",
+        ]
+        session.open_tab.return_value = True
+        session.get_page_html.return_value = (
+            "<html><body>"
+            '<div id="tempoSessao">'
+            "<span>00</span>:<span>29</span>:<span>01</span>"
+            "</div>"
+            '<div id="evolution-data">[]</div>'
+            "</body></html>"
+        )
+        session.extract_evolutions_pdf.return_value = []
+        session.extract_evolutions_via_legacy_actions.return_value = [
+            {
+                "admission_key": "ADM-001",
+                "happened_at": "2024-01-15T10:00:00",
+                "event_type": "medical",
+                "content": "Paciente estável, sem queixas.",
+                "profession": "Médico CRM 1234",
+            },
+        ]
+
+        adapter = PersistentExtractionAdapter(
+            session,
+            config=SessionControllerConfig(
+                base_evolutions_url="/evolutions/{patient_record}",
+            ),
+        )
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+        )
+
+        assert len(result) == 1
+        event = result[0]
+        # Original 5-key contract preserved.
+        assert event["content"] == "Paciente estável, sem queixas."
+        assert event["event_type"] == "medical"
+        # Persistible schema added by adapter enrichment.
+        assert event["patient_source_key"] == "12345"
+        assert event["source_system"] == "tasy"
+        assert event["content_text"] == "Paciente estável, sem queixas."
+        assert event["author_name"] == "Médico CRM 1234"
+        assert "profession_type" in event
+        # The action flow was actually used (not the fast paths).
+        session.extract_evolutions_via_legacy_actions.assert_called_once_with(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            timeout=120,
+        )

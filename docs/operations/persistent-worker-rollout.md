@@ -4,10 +4,16 @@
 >
 > The persistent-session worker (`process_ingestion_runs_persistent_session`)
 > is implemented and unit-tested, including persistent full-sync persistence,
-> a ``RealHandleBridge`` that translates real legacy DOM data into the
-> adapter's synthetic container contract, a guarded real-legacy bootstrap
+> a ``RealHandleBridge`` that translates representative legacy DOM data into
+> the adapter's synthetic container contract, a guarded real-legacy bootstrap
 > and manual smoke path, and a persistent real evolution **PDF** extraction
 > flow.
+>
+> **New live-validation finding:** the real legacy system is Java/JSP and does
+> not expose reloadable patient/admission/evolution URLs. The PSW-S10 URL
+> template assumption must be replaced by action-based Playwright navigation
+> modeled after `automation/source_system/medical_evolution/path2.py` before
+> guarded real smoke testing.
 >
 > **Progress:**
 >
@@ -36,9 +42,11 @@
 >    no fresh browser per job. This path has been validated with synthetic
 >    PDF/text and fake Playwright objects only.
 >
-> 4. **Remaining prerequisites (blockers for production rollout):** live
->    validation of the bridge, bootstrap, and PDF flow against the real
->    legacy UI, and operational threshold tuning (max-jobs, max-lifetime).
+> 4. **Remaining prerequisites (blockers for production rollout):** replace
+>    real-smoke URL-template navigation with action-based JSP/PrimeFaces
+>    navigation (PSW-S12/PSW-S13), live validation of the bridge, bootstrap,
+>    and PDF flow against the real legacy UI, and operational threshold tuning
+>    (max-jobs, max-lifetime).
 >
 > This document describes the **intended future rollout plan** and
 > **controlled lab/staging experiment guidance**. Do not apply the scaling or
@@ -100,30 +108,25 @@ one selected queued run and cannot drain the queue or enter an idle loop. It
 also bootstraps a real authenticated legacy session (navigate + login + wait
 for ``#tempoSessao``) before any run is claimed.
 
-Before running, the operator MUST configure (settings or env vars):
+**Do not run the real-handle smoke against production yet.** Manual
+validation confirmed that the real system does not support the URL-template
+navigation assumed by PSW-S10. PSW-S12/PSW-S13 must first replace that path
+with action-based Playwright navigation modeled after `path2.py`.
 
-- ``SOURCE_SYSTEM_URL``, ``SOURCE_SYSTEM_USERNAME``, ``SOURCE_SYSTEM_PASSWORD``
-- ``SOURCE_SYSTEM_ADMISSIONS_URL_TEMPLATE``
-  (e.g. ``https://legacy/consultarInternacoes?prontuario={patient_record}``)
-- ``SOURCE_SYSTEM_EVOLUTIONS_URL_TEMPLATE`` (used by the persistent
-  evolution/PDF path)
-- ``SOURCE_SYSTEM_SAFE_RENEWAL_URL``
-
-If any of these is missing, the command fails with a sanitized, actionable
-message before claiming any run.
+After PSW-S12/PSW-S13, the operator will configure only the real credentials
+and any remaining safe-renewal setting required by the implemented path, then
+run a single selected queued `IngestionRun` with:
 
 ```bash
-# MANUAL SMOKE ONLY (placeholders shown — never commit real values):
-# Pick one known queued IngestionRun id and process only it.
+# MANUAL SMOKE ONLY AFTER PSW-S12/PSW-S13 (placeholders only):
 uv run python manage.py process_ingestion_runs_persistent_session \
     --real-handle --run-id <INGESTION_RUN_ID> --max-runs 1
 ```
 
-> This is a **manual smoke only** path, NOT production rollout. Credentials
-> and passwords are never logged; bootstrap and PDF-flow failures are
-> sanitized. The bridge and PDF flow have been tested with representative
-> legacy HTML/PDF fakes but are NOT yet validated against the real legacy UI
-> in a live environment.
+> This remains a **manual smoke only** path, NOT production rollout. Credentials
+> and passwords must never be logged. Bootstrap, navigation, and PDF-flow
+> failures must be sanitized. The bridge/PDF flow still require live validation
+> against the real legacy UI before any continuous worker rollout.
 
 ---
 
