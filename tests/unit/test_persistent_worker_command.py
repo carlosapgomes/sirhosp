@@ -1308,9 +1308,15 @@ class TestMaxRunsCap:
             )
 
         succeeded = IngestionRun.objects.filter(status="succeeded").count()
-        queued = IngestionRun.objects.filter(status="queued").count()
+        queued_admissions = IngestionRun.objects.filter(
+            status="queued", intent="admissions_only"
+        ).count()
         assert succeeded == 2
-        assert queued == 2
+        # PSW-S15: each processed admissions_only run now enqueues a
+        # demographics_only follow-up (batch=None) to match the current worker,
+        # so total queued is inflated by those follow-ups. The cap is on the
+        # remaining admissions_only runs.
+        assert queued_admissions == 2
 
 
 @pytest.mark.django_db
@@ -1725,9 +1731,18 @@ class TestDefaultStubBackwardCompat:
             call_command("process_ingestion_runs_persistent_session")
 
         succeeded = IngestionRun.objects.filter(status="succeeded").count()
-        queued = IngestionRun.objects.filter(status="queued").count()
+        queued_admissions = IngestionRun.objects.filter(
+            status="queued", intent="admissions_only"
+        ).count()
         assert succeeded == 3
-        assert queued == 0
+        # PSW-S15: each processed admissions_only run now enqueues a
+        # demographics_only follow-up (detached from any batch) to match the
+        # current worker. The eligible admissions_only queue is fully drained.
+        assert queued_admissions == 0
+        demographics = IngestionRun.objects.filter(
+            status="queued", intent="demographics_only"
+        ).count()
+        assert demographics == 3
 
     def test_stub_with_run_id_still_works(self):
         """--run-id works on the stub path too (claims only the selected run)."""
@@ -1796,9 +1811,14 @@ def test_loop_mode_exits_when_max_runs_reached():
         )
 
     succeeded = IngestionRun.objects.filter(status="succeeded").count()
-    queued = IngestionRun.objects.filter(status="queued").count()
+    queued_admissions = IngestionRun.objects.filter(
+        status="queued", intent="admissions_only"
+    ).count()
     assert succeeded == 2
-    assert queued == 1
+    # PSW-S15: each processed admissions_only run now enqueues a
+    # demographics_only follow-up, so total queued grows by those. The cap is
+    # on the remaining admissions_only runs.
+    assert queued_admissions == 1
 
 
 # ===========================================================================
@@ -2354,3 +2374,363 @@ class TestProductionProducerIntents:
         assert run.worker_label != "", (
             "Current worker must assign a worker label"
         )
+
+
+# =========================================================================
+# PSW-S15: Admissions-only persistence parity
+# =========================================================================
+
+_ADMISSION_SNAPSHOT_PARITY = [
+    {
+        "admission_key": "ADM-PARITY",
+        "admission_start": "2024-03-10",
+        "admission_end": "2024-03-15",
+        "ward": "Enfermaria B",
+        "bed": "010",
+    },
+]
+
+
+@pytest.mark.django_db
+class TestAdmissionsOnlyPersistenceParity:
+    """PSW-S15: persistent admissions_only must persist like the current worker.
+
+    Asserts the persistent worker produces the same clinical and operational
+    effects as ``process_ingestion_runs``: Patient/Admission rows,
+    database-derived counters (never list-length fabrication), demographics +
+    full-sync follow-ups under the same conditions, stages, attempts, and
+    batch semantics. Expected values mirror the current worker's documented
+    behavior (``tests/integration/test_worker_lifecycle.py``
+    ``TestAdmissionsOnlyWorker``).
+    """
+
+    def test_persists_patient_and_admission_rows(self):
+        from apps.patients.models import Admission, Patient
+
+        run = _queue_admissions_run(
+            parameters_json={
+                "patient_record": "PAR-1",
+                "intent": "admissions_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=_ADMISSION_SNAPSHOT_PARITY,
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        patient = Patient.objects.get(patient_source_key="PAR-1")
+        assert Admission.objects.filter(
+            patient=patient, source_admission_key="ADM-PARITY"
+        ).exists()
+
+    def test_counters_reflect_database_outcomes_not_list_length(self):
+        """Update path: pre-existing admission -> created=0, updated=1.
+
+        Exposes the fabricated ``admissions_created = admissions_seen``
+        counter that ignored database outcomes.
+        """
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            source_system="tasy", patient_source_key="PAR-2", name="",
+        )
+        Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM-PARITY",
+            admission_date=timezone.make_aware(
+                datetime.datetime(2024, 3, 10, 0, 0, 0)
+            ),
+        )
+        run = _queue_admissions_run(
+            parameters_json={
+                "patient_record": "PAR-2",
+                "intent": "admissions_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=_ADMISSION_SNAPSHOT_PARITY,
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        assert run.admissions_seen == 1
+        assert run.admissions_created == 0
+        assert run.admissions_updated == 1
+
+    def test_enqueues_demographics_only_followup_with_no_batch(self):
+        _queue_admissions_run(
+            parameters_json={
+                "patient_record": "PAR-3",
+                "intent": "admissions_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=_ADMISSION_SNAPSHOT_PARITY,
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        demos = IngestionRun.objects.filter(
+            intent="demographics_only",
+            parameters_json__patient_record="PAR-3",
+        )
+        assert demos.count() == 1
+        demo = demos.first()
+        assert demo.status == "queued"
+        # Demographics follow-up is deliberately detached from the batch.
+        assert demo.batch_id is None
+
+    def test_enqueues_most_recent_full_sync_followup(self):
+        run = _queue_admissions_run(
+            parameters_json={
+                "patient_record": "PAR-4",
+                "intent": "admissions_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=_ADMISSION_SNAPSHOT_PARITY,
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        fs_runs = (
+            IngestionRun.objects.filter(
+                intent="full_sync",
+                parameters_json__patient_record="PAR-4",
+            )
+            .exclude(pk=run.pk)
+        )
+        assert fs_runs.count() == 1
+        fs = fs_runs.first()
+        assert fs.status == "queued"
+        # Same batch relationship as the current worker.
+        assert fs.batch_id == run.batch_id
+        assert fs.parameters_json["intent"] == "full_sync"
+        assert fs.parameters_json["admission_source_key"] == "ADM-PARITY"
+        assert "admission_id" in fs.parameters_json
+
+    def test_empty_snapshot_no_fabricated_counters_or_full_sync(self):
+        """Zero admissions must not fabricate created rows or full-sync work."""
+        run = _queue_admissions_run(
+            parameters_json={
+                "patient_record": "PAR-5",
+                "intent": "admissions_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        assert run.admissions_seen == 0
+        assert run.admissions_created == 0
+        assert run.admissions_updated == 0
+        # No full-sync work fabricated when no admission exists.
+        assert not (
+            IngestionRun.objects.filter(
+                intent="full_sync",
+                parameters_json__patient_record="PAR-5",
+            )
+            .exclude(pk=run.pk)
+            .exists()
+        )
+
+    def test_persistence_failure_fails_run_without_admission(self):
+        from apps.patients.models import Admission
+
+        run = _queue_admissions_run(
+            max_attempts=1,
+            parameters_json={
+                "patient_record": "PAR-6",
+                "intent": "admissions_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=_ADMISSION_SNAPSHOT_PARITY,
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"
+            ".persist_admissions_snapshot",
+            side_effect=ValueError("DB write failed"),
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert not Admission.objects.filter(
+            source_admission_key="ADM-PARITY",
+        ).exists()
+        stage = IngestionRunStageMetric.objects.filter(
+            run=run, stage_name="admissions_capture"
+        ).first()
+        assert stage is not None
+        assert stage.status == "failed"
+
+    def test_stages_and_attempt_succeeded_on_success(self):
+        run = _queue_admissions_run(
+            parameters_json={
+                "patient_record": "PAR-7",
+                "intent": "admissions_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=_ADMISSION_SNAPSHOT_PARITY,
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        stage = IngestionRunStageMetric.objects.filter(
+            run=run, stage_name="admissions_capture"
+        ).first()
+        assert stage is not None and stage.status == "succeeded"
+        attempt = IngestionRunAttempt.objects.filter(run=run).first()
+        assert attempt is not None and attempt.status == "succeeded"
+
+
+@pytest.mark.django_db
+class TestAdmissionsOnlyCrossWorkerParity:
+    """PSW-S15-R8: both workers use the same admissions business rule.
+
+    Runs equivalent synthetic snapshots (distinct admission keys per worker to
+    avoid the global ``source_admission_key`` lookup colliding across patients)
+    through both workers and asserts equivalent Patient/Admission rows,
+    counters, demographics/full-sync follow-ups, and batch relationships.
+    """
+
+    def _snapshot(self, admission_key):
+        return [
+            {
+                "admission_key": admission_key,
+                "admission_start": "2024-03-10",
+                "admission_end": "2024-03-15",
+                "ward": "Enfermaria B",
+                "bed": "010",
+            }
+        ]
+
+    def _run_current_worker(self, patient_record, admission_key):
+        from apps.ingestion.management.commands.process_ingestion_runs import (
+            Command as CurrentCommand,
+        )
+
+        run = IngestionRun.objects.create(
+            status="queued",
+            max_attempts=1,
+            parameters_json={
+                "patient_record": patient_record,
+                "intent": "admissions_only",
+            },
+        )
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.return_value = self._snapshot(admission_key)
+        mock_ext.extract_evolutions.return_value = []
+
+        counter = {"n": 0}
+
+        def fake_claim(*args, **kwargs):
+            counter["n"] += 1
+            return run if counter["n"] == 1 else None
+
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs"
+            ".PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ), patch.object(
+            CurrentCommand, "_claim_eligible_run", fake_claim
+        ):
+            call_command("process_ingestion_runs")
+        return run
+
+    def _run_persistent_worker(self, patient_record, admission_key):
+        run = IngestionRun.objects.create(
+            status="queued",
+            max_attempts=1,
+            parameters_json={
+                "patient_record": patient_record,
+                "intent": "admissions_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=self._snapshot(admission_key),
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            # Target the specific run so an unrelated full_sync follow-up
+            # enqueued by the current worker (same DB) is not claimed.
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run.pk,
+                max_runs=1,
+            )
+        return run
+
+    def test_both_workers_persist_equivalent_patient_admission_counters(self):
+        from apps.patients.models import Admission, Patient
+
+        current_run = self._run_current_worker("CW-CURR", "ADM-CURR")
+        persistent_run = self._run_persistent_worker("CW-PERS", "ADM-PERS")
+
+        assert Patient.objects.filter(patient_source_key="CW-CURR").exists()
+        assert Patient.objects.filter(patient_source_key="CW-PERS").exists()
+        assert Admission.objects.filter(source_admission_key="ADM-CURR").count() == 1
+        assert Admission.objects.filter(source_admission_key="ADM-PERS").count() == 1
+
+        current_run.refresh_from_db()
+        persistent_run.refresh_from_db()
+        assert current_run.admissions_seen == persistent_run.admissions_seen == 1
+        assert current_run.admissions_created == persistent_run.admissions_created == 1
+        assert current_run.admissions_updated == persistent_run.admissions_updated == 0
+        assert current_run.status == persistent_run.status == "succeeded"
+
+    def test_both_workers_enqueue_equivalent_followups(self):
+        current_run = self._run_current_worker("FW-CURR", "ADM-CURR")
+        persistent_run = self._run_persistent_worker("FW-PERS", "ADM-PERS")
+
+        for pr, src, key in (
+            ("FW-CURR", current_run, "ADM-CURR"),
+            ("FW-PERS", persistent_run, "ADM-PERS"),
+        ):
+            demos = IngestionRun.objects.filter(
+                intent="demographics_only",
+                parameters_json__patient_record=pr,
+            )
+            assert demos.count() == 1, f"demographics follow-up mismatch for {pr}"
+            assert demos.first().batch_id is None
+
+            fs = (
+                IngestionRun.objects.filter(
+                    intent="full_sync",
+                    parameters_json__patient_record=pr,
+                )
+                .exclude(pk=src.pk)
+            )
+            assert fs.count() == 1, f"full_sync follow-up mismatch for {pr}"
+            f = fs.first()
+            assert f.batch_id == src.batch_id
+            assert f.parameters_json["admission_source_key"] == key
+            assert f.parameters_json["intent"] == "full_sync"

@@ -251,16 +251,16 @@
 
 ## 15. PSW-S15: Admissions-only persistence parity
 
-- [ ] 15.1 Add failing parity tests for patient/admission persistence, real
+- [x] 15.1 Add failing parity tests for patient/admission persistence, real
   counters, ward/bed backfill, follow-ups, attempts, stages, and batch closure.
-- [ ] 15.2 Reuse or extract the smallest canonical admissions orchestration so
+- [x] 15.2 Reuse or extract the smallest canonical admissions orchestration so
   both workers preserve the same clinical effects without duplicated business
   logic.
-- [ ] 15.3 Replace fabricated persistent-worker counters with database outcomes
+- [x] 15.3 Replace fabricated persistent-worker counters with database outcomes
   and enqueue demographics/full-sync under current-worker conditions.
-- [ ] 15.4 Prove zero-admission and failure paths do not create false counters or
+- [x] 15.4 Prove zero-admission and failure paths do not create false counters or
   follow-up jobs.
-- [ ] 15.5 Run official validation and create
+- [x] 15.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S15-report.md`.
 
 ## 16. PSW-S16: Persistent demographics-only end-to-end

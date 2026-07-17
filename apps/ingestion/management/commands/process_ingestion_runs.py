@@ -1065,10 +1065,12 @@ class Command(BaseCommand):
             - Propagates extractor errors to caller.
             - Syncs ward/bed from latest census data onto active admissions.
         """
-        from apps.ingestion.services import upsert_admission_snapshot
-        from apps.patients.models import Patient
-
-        adm_metrics = {"seen": 0, "created": 0, "updated": 0}
+        # Persistence is delegated to the shared
+        # ``persist_admissions_snapshot`` service so the current and
+        # persistent-session workers share one canonical persistence path
+        # (Patient/Admission rows, ward/bed backfill, database-derived
+        # counters). Source extraction (the extractor call) stays here.
+        from apps.ingestion.services import persist_admissions_snapshot
 
         # For admissions-only runs with no date range, use a wide default
         snap_start = start_date or "2000-01-01"
@@ -1080,36 +1082,10 @@ class Command(BaseCommand):
             timeout=120,
         )
 
-        adm_metrics["seen"] = len(admissions_snapshot)
-
-        if admissions_snapshot:
-            # Create or get patient (for upsert)
-            patient, _ = Patient.objects.get_or_create(
-                source_system="tasy",
-                patient_source_key=patient_record,
-                defaults={"name": ""},
-            )
-
-            # Upsert admissions
-            upsert_result = upsert_admission_snapshot(
-                patient=patient,
-                admissions_snapshot=admissions_snapshot,
-            )
-            adm_metrics["created"] = upsert_result.get("created", 0)
-            adm_metrics["updated"] = upsert_result.get("updated", 0)
-
-            # Sync ward/bed from latest census data onto active admissions
-            # (path2.py does not extract ward/bed, so we backfill from census)
-            self._backfill_admission_ward_from_census(patient)
-        else:
-            # Snapshot empty but capture succeeded — still need patient record
-            patient, _ = Patient.objects.get_or_create(
-                source_system="tasy",
-                patient_source_key=patient_record,
-                defaults={"name": ""},
-            )
-
-        return patient, adm_metrics
+        return persist_admissions_snapshot(
+            patient_source_key=patient_record,
+            admissions_snapshot=admissions_snapshot,
+        )
 
     @staticmethod
     def _backfill_admission_ward_from_census(patient) -> None:
@@ -1174,47 +1150,20 @@ class Command(BaseCommand):
     def _enqueue_most_recent_full_sync(patient, batch=None):
         """Enqueue a full_sync run for the patient's most recent admission.
 
-        Returns the created IngestionRun or None if no admission exists.
-        The run is optionally attached to a batch (pass None for auto-enqueued runs
-        so they don't block batch closure).
+        Thin wrapper over the shared
+        :func:`apps.ingestion.services.enqueue_most_recent_admission_full_sync`
+        service so the current and persistent-session workers share one
+        follow-up rule. Returns the created ``IngestionRun`` or ``None`` if no
+        admission exists.
 
-        Backward compatibility: older callers/tests may still pass an IngestionRun
-        instance instead of a CensusExecutionBatch; in that case, inherit its batch.
+        Backward compatibility: older callers/tests may still pass an
+        ``IngestionRun`` instance instead of a ``CensusExecutionBatch``; in
+        that case, inherit its batch.
         """
-        from django.utils import timezone
-
         from apps.ingestion.models import IngestionRun
-        from apps.patients.models import Admission
+        from apps.ingestion.services import enqueue_most_recent_admission_full_sync
 
         if isinstance(batch, IngestionRun):
             batch = batch.batch
 
-        latest = (
-            Admission.objects.filter(patient=patient)
-            .order_by("-admission_date")
-            .first()
-        )
-        if latest is None:
-            return None
-
-        # Calculate end_date: use discharge_date if available,
-        # otherwise use current time (still admitted)
-        if latest.discharge_date:
-            end_date = latest.discharge_date.strftime("%Y-%m-%d")
-        else:
-            end_date = timezone.now().strftime("%Y-%m-%d")
-
-        return IngestionRun.objects.create(
-            status="queued",
-            intent="full_sync",
-            batch=batch,
-            parameters_json={
-                "patient_record": patient.patient_source_key,
-                "admission_id": str(latest.pk),
-                "admission_source_key": latest.source_admission_key,
-                "start_date": latest.admission_date.strftime("%Y-%m-%d")
-                    if latest.admission_date else "",
-                "end_date": end_date,
-                "intent": "full_sync",
-            },
-        )
+        return enqueue_most_recent_admission_full_sync(patient, batch=batch)

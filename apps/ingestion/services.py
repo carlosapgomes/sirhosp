@@ -558,6 +558,50 @@ def queue_demographics_only_run(
     )
 
 
+def enqueue_most_recent_admission_full_sync(
+    patient: Patient,
+    *,
+    batch: CensusExecutionBatch | None = None,
+) -> IngestionRun | None:
+    """Enqueue a ``full_sync`` run for the patient's most recent admission.
+
+    Shared by the current (``process_ingestion_runs``) and persistent-session
+    (``process_ingestion_runs_persistent_session``) workers so both enqueue the
+    same follow-up with equivalent parameters and batch relationship.
+
+    Returns the created ``IngestionRun``, or ``None`` when the patient has no
+    admission (no full-sync work to schedule).
+    """
+    latest = (
+        Admission.objects.filter(patient=patient)
+        .order_by("-admission_date")
+        .first()
+    )
+    if latest is None:
+        return None
+
+    if latest.discharge_date:
+        end_date = latest.discharge_date.strftime("%Y-%m-%d")
+    else:
+        end_date = timezone.now().strftime("%Y-%m-%d")
+
+    return IngestionRun.objects.create(
+        status="queued",
+        intent="full_sync",
+        batch=batch,
+        parameters_json={
+            "patient_record": patient.patient_source_key,
+            "admission_id": str(latest.pk),
+            "admission_source_key": latest.source_admission_key,
+            "start_date": latest.admission_date.strftime("%Y-%m-%d")
+            if latest.admission_date
+            else "",
+            "end_date": end_date,
+            "intent": "full_sync",
+        },
+    )
+
+
 def find_active_full_admission_sync_run(
     *,
     patient_record: str,
@@ -837,6 +881,48 @@ def upsert_admission_snapshot(
         )
 
     return {"created": created, "updated": updated}
+
+
+def persist_admissions_snapshot(
+    *,
+    patient_source_key: str,
+    admissions_snapshot: list[dict[str, Any]],
+    source_system: str = "tasy",
+) -> tuple[Patient, dict[str, int]]:
+    """Persist a patient and admissions snapshot through canonical services.
+
+    Shared by the current and persistent-session workers' admissions capture
+    so both produce identical clinical effects: a ``Patient`` row, ``Admission``
+    rows via :func:`upsert_admission_snapshot`, ward/bed backfill via
+    :func:`backfill_admission_ward_from_census`, and ``seen``/``created``/
+    ``updated`` counters derived from database outcomes (never from list
+    length). Source extraction (extractor/adapter) stays OUTSIDE this
+    boundary — callers pass the already-captured snapshot.
+
+    A ``Patient`` is always created (even for an empty snapshot) for
+    traceability, matching the existing current-worker behavior.
+
+    Returns ``(patient, {"seen": int, "created": int, "updated": int})``.
+    """
+    patient, _ = Patient.objects.get_or_create(
+        source_system=source_system,
+        patient_source_key=patient_source_key,
+        defaults={"name": ""},
+    )
+    adm_metrics: dict[str, int] = {
+        "seen": len(admissions_snapshot),
+        "created": 0,
+        "updated": 0,
+    }
+    if admissions_snapshot:
+        upsert_result = upsert_admission_snapshot(
+            patient=patient,
+            admissions_snapshot=admissions_snapshot,
+        )
+        adm_metrics["created"] = upsert_result.get("created", 0)
+        adm_metrics["updated"] = upsert_result.get("updated", 0)
+        backfill_admission_ward_from_census(patient)
+    return patient, adm_metrics
 
 
 # ---------------------------------------------------------------------------

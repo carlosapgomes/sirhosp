@@ -129,6 +129,11 @@ from apps.ingestion.management.commands.process_ingestion_runs import (
     WorkerHeartbeat,
 )
 from apps.ingestion.models import IngestionRun, IngestionRunAttempt
+from apps.ingestion.services import (
+    enqueue_most_recent_admission_full_sync,
+    persist_admissions_snapshot,
+    queue_demographics_only_run,
+)
 
 # ---------------------------------------------------------------------------
 # Default configuration
@@ -995,16 +1000,35 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             return
 
-        # Success — adapter already handled tab cleanup and mark_job_processed
-        adm_seen = len(result)
+        # Success — adapter already handled tab cleanup and mark_job_processed.
+        # Persist the snapshot through the canonical services shared with the
+        # current worker (Patient/Admission rows, ward/bed backfill, and
+        # database-derived seen/created/updated counters).
+        try:
+            patient, adm_metrics = persist_admissions_snapshot(
+                patient_source_key=patient_record,
+                admissions_snapshot=result,
+            )
+        except Exception as exc:
+            self._record_stage(
+                run, "admissions_capture", "failed", stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during admissions persistence: {exc}"
+            )
+            return
+
         self._record_stage(
             run, "admissions_capture", "succeeded", stage_start,
         )
 
-        # Persist metrics and mark succeeded
-        run.admissions_seen = adm_seen
-        run.admissions_created = adm_seen  # simplified: all seen are new here
-        run.admissions_updated = 0
+        # Persist metrics (counters come from database outcomes, never list
+        # length) and mark succeeded.
+        run.admissions_seen = adm_metrics["seen"]
+        run.admissions_created = adm_metrics["created"]
+        run.admissions_updated = adm_metrics["updated"]
         run.events_processed = 0
         run.events_created = 0
         run.events_skipped = 0
@@ -1018,12 +1042,36 @@ class Command(BaseCommand):
         # Mark attempt as succeeded
         self._mark_latest_attempt_succeeded(run)
 
+        # Enqueue follow-ups under the same conditions as the current worker:
+        # demographics_only (detached from the batch so it can close
+        # independently) and the most-recent-admission full_sync (attached to
+        # the same batch as this run).
+        if patient is not None:
+            demo_run = queue_demographics_only_run(
+                patient_record=patient.patient_source_key,
+                batch=None,
+            )
+            self.stdout.write(
+                f"  Auto-enqueued demographics_only run #{demo_run.pk} "
+                f"for patient {patient.patient_source_key}"
+            )
+            full_sync_run = enqueue_most_recent_admission_full_sync(
+                patient, batch=run.batch,
+            )
+            if full_sync_run is not None:
+                self.stdout.write(
+                    f"  Auto-enqueued full_sync run #{full_sync_run.pk} "
+                    f"for most recent admission"
+                )
+
         # Close batch if all runs drained
         self._try_close_batch(run.batch)
 
         self.stdout.write(
             f"  Run #{run.pk} admissions-only succeeded (persistent session) "
-            f"(admissions_seen={adm_seen})"
+            f"(admissions_seen={adm_metrics['seen']}, "
+            f"admissions_created={adm_metrics['created']}, "
+            f"admissions_updated={adm_metrics['updated']})"
         )
 
     # ------------------------------------------------------------------
@@ -1046,12 +1094,6 @@ class Command(BaseCommand):
         6. Transition to 'succeeded' with metrics.
         7. On any failure after admissions: preserve admissions + fail run.
         """
-        from apps.ingestion.services import (
-            backfill_admission_ward_from_census,
-            upsert_admission_snapshot,
-        )
-        from apps.patients.models import Patient
-
         params = run.parameters_json or {}
         patient_record = params.get("patient_record", "")
         start_date = params.get("start_date", "")
@@ -1097,25 +1139,14 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             return
 
-        # Create/get patient and upsert admissions
-        patient, _ = Patient.objects.get_or_create(
-            source_system="tasy",
+        # Persist through the canonical shared service so admissions-only and
+        # full-sync share one persistence path (Patient/Admission rows,
+        # ward/bed backfill, database-derived counters). Source extraction
+        # (the adapter call above) stays in this command.
+        patient, adm_metrics = persist_admissions_snapshot(
             patient_source_key=patient_record,
-            defaults={"name": ""},
+            admissions_snapshot=admissions_data,
         )
-        adm_metrics = {"seen": len(admissions_data), "created": 0, "updated": 0}
-        if admissions_data:
-            upsert_result = upsert_admission_snapshot(
-                patient=patient,
-                admissions_snapshot=admissions_data,
-            )
-            adm_metrics["created"] = upsert_result.get("created", 0)
-            adm_metrics["updated"] = upsert_result.get("updated", 0)
-
-        # Enrich active admissions with ward/bed from the latest census
-        # (admission snapshot does not carry setor/leito). Same behavior as
-        # the current worker's _capture_admissions.
-        backfill_admission_ward_from_census(patient)
 
         self._record_stage(
             run, "admissions_capture", "succeeded", adm_stage_start,
