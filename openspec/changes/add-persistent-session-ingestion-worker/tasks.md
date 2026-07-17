@@ -235,18 +235,18 @@
 
 ## 14. PSW-S14: Explicit supported-intent contract
 
-- [ ] 14.1 Characterize current queued intent behavior and add failing tests for
+- [x] 14.1 Characterize current queued intent behavior and add failing tests for
   explicit enabled dispatch of `admissions_only`, `full_sync`, and the
   `full_admission_sync` alias.
-- [ ] 14.2 Add failing tests proving empty, unknown, and not-yet-enabled
+- [x] 14.2 Add failing tests proving empty, unknown, and not-yet-enabled
   `demographics_only` runs are not claimed during normal polling and explicit
   unsupported selection performs no source or clinical side effects.
-- [ ] 14.3 Implement explicit enabled-intent claiming and dispatch without an
+- [x] 14.3 Implement explicit enabled-intent claiming and dispatch without an
   implicit `else -> full_sync` fallback or placeholder demographics handler.
-- [ ] 14.4 Prove production enqueue paths create explicit non-empty target
+- [x] 14.4 Prove production enqueue paths create explicit non-empty target
   intents and keep the current worker consuming demographics until PSW-S16
   atomically enables the persistent implementation.
-- [ ] 14.5 Run official validation and create
+- [x] 14.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S14-report.md`.
 
 ## 15. PSW-S15: Admissions-only persistence parity

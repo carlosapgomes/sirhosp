@@ -143,6 +143,38 @@ _LOGIN_TIMEOUT_SECONDS = 60
 _PERSISTENT_LABEL_PREFIX = "persistent-worker"
 """Default worker label prefix when SIRHOSP_WORKER_LABEL is not set."""
 
+# ---------------------------------------------------------------------------
+# Explicit supported-intent contract (PSW-S14)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Explicit supported-intent contract (PSW-S14)
+# Single source of truth: _DISPATCH_MAP is the declaration; _ENABLED_INTENTS
+# is derived from its keys and cannot drift.
+# ---------------------------------------------------------------------------
+
+_DISPATCH_MAP: dict[str, str] = {
+    "admissions_only": "admissions_only",
+    "full_sync": "full_sync",
+    "full_admission_sync": "full_sync",
+}
+"""Maps queued intent to dispatch action.
+
+``full_admission_sync`` is an explicit alias that dispatches to the same
+full-sync code path as ``full_sync``. This is the single declaration of
+which intents are supported; ``_ENABLED_INTENTS`` is derived from its keys.
+"""
+
+_ENABLED_INTENTS: frozenset[str] = frozenset(_DISPATCH_MAP)
+"""Intents the persistent worker MAY claim during normal polling.
+
+Derived from ``_DISPATCH_MAP`` keys — cannot drift independently.
+``demographics_only`` is a required replacement scope but is NOT enabled until
+PSW-S16 atomically adds its persistent implementation and enables its claim.
+Empty or unknown intents must never fall through to full-sync.
+"""
+
+
 
 class _StubSessionHandle:
     """Minimal stub implementing the SessionHandle protocol.
@@ -261,6 +293,13 @@ class Command(BaseCommand):
                 "--real-handle requires --max-runs 1 to bound the manual smoke "
                 "to a single run. Pass --max-runs 1 explicitly."
             )
+
+        # Preflight the selected run before creating the adapter.
+        # If the selected run has an unsupported intent (empty, unknown,
+        # demographics_only, or conflicting model/JSON intents), reject
+        # without starting a browser/session/login.
+        if self._run_id is not None and not self._preflight_selected_run():
+            return
 
         # The adapter (and its persistent browser/session) is created ONCE
         # at startup and reused across all claimed runs. This is the core
@@ -467,30 +506,64 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _claim_eligible_run(run_id: int | None = None) -> IngestionRun | None:
-        """Claim the next eligible queued run respecting next_retry_at.
+    def _eligible_work_filter():
+        """Return a Q expression for eligible persistent-worker work.
 
-        Eligible = status='queued' AND (next_retry_at IS NULL OR
-        next_retry_at <= now). Uses ``select_for_update(skip_locked=True)``
-        for safe concurrent access.
+        A run is eligible when:
+        - status=queued
+        - intent is one of the enabled intents
+        - next_retry_at IS NULL OR next_retry_at <= now
 
-        Args:
-            run_id: When provided, claim only that run (still requiring it to
-                be queued and eligible). Used by the manual smoke
-                ``--run-id`` control.
+        Reused by both the polling loop and the claiming method so their
+        eligibility rules are identical.
         """
         from django.db.models import Q
 
-        now = timezone.now()
-        qs = (
+        return (
+            Q(status="queued")
+            & Q(intent__in=_ENABLED_INTENTS)
+            & (Q(next_retry_at__isnull=True) | Q(next_retry_at__lte=timezone.now()))
+        )
+
+    @staticmethod
+    def _claim_eligible_run(run_id: int | None = None) -> IngestionRun | None:
+        """Claim the next eligible queued run respecting next_retry_at.
+
+        Uses ``select_for_update(skip_locked=True)`` for safe concurrent
+        access.
+
+        During normal polling (``run_id`` is None), only runs with an
+        enabled intent are eligible (see ``_eligible_work_filter()``).
+        ``demographics_only``, empty, and unknown intents are NOT claimed.
+
+        When ``--run-id`` is provided, the caller must have validated the
+        run via ``_preflight_selected_run()`` before reaching this method.
+        The intent and retry filters are not applied so the specific PK
+        can be claimed under the preflight check.
+
+        Args:
+            run_id: When provided, claim only that run (still requiring it to
+                be queued). Used by the manual smoke ``--run-id`` control.
+        """
+
+        if run_id is not None:
+            # --run-id path: preflight already validated. Claim by PK only.
+            return (
+                IngestionRun.objects
+                .select_for_update(skip_locked=True)
+                .filter(pk=run_id, status="queued")
+                .order_by("pk")
+                .first()
+            )
+
+        # Normal polling: use the shared eligibility filter.
+        return (
             IngestionRun.objects
             .select_for_update(skip_locked=True)
-            .filter(status="queued")
-            .filter(Q(next_retry_at__isnull=True) | Q(next_retry_at__lte=now))
+            .filter(Command._eligible_work_filter())
+            .order_by("pk")
+            .first()
         )
-        if run_id is not None:
-            qs = qs.filter(pk=run_id)
-        return qs.order_by("pk").first()
 
     # ------------------------------------------------------------------
     # Loop mode
@@ -525,7 +598,9 @@ class Command(BaseCommand):
                 break
             try:
                 close_old_connections()
-                count = IngestionRun.objects.filter(status="queued").count()
+                count = IngestionRun.objects.filter(
+                    self._eligible_work_filter()
+                ).count()
             except (OperationalError, ProgrammingError) as exc:
                 self.stderr.write(
                     self.style.WARNING(
@@ -540,14 +615,14 @@ class Command(BaseCommand):
 
             if count == 0:
                 self.stdout.write(
-                    f"[{timezone.now():%H:%M:%S}] No queued runs, "
+                    f"[{timezone.now():%H:%M:%S}] No eligible persistent work, "
                     f"sleeping {sleep_seconds}s..."
                 )
                 time.sleep(sleep_seconds)
                 continue
 
             self.stdout.write(
-                f"[{timezone.now():%H:%M:%S}] Found {count} queued run(s), "
+                f"[{timezone.now():%H:%M:%S}] Found {count} eligible run(s), "
                 "processing..."
             )
             self._process_all_queued(adapter)
@@ -559,39 +634,25 @@ class Command(BaseCommand):
     def _process_once(self, adapter: PersistentExtractionAdapter) -> None:
         """Process all queued runs once and exit.
 
-        Honors ``--run-id`` (scope to one run) and ``--max-runs`` (bound the
-        number of processed runs).
+        Honors ``--max-runs`` (bound the number of processed runs).
+        The ``--run-id`` preflight already ran before adapter creation
+        (see ``handle()`` and ``_preflight_selected_run()``).
         """
         run_id = getattr(self, "_run_id", None)
         if run_id is not None:
-            scoped = IngestionRun.objects.filter(pk=run_id)
-            exists = scoped.exists()
-            eligible = scoped.filter(status="queued").exists()
-            if not exists:
-                self.stderr.write(
-                    self.style.WARNING(
-                        f"Run #{run_id} does not exist; nothing processed."
-                    )
-                )
-                return
-            if not eligible:
-                self.stderr.write(
-                    self.style.WARNING(
-                        f"Run #{run_id} is not eligible (not queued); "
-                        "nothing processed."
-                    )
-                )
-                return
+            # Preflight already validated this run. Process it directly.
             self.stdout.write(f"Processing selected run #{run_id}...")
             self._process_all_queued(adapter)
             self.stdout.write(self.style.SUCCESS("Done."))
             return
 
-        count = IngestionRun.objects.filter(status="queued").count()
+        count = IngestionRun.objects.filter(
+            self._eligible_work_filter()
+        ).count()
         if count == 0:
-            self.stdout.write("No queued runs to process.")
+            self.stdout.write("No eligible runs to process.")
             return
-        self.stdout.write(f"Processing {count} queued run(s)...")
+        self.stdout.write(f"Processing {count} eligible run(s)...")
         self._process_all_queued(adapter)
         self.stdout.write(self.style.SUCCESS("Done."))
 
@@ -627,6 +688,13 @@ class Command(BaseCommand):
                 run = self._claim_eligible_run(getattr(self, "_run_id", None))
                 if run is None:
                     break
+                # Validate intent before marking as running. During normal
+                # polling the claim filter already excludes unsupported intents,
+                # but when ``--run-id`` selects a specific run, we must check
+                # here before mutating the run.
+                if not self._validate_run_intent(run):
+                    self._reject_unsupported_intent(run, run.intent)
+                    break
                 run.status = "running"
                 run.save(update_fields=["status"])
 
@@ -654,6 +722,113 @@ class Command(BaseCommand):
     # Process a single run
     # ------------------------------------------------------------------
 
+    def _preflight_selected_run(self) -> bool:
+        """Validate a selected (--run-id) run before adapter/browser creation.
+
+        Checks: existence, queued status, retry eligibility, intent validity,
+        and model/JSON intent consistency. On failure, emits a warning and
+        returns False WITHOUT starting a browser, session, login, or adapter.
+
+        Returns:
+            True if the run passes all preflight checks and may proceed.
+
+        Side effects when returning False:
+            No adapter/session/browser created. No run state mutated.
+        """
+        run_id = getattr(self, "_run_id", None)
+        if run_id is None:
+            return True
+
+        now = timezone.now()
+
+        try:
+            run = IngestionRun.objects.get(pk=run_id)
+        except IngestionRun.DoesNotExist:
+            self.stderr.write(
+                self.style.WARNING(
+                    f"Run #{run_id} does not exist; nothing processed."
+                )
+            )
+            return False
+
+        if run.status != "queued":
+            self.stderr.write(
+                self.style.WARNING(
+                    f"Run #{run_id} is not queued (status={run.status}); "
+                    "nothing processed."
+                )
+            )
+            return False
+
+        # Check retry eligibility
+        if run.next_retry_at is not None and run.next_retry_at > now:
+            self.stderr.write(
+                self.style.WARNING(
+                    f"Run #{run_id} retry not yet due "
+                    f"(next_retry_at={run.next_retry_at}); "
+                    "nothing processed."
+                )
+            )
+            return False
+
+        # Validate intent (model authoritative, JSON must agree)
+        if not self._validate_run_intent(run):
+            params = run.parameters_json or {}
+            json_intent = params.get("intent", "")
+            model_intent = run.intent or ""
+            if model_intent and json_intent and model_intent != json_intent:
+                msg = (
+                    f"Run #{run_id}: conflicting intents "
+                    f"(model={model_intent!r}, JSON={json_intent!r}); "
+                    f"persistent worker rejects."
+                )
+            else:
+                effective = model_intent or json_intent or "(empty)"
+                msg = (
+                    f"Run #{run_id}: unsupported intent {effective!r} — "
+                    f"persistent worker rejects. "
+                    f"Keeping run queued for current worker."
+                )
+            self.stderr.write(self.style.WARNING(msg))
+            return False
+
+        return True
+
+    @staticmethod
+    def _validate_run_intent(run: IngestionRun) -> bool:
+        """Validate that this run has a supported explicit intent.
+
+        During normal polling, unsupported intents are filtered by
+        ``_claim_eligible_run``. This method is used when ``--run-id``
+        selects a specific run that may have a non-enabled intent.
+
+        The canonical effective-intent rule: ``IngestionRun.intent`` is
+        authoritative for queue ownership. When ``parameters_json.intent``
+        is non-empty it must match ``run.intent``, otherwise the row is
+        rejected without source actions.
+
+        Returns:
+            True if the intent is supported and enabled, and the model
+            field agrees with the JSON parameter when both are non-empty.
+
+        Side effects when returning False:
+            The run is NOT mutated — no status change, no attempt
+            increment, no stage metrics, no clinical data, no source-
+            session actions.
+        """
+        params = run.parameters_json or {}
+        json_intent = params.get("intent", "")
+        model_intent = run.intent or ""
+
+        # The model field is authoritative for queue ownership.
+        effective_intent = model_intent or json_intent
+
+        # When both are non-empty they must agree.
+        if model_intent and json_intent and model_intent != json_intent:
+            return False
+
+        return effective_intent in _ENABLED_INTENTS and effective_intent in _DISPATCH_MAP
+
     def _process_run(
         self,
         run: IngestionRun,
@@ -661,11 +836,23 @@ class Command(BaseCommand):
     ) -> None:
         """Process a single IngestionRun through the persistent adapter.
 
-        Dispatches to admissions-only or full-sync based on intent.
+        Dispatches through an explicit intent mapping. ``full_admission_sync``
+        is dispatched to the full-sync path via ``_DISPATCH_MAP``.
+        Empty, unknown, or not-yet-enabled intents are validated and rejected
+        WITHOUT changing run status, attempts, stages, clinical data, or
+        source-session state.
+
         Heartbeat is refreshed via ``WorkerHeartbeat`` context manager.
         """
         params = run.parameters_json or {}
         intent = params.get("intent", "") or run.intent
+
+        # Validate intent. During normal polling this is redundant (the claim
+        # filter already excludes unsupported intents), but when ``--run-id``
+        # selects a specific run, this guards against unsupported intents.
+        if not self._validate_run_intent(run):
+            self._reject_unsupported_intent(run, intent)
+            return
 
         # Transition to running + record attempt start
         run.status = "running"
@@ -687,14 +874,38 @@ class Command(BaseCommand):
             attempt_number=run.attempt_count,
         )
 
+        # Strict lookup: validation guarantees intent is in _DISPATCH_MAP.
+        # No fallback — an unknown intent must never reach full-sync.
+        dispatch_action = _DISPATCH_MAP[intent]
         with WorkerHeartbeat(run, interval_seconds=60):
-            if intent == "admissions_only":
+            if dispatch_action == "admissions_only":
                 self._process_admissions_only(run, adapter)
-            elif intent == "full_sync":
+            elif dispatch_action == "full_sync":
                 self._process_full_sync(run, adapter)
-            else:
-                # Unknown intent — treat as full_sync (backward compat)
-                self._process_full_sync(run, adapter)
+
+    @staticmethod
+    def _reject_unsupported_intent(run: IngestionRun, intent: str) -> None:
+        """Reject a run with unsupported intent without side effects.
+
+        The run is NOT mutated — no status change, no attempt increment,
+        no stage metrics, no clinical data, no source-session actions.
+        A warning is logged to stderr so the operator can inspect the
+        situation.
+
+        This only applies to explicit ``--run-id`` selection. During
+        normal polling, the claim filter prevents unsupported runs from
+        being claimed.
+        """
+        # Intentionally blank: no DB mutations, no adapter calls.
+        # The run remains queued for the current worker.
+        import sys
+
+        print(
+            f"  Run #{run.pk}: unsupported intent {intent!r} — "
+            f"persistent worker rejects. "
+            f"Keeping run queued for current worker.",
+            file=sys.stderr,
+        )
 
     # ------------------------------------------------------------------
     # Admissions-only processing via persistent adapter

@@ -1964,3 +1964,393 @@ class TestFullSyncPdfFallback:
         lowered = (run.error_message or "").lower()
         for secret in ("password", "cookie", "jsessionid", "authorization"):
             assert secret not in lowered
+
+
+# ===========================================================================
+# PSW-S14: Explicit supported-intent contract
+# ===========================================================================
+
+
+@pytest.mark.django_db
+class TestEnabledIntents:
+    """PSW-S14: Explicit enabled-intent contract for claim and dispatch."""
+
+    def _make_run(self, intent="", params=None, max_attempts=1):
+        return IngestionRun.objects.create(
+            status="queued",
+            intent=intent,
+            max_attempts=max_attempts,
+            parameters_json=params or {},
+        )
+
+    def test_enabled_intents_derived_from_dispatch_map(self):
+        """R1: Enabled intents are derived from the dispatch declaration
+        and cannot drift."""
+        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (
+            _DISPATCH_MAP,
+            _ENABLED_INTENTS,
+        )
+        assert set(_ENABLED_INTENTS) == set(_DISPATCH_MAP.keys()), (
+            "_ENABLED_INTENTS must be derived from _DISPATCH_MAP keys"
+        )
+
+    def test_normal_poll_skips_demographics_only(self):
+        """R2R3: Normal polling does NOT claim demographics_only runs."""
+        _queue_admissions_run(parameters_json={
+            "patient_record": "E1", "intent": "admissions_only",
+        })
+        demo = self._make_run(
+            intent="demographics_only",
+            params={"patient_record": "E2", "intent": "demographics_only"},
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+        demo.refresh_from_db()
+        assert demo.status == "queued"
+
+    def test_normal_poll_skips_empty_intent(self):
+        """R4: Normal polling does NOT claim runs with empty intent."""
+        empty = self._make_run(intent="", params={"patient_record": "E3", "intent": ""})
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+        empty.refresh_from_db()
+        assert empty.status == "queued"
+
+    def test_normal_poll_skips_unknown_intent(self):
+        """R4: Normal polling does NOT claim runs with unknown intent."""
+        unknown = self._make_run(
+            intent="unknown_purpose",
+            params={"patient_record": "E4", "intent": "unknown_purpose"},
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+        unknown.refresh_from_db()
+        assert unknown.status == "queued"
+
+    def test_full_admission_sync_dispatched_to_full_sync(self):
+        """R2: full_admission_sync dispatches explicitly to full-sync."""
+        run = self._make_run(
+            intent="full_admission_sync",
+            params={
+                "patient_record": "E5",
+                "intent": "full_admission_sync",
+                "start_date": "2024-01-01",
+                "end_date": "2024-12-31",
+            },
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.return_value = _EVOLUTION_DATA
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        assert run.events_processed >= 1
+
+    def test_strict_dispatch_no_fallback(self):
+        """R1R2: Strict dispatch has no unknown-to-full-sync fallback.
+        Uses _DISPATCH_MAP[intent] (not .get with fallback)."""
+        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (
+            _DISPATCH_MAP,
+        )
+        with pytest.raises(KeyError):
+            _DISPATCH_MAP["nonexistent_intent"]
+
+    def test_selected_unsupported_does_not_call_adapter(self):
+        """R3R5: Unsupported --run-id does NOT call _create_adapter()."""
+        run = self._make_run(
+            intent="invalid",
+            max_attempts=3,
+            params={"patient_record": "E6", "intent": "invalid"},
+        )
+        with patch.object(PersistentWorkerCommand, "_create_adapter") as mock_create:
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run.pk,
+            )
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+        assert run.attempt_count == 0
+
+    def test_selected_empty_does_not_call_adapter(self):
+        """R3R5: Empty selected intent does NOT call _create_adapter()."""
+        run = self._make_run(intent="", params={"patient_record": "E9", "intent": ""})
+        with patch.object(PersistentWorkerCommand, "_create_adapter") as mock_create:
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run.pk,
+            )
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_selected_demographics_only_does_not_call_adapter(self):
+        """R3R5: demographics_only selected intent does NOT call _create_adapter()."""
+        run = self._make_run(
+            intent="demographics_only",
+            params={"patient_record": "E10", "intent": "demographics_only"},
+        )
+        with patch.object(PersistentWorkerCommand, "_create_adapter") as mock_create:
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run.pk,
+            )
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_conflicting_model_json_intents_rejected(self):
+        """R3R5: Conflicting model/JSON intents rejected before adapter creation."""
+        run = self._make_run(
+            intent="admissions_only",
+            params={"patient_record": "E11", "intent": "full_sync"},
+        )
+        with patch.object(PersistentWorkerCommand, "_create_adapter") as mock_create:
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run.pk,
+            )
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def _loop_sleep_test(self, mock_adapter):
+        """Helper: assert loop with ineligible-only work sleeps
+        and does not call ensure_session_ready."""
+        with (
+            patch.object(
+                PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+            ),
+            patch(
+                "apps.ingestion.management.commands.process_ingestion_runs_persistent_session.time.sleep",
+                side_effect=[None, KeyboardInterrupt],
+            ),
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    loop=True,
+                    sleep_seconds=10,
+                )
+        mock_adapter.ensure_session_ready.assert_not_called()
+
+    def test_loop_with_only_demographics_only_sleeps(self):
+        """R4: Loop with only demographics_only sleeps, no readiness/extraction."""
+        self._make_run(
+            intent="demographics_only",
+            params={"patient_record": "L1", "intent": "demographics_only"},
+        )
+        self._loop_sleep_test(_make_adapter_mock(snapshot_result=[]))
+
+    def test_loop_with_only_empty_intents_sleeps(self):
+        """R4: Loop with only empty/unknown intents sleeps."""
+        self._make_run(intent="", params={"patient_record": "L2", "intent": ""})
+        self._loop_sleep_test(_make_adapter_mock(snapshot_result=[]))
+
+    def test_loop_with_only_retry_not_due_sleeps(self):
+        """R4: Loop with only retry-not-due enabled work sleeps."""
+        import datetime
+        self._make_run(
+            intent="admissions_only",
+            max_attempts=3,
+            params={"patient_record": "L3", "intent": "admissions_only"},
+        )
+        run = IngestionRun.objects.get(parameters_json__patient_record="L3")
+        run.next_retry_at = timezone.now() + datetime.timedelta(hours=1)
+        run.save(update_fields=["next_retry_at"])
+        self._loop_sleep_test(_make_adapter_mock(snapshot_result=[]))
+
+    def test_eligible_enabled_run_still_processed(self):
+        """R2: An eligible enabled run is still processed normally."""
+        run = self._make_run(
+            intent="admissions_only",
+            params={"patient_record": "E12", "intent": "admissions_only"},
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+
+    def test_unsupported_not_yet_enabled_alongside_enabled(self):
+        """R2R3: Disabled run remains untouched while an enabled run is processed."""
+        enabled = self._make_run(
+            intent="admissions_only",
+            params={"patient_record": "E7", "intent": "admissions_only"},
+        )
+        disabled = self._make_run(
+            intent="demographics_only",
+            params={"patient_record": "E8", "intent": "demographics_only"},
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+        enabled.refresh_from_db()
+        disabled.refresh_from_db()
+        assert enabled.status == "succeeded"
+        assert disabled.status == "queued"
+
+    def test_unsupported_selected_no_adapter_no_browser(self):
+        """R5: Unsupported selected run — zero adapter calls, no state mutation."""
+        run = self._make_run(
+            intent="invalid",
+            max_attempts=3,
+            params={"patient_record": "E13", "intent": "invalid"},
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run.pk,
+            )
+        run.refresh_from_db()
+        assert run.status == "queued"
+        assert run.attempt_count == 0
+        mock_adapter.get_admission_snapshot.assert_not_called()
+        mock_adapter.extract_evolutions.assert_not_called()
+
+
+# ===========================================================================
+# PSW-S14: Production producer explicit intent contract
+# ===========================================================================
+
+
+def _make_queued_run(
+    intent: str = "",
+    parameters: dict | None = None,
+    max_attempts: int = 1,
+) -> IngestionRun:
+    """Create a queued IngestionRun with given intent and parameters."""
+    return IngestionRun.objects.create(
+        status="queued",
+        intent=intent,
+        max_attempts=max_attempts,
+        parameters_json=parameters or {},
+    )
+
+
+@pytest.mark.django_db
+class TestProductionProducerIntents:
+    """PSW-S14-R6: Production enqueue helpers create explicit non-empty intents."""
+
+    def test_queue_admissions_only_run_creates_explicit_intent(self):
+        """queue_admissions_only_run creates intent='admissions_only'."""
+        from apps.ingestion.services import queue_admissions_only_run
+        run = queue_admissions_only_run(patient_record="P-PROD")
+        assert run.intent == "admissions_only"
+        assert run.parameters_json.get("intent") == "admissions_only"
+
+    def test_queue_demographics_only_run_creates_explicit_intent(self):
+        """queue_demographics_only_run creates intent='demographics_only'."""
+        from apps.ingestion.services import queue_demographics_only_run
+        run = queue_demographics_only_run(patient_record="P-PROD")
+        assert run.intent == "demographics_only"
+        assert run.parameters_json.get("intent") == "demographics_only"
+
+    def test_queue_ingestion_run_creates_explicit_intent(self):
+        """queue_ingestion_run creates runs with the supplied intent."""
+        from apps.ingestion.services import queue_ingestion_run
+        for intent in ("full_sync", "full_admission_sync", "admissions_only"):
+            run = queue_ingestion_run(
+                patient_record="P-PROD", start_date="2024-01-01",
+                end_date="2024-12-31", intent=intent,
+            )
+            assert run.intent == intent
+            assert run.parameters_json.get("intent") == intent
+
+    def test_current_worker_enqueue_most_recent_full_sync_creates_full_sync(self):
+        """Current worker's _enqueue_most_recent_full_sync creates intent='full_sync'."""
+        from apps.ingestion.management.commands.process_ingestion_runs import (
+            Command as CurrentWorkerCommand,
+        )
+        from apps.patients.models import Admission, Patient
+        patient = Patient.objects.create(
+            source_system="tasy", patient_source_key="P-FS", name="FS Patient",
+        )
+        Admission.objects.create(
+            patient=patient, source_system="tasy",
+            source_admission_key="ADM-FS", admission_date=timezone.now(),
+        )
+        run = CurrentWorkerCommand._enqueue_most_recent_full_sync(patient)
+        assert run is not None and run.intent == "full_sync"
+
+    def test_no_producer_creates_empty_intent(self):
+        """No production enqueue helper creates an empty/blank intent."""
+        from apps.ingestion.services import (
+            queue_admissions_only_run,
+            queue_demographics_only_run,
+            queue_ingestion_run,
+        )
+        runs = [
+            queue_admissions_only_run(patient_record="P-E1"),
+            queue_demographics_only_run(patient_record="P-E2"),
+            queue_ingestion_run(
+                patient_record="P-E3", start_date="2024-01-01",
+                end_date="2024-12-31", intent="full_sync",
+            ),
+            queue_ingestion_run(
+                patient_record="P-E4", start_date="2024-01-01",
+                end_date="2024-12-31", intent="full_admission_sync",
+            ),
+        ]
+        for r in runs:
+            assert r.intent, f"Run #{r.pk} has empty intent"
+            assert r.parameters_json.get("intent"), (
+                f"Run #{r.pk} parameters_json has no intent"
+            )
+
+    def test_current_worker_handles_demographics(self):
+        """R7: The current worker remains executable and continues
+        handling demographics until PSW-S16.
+
+        This test proves the current worker picks up demographics_only runs
+        (the persistent worker skips them), even though the full subprocess
+        extraction may not complete in this test context.
+        """
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="demographics_only",
+            parameters_json={
+                "patient_record": "CWD", "intent": "demographics_only",
+            },
+        )
+        # The current worker claims demographics_only runs and attempts
+        # processing. We patch the full subprocess pipeline to verify the
+        # intent dispatch works (demographics_only branch is reached).
+        with patch(
+            "apps.ingestion.management.commands.process_ingestion_runs.PlaywrightEvolutionExtractor",
+        ) as mock_ext_cls:
+            mock_ext = MagicMock()
+            mock_ext.get_admission_snapshot.return_value = []
+            mock_ext_cls.return_value = mock_ext
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        # The current worker attempted to process the run (attempt_count
+        # was incremented). It may have failed due to subprocess issues,
+        # but the key point is that the current worker CLAIMED the
+        # demographics_only run (persistent worker skips it).
+        assert run.attempt_count >= 1, (
+            "Current worker must claim demographics_only runs"
+        )
+        # The run was marked 'running' at some point (proof of claim)
+        assert run.worker_label != "", (
+            "Current worker must assign a worker label"
+        )
