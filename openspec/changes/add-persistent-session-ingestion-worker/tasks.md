@@ -232,3 +232,150 @@
   threshold tuning.
 - [x] 13.6 Run relevant validation and create
   `/tmp/sirhosp-slice-PSW-S13-report.md`.
+
+## 14. PSW-S14: Explicit supported-intent contract
+
+- [ ] 14.1 Characterize current queued intent behavior and add failing tests for
+  explicit enabled dispatch of `admissions_only`, `full_sync`, and the
+  `full_admission_sync` alias.
+- [ ] 14.2 Add failing tests proving empty, unknown, and not-yet-enabled
+  `demographics_only` runs are not claimed during normal polling and explicit
+  unsupported selection performs no source or clinical side effects.
+- [ ] 14.3 Implement explicit enabled-intent claiming and dispatch without an
+  implicit `else -> full_sync` fallback or placeholder demographics handler.
+- [ ] 14.4 Prove production enqueue paths create explicit non-empty target
+  intents and keep the current worker consuming demographics until PSW-S16
+  atomically enables the persistent implementation.
+- [ ] 14.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S14-report.md`.
+
+## 15. PSW-S15: Admissions-only persistence parity
+
+- [ ] 15.1 Add failing parity tests for patient/admission persistence, real
+  counters, ward/bed backfill, follow-ups, attempts, stages, and batch closure.
+- [ ] 15.2 Reuse or extract the smallest canonical admissions orchestration so
+  both workers preserve the same clinical effects without duplicated business
+  logic.
+- [ ] 15.3 Replace fabricated persistent-worker counters with database outcomes
+  and enqueue demographics/full-sync under current-worker conditions.
+- [ ] 15.4 Prove zero-admission and failure paths do not create false counters or
+  follow-up jobs.
+- [ ] 15.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S15-report.md`.
+
+## 16. PSW-S16: Persistent demographics-only end-to-end
+
+- [ ] 16.1 Add failing tests for action navigation to `Dados do Paciente`,
+  `frame_pol` extraction, normalization, and persistence with synthetic data.
+- [ ] 16.2 Implement `demographics_only` through the already-authenticated
+  persistent page/context and `upsert_patient_demographics`.
+- [ ] 16.3 Preserve demographics stages, attempts, timeouts, retries, heartbeat,
+  extracted-field metrics, cleanup, and batch closure.
+- [ ] 16.4 Prove the persistent path performs no subprocess, temporary JSON,
+  `sync_playwright()`, new browser/context, or second login.
+- [ ] 16.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S16-report.md`.
+
+## 17. PSW-S17: Failure and attempt lifecycle parity
+
+- [ ] 17.1 Add failing cross-worker tests for timeout classification, retry
+  scheduling, terminal attempts, `FinalRunFailure`, and batch closure.
+- [ ] 17.2 Share or align failure classification without duplicating divergent
+  command-local rules.
+- [ ] 17.3 Ensure persistent source timeouts record `failure_reason=timeout` and
+  `timed_out=True`, including navigation, report, and download timeouts.
+- [ ] 17.4 Preserve sanitized errors and current-worker behavior.
+- [ ] 17.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S17-report.md`.
+
+## 18. PSW-S18: Internal legacy-tab cleanup and recovery
+
+- [ ] 18.1 Add failing tests reproducing multiple legacy DOM tabs inside one
+  Playwright Page and unsafe/ambiguous cleanup states.
+- [ ] 18.2 Close the last non-root PrimeFaces tab through its DOM close control,
+  preserve root, and verify tab-count decrease or root restoration.
+- [ ] 18.3 Ensure unsafe cleanup failures are not erased by job accounting and
+  force recovery before the next claim.
+- [ ] 18.4 Prove tab close is cleanup only and never renewal evidence.
+- [ ] 18.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S18-report.md`.
+
+## 19. PSW-S19: Restart, rebootstrap, and lifecycle configuration
+
+- [ ] 19.1 Add failing tests for authenticated rebootstrap after browser restart
+  and no claim while rebootstrap is incomplete.
+- [ ] 19.2 Implement restart plus login/bootstrap readiness through the same
+  persistent lifecycle boundary.
+- [ ] 19.3 Expose conservative max-jobs, max-lifetime, failure, renewal, and
+  headless configuration without changing current-worker CLI behavior.
+- [ ] 19.4 Prove two jobs reuse one login/context and a later post-threshold job
+  runs only after one controlled restart plus rebootstrap.
+- [ ] 19.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S19-report.md`.
+
+## 20. PSW-S20: Action-first real evolution dispatch
+
+- [ ] 20.1 Add a failing real-like adapter test proving the real handle reaches
+  legacy action navigation without first opening a synthetic evolution URL.
+- [ ] 20.2 Make action navigation the real-handle path while retaining URL-based
+  behavior only for explicit stubs/tests.
+- [ ] 20.3 Make required date filling and report waits fail safely with typed,
+  sanitized timeout/error semantics instead of continuing with default dates.
+- [ ] 20.4 Preserve fast paths only where they do not bypass required real
+  navigation or persistence.
+- [ ] 20.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S20-report.md`.
+
+## 21. PSW-S21: Canonical chunking and multi-admission flow
+
+- [ ] 21.1 Add failing tests for at-most-15-day chunks, canonical overlap,
+  guaranteed progress, final single-day windows, and multiple overlapping
+  admissions.
+- [ ] 21.2 Reuse the canonical dependency-free chunking module and remove the
+  duplicate unused helper.
+- [ ] 21.3 Process every selected admission/chunk through the existing session,
+  restore navigation between iterations, and retain the correct admission key.
+- [ ] 21.4 Preserve previously extracted events when a later chunk is empty and
+  avoid fake data or infinite loops.
+- [ ] 21.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S21-report.md`.
+
+## 22. PSW-S22: Authenticated PDF form-download parity
+
+- [ ] 22.1 Add failing tests for direct PDF download and `#printLinks` POST
+  fallback with synthetic ViewState and PDF bytes.
+- [ ] 22.2 Implement authenticated form fallback through the existing
+  `context.request` without filesystem clinical artifacts.
+- [ ] 22.3 Propagate timeout and validate HTTP response, content type, and PDF
+  signature with sanitized typed failures.
+- [ ] 22.4 Preserve normalization, shared persistence, cleanup, and no-new-login
+  guarantees.
+- [ ] 22.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S22-report.md`.
+
+## 23. PSW-S23: Current-versus-persistent parity suite
+
+- [ ] 23.1 Build parameterized parity tests for all supported intents using the
+  same synthetic inputs and comparing externally visible effects.
+- [ ] 23.2 Compare lifecycle, attempts, stages, failures, counters, Patient,
+  Admission, ClinicalEvent, demographics, follow-ups, and batch closure.
+- [ ] 23.3 Add a multi-job sequence proving admissions, demographics, full-sync,
+  and a later job reuse one authenticated handle without subprocess or browser
+  relaunch between jobs.
+- [ ] 23.4 Keep rollout blocked and report every intentional difference rather
+  than weakening parity assertions.
+- [ ] 23.5 Run official validation and create
+  `/tmp/sirhosp-slice-PSW-S23-report.md`.
+
+## 24. PSW-S24: Guarded live validation and cutover readiness
+
+- [ ] 24.1 Define sanitized operator-run evidence for real admissions,
+  demographics, chunked evolutions, renewal, cleanup, and restart/rebootstrap.
+- [ ] 24.2 Run guarded validation within the approved concurrency limit, or mark
+  the slice blocked without changing rollout status when access is unavailable.
+- [ ] 24.3 Reconcile proposal, design, specs, tasks, rollout docs, defaults, and
+  remaining risks with observed results.
+- [ ] 24.4 Approve replacement readiness only if automated parity, live
+  validation, official gates, rollback, and observability criteria all pass.
+- [ ] 24.5 Run final official validation and create
+  `/tmp/sirhosp-slice-PSW-S24-report.md`.

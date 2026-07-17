@@ -174,6 +174,80 @@ The persistent-session worker SHALL preserve the same externally visible
 - **THEN** the timeout is propagated to the session handle or wait path
 - **AND** timeout failures use the existing timeout failure taxonomy
 
+### Requirement: Explicit replacement intent parity
+
+The persistent-session worker SHALL provide functional and operational parity
+for every queued intent supported for replacement: `admissions_only`,
+`demographics_only`, `full_sync`, and `full_admission_sync` as an explicit
+full-sync alias.
+
+#### Scenario: Supported intent is dispatched explicitly
+
+- **WHEN** the persistent worker claims a supported queued run
+- **THEN** it dispatches through an explicit intent mapping
+- **AND** it produces the same externally visible clinical and operational
+  effects as the current worker
+- **AND** it never relies on a generic unknown-intent-to-full-sync fallback
+
+#### Scenario: Empty or unknown intent is not source-processed
+
+- **WHEN** a queued run has an empty or unknown intent
+- **THEN** the persistent worker does not claim it during normal queue polling
+- **AND** an explicitly selected unsupported run fails validation without
+  opening source-system tabs or changing clinical data
+- **AND** tests prove supported production enqueue paths create explicit intents
+
+### Requirement: Admissions-only parity
+
+The persistent worker SHALL persist the admissions snapshot and follow-up work
+with the same observable semantics as the current worker.
+
+#### Scenario: Admissions-only persists and schedules follow-ups
+
+- **WHEN** an `admissions_only` run captures a valid snapshot
+- **THEN** patient and admissions are upserted through the canonical services
+- **AND** seen, created, and updated counters reflect database outcomes
+- **AND** demographics and full-sync follow-ups are enqueued under the same
+  conditions as the current worker
+- **AND** no positive created counter is recorded without persistence
+
+### Requirement: Persistent demographics extraction
+
+The persistent worker SHALL process `demographics_only` through the existing
+authenticated Playwright session and persist results through
+`upsert_patient_demographics`.
+
+#### Scenario: Demographics reuse the current login
+
+- **WHEN** a `demographics_only` run is processed between other persistent jobs
+- **THEN** the worker navigates to `Dados do Paciente` through the already-open
+  page/context and reads the demographic fields from the legacy UI
+- **AND** it performs no subprocess, temporary JSON exchange, new Playwright
+  entry, browser/context launch, or second login
+- **AND** it records extraction and persistence stages plus the extracted-field
+  count consistently with the current worker
+
+### Requirement: Replacement readiness requires parity evidence
+
+The current worker SHALL remain available until automated parity and guarded
+live validation demonstrate that the persistent worker can replace it safely.
+
+#### Scenario: Multi-intent parity suite passes
+
+- **WHEN** replacement readiness is evaluated
+- **THEN** identical synthetic inputs are exercised through both workers for
+  every supported intent
+- **AND** status, attempts, stages, failures, counters, clinical persistence,
+  follow-up runs, and batch closure are compared
+- **AND** a persistent sequence of admissions, demographics, full-sync, and a
+  later job proves one login/session is reused across jobs
+
+#### Scenario: Cutover remains blocked without live validation
+
+- **WHEN** fake-based tests pass but the real legacy UI has not been validated
+- **THEN** the persistent worker remains a guarded candidate
+- **AND** production replacement is not declared ready
+
 ### Requirement: Shared evolution ingestion service
 
 The system SHALL provide a shared evolution ingestion service used by both the

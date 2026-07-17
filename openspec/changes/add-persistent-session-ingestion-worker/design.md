@@ -217,6 +217,53 @@ against the real JSP navigation model. Action navigation keeps the persistent
 worker aligned with the known-good integrated Playwright script while still
 preserving the no-subprocess/no-new-browser requirement.
 
+### Decision 12: Target replacement readiness, not partial queue support
+
+The persistent worker is a candidate replacement for `process_ingestion_runs`.
+The current worker remains unchanged and available until the persistent worker
+has automated and live-validated parity for every supported queued intent.
+
+Rationale: side-by-side operation is a migration mechanism, not the final
+functional boundary. A worker sharing the queue cannot safely omit a supported
+intent or report success with different clinical and operational side effects.
+
+### Decision 13: Use an explicit supported-intent contract
+
+The persistent worker supports `admissions_only`, `demographics_only`,
+`full_sync`, and `full_admission_sync` (an explicit alias of the full-sync
+path). It must not use a generic `else -> full_sync` fallback. Empty intents are
+not supported: the persistent worker must not claim them, tests must prove that
+current production enqueue paths do not create them, and any explicitly
+selected empty/unknown run must fail validation without source-system actions.
+
+Rationale: implicit fallback can make a faster persistent worker steal and
+misprocess unrelated jobs. An explicit contract makes replacement scope and
+queue ownership auditable.
+
+### Decision 14: Demographics reuse the authenticated persistent session
+
+`demographics_only` must navigate to `Dados do Paciente`, read `frame_pol`,
+normalize fields in memory, and call the existing
+`upsert_patient_demographics` service through the already-open persistent
+page/context. It must not execute the current demographics subprocess, create a
+temporary JSON file, call `sync_playwright()`, launch another browser/context,
+or perform another login.
+
+Rationale: copying the current command method would provide intent coverage but
+would defeat the central session-reuse objective.
+
+### Decision 15: Require parity and live validation before cutover
+
+Replacement readiness requires: per-intent behavior tests, shared-session
+multi-job tests, failure/attempt parity, safe tab cleanup, restart plus
+rebootstrap, action-first evolution navigation, canonical chunking,
+authenticated PDF fallback, and guarded validation against the real legacy UI.
+Passing fake-only unit tests is necessary but not sufficient.
+
+Rationale: the persistent lifecycle changes source navigation and operational
+failure modes. Cutover must be based on observable parity, not matching method
+names or mock call counts.
+
 ## Risks / Trade-offs
 
 - Profile/cache growth -> use exclusive profiles, tmpfs limits, safe cache
@@ -226,22 +273,26 @@ preserving the no-subprocess/no-new-browser requirement.
   legacy tab for proactive renewal, then close tabs only as cleanup.
 - Idle session expires -> handle popup during idle and relog before claim.
 - Wrong tab closed -> enforce non-root selector and verify root state.
-- Persistent group consumes more jobs -> compare rates and durations by group.
-- Run semantics drift -> preserve model/status/stage behavior with tests.
-- Persistence duplication -> extract evolution persistence into one shared
-  service before enabling persistent full-sync.
-- Real handle contract mismatch -> keep rollout blocked until the handle can
-  supply real legacy admission/evolution data to the adapter contract.
-- Invalid URL-template assumption -> real legacy smoke must use action-based
-  JSP/PrimeFaces navigation modeled after `path2.py`, not reloadable deep
-  links.
-- Selector drift -> isolate selectors and test known synthetic HTML.
-- Popup-detection regex is order-sensitive (expects `id` then
-  `aria-hidden="false"` then `display: block` on the same element).
-  Synthetic HTML in PSW-S1 is controlled, but PSW-S2 must verify that
-  real PrimeFaces DOM keeps this attribute order or harden the detector
-  (e.g. parse attributes independently instead of a single ordered
-  regex) before relying on it for recovery decisions.
+- Persistent group consumes more jobs -> use explicit supported-intent claims
+  and compare rates and durations by group.
+- Run semantics drift -> compare persistent and current external effects for
+  each supported intent.
+- Unsupported/empty intent is misrouted -> never use an implicit full-sync
+  fallback and never claim unsupported rows.
+- Demographics opens another login -> require navigation through the already
+  authenticated persistent page/context and inspect for forbidden subprocess or
+  browser-launch calls.
+- Persistence duplication -> extract or reuse small shared services rather than
+  copying command-local business logic.
+- Real handle contract mismatch -> keep rollout blocked until admissions,
+  demographics, and evolutions work through real action navigation.
+- Invalid URL-template assumption -> real legacy flows must use action-based
+  JSP/PrimeFaces navigation modeled after the known working scripts.
+- Selector drift -> isolate selectors and validate them in guarded live smoke.
+- Popup detection drift -> parse attributes independently and verify popup
+  disappearance before treating the page as ready.
+- Partial parity is mistaken for cutover readiness -> require the parity suite
+  and live-validation slice to complete before replacement approval.
 
 ## Migration Plan
 
@@ -256,21 +307,31 @@ preserving the no-subprocess/no-new-browser requirement.
 7. Resolve the real handle contract for legacy admission/evolution data.
 8. Replace real-smoke URL-template navigation with action-based legacy
    navigation modeled after `path2.py`.
-9. Do not start production side-by-side load until full-sync persistence, real
-   action navigation, and the real-handle contract are resolved.
-10. After prerequisites are met, start a small side-by-side experiment with
-    distinct label prefixes.
-11. Compare run count, success rate, timeout rate, durations, retries, and stale
-    recovery incidents by group.
-12. Roll back by stopping persistent workers and scaling current workers back.
+9. Implement explicit dispatch and claim ownership for every supported intent;
+   reject empty and unknown intents without source-system actions.
+10. Restore `admissions_only` clinical persistence and follow-up parity.
+11. Implement persistent-session `demographics_only` without subprocess or a
+    second browser/login.
+12. Restore timeout, attempt, final-failure, and batch lifecycle parity.
+13. Correct internal legacy-tab cleanup and unsafe-cleanup recovery.
+14. Rebootstrap authentication after browser restart and expose conservative
+    lifecycle/headless configuration.
+15. Make the real evolution path action-first, then add canonical chunking,
+    multi-admission handling, and authenticated PDF form fallback.
+16. Run current-versus-persistent parity tests for all supported intents and a
+    multi-job sequence through one authenticated handle.
+17. Do not start production side-by-side load until all automated blockers are
+    resolved and the official quality gates pass.
+18. Run guarded live validation within the project-approved concurrency limit.
+19. Compare run outcomes, persistence, retries, timeouts, resource use, and
+    stale recovery between groups.
+20. Approve cutover only when parity and rollback criteria pass; otherwise stop
+    persistent workers and keep or restore the current worker.
 
 ## Open Questions
 
-- Which legacy action should be used for artificial keepalive if needed later?
-- Should per-attempt worker-group metadata be added later?
-- What max-jobs and max-lifetime defaults are best for production?
-- How will the real handle satisfy the legacy snapshot/evolution container
-  contract without synthetic HTML injection?
-- Which minimal action-navigation helper should become the shared source of
-  truth between the persistent real handle and the existing Playwright scripts?
-- When will full-sync persistence be extracted into a shared ingestion service?
+- What conservative max-jobs and max-lifetime values pass guarded live testing?
+- Which safe legacy action should renew an idle authenticated session?
+- What observation window and success thresholds are required for cutover?
+- Does the real `#printLinks` download require any environment-specific form
+  fields beyond those used by the known working script?

@@ -7,21 +7,31 @@ system, opens a legacy tab, processes one `IngestionRun`, and tears everything
 down for every job. This adds avoidable latency, CPU/RAM churn, temporary-file
 churn, and login fragility during large census batches.
 
-A second worker can eventually run side-by-side with the existing worker to
-evaluate persistent browser/session reuse before replacing any current behavior.
-After PSW-S5, this is still blocked for production until full-sync persistence
-and the real-handle legacy container contract are resolved.
+A second worker will run side-by-side with the existing worker while it is
+validated as a potential full replacement. Replacement readiness requires
+functional and operational parity for every supported queued intent, repeated
+job execution through one authenticated session, live legacy validation, and a
+documented rollback path. The current worker remains available until cutover is
+explicitly approved.
 
 ## What Changes
 
 - Add an alternative ingestion worker command that consumes the same PostgreSQL
   `IngestionRun` queue as `process_ingestion_runs`.
-- Keep the existing worker behavior unchanged so operators can run both groups
-  concurrently, for example six legacy workers and six persistent workers.
+- Keep the existing worker behavior unchanged and available for rollback until
+  automated parity, guarded live validation, and cutover criteria pass.
+- Run side-by-side experiments only within the concurrency limit approved for
+  this project; do not assume an arbitrary worker split.
 - Add a reusable legacy session lifecycle component for login, health checks,
   renewal, relogin fallback, tab cleanup, and browser restart decisions.
 - Extract evolution persistence into a shared service so current and persistent
   workers use the same clinical persistence path.
+- Add persistent-session `demographics_only` extraction through the already
+  authenticated browser/page, with no subprocess, temporary JSON, new browser,
+  or second login per job.
+- Define explicit dispatch for `admissions_only`, `demographics_only`,
+  `full_sync`, and the `full_admission_sync` alias. Empty or unknown intents are
+  not valid persistent-worker jobs and must never fall through to `full_sync`.
 - Reuse the legacy sliding-window behavior that opening/rendering a new legacy
   tab consistently renews the 30-minute session.
 - Treat closing the last non-root tab as cleanup only; do not depend on tab
@@ -38,7 +48,8 @@ and the real-handle legacy container contract are resolved.
 
 Non-goals:
 
-- Do not remove or rewrite the current worker.
+- Do not remove or disable the current worker before replacement-readiness and
+  cutover criteria are met.
 - Do not introduce Celery, Redis, microservices, or a separate queue.
 - Do not persist real patient data, screenshots, PDFs, debug HTML, or
   credentials in repository artifacts.
@@ -67,9 +78,11 @@ Affected code areas:
 - `apps/ingestion/management/commands/` for the new worker entry point.
 - Legacy Playwright connector/session code under `automation/source_system/` or
   a small ingestion automation service module.
-- Unit tests for session lifecycle, tab cleanup, session-renewal parsing, queue
-  claiming, and restart decisions.
-- Integration/command tests for the new command using fakes or mocks.
+- Unit tests for session lifecycle, tab cleanup, session-renewal parsing,
+  explicit intent dispatch, persistent demographics, queue claiming, restart
+  decisions, and current-versus-persistent parity.
+- Integration/command tests for every supported intent using synthetic data,
+  plus guarded live validation before replacement approval.
 - Deployment docs for running both worker groups concurrently.
 
 Affected systems:
