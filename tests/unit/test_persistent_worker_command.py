@@ -2998,6 +2998,134 @@ class TestPersistAdmissionsSnapshotService:
         assert adm.source_system == "tasy"
         assert adm.source_system == patient.source_system
 
+    def test_explicit_argument_divergent_from_patient_source_raises(self):
+        """A caller argument that differs from patient.source_system is rejected."""
+        import pytest
+
+        from apps.ingestion.services import upsert_admission_snapshot
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            source_system="source-a",
+            patient_source_key="ARG-1",
+            name="",
+        )
+        snapshot = [
+            {
+                "admission_key": "ADM-ARG",
+                "admission_start": "2024-09-01",
+                "admission_end": "2024-09-03",
+                "ward": "UTI",
+                "bed": "01",
+            }
+        ]
+        with pytest.raises(ValueError) as exc_info:
+            upsert_admission_snapshot(
+                patient, snapshot, source_system="source-b"
+            )
+
+        message = str(exc_info.value)
+        # Sanitized: no identifiers, clinical text, or the conflicting values.
+        assert "ARG-1" not in message
+        assert "ADM-ARG" not in message
+        assert "source-a" not in message
+        assert "source-b" not in message
+
+        # Zero Admissions created or updated.
+        assert not Admission.objects.filter(
+            source_admission_key="ADM-ARG"
+        ).exists()
+        assert Admission.objects.filter(patient=patient).count() == 0
+
+    def test_non_string_item_source_raises_value_error_not_attribute_error(
+        self,
+    ):
+        """A non-string per-item source_system raises ValueError, not
+        AttributeError, before any Admission mutation."""
+        import pytest
+
+        from apps.ingestion.services import upsert_admission_snapshot
+        from apps.patients.models import Admission, Patient
+
+        for index, bad_value in enumerate((123, True, False), start=1):
+            patient = Patient.objects.create(
+                source_system="source-a",
+                patient_source_key=f"TYP-{index}",
+                name="",
+            )
+            snapshot = [
+                {
+                    "admission_key": f"ADM-TYP-{index}",
+                    "admission_start": "2024-09-01",
+                    "admission_end": "2024-09-03",
+                    "ward": "UTI",
+                    "bed": "01",
+                    "source_system": bad_value,
+                }
+            ]
+            with pytest.raises(ValueError) as exc_info:
+                upsert_admission_snapshot(patient, snapshot)
+
+            message = str(exc_info.value)
+            assert f"TYP-{index}" not in message
+            assert f"ADM-TYP-{index}" not in message
+            assert str(bad_value) not in message
+            assert not Admission.objects.filter(
+                source_admission_key=f"ADM-TYP-{index}"
+            ).exists()
+
+    def test_omitted_argument_uses_patient_source_non_default(self):
+        """Omitting the argument uses patient.source_system (non-default)."""
+        from apps.ingestion.services import upsert_admission_snapshot
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            source_system="source-a",
+            patient_source_key="OMIT-1",
+            name="",
+        )
+        snapshot = [
+            {
+                "admission_key": "ADM-OMIT",
+                "admission_start": "2024-10-01",
+                "admission_end": "2024-10-03",
+                "ward": "UTI",
+                "bed": "01",
+            }
+        ]
+        result = upsert_admission_snapshot(patient, snapshot)
+        assert result["created"] == 1
+        adm = Admission.objects.get(source_admission_key="ADM-OMIT")
+        assert adm.source_system == "source-a"
+        assert adm.source_system == patient.source_system
+
+    def test_matching_explicit_argument_is_accepted_direct_call(self):
+        """An explicit argument equal to patient.source_system is accepted."""
+        from apps.ingestion.services import upsert_admission_snapshot
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            source_system="source-a",
+            patient_source_key="MTCH-1",
+            name="",
+        )
+        snapshot = [
+            {
+                "admission_key": "ADM-MTCH",
+                "admission_start": "2024-11-01",
+                "admission_end": "2024-11-03",
+                "ward": "UTI",
+                "bed": "01",
+            }
+        ]
+        result = upsert_admission_snapshot(
+            patient, snapshot, source_system="source-a"
+        )
+        assert result["created"] == 1
+        adm = Admission.objects.get(source_admission_key="ADM-MTCH")
+        assert adm.source_system == "source-a"
+        assert adm.source_system == patient.source_system
+
 
 @pytest.mark.django_db
 class TestAdmissionsOnlyCrossWorkerParity:

@@ -770,6 +770,11 @@ def _consolidate_period_duplicates(
     Admission.objects.filter(id__in=non_canonical_ids).delete()
 
 
+_SOURCE_SYSTEM_CONFLICT_MESSAGE = (
+    "source_system conflicts with the target patient's source system"
+)
+
+
 def upsert_admission_snapshot(
     patient: Patient,
     admissions_snapshot: list[dict[str, Any]],
@@ -781,48 +786,58 @@ def upsert_admission_snapshot(
     Accepts admission period fields (`admission_start`, `admission_end`)
     when available.
 
-    Source-system invariant: every persisted Admission uses ONE authoritative
-    source system — the caller-supplied ``source_system`` when given, otherwise
-    ``patient.source_system`` — so a Patient and its Admissions can never carry
-    conflicting sources. A snapshot item may omit ``source_system`` (the
-    authoritative source is used) or declare a value EQUAL to the authoritative
-    source; a non-empty CONFLICTING value raises a sanitized ``ValueError``
-    before any Admission is created or updated. The whole snapshot is validated
-    before the mutation loop, so a conflict in a later item cannot leave
-    earlier Admissions partially written.
+    Source-system invariant: ``patient.source_system`` is authoritative. The
+    optional ``source_system`` argument is compatibility/validation input
+    only and must be absent (``None``) or equal to ``patient.source_system``;
+    a divergent argument raises a sanitized ``ValueError``. Each snapshot
+    item's ``source_system`` metadata must be absent, ``None``, an empty
+    string, or a string equal to the Patient source; a conflicting string or
+    a non-string value raises a sanitized ``ValueError``. All argument and
+    item validation runs before any Admission lookup, create, update, or
+    consolidation, so a later invalid item cannot leave earlier Admissions
+    partially written.
 
     Policy for ward/bed:
     - Non-empty values always update.
     - Empty values never overwrite existing non-empty values.
 
     Args:
-        patient: Patient instance to link admissions to.
+        patient: Patient instance to link admissions to; its ``source_system``
+          is the sole source authority for this operation.
         admissions_snapshot: List of admission dicts with fields:
             - admission_key: External admission identifier (required).
             - admission_start: Admission start datetime string (required).
-            - admission_end: Admission end datetime string (optional, may be None).
+            - admission_end: Admission end datetime string (optional).
             - ward: Ward name (optional, may be empty string).
             - bed: Bed identifier (optional, may be empty string).
-            - source_system: Optional; must be absent/empty or equal to the
-              authoritative source (a conflict raises ``ValueError``).
-        source_system: Authoritative source system for this operation.
-          Defaults to ``patient.source_system`` so direct callers remain safe.
+            - source_system: Optional; must be absent/empty or a string equal
+              to ``patient.source_system``.
+        source_system: Compatibility/validation input only. ``None`` uses the
+          Patient source; a value equal to the Patient source is accepted; any
+          other non-empty value raises ``ValueError``.
 
     Returns:
         dict with "created" (int) and "updated" (int) counts.
     """
-    authoritative_source = source_system or patient.source_system
+    authoritative_source = patient.source_system
+
+    # The Patient is authoritative. The optional argument may only confirm the
+    # Patient source; a divergent value is rejected before any Admission work.
+    if source_system and source_system != authoritative_source:
+        raise ValueError(_SOURCE_SYSTEM_CONFLICT_MESSAGE)
 
     # Pre-validate the whole snapshot before mutating any Admission so a
     # conflict in a later item cannot leave earlier rows partially written.
-    # The error is deliberately generic and contains no identifiers.
+    # Errors are deliberately generic and contain no identifiers or input data.
     for item in admissions_snapshot:
-        item_source = (item.get("source_system") or "").strip()
+        item_source = item.get("source_system")
+        if item_source is None:
+            continue
+        if not isinstance(item_source, str):
+            raise ValueError(_SOURCE_SYSTEM_CONFLICT_MESSAGE)
+        item_source = item_source.strip()
         if item_source and item_source != authoritative_source:
-            raise ValueError(
-                "admission snapshot declares a source_system that conflicts "
-                "with the target patient's source system"
-            )
+            raise ValueError(_SOURCE_SYSTEM_CONFLICT_MESSAGE)
 
     created = 0
     updated = 0
