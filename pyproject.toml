@@ -34,6 +34,11 @@ python_files = ["test_*.py", "*_test.py"]
 testpaths = ["tests"]
 env = [
     "LLM_API_KEY=sk-test",
+    "SUMMARY_PHASE1_API_KEY=sk-test",
+    "SUMMARY_PHASE2_OPTION_1_API_KEY=sk-test",
+    "SUMMARY_PHASE2_OPTION_2_API_KEY=sk-test",
+    "SUMMARY_PHASE2_OPTION_3_API_KEY=sk-test",
+    "SUMMARY_PHASE2_OPTION_4_API_KEY=sk-test",
 ]
 
 [tool.ruff]
