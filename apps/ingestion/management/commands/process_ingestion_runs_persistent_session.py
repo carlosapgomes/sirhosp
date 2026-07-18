@@ -133,6 +133,7 @@ from apps.ingestion.services import (
     enqueue_most_recent_admission_full_sync,
     persist_admissions_snapshot,
     queue_demographics_only_run,
+    upsert_patient_demographics,
 )
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,26 @@ from apps.ingestion.services import (
 
 _ADMISSIONS_TIMEOUT = 120
 """Default timeout (seconds) for admissions snapshot extraction."""
+
+_DEMOGRAPHICS_TIMEOUT = 120
+"""Default timeout (seconds) for persistent demographics extraction.
+
+Reuses the already-open persistent page/context (no subprocess), so this
+matches the admissions-style bounded wait rather than the current worker's
+5-minute subprocess timeout."""
+
+# Field count metric: mirror the current worker's exact 25-field list so the
+# ``demographics_fields_extracted`` metric is identical across workers.
+_DEMOGRAPHICS_FIELD_COUNT_FIELDS: tuple[str, ...] = (
+    "name", "social_name", "date_of_birth", "gender",
+    "gender_identity", "mother_name", "father_name",
+    "race_color", "birthplace", "nationality",
+    "marital_status", "education_level", "profession",
+    "cns", "cpf", "phone_home", "phone_cellular",
+    "phone_contact", "street", "address_number",
+    "address_complement", "neighborhood", "city",
+    "state", "postal_code",
+)
 
 _LOGIN_TIMEOUT_SECONDS = 60
 """Default timeout (seconds) for each legacy bootstrap navigation/wait step."""
@@ -160,22 +181,24 @@ _PERSISTENT_LABEL_PREFIX = "persistent-worker"
 
 _DISPATCH_MAP: dict[str, str] = {
     "admissions_only": "admissions_only",
+    "demographics_only": "demographics_only",
     "full_sync": "full_sync",
     "full_admission_sync": "full_sync",
 }
 """Maps queued intent to dispatch action.
 
 ``full_admission_sync`` is an explicit alias that dispatches to the same
-full-sync code path as ``full_sync``. This is the single declaration of
-which intents are supported; ``_ENABLED_INTENTS`` is derived from its keys.
+full-sync code path as ``full_sync``. ``demographics_only`` is enabled in
+PSW-S16 and dispatches to the persistent demographics path
+(``_process_demographics_only``) through the already-authenticated page.
+This is the single declaration of which intents are supported;
+``_ENABLED_INTENTS`` is derived from its keys.
 """
 
 _ENABLED_INTENTS: frozenset[str] = frozenset(_DISPATCH_MAP)
 """Intents the persistent worker MAY claim during normal polling.
 
 Derived from ``_DISPATCH_MAP`` keys — cannot drift independently.
-``demographics_only`` is a required replacement scope but is NOT enabled until
-PSW-S16 atomically adds its persistent implementation and enables its claim.
 Empty or unknown intents must never fall through to full-sync.
 """
 
@@ -887,6 +910,8 @@ class Command(BaseCommand):
                 self._process_admissions_only(run, adapter)
             elif dispatch_action == "full_sync":
                 self._process_full_sync(run, adapter)
+            elif dispatch_action == "demographics_only":
+                self._process_demographics_only(run, adapter)
 
     @staticmethod
     def _reject_unsupported_intent(run: IngestionRun, intent: str) -> None:
@@ -1072,6 +1097,145 @@ class Command(BaseCommand):
             f"(admissions_seen={adm_metrics['seen']}, "
             f"admissions_created={adm_metrics['created']}, "
             f"admissions_updated={adm_metrics['updated']})"
+        )
+
+    # ------------------------------------------------------------------
+    # Demographics-only processing via persistent adapter (PSW-S16)
+    # ------------------------------------------------------------------
+
+    def _process_demographics_only(
+        self,
+        run: IngestionRun,
+        adapter: PersistentExtractionAdapter,
+    ) -> None:
+        """Process a demographics-only run through the persistent session.
+
+        Navigates the already-authenticated page to ``Dados do Paciente``,
+        reads every demographic field from ``frame_pol`` into memory, and
+        persists via the canonical :func:`upsert_patient_demographics`
+        service shared with the current worker.
+
+        Lifecycle (matches the current worker's stages/metrics while
+        replacing the subprocess with the persistent page/context):
+        1. Validate ``patient_record`` (R6: fail before source actions).
+        2. Stage ``demographics_extraction``: adapter.get_demographics().
+        3. Stage ``demographics_persistence``: upsert_patient_demographics().
+        4. Record ``demographics_fields_extracted`` metric.
+        5. Mark succeeded, attempt succeeded, and close the batch.
+
+        Never invokes subprocess, ``TemporaryDirectory``, JSON files,
+        ``sync_playwright``, a new browser/context, or a second login.
+        """
+        params = run.parameters_json or {}
+        patient_record = params.get("patient_record", "")
+
+        # R6: Missing patient record fails validation before source actions.
+        if not patient_record:
+            self._mark_run_failed(
+                run, ValueError("Missing patient_record in parameters")
+            )
+            return
+
+        # ------------------------------------------------------------------
+        # Stage: demographics_extraction (persistent session)
+        # ------------------------------------------------------------------
+        ext_stage_start = timezone.now()
+        try:
+            demographics = adapter.get_demographics(
+                patient_record=patient_record,
+                timeout=_DEMOGRAPHICS_TIMEOUT,
+            )
+        except (InvalidJsonError, SnapshotContainerMissingError) as exc:
+            # Data-level failure: a job tab was opened (stub path) or the
+            # page rendered without the expected container, so cleanup runs
+            # before the next claim. Tab close is cleanup only.
+            self._record_stage(
+                run, "demographics_extraction", "failed", ext_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            adapter.cleanup_after_failure()
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during demographics capture "
+                f"(persistent session): {exc}"
+            )
+            return
+        except ExtractionError as exc:
+            # Session-level failure (not ready, renewal fail, action
+            # navigation failure): no job tab was opened, cleanup skipped.
+            self._record_stage(
+                run, "demographics_extraction", "failed", ext_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during demographics capture "
+                f"(persistent session): {exc}"
+            )
+            return
+        except Exception as exc:
+            # Unexpected error — treat as session/infra failure (no cleanup).
+            self._record_stage(
+                run, "demographics_extraction", "failed", ext_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            return
+
+        self._record_stage(
+            run, "demographics_extraction", "succeeded", ext_stage_start,
+        )
+
+        # ------------------------------------------------------------------
+        # Stage: demographics_persistence (canonical upsert)
+        # ------------------------------------------------------------------
+        persist_stage_start = timezone.now()
+        try:
+            patient = upsert_patient_demographics(
+                patient_source_key=patient_record,
+                source_system="tasy",
+                demographics=demographics,
+                run=run,
+            )
+        except Exception as exc:
+            self._record_stage(
+                run, "demographics_persistence", "failed", persist_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during demographics persistence: {exc}"
+            )
+            return
+
+        self._record_stage(
+            run, "demographics_persistence", "succeeded", persist_stage_start,
+        )
+
+        # Field-count metric: identical field list as the current worker.
+        fields_populated = sum(
+            1
+            for field_name in _DEMOGRAPHICS_FIELD_COUNT_FIELDS
+            if getattr(patient, field_name, None)
+        )
+
+        run.status = "succeeded"
+        run.finished_at = timezone.now()
+        run.failure_reason = ""
+        run.timed_out = False
+        run.parameters_json = {
+            **params,
+            "demographics_fields_extracted": fields_populated,
+        }
+        run.save()
+
+        self._mark_latest_attempt_succeeded(run)
+        self._try_close_batch(run.batch)
+
+        self.stdout.write(
+            f"  Run #{run.pk} demographics-only succeeded "
+            f"(persistent session) "
+            f"(fields_populated={fields_populated})"
         )
 
     # ------------------------------------------------------------------

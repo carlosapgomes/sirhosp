@@ -110,6 +110,7 @@ class FakeNavigationPage:
         self._frame: FakeNavigationFrame | None = None
         self._visible_selectors: set[str] = set()
         self._click_callbacks: dict[str, list[str]] = {}
+        self._filled_values: dict[str, str] = {}
 
     def set_html(self, html: str) -> None:
         self._html = html
@@ -128,12 +129,15 @@ class FakeNavigationPage:
     def content(self) -> str:
         return self._html
 
-    def locator(self, selector: str) -> FakeNavigationLocator:
+    def locator(self, selector: str, has_text: Any = None) -> FakeNavigationLocator:  # noqa: ARG002
         self._locator_calls.append(selector)
         return FakeNavigationLocator(
             selector=selector,
             visible_getter=lambda: selector in self._visible_selectors,
             on_click_callback=lambda: self._on_click_hook(selector),
+            fill_callback=lambda value: self._filled_values.__setitem__(
+                selector, value
+            ),
         )
 
     def get_by_role(self, role: str, *, name: str | None = None) -> FakeNavigationLocator:
@@ -185,14 +189,26 @@ class FakeNavigationPage:
     def frame_name_calls(self) -> list[str]:
         return list(self._frame_name_calls)
 
+    @property
+    def filled_values(self) -> dict[str, str]:
+        """Map of CSS selector -> last fill() value applied to any locator."""
+        return dict(self._filled_values)
+
 
 class FakeNavigationLocator:
     """Fake Playwright locator with lazy visibility check."""
 
-    def __init__(self, selector: str, visible_getter, on_click_callback=None) -> None:
+    def __init__(
+        self,
+        selector: str,
+        visible_getter,
+        on_click_callback=None,
+        fill_callback=None,
+    ) -> None:
         self._selector = selector
         self._visible_getter = visible_getter
         self._on_click_callback = on_click_callback
+        self._fill_callback = fill_callback
         self._clicked = False
         self._filled_value: str | None = None
 
@@ -212,6 +228,8 @@ class FakeNavigationLocator:
 
     def fill(self, value: str) -> None:
         self._filled_value = value
+        if self._fill_callback:
+            self._fill_callback(value)
 
     def count(self) -> int:
         """Return 1 if this locator is visible, 0 otherwise."""
@@ -249,6 +267,8 @@ class FakeNavigationFrame:
         self._eval_calls: list[str] = []
         self._eval_results: dict[str, list[dict]] = {}
         self._visible_selectors: set[str] = set()
+        self._evaluate_result: dict[str, str] = {}
+        self._evaluate_calls: list[str] = []
 
     def set_html(self, html: str) -> None:
         self._html = html
@@ -289,6 +309,19 @@ class FakeNavigationFrame:
 
     def set_eval_result(self, selector: str, result: list[dict]) -> None:
         self._eval_results[selector] = result
+
+    def set_evaluate_result(self, result: dict[str, str]) -> None:
+        """Register the dict returned by frame.evaluate() (demographics read)."""
+        self._evaluate_result = dict(result)
+
+    def evaluate(self, expression: str, arg: Any = None) -> Any:  # noqa: ARG002
+        """Simulate Playwright's frame.evaluate(expression, arg)."""
+        self._evaluate_calls.append(expression)
+        return dict(self._evaluate_result)
+
+    @property
+    def evaluate_calls(self) -> list[str]:
+        return list(self._evaluate_calls)
 
 
 # ===========================================================================
@@ -1317,3 +1350,193 @@ class TestBridgeNavigationIntegration:
         session.open_tab.assert_called_once()
         assert isinstance(result, list)
         assert len(result) == 1
+
+
+# ===========================================================================
+# PSW-S16: Demographics navigation helpers
+# ===========================================================================
+
+
+class TestClickDadosDoPaciente:
+    """Tests for click_dados_do_paciente()."""
+
+    def test_clicks_dados_do_paciente_tree_label(self) -> None:
+        """click_dados_do_paciente clicks the POL tree label span."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            SEL_DADOS_DO_PACIENTE,
+            click_dados_do_paciente,
+        )
+
+        page = FakeNavigationPage()
+        page.make_selector_visible(SEL_DADOS_DO_PACIENTE)
+
+        click_dados_do_paciente(page)
+
+        assert SEL_DADOS_DO_PACIENTE in page.locator_calls
+
+    def test_raises_navigation_error_when_label_not_visible(self) -> None:
+        """NavigationError raised when 'Dados do Paciente' is unavailable."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            click_dados_do_paciente,
+        )
+
+        page = FakeNavigationPage()
+        # Nothing made visible
+        with pytest.raises(NavigationError):
+            click_dados_do_paciente(page)
+
+
+class TestWaitForDemographicsFrame:
+    """Tests for wait_for_demographics_frame()."""
+
+    def test_returns_frame_when_cadastro_tab_attached(self) -> None:
+        """Returns frame_pol when #aba_cadastro is attached."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            SEL_CADASTRO_TAB,
+            wait_for_demographics_frame,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame()
+        frame.make_selector_visible(SEL_CADASTRO_TAB)
+        page.set_frame(frame)
+
+        result = wait_for_demographics_frame(page, timeout_ms=2000)
+        assert result is frame
+
+    def test_raises_navigation_error_on_timeout(self) -> None:
+        """NavigationError when frame_pol never appears with Cadastro tab."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            wait_for_demographics_frame,
+        )
+
+        page = FakeNavigationPage()
+        # No frame set
+        with pytest.raises(NavigationError):
+            wait_for_demographics_frame(page, timeout_ms=500)
+
+
+class TestReadDemographicFields:
+    """Tests for read_demographic_fields()."""
+
+    def test_reads_all_consumed_fields_from_frame(self) -> None:
+        """read_demographic_fields returns every key consumed by
+        upsert_patient_demographics with the frame's evaluated values."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
+            read_demographic_fields,
+        )
+
+        frame = FakeNavigationFrame()
+        sample = {
+            "prontuario": "14160147",
+            "nome": "MARIA DE FATIMA SILVA",
+            "nome_social": "",
+            "data_nascimento": "15/03/1965",
+            "sexo": "Feminino",
+            "genero": "Cisgênero",
+            "nome_mae": "JOSEFA SILVA",
+            "nome_pai": "JOAO SILVA",
+            "raca_cor": "Branca",
+            "naturalidade": "Sao Paulo",
+            "nacionalidade": "Brasileira",
+            "estado_civil": "Casado",
+            "grau_instrucao": "Ensino Medio Completo",
+            "profissao": "Motorista",
+            "ddd_fone_residencial": "11",
+            "fone_residencial": "12345678",
+            "ddd_fone_celular": "11",
+            "fone_celular": "987654321",
+            "ddd_fone_recado": "",
+            "fone_recado": "",
+            "cns": "898001234567890",
+            "cpf": "12345678900",
+            "logradouro": "Rua das Flores",
+            "numero": "123",
+            "complemento": "Apto 2",
+            "bairro": "Centro",
+            "cep": "01001000",
+            "cidade": "Sao Paulo",
+            "uf": "SP",
+        }
+        frame.set_evaluate_result(sample)
+
+        result = read_demographic_fields(frame)
+
+        # Every key consumed by upsert_patient_demographics is present.
+        assert set(result.keys()) == set(DEMOGRAPHIC_FIELD_SELECTORS.keys())
+        assert result["nome"] == "MARIA DE FATIMA SILVA"
+        assert result["cpf"] == "12345678900"
+        assert result["data_nascimento"] == "15/03/1965"
+        # Empty values preserved as empty strings, not dropped.
+        assert result["nome_social"] == ""
+        assert result["fone_recado"] == ""
+
+    def test_missing_fields_returned_as_empty_string(self) -> None:
+        """Missing/empty values are safe: returned as empty strings."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
+            read_demographic_fields,
+        )
+
+        frame = FakeNavigationFrame()
+        # Only one field populated; the rest must default to "".
+        frame.set_evaluate_result({"nome": "UNICO DADO"})
+
+        result = read_demographic_fields(frame)
+
+        assert set(result.keys()) == set(DEMOGRAPHIC_FIELD_SELECTORS.keys())
+        assert result["nome"] == "UNICO DADO"
+        assert result["cpf"] == ""
+        assert result["data_nascimento"] == ""
+
+    def test_evaluate_failure_returns_all_empty(self) -> None:
+        """A JS evaluation failure returns every key as empty string,
+        never raising — extraction failure is surfaced by the bridge."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
+            read_demographic_fields,
+        )
+
+        class _BrokenFrame(FakeNavigationFrame):
+            def evaluate(self, expression: str, arg: Any = None) -> Any:  # noqa: ARG002
+                raise RuntimeError("frame detached")
+
+        frame = _BrokenFrame()
+        result = read_demographic_fields(frame)
+
+        assert set(result.keys()) == set(DEMOGRAPHIC_FIELD_SELECTORS.keys())
+        assert all(v == "" for v in result.values())
+
+
+class TestBuildDemographics:
+    """Tests for build_demographics()."""
+
+    def test_clicks_waits_and_reads_returning_in_memory_dict(self) -> None:
+        """build_demographics performs click + wait + read and returns a dict."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            SEL_CADASTRO_TAB,
+            SEL_DADOS_DO_PACIENTE,
+            build_demographics,
+        )
+
+        page = FakeNavigationPage()
+        page.make_selector_visible(SEL_DADOS_DO_PACIENTE)
+        frame = FakeNavigationFrame()
+        frame.make_selector_visible(SEL_CADASTRO_TAB)
+        frame.set_evaluate_result({"nome": "PACIENTE TESTE", "cpf": ""})
+        page.set_frame(frame)
+
+        result = build_demographics(page)
+
+        assert isinstance(result, dict)
+        assert result["nome"] == "PACIENTE TESTE"
+        assert result["cpf"] == ""
+        assert SEL_DADOS_DO_PACIENTE in page.locator_calls
+        assert "frame_pol" in page.frame_name_calls

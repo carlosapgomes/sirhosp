@@ -886,3 +886,228 @@ def _read_and_build_snapshot(page: Any) -> list[dict[str, Any]]:
     wait_for_admissions_table(page)
     rows = read_admissions_rows(page)
     return _build_admission_snapshot(rows)
+
+
+# ---------------------------------------------------------------------------
+# Demographics navigation helpers (PSW-S16)
+# ---------------------------------------------------------------------------
+#
+# Modeled after ``automation/source_system/patient_demographics/
+# extract_patient_demographics.py`` but stripped of all CLI/env/login/
+# debug-artifact/browser-startup code. These helpers operate on the
+# already-open persistent page/context and read demographic fields from
+# the ``frame_pol`` Cadastro tab into an in-memory dict consumed by
+# ``upsert_patient_demographics``.
+
+SEL_DADOS_DO_PACIENTE = "#accordionPOL .ui-treenode-label span"
+"""Tree leaf label span for 'Dados do Paciente' in the POL accordion."""
+
+SEL_DADOS_DO_PACIENTE_FALLBACK = "#accordionPOL span"
+"""Broader fallback selector for the 'Dados do Paciente' label."""
+
+SEL_CADASTRO_TAB = "#aba_cadastro"
+"""Cadastro tab panel id inside ``frame_pol``."""
+
+_DEMOGRAPHICS_PAUSE_MS = 1500
+"""Small pause after clicking 'Dados do Paciente' (matches the script)."""
+
+# Canonical mapping of {demographic_key: CSS_selector} for every field
+# consumed by ``upsert_patient_demographics`` (see ``apps/ingestion/services``
+# ``field_map`` and the DDD-combined phone keys). Selectors mirror the
+# working demographics script. Backslash-escaped colons match PrimeFaces
+# component ids.
+DEMOGRAPHIC_FIELD_SELECTORS: dict[str, str] = {
+    "prontuario": r"#prontuario\:prontuario\:inputId",
+    "nome": r"#nome\:nome\:inputId",
+    "nome_social": r"#nomeSocial\:nomeSocial\:inputId",
+    "data_nascimento": r"#idFieldDataNascimento\:dataDataNascimento_input",
+    "sexo": r"#sexo\:sexo\:inputId",
+    "genero": r"#genero\:genero\:inputId",
+    "nome_mae": r"#nome_mae\:nome_mae\:inputId",
+    "nome_pai": r"#nome_pai\:nome_pai\:inputId",
+    "raca_cor": r"#cor\:cor\:inputId",
+    "naturalidade": r"#naturalidade\:naturalidade\:inputId",
+    "nacionalidade": r"#nacionalidade\:nacionalidade\:inputId",
+    "estado_civil": r"#estadoCivil\:estadoCivil\:inputId",
+    "grau_instrucao": r"#grauInstrucao\:grauInstrucao\:inputId",
+    "profissao": r"#profissao\:profissao\:inputId",
+    "ddd_fone_residencial": r"#ddd_fone_residencial\:ddd_fone_residencial\:inputId",
+    "fone_residencial": r"#foneResidencial\:foneResidencial\:inputId",
+    "ddd_fone_celular": r"#ddd_fone_celular\:ddd_fone_celular\:inputId",
+    "fone_celular": r"#foneCelular\:foneCelular\:inputId",
+    "ddd_fone_recado": r"#ddd_fone_recado\:ddd_fone_recado\:inputId",
+    "fone_recado": r"#foneRecado\:foneRecado\:inputId",
+    "cns": r"#nroCartaoSaude\:nroCartaoSaude\:inputId",
+    "cpf": r"#cpf\:cpf\:inputId",
+    "logradouro": r"#logradouro\:logradouro\:inputId",
+    "numero": r"#numero\:numero\:inputId",
+    "complemento": r"#complemento\:complemento\:inputId",
+    "bairro": r"#bairro\:bairro\:inputId",
+    "cep": r"#cep\:cep\:inputId",
+    "cidade": r"#cidade\:cidade\:inputId",
+    "uf": r"#uf\:uf\:inputId",
+}
+"""Canonical ``{demographic_key: CSS_selector}`` mapping.
+
+Keys are exactly the external keys ``upsert_patient_demographics`` reads
+(its ``field_map`` keys plus the three ``ddd_fone_*`` keys used to combine
+# phone DDD + number). Values are the input-element selectors inside
+# ``frame_pol``.
+"""
+
+# Single JS round-trip that reads every demographic input value at once.
+# Missing elements yield an empty string, so a sparse page never fails the
+# whole extraction (R2: missing/empty values handled safely).
+_DEMOGRAPHIC_READ_JS = """
+(selectorMap) => {
+    const result = {};
+    for (const [key, selector] of Object.entries(selectorMap)) {
+        const el = document.querySelector(selector);
+        let value = '';
+        if (el && (el instanceof HTMLInputElement
+                   || el instanceof HTMLTextAreaElement
+                   || el instanceof HTMLSelectElement)) {
+            value = (el.value || '').trim();
+        }
+        result[key] = value;
+    }
+    return result;
+}
+"""
+
+
+def click_dados_do_paciente(page: Any) -> None:
+    """Click the 'Dados do Paciente' leaf node in the POL tree menu.
+
+    Modeled after ``extract_patient_demographics.click_dados_do_paciente``.
+    Locates the tree-node label span by text and clicks it. Operates on the
+    already-open persistent page (never a new browser/context).
+
+    Args:
+        page: A Playwright ``Page`` object.
+
+    Raises:
+        NavigationError: If the 'Dados do Paciente' element cannot be found.
+    """
+    locator = page.locator(
+        SEL_DADOS_DO_PACIENTE,
+        has_text=re.compile(r"Dados do Paciente", re.IGNORECASE),
+    )
+    try:
+        locator.first.wait_for(state="visible", timeout=10000)
+    except Exception:
+        # Broader fallback search in the POL accordion.
+        locator = page.locator(
+            SEL_DADOS_DO_PACIENTE_FALLBACK,
+            has_text=re.compile(r"^Dados do Paciente$", re.IGNORECASE),
+        )
+        try:
+            locator.first.wait_for(state="visible", timeout=5000)
+        except Exception as exc:
+            raise NavigationError(
+                "Could not locate 'Dados do Paciente' in the POL menu."
+            ) from exc
+
+    try:
+        locator.first.click()
+    except Exception as exc:
+        raise NavigationError(
+            "Could not click 'Dados do Paciente' in the POL menu."
+        ) from exc
+
+    page.wait_for_timeout(_DEMOGRAPHICS_PAUSE_MS)
+
+
+def wait_for_demographics_frame(
+    page: Any,
+    timeout_ms: int = 15000,
+) -> Any:
+    """Wait for ``frame_pol`` to load the Cadastro tab and return it.
+
+    Polls for the ``frame_pol`` iframe and checks that ``#aba_cadastro`` is
+    attached. Modeled after the script's ``_wait_for_frame`` plus the
+    Cadastro-tab wait.
+
+    Args:
+        page: A Playwright ``Page`` object.
+        timeout_ms: Maximum time to wait in milliseconds.
+
+    Returns:
+        The Playwright ``Frame`` object for ``frame_pol`` with the Cadastro
+        tab available.
+
+    Raises:
+        NavigationError: If the frame or Cadastro tab is not available within
+            the timeout.
+    """
+    started_at = time.monotonic()
+    while True:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        if elapsed_ms >= timeout_ms:
+            break
+        remaining_ms = timeout_ms - elapsed_ms
+        frame = page.frame(name=SEL_FRAME_POL)
+        if frame is not None:
+            try:
+                cadastro = frame.locator(SEL_CADASTRO_TAB)
+                step_timeout = min(500, max(1, remaining_ms))
+                cadastro.first.wait_for(
+                    state="attached", timeout=step_timeout
+                )
+                return frame
+            except Exception:
+                pass
+        page.wait_for_timeout(min(500, max(1, remaining_ms)))
+
+    raise NavigationError(
+        f"Iframe '{SEL_FRAME_POL}' did not become available with the "
+        f"Cadastro tab within {timeout_ms} ms."
+    )
+
+
+def read_demographic_fields(frame: Any) -> dict[str, str]:
+    """Read every demographic field value from the Cadastro tab in memory.
+
+    Performs a single JavaScript evaluation on the frame that queries each
+    canonical selector and returns its trimmed input value. Missing or
+    non-input elements yield an empty string, so a sparse page never fails
+    the whole extraction.
+
+    Args:
+        frame: The ``frame_pol`` Playwright ``Frame`` with the Cadastro tab.
+
+    Returns:
+        Dict mapping every ``DEMOGRAPHIC_FIELD_SELECTORS`` key to its
+        stripped string value (empty string when missing/unreadable).
+    """
+    empty = {key: "" for key in DEMOGRAPHIC_FIELD_SELECTORS}
+    try:
+        result = frame.evaluate(
+            _DEMOGRAPHIC_READ_JS, DEMOGRAPHIC_FIELD_SELECTORS
+        )
+    except Exception:
+        return empty
+    if not isinstance(result, dict):
+        return empty
+    return {
+        key: (str(result.get(key, "") or "")).strip()
+        for key in DEMOGRAPHIC_FIELD_SELECTORS
+    }
+
+
+def build_demographics(page: Any) -> dict[str, str]:
+    """Click 'Dados do Paciente', wait for the Cadastro tab, read fields.
+
+    Combined convenience: navigates to the demographics screen and reads
+    every demographic field into an in-memory dict in one call. The dict
+    uses the external keys ``upsert_patient_demographics`` consumes.
+
+    Args:
+        page: A Playwright ``Page`` object on the patient search screen.
+
+    Returns:
+        Normalized in-memory demographics dict.
+    """
+    click_dados_do_paciente(page)
+    frame = wait_for_demographics_frame(page)
+    return read_demographic_fields(frame)

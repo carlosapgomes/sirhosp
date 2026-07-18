@@ -265,15 +265,15 @@
 
 ## 16. PSW-S16: Persistent demographics-only end-to-end
 
-- [ ] 16.1 Add failing tests for action navigation to `Dados do Paciente`,
+- [x] 16.1 Add failing tests for action navigation to `Dados do Paciente`,
   `frame_pol` extraction, normalization, and persistence with synthetic data.
-- [ ] 16.2 Implement `demographics_only` through the already-authenticated
+- [x] 16.2 Implement `demographics_only` through the already-authenticated
   persistent page/context and `upsert_patient_demographics`.
-- [ ] 16.3 Preserve demographics stages, attempts, timeouts, retries, heartbeat,
+- [x] 16.3 Preserve demographics stages, attempts, timeouts, retries, heartbeat,
   extracted-field metrics, cleanup, and batch closure.
-- [ ] 16.4 Prove the persistent path performs no subprocess, temporary JSON,
+- [x] 16.4 Prove the persistent path performs no subprocess, temporary JSON,
   `sync_playwright()`, new browser/context, or second login.
-- [ ] 16.5 Run official validation and create
+- [x] 16.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S16-report.md`.
 
 ## 17. PSW-S17: Failure and attempt lifecycle parity

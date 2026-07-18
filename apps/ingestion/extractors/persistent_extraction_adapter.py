@@ -74,6 +74,30 @@ _EVOLUTION_DATA_CONTAINER_RE = re.compile(
 )
 """Regex to extract JSON array from a ``<div id="evolution-data">`` container."""
 
+# ---------------------------------------------------------------------------
+# Demographics data extraction constants (PSW-S16)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_DEMOGRAPHICS_URL_TEMPLATE = "/demographics/{patient_record}"
+"""Default URL template for the demographics page (stub/test compatibility).
+
+The real legacy path uses action navigation
+(``extract_demographics_via_legacy_actions``); this template only exists so
+the stub path and unit tests can inject a synthetic ``demographics-data``
+container.
+"""
+
+_DEMOGRAPHICS_DATA_DIV_ID = "demographics-data"
+"""HTML id of the synthetic demographics data container div."""
+
+_DEMOGRAPHICS_DATA_CONTAINER_RE = re.compile(
+    r'<div[^>]*\bid\s*=\s*["\']'
+    + re.escape(_DEMOGRAPHICS_DATA_DIV_ID)
+    + r'["\'][^>]*>\s*(.*?)\s*</div>',
+    re.DOTALL | re.IGNORECASE,
+)
+"""Regex to extract a JSON object from ``<div id="demographics-data">``."""
+
 
 def _build_admissions_url(
     template: str,
@@ -340,6 +364,10 @@ class PersistentExtractionAdapter:
             getattr(config, "base_evolutions_url", "")
             or _DEFAULT_EVOLUTIONS_URL_TEMPLATE
         )
+        self._demographics_url_template: str = (
+            getattr(config, "base_demographics_url", "")
+            or _DEFAULT_DEMOGRAPHICS_URL_TEMPLATE
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -555,6 +583,113 @@ class PersistentExtractionAdapter:
         self._controller.mark_job_processed()
 
         return result
+
+    # ------------------------------------------------------------------
+    # Demographics extraction (PSW-S16)
+    # ------------------------------------------------------------------
+
+    def get_demographics(
+        self,
+        *,
+        patient_record: str,
+        timeout: int = 120,
+    ) -> dict[str, str]:
+        """Extract patient demographics through the persistent session.
+
+        Lifecycle:
+        1. Check session readiness (``ensure_ready``).
+        2. Renew session if needed (``renew_if_needed``).
+        3. Navigate + extract demographics:
+           - Real handle: delegate to
+             ``extract_demographics_via_legacy_actions`` (action navigation
+             reusing the already-open page/context).
+           - Stub/test fallback: URL template (``open_tab``) + parse the
+             synthetic ``<div id="demographics-data">`` JSON container.
+        4. Cleanup job tab (``close_job_tab_if_present``).
+        5. Mark job as processed (``mark_job_processed``).
+
+        The returned dict uses the external keys
+        :func:`~apps.ingestion.services.upsert_patient_demographics` reads.
+        Dates stay in source ``DD/MM/YYYY`` format; the persistence service
+        parses them.
+
+        Args:
+            patient_record: Patient record identifier (prontuário).
+            timeout: Maximum execution time in seconds, propagated to the
+                session handle's navigation path.
+
+        Returns:
+            Normalized in-memory demographics dict.
+
+        Raises:
+            ExtractionError: If session is not ready, renewal fails, or the
+                real-handle action navigation fails.
+            InvalidJsonError: If the stub-path synthetic container holds
+                invalid JSON or a non-object payload.
+            SnapshotContainerMissingError: If the stub-path page renders but
+                the synthetic demographics container is absent.
+        """
+        # Step 1: Check session readiness
+        if not self._controller.ensure_ready():
+            raise ExtractionError("Session not ready for extraction")
+
+        # Step 2: Renew session if needed
+        if not self._controller.renew_if_needed():
+            raise ExtractionError("Session renewal failed before extraction")
+
+        # Step 3: Navigate + extract demographics.
+        _extract_via_actions = getattr(
+            self._session, "extract_demographics_via_legacy_actions", None
+        )
+        if callable(_extract_via_actions):
+            # Real legacy action navigation (PSW-S16). Reuses the
+            # already-open persistent page/context.
+            try:
+                demographics = _extract_via_actions(
+                    patient_record=patient_record, timeout=timeout
+                )
+            except Exception as exc:  # noqa: BLE001 - sanitized taxonomy
+                raise ExtractionError(
+                    "Failed to extract demographics via legacy UI actions"
+                ) from exc
+            if not isinstance(demographics, dict):
+                raise ExtractionError(
+                    "Demographics extraction returned a non-object payload"
+                )
+        else:
+            # URL template fallback (stub/test compatibility).
+            url = _build_admissions_url(
+                self._demographics_url_template,
+                patient_record=patient_record,
+            )
+            if not self._session.open_tab(url, timeout=timeout):
+                raise ExtractionError(
+                    f"Failed to navigate to demographics page: {url}"
+                )
+            html = self._session.get_page_html()
+            json_text = _extract_json_from_container(
+                html,
+                _DEMOGRAPHICS_DATA_DIV_ID,
+                _DEMOGRAPHICS_DATA_CONTAINER_RE,
+            )
+            try:
+                demographics = json.loads(json_text)
+            except json.JSONDecodeError as exc:
+                raise InvalidJsonError(
+                    f"Invalid JSON in demographics data: {exc}"
+                ) from exc
+            if not isinstance(demographics, dict):
+                raise InvalidJsonError(
+                    "Demographics data JSON root must be an object"
+                )
+
+        # Step 4: Cleanup job tab (safe no-op when only root tab remains).
+        self._controller.close_job_tab_if_present()
+
+        # Step 5: Mark job as processed.
+        self._controller.mark_job_processed()
+
+        return demographics
 
     def cleanup_after_failure(self) -> None:
         """Clean up the job tab and mark the job as processed after a recoverable failure.

@@ -87,7 +87,12 @@ class TestUrlEncoding:
 # ---------------------------------------------------------------------------
 
 
-def _make_adapter_mock(snapshot_result=None, fail_mode=None):
+def _make_adapter_mock(
+    snapshot_result=None,
+    fail_mode=None,
+    demographics_result=None,
+    demographics_fail_mode=None,
+):
     """Create a configured mock PersistentExtractionAdapter.
 
     Args:
@@ -95,9 +100,16 @@ def _make_adapter_mock(snapshot_result=None, fail_mode=None):
             Defaults to an empty list.
         fail_mode: One of None, 'session_not_ready', 'renew_fail',
             'nav_fail', 'missing_data', 'invalid_json'
+        demographics_result: The dict to return from get_demographics.
+            Defaults to an empty dict.
+        demographics_fail_mode: One of None, 'extraction_error',
+            'invalid_json', 'missing_data'.
     """
     mock = MagicMock()
     mock.get_admission_snapshot.return_value = snapshot_result or []
+    mock.get_demographics.return_value = (
+        demographics_result if demographics_result is not None else {}
+    )
     mock.cleanup_after_failure = MagicMock()
     mock.ensure_session_ready = MagicMock(return_value=True)
     mock.controller = MagicMock()
@@ -128,6 +140,19 @@ def _make_adapter_mock(snapshot_result=None, fail_mode=None):
     elif fail_mode == "invalid_json":
         mock.get_admission_snapshot.side_effect = InvalidJsonError(
             "Invalid JSON in admission snapshot data"
+        )
+
+    if demographics_fail_mode == "extraction_error":
+        mock.get_demographics.side_effect = ExtractionError(
+            "Demographics extraction failed"
+        )
+    elif demographics_fail_mode == "invalid_json":
+        mock.get_demographics.side_effect = InvalidJsonError(
+            "Invalid JSON in demographics data"
+        )
+    elif demographics_fail_mode == "missing_data":
+        mock.get_demographics.side_effect = SnapshotContainerMissingError(
+            "Page HTML contains no demographics data container."
         )
 
     return mock
@@ -1734,15 +1759,16 @@ class TestDefaultStubBackwardCompat:
         queued_admissions = IngestionRun.objects.filter(
             status="queued", intent="admissions_only"
         ).count()
-        assert succeeded == 3
-        # PSW-S15: each processed admissions_only run now enqueues a
-        # demographics_only follow-up (detached from any batch) to match the
-        # current worker. The eligible admissions_only queue is fully drained.
+        # PSW-S16: each admissions_only run enqueues a demographics_only
+        # follow-up (detached from any batch). demographics_only is now an
+        # enabled intent, so those follow-ups are claimed and processed in
+        # the same default (unbounded) pass — 3 admissions + 3 demographics.
+        assert succeeded == 6
         assert queued_admissions == 0
         demographics = IngestionRun.objects.filter(
             status="queued", intent="demographics_only"
         ).count()
-        assert demographics == 3
+        assert demographics == 0
 
     def test_stub_with_run_id_still_works(self):
         """--run-id works on the stub path too (claims only the selected run)."""
@@ -2014,22 +2040,23 @@ class TestEnabledIntents:
             "_ENABLED_INTENTS must be derived from _DISPATCH_MAP keys"
         )
 
-    def test_normal_poll_skips_demographics_only(self):
-        """R2R3: Normal polling does NOT claim demographics_only runs."""
-        _queue_admissions_run(parameters_json={
-            "patient_record": "E1", "intent": "admissions_only",
-        })
+    def test_normal_poll_processes_demographics_only(self):
+        """PSW-S16: Normal polling now CLAIMS and processes demographics_only
+        runs through the persistent session (atomic enablement)."""
         demo = self._make_run(
             intent="demographics_only",
             params={"patient_record": "E2", "intent": "demographics_only"},
         )
-        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter = _make_adapter_mock(
+            demographics_result={"nome": "PACIENTE TESTE"},
+        )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
         ):
             call_command("process_ingestion_runs_persistent_session")
         demo.refresh_from_db()
-        assert demo.status == "queued"
+        assert demo.status == "succeeded"
+        mock_adapter.get_demographics.assert_called_once()
 
     def test_normal_poll_skips_empty_intent(self):
         """R4: Normal polling does NOT claim runs with empty intent."""
@@ -2115,20 +2142,27 @@ class TestEnabledIntents:
         run.refresh_from_db()
         assert run.status == "queued"
 
-    def test_selected_demographics_only_does_not_call_adapter(self):
-        """R3R5: demographics_only selected intent does NOT call _create_adapter()."""
+    def test_selected_demographics_only_calls_adapter_and_processes(self):
+        """PSW-S16: demographics_only selected via --run-id now creates the
+        adapter and processes the run (atomic enablement)."""
         run = self._make_run(
             intent="demographics_only",
             params={"patient_record": "E10", "intent": "demographics_only"},
         )
-        with patch.object(PersistentWorkerCommand, "_create_adapter") as mock_create:
+        mock_adapter = _make_adapter_mock(
+            demographics_result={"nome": "PACIENTE TESTE"},
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
             call_command(
                 "process_ingestion_runs_persistent_session",
                 run_id=run.pk,
+                max_runs=1,
             )
-        mock_create.assert_not_called()
         run.refresh_from_db()
-        assert run.status == "queued"
+        assert run.status == "succeeded"
+        mock_adapter.get_demographics.assert_called_once()
 
     def test_conflicting_model_json_intents_rejected(self):
         """R3R5: Conflicting model/JSON intents rejected before adapter creation."""
@@ -2165,13 +2199,19 @@ class TestEnabledIntents:
                 )
         mock_adapter.ensure_session_ready.assert_not_called()
 
-    def test_loop_with_only_demographics_only_sleeps(self):
-        """R4: Loop with only demographics_only sleeps, no readiness/extraction."""
+    def test_loop_with_only_demographics_retry_not_due_sleeps(self):
+        """PSW-S16: demographics_only is now eligible; a retry-not-due
+        demographics run still makes the loop sleep."""
+        import datetime
         self._make_run(
             intent="demographics_only",
+            max_attempts=3,
             params={"patient_record": "L1", "intent": "demographics_only"},
         )
-        self._loop_sleep_test(_make_adapter_mock(snapshot_result=[]))
+        run = IngestionRun.objects.get(parameters_json__patient_record="L1")
+        run.next_retry_at = timezone.now() + datetime.timedelta(hours=1)
+        run.save(update_fields=["next_retry_at"])
+        self._loop_sleep_test(_make_adapter_mock(demographics_result={}))
 
     def test_loop_with_only_empty_intents_sleeps(self):
         """R4: Loop with only empty/unknown intents sleeps."""
@@ -2205,15 +2245,17 @@ class TestEnabledIntents:
         run.refresh_from_db()
         assert run.status == "succeeded"
 
-    def test_unsupported_not_yet_enabled_alongside_enabled(self):
-        """R2R3: Disabled run remains untouched while an enabled run is processed."""
+    def test_unsupported_unknown_remains_unclaimed_alongside_enabled(self):
+        """PSW-S16: An unknown-intent run remains untouched while an enabled
+        run is processed. (demographics_only is now enabled in PSW-S16, so a
+        truly unknown intent is used as the disabled example.)"""
         enabled = self._make_run(
             intent="admissions_only",
             params={"patient_record": "E7", "intent": "admissions_only"},
         )
         disabled = self._make_run(
-            intent="demographics_only",
-            params={"patient_record": "E8", "intent": "demographics_only"},
+            intent="unknown_purpose",
+            params={"patient_record": "E8", "intent": "unknown_purpose"},
         )
         mock_adapter = _make_adapter_mock(snapshot_result=[])
         with patch.object(
@@ -2245,6 +2287,7 @@ class TestEnabledIntents:
         assert run.attempt_count == 0
         mock_adapter.get_admission_snapshot.assert_not_called()
         mock_adapter.extract_evolutions.assert_not_called()
+        mock_adapter.get_demographics.assert_not_called()
 
 
 # ===========================================================================
@@ -3257,3 +3300,293 @@ class TestAdmissionsOnlyCrossWorkerParity:
             assert f.batch_id == src.batch_id
             assert f.parameters_json["admission_source_key"] == key
             assert f.parameters_json["intent"] == "full_sync"
+
+
+# ===========================================================================
+# PSW-S16: Persistent demographics-only end-to-end
+# ===========================================================================
+
+
+_DEMOGRAPHICS_EXTRACT = {
+    "prontuario": "DEMO-1",
+    "nome": "MARIA DE FATIMA SILVA",
+    "nome_social": "",
+    "data_nascimento": "15/03/1965",
+    "sexo": "Feminino",
+    "genero": "Cisgênero",
+    "nome_mae": "JOSEFA SILVA",
+    "nome_pai": "JOAO SILVA",
+    "raca_cor": "Branca",
+    "naturalidade": "Sao Paulo",
+    "nacionalidade": "Brasileira",
+    "estado_civil": "Casado",
+    "grau_instrucao": "Ensino Medio Completo",
+    "profissao": "Motorista",
+    "ddd_fone_residencial": "11",
+    "fone_residencial": "12345678",
+    "ddd_fone_celular": "11",
+    "fone_celular": "987654321",
+    "ddd_fone_recado": "",
+    "fone_recado": "",
+    "cns": "898001234567890",
+    "cpf": "12345678900",
+    "logradouro": "Rua das Flores",
+    "numero": "123",
+    "complemento": "Apto 2",
+    "bairro": "Centro",
+    "cep": "01001000",
+    "cidade": "Sao Paulo",
+    "uf": "SP",
+}
+
+
+@pytest.mark.django_db
+class TestDemographicsOnlyEndToEnd:
+    """PSW-S16: persistent demographics_only end-to-end through the
+    already-authenticated session and ``upsert_patient_demographics``."""
+
+    def _queue_demo_run(self, patient_record="DEMO-1", **kwargs):
+        defaults = {
+            "status": "queued",
+            "intent": "demographics_only",
+            "max_attempts": 1,
+            "parameters_json": {
+                "patient_record": patient_record,
+                "intent": "demographics_only",
+            },
+        }
+        defaults.update(kwargs)
+        return IngestionRun.objects.create(**defaults)
+
+    def test_persists_demographics_via_upsert_patient_demographics(self):
+        from apps.patients.models import Patient
+
+        run = self._queue_demo_run(patient_record="DEMO-1")
+        mock_adapter = _make_adapter_mock(
+            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        patient = Patient.objects.get(patient_source_key="DEMO-1")
+        assert patient.name == "MARIA DE FATIMA SILVA"
+        assert patient.cns == "898001234567890"
+        assert patient.cpf == "12345678900"
+        assert patient.gender == "Feminino"
+        # Phone combines DDD + number (matches current worker/service).
+        assert patient.phone_cellular == "11987654321"
+
+    def test_records_both_demographics_stages(self):
+        run = self._queue_demo_run(patient_record="DEMO-2")
+        mock_adapter = _make_adapter_mock(
+            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        stages = {
+            m.stage_name: m.status
+            for m in IngestionRunStageMetric.objects.filter(run=run)
+        }
+        assert stages.get("demographics_extraction") == "succeeded"
+        assert stages.get("demographics_persistence") == "succeeded"
+
+    def test_field_count_metric_matches_current_worker(self):
+        from apps.patients.models import Patient
+
+        run = self._queue_demo_run(patient_record="DEMO-3")
+        mock_adapter = _make_adapter_mock(
+            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        patient = Patient.objects.get(patient_source_key="DEMO-3")
+        # Mirror the current worker's exact field list/count logic.
+        expected_count = sum(
+            1
+            for field_name in [
+                "name", "social_name", "date_of_birth", "gender",
+                "gender_identity", "mother_name", "father_name",
+                "race_color", "birthplace", "nationality",
+                "marital_status", "education_level", "profession",
+                "cns", "cpf", "phone_home", "phone_cellular",
+                "phone_contact", "street", "address_number",
+                "address_complement", "neighborhood", "city",
+                "state", "postal_code",
+            ]
+            if getattr(patient, field_name, None)
+        )
+        assert (
+            run.parameters_json["demographics_fields_extracted"]
+            == expected_count
+        )
+        assert expected_count > 0
+
+    def test_missing_patient_record_fails_before_source_actions(self):
+        """R6: empty patient_record fails immediately without calling the
+        adapter (no source actions)."""
+        run = self._queue_demo_run(
+            patient_record="",
+            parameters_json={
+                "patient_record": "",
+                "intent": "demographics_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(demographics_result={})
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        mock_adapter.get_demographics.assert_not_called()
+
+    def test_extraction_failure_preserves_retry_taxonomy(self):
+        run = self._queue_demo_run(
+            patient_record="DEMO-4",
+            max_attempts=3,
+        )
+        mock_adapter = _make_adapter_mock(
+            demographics_fail_mode="extraction_error",
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "queued"  # requeued (attempts remain)
+        assert run.attempt_count == 1
+        stages = {
+            m.stage_name: m.status
+            for m in IngestionRunStageMetric.objects.filter(run=run)
+        }
+        assert stages.get("demographics_extraction") == "failed"
+        # Persistence stage must NOT have run.
+        assert "demographics_persistence" not in stages
+
+    def test_persistence_failure_marks_run_failed_without_stage_success(self):
+        run = self._queue_demo_run(
+            patient_record="DEMO-5",
+            max_attempts=1,
+        )
+        mock_adapter = _make_adapter_mock(
+            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"
+            ".upsert_patient_demographics",
+            side_effect=ValueError("DB write failed"),
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        stages = {
+            m.stage_name: m.status
+            for m in IngestionRunStageMetric.objects.filter(run=run)
+        }
+        # Extraction succeeded but persistence failed.
+        assert stages.get("demographics_extraction") == "succeeded"
+        assert stages.get("demographics_persistence") == "failed"
+
+    def test_demographics_only_closes_batch(self):
+        from apps.ingestion.models import CensusExecutionBatch
+
+        batch = CensusExecutionBatch.objects.create()
+        run = self._queue_demo_run(
+            patient_record="DEMO-6",
+            batch=batch,
+        )
+        mock_adapter = _make_adapter_mock(
+            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        batch.refresh_from_db()
+        # try_close_batch marks a drained batch "succeeded" (no failures).
+        assert batch.status == "succeeded"
+        assert batch.finished_at is not None
+
+    def test_no_subprocess_no_new_browser_on_demographics(self):
+        """R7: demographics dispatch performs no subprocess, temp dir/JSON,
+        sync_playwright, browser/context launch, or second login."""
+        run = self._queue_demo_run(patient_record="DEMO-7")
+        mock_adapter = _make_adapter_mock(
+            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ), patch("subprocess.run") as mock_run, patch(
+            "subprocess.Popen"
+        ) as mock_popen, patch(
+            "playwright.sync_api.sync_playwright"
+        ) as mock_sync, patch(
+            "tempfile.TemporaryDirectory"
+        ) as mock_tmpdir, patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".bootstrap_legacy_session"
+        ) as mock_bootstrap:
+            call_command(
+                "process_ingestion_runs_persistent_session", max_runs=1
+            )
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        mock_run.assert_not_called()
+        mock_popen.assert_not_called()
+        mock_sync.assert_not_called()
+        mock_tmpdir.assert_not_called()
+        mock_bootstrap.assert_not_called()
+
+    def test_admissions_then_demographics_reuse_one_handle(self):
+        """R9: an admissions job followed by a demographics job reuse the
+        same adapter/handle (one ``_create_adapter`` call) and one login."""
+        from apps.ingestion.extractors import legacy_session_bootstrap
+
+        adm_run = _queue_admissions_run(
+            parameters_json={
+                "patient_record": "DEMO-8",
+                "intent": "admissions_only",
+            },
+        )
+        demo_run = self._queue_demo_run(patient_record="DEMO-8")
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=_ADMISSION_SNAPSHOT_PARITY,
+            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ) as mock_create, patch.object(
+            legacy_session_bootstrap, "bootstrap_legacy_session"
+        ) as mock_bootstrap:
+            call_command(
+                "process_ingestion_runs_persistent_session", max_runs=2
+            )
+
+        adm_run.refresh_from_db()
+        demo_run.refresh_from_db()
+        assert adm_run.status == "succeeded"
+        assert demo_run.status == "succeeded"
+        # One adapter/handle created for both jobs.
+        mock_create.assert_called_once()
+        # No additional login/bootstrap during dispatch (stub path).
+        mock_bootstrap.assert_not_called()

@@ -46,6 +46,7 @@ from typing import Any
 from apps.ingestion.extractors.legacy_navigation import (
     NavigationError,
     _read_and_build_snapshot,
+    build_demographics,
     choose_overlapping_admissions,
     click_evolucao,
     click_internacoes,
@@ -484,6 +485,74 @@ class RealHandleBridge:
                 exc,
             )
             return False
+
+    # ------------------------------------------------------------------
+    # PSW-S16: real legacy demographics action navigation
+    # ------------------------------------------------------------------
+
+    def extract_demographics_via_legacy_actions(
+        self,
+        *,
+        patient_record: str,
+        timeout: int = 120,  # noqa: ARG002
+    ) -> dict[str, str]:
+        """Extract demographics by navigating the real legacy UI action flow.
+
+        Reuses the already-open persistent page/context (never a new browser,
+        subprocess, or second login) to perform the action sequence modeled
+        on the working demographics script:
+
+        1. Ensure the patient search screen is visible.
+        2. Fill ``#prontuarioInput`` and click ``Pesquisa Avan\u00e7ada``.
+        3. Click ``Dados do Paciente`` in the POL tree menu.
+        4. Wait for ``frame_pol`` Cadastro tab to load.
+        5. Read every demographic field into an in-memory dict.
+
+        The returned dict uses the external keys consumed by
+        :func:`~apps.ingestion.services.upsert_patient_demographics`.
+        Dates stay in source ``DD/MM/YYYY`` format; the persistence service
+        parses them. Missing/empty fields are returned as empty strings, so a
+        sparse page never fails the whole extraction unexpectedly.
+
+        Args:
+            patient_record: Patient record (prontu\u00e1rio) string. Normalized
+                to digits-only before search.
+            timeout: Overall hint in seconds (reserved for future per-step
+                waits; currently unused because the navigation helpers use
+                their own bounded waits).
+
+        Returns:
+            Normalized in-memory demographics dict. On navigation failure (no
+            active page, search/dados-do-paciente unavailable, frame timeout)
+            an empty dict is returned and the failure is logged with a
+            sanitized message (no credentials/cookies/raw payloads). The
+            command layer treats an empty dict as an extraction failure and
+            never persists it.
+        """
+        page = self._resolve_active_page()
+        if page is None:
+            logger.warning(
+                "Cannot extract demographics via legacy actions: "
+                "no active page available"
+            )
+            return {}
+
+        try:
+            ensure_search_screen(page)
+            search_patient(page, patient_record=patient_record)
+            return build_demographics(page)
+        except NavigationError as exc:
+            logger.warning(
+                "Demographics legacy action navigation failed (sanitized): %s",
+                exc,
+            )
+            return {}
+        except Exception as exc:  # noqa: BLE001 - sanitized fallback
+            logger.warning(
+                "Unexpected error during demographics extraction: %s",
+                exc,
+            )
+            return {}
 
     # ------------------------------------------------------------------
     # PSW-S13: real legacy evolution action navigation (full-sync)
