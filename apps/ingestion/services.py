@@ -773,6 +773,8 @@ def _consolidate_period_duplicates(
 def upsert_admission_snapshot(
     patient: Patient,
     admissions_snapshot: list[dict[str, Any]],
+    *,
+    source_system: str = "tasy",
 ) -> dict[str, int]:
     """Upsert a list of admission snapshots for a patient.
 
@@ -791,6 +793,11 @@ def upsert_admission_snapshot(
             - admission_end: Admission end datetime string (optional, may be None).
             - ward: Ward name (optional, may be empty string).
             - bed: Bed identifier (optional, may be empty string).
+            - source_system: Optional per-item override (defaults to the
+              caller-supplied ``source_system`` so Patient and Admission share
+              the same source system).
+        source_system: Source system applied to every admission unless the
+          snapshot item overrides it. Defaults to ``"tasy"``.
 
     Returns:
         dict with "created" (int) and "updated" (int) counts.
@@ -800,7 +807,9 @@ def upsert_admission_snapshot(
 
     for item in admissions_snapshot:
         admission_key = item.get("admission_key", "")
-        source_system = item.get("source_system", "tasy")
+        # Per-item source_system (rare) overrides the caller default; this
+        # keeps Patient and Admission on the same source system.
+        admission_source_system = item.get("source_system") or source_system
 
         admission_date = _parse_naive_datetime(item.get("admission_start"))
         discharge_date = _parse_naive_datetime(item.get("admission_end"))
@@ -813,7 +822,7 @@ def upsert_admission_snapshot(
         # 1) Match by source admission key (stable key scenario)
         try:
             admission = Admission.objects.get(
-                source_system=source_system,
+                source_system=admission_source_system,
                 source_admission_key=admission_key,
             )
         except Admission.DoesNotExist:
@@ -823,7 +832,7 @@ def upsert_admission_snapshot(
         if admission is None and admission_date is not None:
             period_filter: dict[str, Any] = {
                 "patient": patient,
-                "source_system": source_system,
+                "source_system": admission_source_system,
                 "admission_date__date": admission_date.date(),
             }
             # Only include discharge_date in the filter when both sides are non-null
@@ -837,7 +846,7 @@ def upsert_admission_snapshot(
         if admission is None:
             admission = Admission.objects.create(
                 patient=patient,
-                source_system=source_system,
+                source_system=admission_source_system,
                 source_admission_key=admission_key,
                 admission_date=admission_date,
                 discharge_date=discharge_date,
@@ -877,7 +886,7 @@ def upsert_admission_snapshot(
 
         # --- Consolidation (S2): merge duplicates for this period ---
         _consolidate_period_duplicates(
-            patient, admission_date, discharge_date, source_system
+            patient, admission_date, discharge_date, admission_source_system
         )
 
     return {"created": created, "updated": updated}
@@ -918,6 +927,7 @@ def persist_admissions_snapshot(
         upsert_result = upsert_admission_snapshot(
             patient=patient,
             admissions_snapshot=admissions_snapshot,
+            source_system=source_system,
         )
         adm_metrics["created"] = upsert_result.get("created", 0)
         adm_metrics["updated"] = upsert_result.get("updated", 0)
