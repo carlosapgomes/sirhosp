@@ -2683,6 +2683,9 @@ class TestAdmissionsOnlyPersistenceParity:
         assert f.parameters_json["admission_source_key"] == "ADM-BATCH"
         assert "admission_id" in f.parameters_json
         assert f.parameters_json["patient_record"] == "BATCH-P"
+        # PSW-S15 R2: both dates are propagated from the captured admission.
+        assert f.parameters_json["start_date"] == "2024-03-10"
+        assert f.parameters_json["end_date"] == "2024-03-15"
 
         # Batch stays open/running while its full_sync child is queued.
         batch.refresh_from_db()
@@ -2844,6 +2847,156 @@ class TestPersistAdmissionsSnapshotService:
         assert metrics["seen"] == 1
         assert metrics["created"] == 1
         assert metrics["updated"] == 0
+
+    def test_conflicting_item_source_system_raises_sanitized_error(self):
+        """A conflicting per-item source_system is rejected before any write."""
+        import pytest
+
+        from apps.ingestion.services import persist_admissions_snapshot
+        from apps.patients.models import Admission
+
+        snapshot = [
+            {
+                "admission_key": "ADM-CONFLICT",
+                "admission_start": "2024-05-01",
+                "admission_end": "2024-05-05",
+                "ward": "UTI",
+                "bed": "01",
+                "source_system": "source-b",
+            }
+        ]
+        with pytest.raises(ValueError) as exc_info:
+            persist_admissions_snapshot(
+                patient_source_key="CONF-1",
+                admissions_snapshot=snapshot,
+                source_system="source-a",
+            )
+
+        message = str(exc_info.value)
+        # Sanitized: no patient/admission identifiers, clinical text, or creds.
+        assert "CONF-1" not in message
+        assert "ADM-CONFLICT" not in message
+
+        # No Admission from that snapshot was created or updated.
+        assert not Admission.objects.filter(
+            source_admission_key="ADM-CONFLICT"
+        ).exists()
+        # No Admission linked to the resolved patient carries a different source.
+        from apps.patients.models import Patient
+
+        patient = Patient.objects.get(
+            source_system="source-a", patient_source_key="CONF-1"
+        )
+        assert not Admission.objects.filter(patient=patient).exists()
+
+    def test_conflict_in_later_item_prevents_partial_admission_writes(self):
+        """A conflict in item two must not leave item one persisted."""
+        import pytest
+
+        from apps.ingestion.services import persist_admissions_snapshot
+        from apps.patients.models import Admission, Patient
+
+        snapshot = [
+            {
+                "admission_key": "ADM-FIRST",
+                "admission_start": "2024-06-01",
+                "admission_end": "2024-06-05",
+                "ward": "UTI",
+                "bed": "01",
+            },
+            {
+                "admission_key": "ADM-SECOND",
+                "admission_start": "2024-07-01",
+                "admission_end": "2024-07-05",
+                "ward": "UTI",
+                "bed": "02",
+                "source_system": "source-b",
+            },
+        ]
+        with pytest.raises(ValueError):
+            persist_admissions_snapshot(
+                patient_source_key="CONF-2",
+                admissions_snapshot=snapshot,
+                source_system="source-a",
+            )
+
+        # Pre-validation runs before the mutation loop, so neither admission is
+        # written (no partial write of item one).
+        assert not Admission.objects.filter(source_admission_key="ADM-FIRST").exists()
+        assert not Admission.objects.filter(source_admission_key="ADM-SECOND").exists()
+        patient = Patient.objects.get(
+            source_system="source-a", patient_source_key="CONF-2"
+        )
+        assert patient.admissions.count() == 0
+
+    def test_absent_item_source_system_uses_authoritative_source(self):
+        """An item without source_system uses the authoritative source."""
+        from apps.ingestion.services import persist_admissions_snapshot
+        from apps.patients.models import Admission
+
+        snapshot = [
+            {
+                "admission_key": "ADM-ABS",
+                "admission_start": "2024-05-10",
+                "admission_end": "2024-05-12",
+                "ward": "UTI",
+                "bed": "01",
+            }
+        ]
+        patient, _ = persist_admissions_snapshot(
+            patient_source_key="ABS-1",
+            admissions_snapshot=snapshot,
+            source_system="source-a",
+        )
+        adm = Admission.objects.get(source_admission_key="ADM-ABS")
+        assert adm.source_system == "source-a"
+        assert adm.source_system == patient.source_system
+
+    def test_matching_item_source_system_is_accepted(self):
+        """An item whose source_system equals the authoritative source is accepted."""
+        from apps.ingestion.services import persist_admissions_snapshot
+        from apps.patients.models import Admission
+
+        snapshot = [
+            {
+                "admission_key": "ADM-MATCH",
+                "admission_start": "2024-05-20",
+                "admission_end": "2024-05-22",
+                "ward": "UTI",
+                "bed": "01",
+                "source_system": "source-a",
+            }
+        ]
+        persist_admissions_snapshot(
+            patient_source_key="MATCH-1",
+            admissions_snapshot=snapshot,
+            source_system="source-a",
+        )
+        adm = Admission.objects.get(source_admission_key="ADM-MATCH")
+        assert adm.source_system == "source-a"
+
+    def test_default_tasy_direct_caller_remains_unchanged(self):
+        """Direct callers without source_system keep default Tasy behavior."""
+        from apps.ingestion.services import upsert_admission_snapshot
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            source_system="tasy", patient_source_key="TASY-1", name=""
+        )
+        snapshot = [
+            {
+                "admission_key": "ADM-TASY",
+                "admission_start": "2024-08-01",
+                "admission_end": "2024-08-03",
+                "ward": "UTI",
+                "bed": "01",
+            }
+        ]
+        result = upsert_admission_snapshot(patient, snapshot)
+        assert result["created"] == 1
+        adm = Admission.objects.get(source_admission_key="ADM-TASY")
+        assert adm.source_system == "tasy"
+        assert adm.source_system == patient.source_system
 
 
 @pytest.mark.django_db

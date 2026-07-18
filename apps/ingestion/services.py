@@ -774,12 +774,22 @@ def upsert_admission_snapshot(
     patient: Patient,
     admissions_snapshot: list[dict[str, Any]],
     *,
-    source_system: str = "tasy",
+    source_system: str | None = None,
 ) -> dict[str, int]:
     """Upsert a list of admission snapshots for a patient.
 
     Accepts admission period fields (`admission_start`, `admission_end`)
     when available.
+
+    Source-system invariant: every persisted Admission uses ONE authoritative
+    source system — the caller-supplied ``source_system`` when given, otherwise
+    ``patient.source_system`` — so a Patient and its Admissions can never carry
+    conflicting sources. A snapshot item may omit ``source_system`` (the
+    authoritative source is used) or declare a value EQUAL to the authoritative
+    source; a non-empty CONFLICTING value raises a sanitized ``ValueError``
+    before any Admission is created or updated. The whole snapshot is validated
+    before the mutation loop, so a conflict in a later item cannot leave
+    earlier Admissions partially written.
 
     Policy for ward/bed:
     - Non-empty values always update.
@@ -793,23 +803,32 @@ def upsert_admission_snapshot(
             - admission_end: Admission end datetime string (optional, may be None).
             - ward: Ward name (optional, may be empty string).
             - bed: Bed identifier (optional, may be empty string).
-            - source_system: Optional per-item override (defaults to the
-              caller-supplied ``source_system`` so Patient and Admission share
-              the same source system).
-        source_system: Source system applied to every admission unless the
-          snapshot item overrides it. Defaults to ``"tasy"``.
+            - source_system: Optional; must be absent/empty or equal to the
+              authoritative source (a conflict raises ``ValueError``).
+        source_system: Authoritative source system for this operation.
+          Defaults to ``patient.source_system`` so direct callers remain safe.
 
     Returns:
         dict with "created" (int) and "updated" (int) counts.
     """
+    authoritative_source = source_system or patient.source_system
+
+    # Pre-validate the whole snapshot before mutating any Admission so a
+    # conflict in a later item cannot leave earlier rows partially written.
+    # The error is deliberately generic and contains no identifiers.
+    for item in admissions_snapshot:
+        item_source = (item.get("source_system") or "").strip()
+        if item_source and item_source != authoritative_source:
+            raise ValueError(
+                "admission snapshot declares a source_system that conflicts "
+                "with the target patient's source system"
+            )
+
     created = 0
     updated = 0
 
     for item in admissions_snapshot:
         admission_key = item.get("admission_key", "")
-        # Per-item source_system (rare) overrides the caller default; this
-        # keeps Patient and Admission on the same source system.
-        admission_source_system = item.get("source_system") or source_system
 
         admission_date = _parse_naive_datetime(item.get("admission_start"))
         discharge_date = _parse_naive_datetime(item.get("admission_end"))
@@ -822,7 +841,7 @@ def upsert_admission_snapshot(
         # 1) Match by source admission key (stable key scenario)
         try:
             admission = Admission.objects.get(
-                source_system=admission_source_system,
+                source_system=authoritative_source,
                 source_admission_key=admission_key,
             )
         except Admission.DoesNotExist:
@@ -832,7 +851,7 @@ def upsert_admission_snapshot(
         if admission is None and admission_date is not None:
             period_filter: dict[str, Any] = {
                 "patient": patient,
-                "source_system": admission_source_system,
+                "source_system": authoritative_source,
                 "admission_date__date": admission_date.date(),
             }
             # Only include discharge_date in the filter when both sides are non-null
@@ -846,7 +865,7 @@ def upsert_admission_snapshot(
         if admission is None:
             admission = Admission.objects.create(
                 patient=patient,
-                source_system=admission_source_system,
+                source_system=authoritative_source,
                 source_admission_key=admission_key,
                 admission_date=admission_date,
                 discharge_date=discharge_date,
@@ -886,7 +905,7 @@ def upsert_admission_snapshot(
 
         # --- Consolidation (S2): merge duplicates for this period ---
         _consolidate_period_duplicates(
-            patient, admission_date, discharge_date, admission_source_system
+            patient, admission_date, discharge_date, authoritative_source
         )
 
     return {"created": created, "updated": updated}
@@ -902,11 +921,16 @@ def persist_admissions_snapshot(
 
     Shared by the current and persistent-session workers' admissions capture
     so both produce identical clinical effects: a ``Patient`` row, ``Admission``
-    rows via :func:`upsert_admission_snapshot`, ward/bed backfill via
-    :func:`backfill_admission_ward_from_census`, and ``seen``/``created``/
-    ``updated`` counters derived from database outcomes (never from list
-    length). Source extraction (extractor/adapter) stays OUTSIDE this
-    boundary — callers pass the already-captured snapshot.
+    rows via :func:`upsert_admission_snapshot`, and ward/bed backfill via
+    :func:`backfill_admission_ward_from_census`. Source extraction
+    (extractor/adapter) stays OUTSIDE this boundary — callers pass the
+    already-captured snapshot.
+
+    Counter provenance:
+    - ``seen`` comes from the captured snapshot length
+      (``len(admissions_snapshot)``).
+    - ``created`` and ``updated`` come from the database upsert outcomes
+      returned by :func:`upsert_admission_snapshot`.
 
     A ``Patient`` is always created (even for an empty snapshot) for
     traceability, matching the existing current-worker behavior.
