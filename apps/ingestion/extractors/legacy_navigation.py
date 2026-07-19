@@ -1263,16 +1263,25 @@ def build_demographics(
     every demographic field into an in-memory dict in one call. The dict
     uses the external keys ``upsert_patient_demographics`` consumes.
 
-    Deadline boundary: ``timeout_ms`` is a single shared monotonic budget
-    that covers the Playwright action/navigation/readiness phases, each of
-    which recomputes and passes the remaining time to its bounded wait,
-    click, fill, or pause. The field read
-    (:func:`read_demographic_fields` → synchronous ``frame.evaluate``)
-    is gated **before it starts** by the final readiness check
-    (``_remaining_ms_strict``), so it can only begin while the budget is
-    still active. Synchronous ``Frame.evaluate()`` has no per-call timeout
-    in the current Playwright API; once the read starts, this shared
-    deadline does not interrupt or bound its execution duration.
+    Deadline boundary: when ``timeout_ms`` is provided, this function
+    creates an outer monotonic deadline and propagates ceil-rounded
+    positive remaining-millisecond bounds to the action/navigation/
+    readiness helpers. Those helpers bound operations that accept timeouts,
+    but the readiness helper (:func:`wait_for_demographics_frame`)
+    re-bases the received integer value onto a *local* deadline rather
+    than reusing one absolute deadline object across every phase;
+    millisecond ceiling/rebasing can extend that local deadline by a
+    fraction of a millisecond relative to the original outer deadline.
+
+    The readiness helper checks its local deadline before returning the
+    frame. ``build_demographics`` performs **no** outer-deadline check at
+    the :func:`read_demographic_fields` / ``Frame.evaluate()`` call, and
+    synchronous ``Frame.evaluate()`` has no per-call timeout in this path.
+    The field read is therefore not guaranteed to start or finish within
+    the original ``timeout_ms``.
+
+    With ``timeout_ms=None`` there is no outer shared deadline: legacy
+    helper defaults apply and readiness uses its own 15-second budget.
 
     Args:
         page: A Playwright ``Page`` object on the patient search screen.
