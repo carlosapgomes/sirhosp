@@ -1067,3 +1067,209 @@ class TestExtractEvolutionsPdfFallback:
 
         assert session.closed_tab_calls == 1
         assert adapter._controller.jobs_processed == 1
+
+
+# ===========================================================================
+# PSW-S16 correction: get_demographics identity + fail-closed contract
+# ===========================================================================
+
+
+def _demographics_container_html(payload: str) -> str:
+    """Build stub-path HTML with a synthetic demographics-data container."""
+    return (
+        "<html><body>\n"
+        '<div id="tempoSessao">'
+        "<span>00</span>:<span>29</span>:<span>01</span>"
+        "</div>\n"
+        f'<div id="demographics-data">\n{payload}\n</div>\n'
+        "</body></html>"
+    )
+
+
+_READY_SESSION_HTML = (
+    "<html><body>"
+    '<div id="tempoSessao" class="tempo-sessao">'
+    "Tempo: <span>00</span>:<span>29</span>:<span>01</span>"
+    "</div></body></html>"
+)
+
+
+class TestGetDemographicsIdentity:
+    """R3: identity invariant at the adapter boundary (all paths cross it)."""
+
+    def test_stub_path_matching_identity_succeeds(self) -> None:
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        payload = '{"prontuario": "14160147", "nome": "MARIA"}'
+        session = FakeExtractionSession()
+        session.set_html(_demographics_container_html(payload))
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+
+        result = adapter.get_demographics(
+            patient_record="14160147", timeout=10
+        )
+
+        assert result["nome"] == "MARIA"
+
+    def test_stub_path_identity_mismatch_raises_extraction_error(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.errors import ExtractionError
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        payload = '{"prontuario": "DEMO-1", "nome": "OUTRO"}'
+        session = FakeExtractionSession()
+        session.set_html(_demographics_container_html(payload))
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+
+        with pytest.raises(ExtractionError) as exc_info:
+            adapter.get_demographics(
+                patient_record="DEMO-2", timeout=10
+            )
+
+        message = str(exc_info.value)
+        assert "DEMO-1" not in message
+        assert "DEMO-2" not in message
+
+    def test_empty_prontuario_raises_extraction_error(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.errors import ExtractionError
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        payload = '{"prontuario": "", "nome": "X"}'
+        session = FakeExtractionSession()
+        session.set_html(_demographics_container_html(payload))
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+
+        with pytest.raises(ExtractionError):
+            adapter.get_demographics(
+                patient_record="14160147", timeout=10
+            )
+
+    def test_non_object_payload_raises_invalid_json(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.errors import InvalidJsonError
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        payload = '["not", "an", "object"]'
+        session = FakeExtractionSession()
+        session.set_html(_demographics_container_html(payload))
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+
+        with pytest.raises(InvalidJsonError):
+            adapter.get_demographics(
+                patient_record="14160147", timeout=10
+            )
+
+    def test_bridge_path_delegateates_and_checks_identity(self) -> None:
+        """The real-handle bridge path crosses the same identity boundary."""
+        from unittest.mock import MagicMock
+
+        from apps.ingestion.extractors.errors import ExtractionError
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        session = MagicMock()
+        session.is_connected.return_value = True
+        session.get_page_html.return_value = _READY_SESSION_HTML
+        session.get_tab_classes.return_value = [
+            "tabs-first tabs-last tabs-selected",
+        ]
+        # Bridge returns a dict whose prontuario does NOT match.
+        session.extract_demographics_via_legacy_actions.return_value = {
+            "prontuario": "DEMO-1",
+            "nome": "OUTRO",
+        }
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+
+        import pytest
+
+        with pytest.raises(ExtractionError):
+            adapter.get_demographics(
+                patient_record="DEMO-2", timeout=10
+            )
+        # Identity failure occurs before the job is counted as processed.
+        session.extract_demographics_via_legacy_actions.assert_called_once_with(
+            patient_record="DEMO-2", timeout=10
+        )
+
+    def test_bridge_path_matching_identity_succeeds(self) -> None:
+        from unittest.mock import MagicMock
+
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        session = MagicMock()
+        session.is_connected.return_value = True
+        session.get_page_html.return_value = _READY_SESSION_HTML
+        session.get_tab_classes.return_value = [
+            "tabs-first tabs-last tabs-selected",
+        ]
+        session.extract_demographics_via_legacy_actions.return_value = {
+            "prontuario": "14160147",
+            "nome": "MATCH",
+        }
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+
+        result = adapter.get_demographics(
+            patient_record="14160147", timeout=10
+        )
+
+        assert result["nome"] == "MATCH"
+        session.extract_demographics_via_legacy_actions.assert_called_once_with(
+            patient_record="14160147", timeout=10
+        )
+
+
+class TestGetDemographicsTimeoutPropagation:
+    """R5: the timeout reaches both the bridge and the stub open_tab."""
+
+    def test_timeout_reaches_bridge_action_call(self) -> None:
+        from unittest.mock import MagicMock
+
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        session = MagicMock()
+        session.is_connected.return_value = True
+        session.get_page_html.return_value = _READY_SESSION_HTML
+        session.get_tab_classes.return_value = [
+            "tabs-first tabs-last tabs-selected",
+        ]
+        session.extract_demographics_via_legacy_actions.return_value = {
+            "prontuario": "14160147",
+        }
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+
+        adapter.get_demographics(patient_record="14160147", timeout=45)
+
+        session.extract_demographics_via_legacy_actions.assert_called_once_with(
+            patient_record="14160147", timeout=45
+        )

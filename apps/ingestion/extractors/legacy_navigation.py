@@ -24,7 +24,7 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -125,11 +125,42 @@ def _format_iso_date(value: date | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Deadline helpers (PSW-S16 correction: real timeout budget)
+# ---------------------------------------------------------------------------
+
+
+def _deadline_s(timeout_ms: int | None) -> float | None:
+    """Return a monotonic deadline (seconds) for ``timeout_ms``, or None."""
+    if timeout_ms is None:
+        return None
+    return time.monotonic() + max(0, timeout_ms) / 1000
+
+
+def _remaining_ms(deadline_s: float | None) -> int | None:
+    """Return milliseconds remaining until ``deadline_s``, or None.
+
+    ``None`` means "no deadline" (caller uses its own fixed defaults).
+    """
+    if deadline_s is None:
+        return None
+    return max(0, int(round((deadline_s - time.monotonic()) * 1000)))
+
+
+def _bound_ms(deadline_s: float | None, default_ms: int) -> int:
+    """Return ``default_ms`` when there is no deadline, else the smaller of
+    the default and the remaining budget (never negative)."""
+    if deadline_s is None:
+        return default_ms
+    remaining = max(0, int(round((deadline_s - time.monotonic()) * 1000)))
+    return min(default_ms, remaining)
+
+
+# ---------------------------------------------------------------------------
 # Navigation actions
 # ---------------------------------------------------------------------------
 
 
-def ensure_search_screen(page: Any) -> None:
+def ensure_search_screen(page: Any, *, timeout_ms: int | None = None) -> None:
     """Ensure the patient search screen is visible.
 
     Tries multiple strategies modeled after ``path2.py``'s
@@ -148,10 +179,11 @@ def ensure_search_screen(page: Any) -> None:
         NavigationError: If the search screen cannot be made visible after
             all fallback attempts.
     """
+    deadline_s = _deadline_s(timeout_ms)
     # Strategy 1: Check if already visible
     prontuario = page.locator(SEL_PRONTUARIO_INPUT)
     try:
-        prontuario.wait_for(state="visible", timeout=5000)
+        prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 5000))
         logger.debug("Search screen already visible via #prontuarioInput.")
         return
     except Exception:
@@ -160,11 +192,11 @@ def ensure_search_screen(page: Any) -> None:
     # Strategy 2: Try the POL menu button (most reliable fallback).
     pol_menu = page.locator(SEL_POL_MENU)
     try:
-        pol_menu.wait_for(state="visible", timeout=5000)
+        pol_menu.wait_for(state="visible", timeout=_bound_ms(deadline_s, 5000))
         pol_menu.click()
-        page.wait_for_timeout(1800)
+        page.wait_for_timeout(_bound_ms(deadline_s, 1800))
         try:
-            prontuario.wait_for(state="visible", timeout=6000)
+            prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
             logger.debug("Search screen opened via #polMenu.")
             return
         except Exception:
@@ -178,11 +210,11 @@ def ensure_search_screen(page: Any) -> None:
             "button",
             name=re.compile(r"Clique aqui para acessar o", re.IGNORECASE),
         )
-        dashboard.wait_for(state="visible", timeout=3000)
+        dashboard.wait_for(state="visible", timeout=_bound_ms(deadline_s, 3000))
         dashboard.click()
-        page.wait_for_timeout(1800)
+        page.wait_for_timeout(_bound_ms(deadline_s, 1800))
         try:
-            prontuario.wait_for(state="visible", timeout=6000)
+            prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
             logger.debug("Search screen opened via dashboard shortcut.")
             return
         except Exception:
@@ -196,27 +228,37 @@ def ensure_search_screen(page: Any) -> None:
     )
 
 
-def search_patient(page: Any, *, patient_record: str) -> None:
+def search_patient(
+    page: Any,
+    *,
+    patient_record: str,
+    timeout_ms: int | None = None,
+) -> None:
     """Fill the patient record field and click the advanced search link.
 
     Steps modeled after ``path2.py``'s search sequence:
     1. Fill ``#prontuarioInput`` with the normalized patient record.
     2. Click the ``Pesquisa Avançada`` (Advanced Search) link.
 
+    When ``timeout_ms`` is provided, every wait is bounded by the remaining
+    budget (PSW-S16 R5); ``None`` preserves the original fixed waits.
+
     Args:
         page: A Playwright ``Page`` object.
         patient_record: Raw patient record (prontuário) string. Is normalized
             to digits-only internally.
+        timeout_ms: Optional overall budget in milliseconds for this step.
 
     Raises:
         NavigationError: If the input field or search link cannot be found.
     """
     normalized = normalize_patient_record(patient_record)
+    deadline_s = _deadline_s(timeout_ms)
 
     # Step 1: Fill prontuário field
     prontuario = page.locator(SEL_PRONTUARIO_INPUT)
     try:
-        prontuario.wait_for(state="visible", timeout=15000)
+        prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
         prontuario.click()
         prontuario.fill(normalized)
     except Exception as exc:
@@ -227,14 +269,14 @@ def search_patient(page: Any, *, patient_record: str) -> None:
     # Step 2: Click advanced search link
     try:
         pesquisa_link = page.get_by_role("link", name="Pesquisa Avançada")
-        pesquisa_link.wait_for(state="visible", timeout=15000)
+        pesquisa_link.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
         pesquisa_link.click()
     except Exception as exc:
         raise NavigationError(
             "Could not find or click the 'Pesquisa Avançada' link."
         ) from exc
 
-    page.wait_for_timeout(1200)
+    page.wait_for_timeout(_bound_ms(deadline_s, 1200))
 
 
 def click_internacoes(page: Any) -> None:
@@ -976,25 +1018,35 @@ _DEMOGRAPHIC_READ_JS = """
 """
 
 
-def click_dados_do_paciente(page: Any) -> None:
+def click_dados_do_paciente(
+    page: Any,
+    *,
+    timeout_ms: int | None = None,
+) -> None:
     """Click the 'Dados do Paciente' leaf node in the POL tree menu.
 
     Modeled after ``extract_patient_demographics.click_dados_do_paciente``.
     Locates the tree-node label span by text and clicks it. Operates on the
-    already-open persistent page (never a new browser/context).
+    already-open persistent page (never a new browser/context). When
+    ``timeout_ms`` is provided, every wait is bounded by the remaining budget
+    (PSW-S16 R5).
 
     Args:
         page: A Playwright ``Page`` object.
+        timeout_ms: Optional overall budget in milliseconds for this step.
 
     Raises:
         NavigationError: If the 'Dados do Paciente' element cannot be found.
     """
+    deadline_s = _deadline_s(timeout_ms)
     locator = page.locator(
         SEL_DADOS_DO_PACIENTE,
         has_text=re.compile(r"Dados do Paciente", re.IGNORECASE),
     )
     try:
-        locator.first.wait_for(state="visible", timeout=10000)
+        locator.first.wait_for(
+            state="visible", timeout=_bound_ms(deadline_s, 10000)
+        )
     except Exception:
         # Broader fallback search in the POL accordion.
         locator = page.locator(
@@ -1002,7 +1054,9 @@ def click_dados_do_paciente(page: Any) -> None:
             has_text=re.compile(r"^Dados do Paciente$", re.IGNORECASE),
         )
         try:
-            locator.first.wait_for(state="visible", timeout=5000)
+            locator.first.wait_for(
+                state="visible", timeout=_bound_ms(deadline_s, 5000)
+            )
         except Exception as exc:
             raise NavigationError(
                 "Could not locate 'Dados do Paciente' in the POL menu."
@@ -1015,53 +1069,56 @@ def click_dados_do_paciente(page: Any) -> None:
             "Could not click 'Dados do Paciente' in the POL menu."
         ) from exc
 
-    page.wait_for_timeout(_DEMOGRAPHICS_PAUSE_MS)
+    page.wait_for_timeout(_bound_ms(deadline_s, _DEMOGRAPHICS_PAUSE_MS))
 
 
 def wait_for_demographics_frame(
     page: Any,
-    timeout_ms: int = 15000,
+    *,
+    timeout_ms: int | None = None,
 ) -> Any:
-    """Wait for ``frame_pol`` to load the Cadastro tab and return it.
+    """Wait for ``frame_pol`` Cadastro readiness and return the frame.
 
-    Polls for the ``frame_pol`` iframe and checks that ``#aba_cadastro`` is
-    attached. Modeled after the script's ``_wait_for_frame`` plus the
-    Cadastro-tab wait.
+    Polls for the ``frame_pol`` iframe and positively verifies readiness
+    (PSW-S16 R6): the Cadastro panel must be **visible** (not merely
+    attached) AND the source-identity input must be readable. This matches
+    the working script, which waits for visible Cadastro content before
+    reading. Optional fields may still be missing/empty.
 
     Args:
         page: A Playwright ``Page`` object.
-        timeout_ms: Maximum time to wait in milliseconds.
+        timeout_ms: Optional overall budget in milliseconds for this step.
+            Defaults to 15000 ms when not provided (backward compatible).
 
     Returns:
         The Playwright ``Frame`` object for ``frame_pol`` with the Cadastro
-        tab available.
+        tab and identity input visible.
 
     Raises:
-        NavigationError: If the frame or Cadastro tab is not available within
-            the timeout.
+        NavigationError: If readiness is not reached within the budget.
     """
-    started_at = time.monotonic()
+    deadline_s = _deadline_s(timeout_ms if timeout_ms is not None else 15000)
+    identity_selector = DEMOGRAPHIC_FIELD_SELECTORS["prontuario"]
     while True:
-        elapsed_ms = int((time.monotonic() - started_at) * 1000)
-        if elapsed_ms >= timeout_ms:
+        remaining = _remaining_ms(deadline_s)
+        if remaining is not None and remaining <= 0:
             break
-        remaining_ms = timeout_ms - elapsed_ms
         frame = page.frame(name=SEL_FRAME_POL)
         if frame is not None:
             try:
+                step = min(500, max(1, remaining or 500))
                 cadastro = frame.locator(SEL_CADASTRO_TAB)
-                step_timeout = min(500, max(1, remaining_ms))
-                cadastro.first.wait_for(
-                    state="attached", timeout=step_timeout
-                )
+                cadastro.first.wait_for(state="visible", timeout=step)
+                # Require the identity input to be readable before accepting.
+                identity = frame.locator(identity_selector)
+                identity.first.wait_for(state="visible", timeout=step)
                 return frame
             except Exception:
                 pass
-        page.wait_for_timeout(min(500, max(1, remaining_ms)))
+        page.wait_for_timeout(min(500, max(1, remaining or 500)))
 
     raise NavigationError(
-        f"Iframe '{SEL_FRAME_POL}' did not become available with the "
-        f"Cadastro tab within {timeout_ms} ms."
+        "The demographics Cadastro tab did not become ready in time."
     )
 
 
@@ -1070,44 +1127,112 @@ def read_demographic_fields(frame: Any) -> dict[str, str]:
 
     Performs a single JavaScript evaluation on the frame that queries each
     canonical selector and returns its trimmed input value. Missing or
-    non-input elements yield an empty string, so a sparse page never fails
-    the whole extraction.
+    non-input elements yield an empty string for that field only.
+
+    Fail-closed (PSW-S16 R2): failure of the whole ``frame.evaluate()`` call
+    or a non-object result raises a sanitized ``NavigationError``. It is
+    never converted into an all-empty success sentinel; that would be
+    indistinguishable from a sparse page.
 
     Args:
         frame: The ``frame_pol`` Playwright ``Frame`` with the Cadastro tab.
 
     Returns:
         Dict mapping every ``DEMOGRAPHIC_FIELD_SELECTORS`` key to its
-        stripped string value (empty string when missing/unreadable).
+        stripped string value (empty string when an optional field is
+        missing/unreadable).
+
+    Raises:
+        NavigationError: If the global field read fails or returns a
+            non-object payload.
     """
-    empty = {key: "" for key in DEMOGRAPHIC_FIELD_SELECTORS}
     try:
         result = frame.evaluate(
             _DEMOGRAPHIC_READ_JS, DEMOGRAPHIC_FIELD_SELECTORS
         )
-    except Exception:
-        return empty
+    except Exception as exc:
+        raise NavigationError(
+            "Could not read demographic fields from the Cadastro tab."
+        ) from exc
     if not isinstance(result, dict):
-        return empty
+        raise NavigationError(
+            "Could not read demographic fields from the Cadastro tab."
+        )
     return {
         key: (str(result.get(key, "") or "")).strip()
         for key in DEMOGRAPHIC_FIELD_SELECTORS
     }
 
 
-def build_demographics(page: Any) -> dict[str, str]:
-    """Click 'Dados do Paciente', wait for the Cadastro tab, read fields.
+def build_demographics(
+    page: Any,
+    *,
+    timeout_ms: int | None = None,
+) -> dict[str, str]:
+    """Click 'Dados do Paciente', wait for readiness, read fields.
 
     Combined convenience: navigates to the demographics screen and reads
     every demographic field into an in-memory dict in one call. The dict
     uses the external keys ``upsert_patient_demographics`` consumes.
 
+    When ``timeout_ms`` is provided it is treated as a single shared budget:
+    each sub-step receives only the remaining budget (PSW-S16 R5), so the
+    advertised timeout is never multiplied across steps.
+
     Args:
         page: A Playwright ``Page`` object on the patient search screen.
+        timeout_ms: Optional overall budget in milliseconds.
 
     Returns:
         Normalized in-memory demographics dict.
     """
-    click_dados_do_paciente(page)
-    frame = wait_for_demographics_frame(page)
+    deadline_s = _deadline_s(timeout_ms)
+    click_dados_do_paciente(page, timeout_ms=_remaining_ms(deadline_s))
+    frame = wait_for_demographics_frame(
+        page, timeout_ms=_remaining_ms(deadline_s)
+    )
     return read_demographic_fields(frame)
+
+
+# ---------------------------------------------------------------------------
+# Source identity invariant (PSW-S16 correction R3)
+# ---------------------------------------------------------------------------
+
+DEMOGRAPHICS_IDENTITY_MESSAGE = (
+    "Extracted source identity does not match the requested patient."
+)
+"""Constant sanitized message for identity mismatches.
+
+Callers raise their own typed error (``ExtractionError`` at the adapter,
+validation error at the command) using this constant text. No patient
+record, field value, HTML, URL, cookie, or credential is ever included.
+"""
+
+
+def demographics_identity_matches(
+    *,
+    requested_patient_record: str,
+    demographics: Mapping[str, Any],
+) -> bool:
+    """Return True iff the extracted prontuario positively identifies the
+    requested patient under one shared normalization rule.
+
+    The extracted ``demographics["prontuario"]`` must be a non-empty string
+    whose normalized form equals the normalized requested record. Both sides
+    use :func:`normalize_patient_record`, so formatting-only differences
+    (punctuation/whitespace vs digits) are accepted. Optional demographic
+    fields are irrelevant to this check.
+
+    Args:
+        requested_patient_record: The run's requested patient record.
+        demographics: The in-memory extracted demographics dict.
+
+    Returns:
+        ``True`` only when the identity positively matches.
+    """
+    extracted = demographics.get("prontuario")
+    if not isinstance(extracted, str) or not extracted.strip():
+        return False
+    return normalize_patient_record(
+        requested_patient_record
+    ) == normalize_patient_record(extracted)

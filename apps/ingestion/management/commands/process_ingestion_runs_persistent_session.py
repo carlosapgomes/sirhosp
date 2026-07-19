@@ -114,6 +114,10 @@ from apps.ingestion.extractors.errors import (
     InvalidJsonError,
     SnapshotContainerMissingError,
 )
+from apps.ingestion.extractors.legacy_navigation import (
+    DEMOGRAPHICS_IDENTITY_MESSAGE,
+    demographics_identity_matches,
+)
 from apps.ingestion.extractors.persistent_evolution_pdf import (
     EvolutionPdfError,
 )
@@ -1180,6 +1184,27 @@ class Command(BaseCommand):
                 details_json=self._stage_error_details(exc),
             )
             self._mark_run_failed(run, exc)
+            return
+
+        # R3 command-level defense: even a mocked/regressed adapter cannot
+        # turn an empty or mismatched payload into persistence success. This
+        # mirrors the adapter identity boundary so the invariant holds end to
+        # end. A failure here is a SOURCE extraction failure (not persistence)
+        # and follows the existing retry/attempt/stage lifecycle.
+        if not demographics_identity_matches(
+            requested_patient_record=patient_record,
+            demographics=demographics,
+        ):
+            identity_exc = ExtractionError(DEMOGRAPHICS_IDENTITY_MESSAGE)
+            self._record_stage(
+                run, "demographics_extraction", "failed", ext_stage_start,
+                details_json=self._stage_error_details(identity_exc),
+            )
+            self._mark_run_failed(run, identity_exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during demographics capture "
+                f"(identity mismatch): {identity_exc}"
+            )
             return
 
         self._record_stage(

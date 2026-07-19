@@ -1352,21 +1352,19 @@ class TestBridgeExtractDemographicsViaLegacyActions:
     """PSW-S16: the bridge extracts demographics through the already-open
     persistent page/context, modeled on the working demographics script
     (search patient -> Dados do Paciente -> frame_pol -> read fields).
+
+    PSW-S16 correction (fail-closed): navigation/page/global-read failures
+    raise a sanitized typed error instead of returning ``{}``.
     """
 
-    def test_returns_normalized_in_memory_dict(self) -> None:
-        """Bridge returns a normalized dict with every field consumed by
-        upsert_patient_demographics, in memory (no JSON file)."""
+    @staticmethod
+    def _ready_page(*, prontuario="14160147", evaluated=None):
+        """Build a fake page whose search/demographics actions all succeed."""
         from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
             SEL_CADASTRO_TAB,
             SEL_DADOS_DO_PACIENTE,
         )
-        from apps.ingestion.extractors.real_handle_bridge import (
-            RealHandleBridge,
-        )
-
-        handle = FakePlaywrightHandle()
-        bridge = RealHandleBridge(handle)
 
         page = FakeNavigationPage()
         page.make_selector_visible("#prontuarioInput")
@@ -1374,56 +1372,51 @@ class TestBridgeExtractDemographicsViaLegacyActions:
         page.make_selector_visible(SEL_DADOS_DO_PACIENTE)
         frame = FakeNavigationFrame()
         frame.make_selector_visible(SEL_CADASTRO_TAB)
-        frame.set_evaluate_result({
-            "prontuario": "14160147",
-            "nome": "MARIA DE FATIMA SILVA",
-            "cpf": "12345678900",
-            "data_nascimento": "15/03/1965",
-            "nome_social": "",
-        })
+        frame.make_selector_visible(DEMOGRAPHIC_FIELD_SELECTORS["prontuario"])
+        payload = {"prontuario": prontuario}
+        if evaluated:
+            payload.update(evaluated)
+        frame.set_evaluate_result(payload)
         page.set_frame(frame)
-        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+        return page
 
-        result = bridge.extract_demographics_via_legacy_actions(
-            patient_record="14160147",
-            timeout=120,
-        )
-
-        assert isinstance(result, dict)
-        assert result["nome"] == "MARIA DE FATIMA SILVA"
-        assert result["cpf"] == "12345678900"
-        assert result["data_nascimento"] == "15/03/1965"
-        # Empty fields preserved, not dropped.
-        assert result["nome_social"] == ""
-
-    def test_no_active_page_returns_empty_dict(self) -> None:
-        """No active page -> sanitized empty dict (no exception leaks)."""
+    def test_returns_normalized_in_memory_dict(self) -> None:
+        """Bridge returns a normalized dict with every field consumed by
+        upsert_patient_demographics, in memory (no JSON file)."""
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
         )
 
         handle = FakePlaywrightHandle()
         bridge = RealHandleBridge(handle)
+        page = self._ready_page(
+            evaluated={
+                "nome": "MARIA DE FATIMA SILVA",
+                "cpf": "12345678900",
+                "data_nascimento": "15/03/1965",
+                "nome_social": "",
+            }
+        )
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
 
         result = bridge.extract_demographics_via_legacy_actions(
             patient_record="14160147",
             timeout=30,
         )
 
-        assert result == {}
+        assert isinstance(result, dict)
+        assert result["nome"] == "MARIA DE FATIMA SILVA"
+        assert result["cpf"] == "12345678900"
+        assert result["data_nascimento"] == "15/03/1965"
+        # Optional empty fields preserved, not dropped.
+        assert result["nome_social"] == ""
 
-    def test_no_subprocess_no_new_browser_no_second_login(self) -> None:
-        """The demographics action flow reuses the existing page/context.
-
-        Spies on subprocess entry points, sync_playwright, browser launch,
-        and a second login/bootstrap to prove none is invoked while reading
-        demographics through the already-authenticated persistent page.
-        """
-        from unittest.mock import patch
+    def test_no_active_page_raises_navigation_error(self) -> None:
+        """R1: no active page raises a sanitized NavigationError, not ``{}``."""
+        import pytest
 
         from apps.ingestion.extractors.legacy_navigation import (
-            SEL_CADASTRO_TAB,
-            SEL_DADOS_DO_PACIENTE,
+            NavigationError,
         )
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
@@ -1432,14 +1425,108 @@ class TestBridgeExtractDemographicsViaLegacyActions:
         handle = FakePlaywrightHandle()
         bridge = RealHandleBridge(handle)
 
+        with pytest.raises(NavigationError):
+            bridge.extract_demographics_via_legacy_actions(
+                patient_record="14160147",
+                timeout=30,
+            )
+
+    def test_navigation_failure_raises_sanitized_navigation_error(self) -> None:
+        """R1: a navigation failure raises a constant-message NavigationError,
+        never ``{}``."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        # Search screen not available -> ensure_search_screen raises.
         page = FakeNavigationPage()
-        page.make_selector_visible("#prontuarioInput")
-        page.make_selector_visible("role:link:Pesquisa Avançada")
-        page.make_selector_visible(SEL_DADOS_DO_PACIENTE)
-        frame = FakeNavigationFrame()
-        frame.make_selector_visible(SEL_CADASTRO_TAB)
-        frame.set_evaluate_result({"nome": "X", "cpf": ""})
-        page.set_frame(frame)
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+
+        with pytest.raises(NavigationError) as exc_info:
+            bridge.extract_demographics_via_legacy_actions(
+                patient_record="14160147",
+                timeout=30,
+            )
+        message = str(exc_info.value)
+        # Constant sanitized message; no patient record leaked.
+        assert "14160147" not in message
+
+    def test_unexpected_exception_wrapped_without_raw_sentinel(self) -> None:
+        """R1/F: an unexpected exception is wrapped in a constant-message
+        NavigationError; the raw sentinel text appears in neither the public
+        message nor emitted logs."""
+        import logging
+
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        sentinel = "RAW-SECRET-FRAME-PAYLOAD-XYZ"
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        page = self._ready_page()
+        # Override the frame so evaluate raises an unexpected error carrying
+        # raw sentinel text that must never leak.
+        class _ExplodingFrame(FakeNavigationFrame):
+            def evaluate(self, expression, arg=None):  # noqa: ARG002
+                raise RuntimeError(sentinel)
+
+        exploder = _ExplodingFrame()
+        exploder.make_selector_visible("#aba_cadastro")
+        from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
+        )
+        exploder.make_selector_visible(
+            DEMOGRAPHIC_FIELD_SELECTORS["prontuario"]
+        )
+        page.set_frame(exploder)
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+
+        caplog = []
+        handler = logging.Handler()
+        handler.emit = lambda record: caplog.append(record.getMessage())  # type: ignore[method-assign]
+        logger = logging.getLogger(
+            "apps.ingestion.extractors.real_handle_bridge"
+        )
+        logger.addHandler(handler)
+        try:
+            with pytest.raises(NavigationError) as exc_info:
+                bridge.extract_demographics_via_legacy_actions(
+                    patient_record="14160147",
+                    timeout=30,
+                )
+        finally:
+            logger.removeHandler(handler)
+
+        public_message = str(exc_info.value)
+        assert sentinel not in public_message
+        assert "14160147" not in public_message
+        for logged in caplog:
+            assert sentinel not in logged
+
+    def test_no_subprocess_no_new_browser_no_second_login(self) -> None:
+        """The demographics action flow reuses the existing page/context."""
+        from unittest.mock import patch
+
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        page = self._ready_page(evaluated={"nome": "X", "cpf": ""})
         handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
 
         with (
@@ -1466,52 +1553,17 @@ class TestBridgeExtractDemographicsViaLegacyActions:
         mock_call.assert_not_called()
         mock_sync.assert_not_called()
         mock_bootstrap.assert_not_called()
-        # Existing handle reused, never restarted.
         assert handle.is_connected() is True
-
-    def test_navigation_failure_returns_empty_dict_sanitized(self) -> None:
-        """NavigationError is sanitized into an empty dict (no sensitive
-        payload leakage, no raw page HTML)."""
-        from apps.ingestion.extractors.real_handle_bridge import (
-            RealHandleBridge,
-        )
-
-        handle = FakePlaywrightHandle()
-        bridge = RealHandleBridge(handle)
-
-        # Page where the search screen is NOT available -> ensure_search_screen
-        # raises NavigationError, which the bridge sanitizes.
-        page = FakeNavigationPage()
-        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
-
-        result = bridge.extract_demographics_via_legacy_actions(
-            patient_record="14160147",
-            timeout=30,
-        )
-
-        assert result == {}
 
     def test_patient_record_normalized_to_digits(self) -> None:
         """The patient record is normalized (digits-only) before search."""
-        from apps.ingestion.extractors.legacy_navigation import (
-            SEL_CADASTRO_TAB,
-            SEL_DADOS_DO_PACIENTE,
-        )
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
         )
 
         handle = FakePlaywrightHandle()
         bridge = RealHandleBridge(handle)
-
-        page = FakeNavigationPage()
-        page.make_selector_visible("#prontuarioInput")
-        page.make_selector_visible("role:link:Pesquisa Avançada")
-        page.make_selector_visible(SEL_DADOS_DO_PACIENTE)
-        frame = FakeNavigationFrame()
-        frame.make_selector_visible(SEL_CADASTRO_TAB)
-        frame.set_evaluate_result({"nome": "Y"})
-        page.set_frame(frame)
+        page = self._ready_page(prontuario="14160147", evaluated={"nome": "Y"})
         handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
 
         bridge.extract_demographics_via_legacy_actions(
@@ -1519,5 +1571,45 @@ class TestBridgeExtractDemographicsViaLegacyActions:
             timeout=30,
         )
 
-        # The prontuario input must have been filled with digits-only value.
         assert page.filled_values.get("#prontuarioInput") == "14160147"
+
+    def test_timeout_budget_bounds_all_action_waits(self) -> None:
+        """R5: a small supplied timeout bounds every action-step wait; no
+        step receives the full default budget."""
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        page = self._ready_page(evaluated={"nome": "Z"})
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+
+        bridge.extract_demographics_via_legacy_actions(
+            patient_record="14160147",
+            timeout=1,
+        )
+
+        waits = list(page.wait_timeouts) + list(page._frame.wait_timeouts)
+        assert waits, "action helpers must consume the timeout budget"
+        # 1s budget -> no wait may reach the 5s/10s defaults.
+        assert max(waits) <= 1100
+
+    def test_non_positive_timeout_raises_sanitized_error(self) -> None:
+        """R5: a zero/negative timeout is rejected deterministically."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        with pytest.raises(NavigationError):
+            bridge.extract_demographics_via_legacy_actions(
+                patient_record="14160147",
+                timeout=0,
+            )

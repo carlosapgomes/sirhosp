@@ -1749,6 +1749,14 @@ class TestDefaultStubBackwardCompat:
                 "patient_record": f"S{i}", "intent": "admissions_only",
             })
         mock_adapter = _make_adapter_mock(snapshot_result=[])
+        # Demographics follow-ups (S0/S1/S2) must return a payload whose
+        # prontuario matches each requested patient (R3 identity invariant).
+        mock_adapter.get_demographics.side_effect = (
+            lambda *, patient_record, timeout=120: {
+                "prontuario": patient_record,
+                "nome": f"PACIENTE {patient_record}",
+            }
+        )
 
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -2048,7 +2056,7 @@ class TestEnabledIntents:
             params={"patient_record": "E2", "intent": "demographics_only"},
         )
         mock_adapter = _make_adapter_mock(
-            demographics_result={"nome": "PACIENTE TESTE"},
+            demographics_result={"prontuario": "E2", "nome": "PACIENTE TESTE"},
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -2150,7 +2158,7 @@ class TestEnabledIntents:
             params={"patient_record": "E10", "intent": "demographics_only"},
         )
         mock_adapter = _make_adapter_mock(
-            demographics_result={"nome": "PACIENTE TESTE"},
+            demographics_result={"prontuario": "E10", "nome": "PACIENTE TESTE"},
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -3340,10 +3348,22 @@ _DEMOGRAPHICS_EXTRACT = {
 }
 
 
+def _demo_demographics(patient_record: str) -> dict:
+    """Return a demographics payload whose prontuario matches the requested
+    patient record (so the identity check passes)."""
+    data = dict(_DEMOGRAPHICS_EXTRACT)
+    data["prontuario"] = patient_record
+    return data
+
+
+
 @pytest.mark.django_db
 class TestDemographicsOnlyEndToEnd:
     """PSW-S16: persistent demographics_only end-to-end through the
-    already-authenticated session and ``upsert_patient_demographics``."""
+    already-authenticated session and ``upsert_patient_demographics``.
+
+    All success-path mocks return a payload whose ``prontuario`` matches the
+    requested patient record (R3 identity invariant)."""
 
     def _queue_demo_run(self, patient_record="DEMO-1", **kwargs):
         defaults = {
@@ -3363,7 +3383,7 @@ class TestDemographicsOnlyEndToEnd:
 
         run = self._queue_demo_run(patient_record="DEMO-1")
         mock_adapter = _make_adapter_mock(
-            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+            demographics_result=_demo_demographics("DEMO-1"),
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -3383,7 +3403,7 @@ class TestDemographicsOnlyEndToEnd:
     def test_records_both_demographics_stages(self):
         run = self._queue_demo_run(patient_record="DEMO-2")
         mock_adapter = _make_adapter_mock(
-            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+            demographics_result=_demo_demographics("DEMO-2"),
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -3402,7 +3422,7 @@ class TestDemographicsOnlyEndToEnd:
 
         run = self._queue_demo_run(patient_record="DEMO-3")
         mock_adapter = _make_adapter_mock(
-            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+            demographics_result=_demo_demographics("DEMO-3"),
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -3482,7 +3502,7 @@ class TestDemographicsOnlyEndToEnd:
             max_attempts=1,
         )
         mock_adapter = _make_adapter_mock(
-            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+            demographics_result=_demo_demographics("DEMO-5"),
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -3512,7 +3532,7 @@ class TestDemographicsOnlyEndToEnd:
             batch=batch,
         )
         mock_adapter = _make_adapter_mock(
-            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+            demographics_result=_demo_demographics("DEMO-6"),
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -3531,7 +3551,7 @@ class TestDemographicsOnlyEndToEnd:
         sync_playwright, browser/context launch, or second login."""
         run = self._queue_demo_run(patient_record="DEMO-7")
         mock_adapter = _make_adapter_mock(
-            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+            demographics_result=_demo_demographics("DEMO-7"),
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -3571,7 +3591,7 @@ class TestDemographicsOnlyEndToEnd:
         demo_run = self._queue_demo_run(patient_record="DEMO-8")
         mock_adapter = _make_adapter_mock(
             snapshot_result=_ADMISSION_SNAPSHOT_PARITY,
-            demographics_result=dict(_DEMOGRAPHICS_EXTRACT),
+            demographics_result=_demo_demographics("DEMO-8"),
         )
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
@@ -3590,3 +3610,203 @@ class TestDemographicsOnlyEndToEnd:
         mock_create.assert_called_once()
         # No additional login/bootstrap during dispatch (stub path).
         mock_bootstrap.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestDemographicsIdentityDefense:
+    """R3/R4: command-level fail-closed defense so a mocked/regressed adapter
+    cannot turn an empty or mismatched payload into persistence success."""
+
+    def _queue_demo_run(self, patient_record, **kwargs):
+        defaults = {
+            "status": "queued",
+            "intent": "demographics_only",
+            "max_attempts": 3,
+            "parameters_json": {
+                "patient_record": patient_record,
+                "intent": "demographics_only",
+            },
+        }
+        defaults.update(kwargs)
+        return IngestionRun.objects.create(**defaults)
+
+    def _stages(self, run):
+        return {
+            m.stage_name: m.status
+            for m in IngestionRunStageMetric.objects.filter(run=run)
+        }
+
+    def test_empty_payload_cannot_succeed_or_persist(self):
+        run = self._queue_demo_run("DEMO-ID-1")
+        mock_adapter = _make_adapter_mock(demographics_result={})
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"
+            ".upsert_patient_demographics"
+        ) as mock_upsert:
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "queued"  # requeued (attempts remain)
+        stages = self._stages(run)
+        assert stages.get("demographics_extraction") == "failed"
+        assert "demographics_persistence" not in stages
+        mock_upsert.assert_not_called()
+        # No clinical writes for the failed run.
+        from apps.patients.models import Patient
+
+        assert not Patient.objects.filter(patient_source_key="DEMO-ID-1").exists()
+
+    def test_all_empty_mapping_cannot_succeed(self):
+        from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
+        )
+
+        run = self._queue_demo_run("DEMO-ID-2")
+        empty_all = {key: "" for key in DEMOGRAPHIC_FIELD_SELECTORS}
+        mock_adapter = _make_adapter_mock(demographics_result=empty_all)
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "queued"
+        stages = self._stages(run)
+        assert stages.get("demographics_extraction") == "failed"
+        assert "demographics_persistence" not in stages
+
+    @pytest.mark.parametrize("bad_prontuario", ["", "   ", None, 14160147])
+    def test_invalid_prontuario_cannot_persist(self, bad_prontuario):
+        run = self._queue_demo_run("DEMO-ID-3")
+        payload = {"prontuario": bad_prontuario, "nome": "X"}
+        mock_adapter = _make_adapter_mock(demographics_result=payload)
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "queued"  # retryable
+        stages = self._stages(run)
+        assert stages.get("demographics_extraction") == "failed"
+        assert "demographics_persistence" not in stages
+        # Sanitized: no extracted value leaks into the run error field.
+        assert "MARIA" not in (run.error_message or "")
+
+    def test_mismatched_identity_fails_before_persistence(self):
+        from apps.patients.models import Patient
+
+        run = self._queue_demo_run("DEMO-2")
+        mock_adapter = _make_adapter_mock(
+            demographics_result=_demo_demographics("DEMO-1"),  # mismatch
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"
+            ".upsert_patient_demographics"
+        ) as mock_upsert:
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "queued"
+        stages = self._stages(run)
+        assert stages.get("demographics_extraction") == "failed"
+        assert "demographics_persistence" not in stages
+        mock_upsert.assert_not_called()
+        # No Patient written for the requested or extracted identity.
+        assert not Patient.objects.filter(patient_source_key="DEMO-2").exists()
+        assert not Patient.objects.filter(patient_source_key="DEMO-1").exists()
+        # Sanitized error message.
+        assert "DEMO-1" not in (run.error_message or "")
+        assert "DEMO-2" not in (run.error_message or "")
+
+    def test_normalized_equivalents_accepted(self):
+        """Punctuation/whitespace vs digits normalize to the same record."""
+        from apps.patients.models import Patient
+
+        run = self._queue_demo_run("141/60147-A")
+        payload = _demo_demographics(" 14160147 ")
+        mock_adapter = _make_adapter_mock(demographics_result=payload)
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        assert Patient.objects.filter(patient_source_key="141/60147-A").exists()
+
+    def test_valid_matching_with_sparse_optional_fields_accepted(self):
+        from apps.patients.models import Patient
+
+        run = self._queue_demo_run("DEMO-ID-4")
+        payload = {"prontuario": "DEMO-ID-4", "nome": "SPARSE"}
+        mock_adapter = _make_adapter_mock(demographics_result=payload)
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        patient = Patient.objects.get(patient_source_key="DEMO-ID-4")
+        assert patient.name == "SPARSE"
+
+
+@pytest.mark.django_db
+class TestDemographicsFailureLifecycle:
+    """R4: source failures reach the existing extraction-failure lifecycle."""
+
+    def _queue(self, patient_record, max_attempts):
+        return IngestionRun.objects.create(
+            status="queued",
+            intent="demographics_only",
+            max_attempts=max_attempts,
+            parameters_json={
+                "patient_record": patient_record,
+                "intent": "demographics_only",
+            },
+        )
+
+    def test_retryable_failure_requeues_and_keeps_batch_open(self):
+        from apps.ingestion.models import CensusExecutionBatch
+
+        batch = CensusExecutionBatch.objects.create()
+        run = self._queue("DEMO-LC-1", max_attempts=3)
+        run.batch = batch
+        run.save(update_fields=["batch"])
+        mock_adapter = _make_adapter_mock(
+            demographics_fail_mode="extraction_error",
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        batch.refresh_from_db()
+        assert run.status == "queued"  # requeued (attempts remain)
+        assert run.attempt_count == 1
+        assert run.next_retry_at is not None
+        # Batch stays open while a retry remains.
+        assert batch.status != "succeeded"
+        assert batch.finished_at is None
+
+    def test_terminal_failure_marks_run_failed_and_closes_batch_failed(self):
+        run = self._queue("DEMO-LC-2", max_attempts=1)
+        mock_adapter = _make_adapter_mock(
+            demographics_fail_mode="extraction_error",
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "failed"  # terminal
+        assert run.attempt_count == 1
+        attempt = run.attempts.order_by("-attempt_number").first()
+        assert attempt.status == "failed"

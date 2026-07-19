@@ -111,6 +111,7 @@ class FakeNavigationPage:
         self._visible_selectors: set[str] = set()
         self._click_callbacks: dict[str, list[str]] = {}
         self._filled_values: dict[str, str] = {}
+        self._wait_timeouts: list[int] = []
 
     def set_html(self, html: str) -> None:
         self._html = html
@@ -137,6 +138,9 @@ class FakeNavigationPage:
             on_click_callback=lambda: self._on_click_hook(selector),
             fill_callback=lambda value: self._filled_values.__setitem__(
                 selector, value
+            ),
+            wait_callback=lambda state, timeout: self._wait_timeouts.append(
+                timeout
             ),
         )
 
@@ -194,6 +198,11 @@ class FakeNavigationPage:
         """Map of CSS selector -> last fill() value applied to any locator."""
         return dict(self._filled_values)
 
+    @property
+    def wait_timeouts(self) -> list[int]:
+        """Timeout values passed to ``wait_for`` on locators from this page."""
+        return list(self._wait_timeouts)
+
 
 class FakeNavigationLocator:
     """Fake Playwright locator with lazy visibility check."""
@@ -204,11 +213,13 @@ class FakeNavigationLocator:
         visible_getter,
         on_click_callback=None,
         fill_callback=None,
+        wait_callback=None,
     ) -> None:
         self._selector = selector
         self._visible_getter = visible_getter
         self._on_click_callback = on_click_callback
         self._fill_callback = fill_callback
+        self._wait_callback = wait_callback
         self._clicked = False
         self._filled_value: str | None = None
 
@@ -218,6 +229,8 @@ class FakeNavigationLocator:
         return self
 
     def wait_for(self, *, state: str = "visible", timeout: int = 5000) -> None:  # noqa: ARG002
+        if self._wait_callback is not None:
+            self._wait_callback(state, timeout)
         if state == "visible" and not self._visible_getter():
             raise Exception(f"Locator {self._selector} not visible")  # noqa: TRY002
 
@@ -269,6 +282,7 @@ class FakeNavigationFrame:
         self._visible_selectors: set[str] = set()
         self._evaluate_result: dict[str, str] = {}
         self._evaluate_calls: list[str] = []
+        self._wait_timeouts: list[int] = []
 
     def set_html(self, html: str) -> None:
         self._html = html
@@ -291,6 +305,9 @@ class FakeNavigationFrame:
         return FakeNavigationLocator(
             selector=selector,
             visible_getter=lambda: selector in self._visible_selectors,
+            wait_callback=lambda state, timeout: self._wait_timeouts.append(
+                timeout
+            ),
         )
 
     def get_by_role(self, role: str, *, name: str | None = None) -> FakeNavigationLocator:
@@ -322,6 +339,11 @@ class FakeNavigationFrame:
     @property
     def evaluate_calls(self) -> list[str]:
         return list(self._evaluate_calls)
+
+    @property
+    def wait_timeouts(self) -> list[int]:
+        """Timeout values passed to ``wait_for`` on locators from this frame."""
+        return list(self._wait_timeouts)
 
 
 # ===========================================================================
@@ -1370,9 +1392,12 @@ class TestClickDadosDoPaciente:
         page = FakeNavigationPage()
         page.make_selector_visible(SEL_DADOS_DO_PACIENTE)
 
-        click_dados_do_paciente(page)
+        click_dados_do_paciente(page, timeout_ms=2000)
 
         assert SEL_DADOS_DO_PACIENTE in page.locator_calls
+        # R5: the supplied timeout budget bounds the wait_for call.
+        assert all(t <= 2000 for t in page.wait_timeouts)
+        assert page.wait_timeouts, "click_dados must pass a bounded timeout"
 
     def test_raises_navigation_error_when_label_not_visible(self) -> None:
         """NavigationError raised when 'Dados do Paciente' is unavailable."""
@@ -1386,15 +1411,17 @@ class TestClickDadosDoPaciente:
         page = FakeNavigationPage()
         # Nothing made visible
         with pytest.raises(NavigationError):
-            click_dados_do_paciente(page)
+            click_dados_do_paciente(page, timeout_ms=500)
 
 
 class TestWaitForDemographicsFrame:
-    """Tests for wait_for_demographics_frame()."""
+    """Tests for wait_for_demographics_frame() (R6: visible + identity ready)."""
 
-    def test_returns_frame_when_cadastro_tab_attached(self) -> None:
-        """Returns frame_pol when #aba_cadastro is attached."""
+    def test_returns_frame_when_cadastro_and_identity_visible(self) -> None:
+        """Returns frame_pol when Cadastro tab AND prontuario input are
+        visible (positive readiness, not merely attached)."""
         from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
             SEL_CADASTRO_TAB,
             wait_for_demographics_frame,
         )
@@ -1402,13 +1429,34 @@ class TestWaitForDemographicsFrame:
         page = FakeNavigationPage()
         frame = FakeNavigationFrame()
         frame.make_selector_visible(SEL_CADASTRO_TAB)
+        frame.make_selector_visible(DEMOGRAPHIC_FIELD_SELECTORS["prontuario"])
         page.set_frame(frame)
 
         result = wait_for_demographics_frame(page, timeout_ms=2000)
         assert result is frame
 
+    def test_attached_cadastro_without_identity_not_accepted(self) -> None:
+        """R6: Cadastro visible but prontuario input not readable must not
+        yield success."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            SEL_CADASTRO_TAB,
+            NavigationError,
+            wait_for_demographics_frame,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame()
+        frame.make_selector_visible(SEL_CADASTRO_TAB)
+        # prontuario input NOT made visible
+        page.set_frame(frame)
+
+        with pytest.raises(NavigationError):
+            wait_for_demographics_frame(page, timeout_ms=300)
+
     def test_raises_navigation_error_on_timeout(self) -> None:
-        """NavigationError when frame_pol never appears with Cadastro tab."""
+        """NavigationError when frame_pol never appears."""
         import pytest
 
         from apps.ingestion.extractors.legacy_navigation import (
@@ -1419,11 +1467,43 @@ class TestWaitForDemographicsFrame:
         page = FakeNavigationPage()
         # No frame set
         with pytest.raises(NavigationError):
-            wait_for_demographics_frame(page, timeout_ms=500)
+            wait_for_demographics_frame(page, timeout_ms=300)
 
 
 class TestReadDemographicFields:
-    """Tests for read_demographic_fields()."""
+    """Tests for read_demographic_fields() (R2: fail-closed global read)."""
+
+    _FULL_SAMPLE = {
+        "prontuario": "14160147",
+        "nome": "MARIA DE FATIMA SILVA",
+        "nome_social": "",
+        "data_nascimento": "15/03/1965",
+        "sexo": "Feminino",
+        "genero": "Cisgênero",
+        "nome_mae": "JOSEFA SILVA",
+        "nome_pai": "JOAO SILVA",
+        "raca_cor": "Branca",
+        "naturalidade": "Sao Paulo",
+        "nacionalidade": "Brasileira",
+        "estado_civil": "Casado",
+        "grau_instrucao": "Ensino Medio Completo",
+        "profissao": "Motorista",
+        "ddd_fone_residencial": "11",
+        "fone_residencial": "12345678",
+        "ddd_fone_celular": "11",
+        "fone_celular": "987654321",
+        "ddd_fone_recado": "",
+        "fone_recado": "",
+        "cns": "898001234567890",
+        "cpf": "12345678900",
+        "logradouro": "Rua das Flores",
+        "numero": "123",
+        "complemento": "Apto 2",
+        "bairro": "Centro",
+        "cep": "01001000",
+        "cidade": "Sao Paulo",
+        "uf": "SP",
+    }
 
     def test_reads_all_consumed_fields_from_frame(self) -> None:
         """read_demographic_fields returns every key consumed by
@@ -1434,52 +1514,21 @@ class TestReadDemographicFields:
         )
 
         frame = FakeNavigationFrame()
-        sample = {
-            "prontuario": "14160147",
-            "nome": "MARIA DE FATIMA SILVA",
-            "nome_social": "",
-            "data_nascimento": "15/03/1965",
-            "sexo": "Feminino",
-            "genero": "Cisgênero",
-            "nome_mae": "JOSEFA SILVA",
-            "nome_pai": "JOAO SILVA",
-            "raca_cor": "Branca",
-            "naturalidade": "Sao Paulo",
-            "nacionalidade": "Brasileira",
-            "estado_civil": "Casado",
-            "grau_instrucao": "Ensino Medio Completo",
-            "profissao": "Motorista",
-            "ddd_fone_residencial": "11",
-            "fone_residencial": "12345678",
-            "ddd_fone_celular": "11",
-            "fone_celular": "987654321",
-            "ddd_fone_recado": "",
-            "fone_recado": "",
-            "cns": "898001234567890",
-            "cpf": "12345678900",
-            "logradouro": "Rua das Flores",
-            "numero": "123",
-            "complemento": "Apto 2",
-            "bairro": "Centro",
-            "cep": "01001000",
-            "cidade": "Sao Paulo",
-            "uf": "SP",
-        }
-        frame.set_evaluate_result(sample)
+        frame.set_evaluate_result(dict(self._FULL_SAMPLE))
 
         result = read_demographic_fields(frame)
 
-        # Every key consumed by upsert_patient_demographics is present.
         assert set(result.keys()) == set(DEMOGRAPHIC_FIELD_SELECTORS.keys())
         assert result["nome"] == "MARIA DE FATIMA SILVA"
         assert result["cpf"] == "12345678900"
         assert result["data_nascimento"] == "15/03/1965"
-        # Empty values preserved as empty strings, not dropped.
+        # Optional empty values preserved as empty strings, not dropped.
         assert result["nome_social"] == ""
         assert result["fone_recado"] == ""
 
-    def test_missing_fields_returned_as_empty_string(self) -> None:
-        """Missing/empty values are safe: returned as empty strings."""
+    def test_missing_optional_fields_returned_as_empty_string(self) -> None:
+        """R2: missing optional selectors yield "" for that field only; the
+        global read still succeeds with a valid mapping."""
         from apps.ingestion.extractors.legacy_navigation import (
             DEMOGRAPHIC_FIELD_SELECTORS,
             read_demographic_fields,
@@ -1496,11 +1545,13 @@ class TestReadDemographicFields:
         assert result["cpf"] == ""
         assert result["data_nascimento"] == ""
 
-    def test_evaluate_failure_returns_all_empty(self) -> None:
-        """A JS evaluation failure returns every key as empty string,
-        never raising — extraction failure is surfaced by the bridge."""
+    def test_global_evaluate_failure_raises_navigation_error(self) -> None:
+        """R2: a whole-frame evaluate() failure raises NavigationError,
+        never an all-empty success sentinel."""
+        import pytest
+
         from apps.ingestion.extractors.legacy_navigation import (
-            DEMOGRAPHIC_FIELD_SELECTORS,
+            NavigationError,
             read_demographic_fields,
         )
 
@@ -1509,10 +1560,25 @@ class TestReadDemographicFields:
                 raise RuntimeError("frame detached")
 
         frame = _BrokenFrame()
-        result = read_demographic_fields(frame)
+        with pytest.raises(NavigationError):
+            read_demographic_fields(frame)
 
-        assert set(result.keys()) == set(DEMOGRAPHIC_FIELD_SELECTORS.keys())
-        assert all(v == "" for v in result.values())
+    def test_non_object_evaluate_result_raises_navigation_error(self) -> None:
+        """R2: a non-mapping evaluate result raises NavigationError."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            read_demographic_fields,
+        )
+
+        class _ListFrame(FakeNavigationFrame):
+            def evaluate(self, expression: str, arg: Any = None) -> Any:  # noqa: ARG002
+                return ["not", "an", "object"]
+
+        frame = _ListFrame()
+        with pytest.raises(NavigationError):
+            read_demographic_fields(frame)
 
 
 class TestBuildDemographics:
@@ -1521,6 +1587,7 @@ class TestBuildDemographics:
     def test_clicks_waits_and_reads_returning_in_memory_dict(self) -> None:
         """build_demographics performs click + wait + read and returns a dict."""
         from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
             SEL_CADASTRO_TAB,
             SEL_DADOS_DO_PACIENTE,
             build_demographics,
@@ -1530,13 +1597,89 @@ class TestBuildDemographics:
         page.make_selector_visible(SEL_DADOS_DO_PACIENTE)
         frame = FakeNavigationFrame()
         frame.make_selector_visible(SEL_CADASTRO_TAB)
-        frame.set_evaluate_result({"nome": "PACIENTE TESTE", "cpf": ""})
+        frame.make_selector_visible(DEMOGRAPHIC_FIELD_SELECTORS["prontuario"])
+        frame.set_evaluate_result(
+            {"prontuario": "14160147", "nome": "PACIENTE TESTE", "cpf": ""}
+        )
         page.set_frame(frame)
 
-        result = build_demographics(page)
+        result = build_demographics(page, timeout_ms=2000)
 
         assert isinstance(result, dict)
         assert result["nome"] == "PACIENTE TESTE"
         assert result["cpf"] == ""
         assert SEL_DADOS_DO_PACIENTE in page.locator_calls
         assert "frame_pol" in page.frame_name_calls
+        # R5: every wait across the action sequence is bounded by the budget.
+        assert page.wait_timeouts or frame.wait_timeouts
+        assert all(t <= 2000 for t in page.wait_timeouts)
+        assert all(t <= 2000 for t in frame.wait_timeouts)
+
+
+# ===========================================================================
+# PSW-S16 correction: identity validator (R3)
+# ===========================================================================
+
+
+class TestDemographicsIdentityValidator:
+    """R3: one shared pure rule governs requested-vs-extracted identity."""
+
+    def test_matching_digits_accepted(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import (
+            demographics_identity_matches,
+        )
+
+        assert demographics_identity_matches(
+            requested_patient_record="14160147",
+            demographics={"prontuario": "14160147"},
+        )
+
+    def test_normalization_equivalents_accepted(self) -> None:
+        """Punctuation/whitespace vs digits normalize to the same record."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            demographics_identity_matches,
+        )
+
+        assert demographics_identity_matches(
+            requested_patient_record="141/60147-A",
+            demographics={"prontuario": " 14160147 "},
+        )
+
+    def test_missing_prontuario_rejected(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import (
+            demographics_identity_matches,
+        )
+
+        assert not demographics_identity_matches(
+            requested_patient_record="14160147", demographics={}
+        )
+
+    def test_empty_prontuario_rejected(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import (
+            demographics_identity_matches,
+        )
+
+        assert not demographics_identity_matches(
+            requested_patient_record="14160147",
+            demographics={"prontuario": "   "},
+        )
+
+    def test_non_string_prontuario_rejected(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import (
+            demographics_identity_matches,
+        )
+
+        assert not demographics_identity_matches(
+            requested_patient_record="14160147",
+            demographics={"prontuario": 14160147},  # type: ignore[dict-item]
+        )
+
+    def test_genuinely_different_record_rejected(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import (
+            demographics_identity_matches,
+        )
+
+        assert not demographics_identity_matches(
+            requested_patient_record="DEMO-2",
+            demographics={"prontuario": "DEMO-1"},
+        )

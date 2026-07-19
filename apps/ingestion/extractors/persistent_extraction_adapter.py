@@ -27,6 +27,10 @@ from apps.ingestion.extractors.errors import (
     InvalidJsonError,
     SnapshotContainerMissingError,
 )
+from apps.ingestion.extractors.legacy_navigation import (
+    DEMOGRAPHICS_IDENTITY_MESSAGE,
+    demographics_identity_matches,
+)
 from apps.ingestion.extractors.playwright_extractor import _TYPE_MAP
 from apps.ingestion.extractors.session_controller import (
     PersistentSessionController,
@@ -682,6 +686,17 @@ class PersistentExtractionAdapter:
                 raise InvalidJsonError(
                     "Demographics data JSON root must be an object"
                 )
+
+        # Identity invariant (PSW-S16 R3): a persistent demographics run can
+        # reach persistence only after the requested patient was positively
+        # identified in the extracted payload. This boundary is crossed by
+        # every real/stub extraction path. Fail-closed BEFORE cleanup so a
+        # mismatched/empty identity never counts the job as processed.
+        if not demographics_identity_matches(
+            requested_patient_record=patient_record,
+            demographics=demographics,
+        ):
+            raise ExtractionError(DEMOGRAPHICS_IDENTITY_MESSAGE)
 
         # Step 4: Cleanup job tab (safe no-op when only root tab remains).
         self._controller.close_job_tab_if_present()

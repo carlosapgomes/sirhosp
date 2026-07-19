@@ -41,11 +41,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from apps.ingestion.extractors.legacy_navigation import (
     NavigationError,
     _read_and_build_snapshot,
+    _remaining_ms,
     build_demographics,
     choose_overlapping_admissions,
     click_evolucao,
@@ -490,11 +492,25 @@ class RealHandleBridge:
     # PSW-S16: real legacy demographics action navigation
     # ------------------------------------------------------------------
 
+    # Constant sanitized messages (PSW-S16 correction: no raw text leaks).
+    _DEMOGRAPHICS_TIMEOUT_MESSAGE = (
+        "Demographics extraction timeout must be positive."
+    )
+    _DEMOGRAPHICS_NO_PAGE_MESSAGE = (
+        "No active page available for demographics extraction."
+    )
+    _DEMOGRAPHICS_NAV_MESSAGE = (
+        "Demographics legacy action navigation failed."
+    )
+    _DEMOGRAPHICS_UNEXPECTED_MESSAGE = (
+        "Unexpected failure during demographics extraction."
+    )
+
     def extract_demographics_via_legacy_actions(
         self,
         *,
         patient_record: str,
-        timeout: int = 120,  # noqa: ARG002
+        timeout: int = 120,
     ) -> dict[str, str]:
         """Extract demographics by navigating the real legacy UI action flow.
 
@@ -505,54 +521,58 @@ class RealHandleBridge:
         1. Ensure the patient search screen is visible.
         2. Fill ``#prontuarioInput`` and click ``Pesquisa Avan\u00e7ada``.
         3. Click ``Dados do Paciente`` in the POL tree menu.
-        4. Wait for ``frame_pol`` Cadastro tab to load.
+        4. Wait for ``frame_pol`` Cadastro readiness (R6).
         5. Read every demographic field into an in-memory dict.
 
         The returned dict uses the external keys consumed by
         :func:`~apps.ingestion.services.upsert_patient_demographics`.
-        Dates stay in source ``DD/MM/YYYY`` format; the persistence service
-        parses them. Missing/empty fields are returned as empty strings, so a
-        sparse page never fails the whole extraction unexpectedly.
+
+        Fail-closed (PSW-S16 correction R1): no active page, search/nav
+        failure, global field-read failure, or an unexpected exception raise
+        a constant-message ``NavigationError`` instead of returning ``{}``.
+        Raw exception text is never logged or exposed.
+
+        Timeout (PSW-S16 R5): ``timeout`` (seconds) is a single monotonic
+        budget shared across all action phases; each phase receives only the
+        remaining budget, so the advertised timeout is never multiplied.
 
         Args:
             patient_record: Patient record (prontu\u00e1rio) string. Normalized
                 to digits-only before search.
-            timeout: Overall hint in seconds (reserved for future per-step
-                waits; currently unused because the navigation helpers use
-                their own bounded waits).
+            timeout: Overall budget in seconds for the whole action sequence.
 
         Returns:
-            Normalized in-memory demographics dict. On navigation failure (no
-            active page, search/dados-do-paciente unavailable, frame timeout)
-            an empty dict is returned and the failure is logged with a
-            sanitized message (no credentials/cookies/raw payloads). The
-            command layer treats an empty dict as an extraction failure and
-            never persists it.
+            Normalized in-memory demographics dict.
+
+        Raises:
+            NavigationError: On any sanitized navigation/read/timeout failure
+                or unexpected exception. The message is constant and never
+                contains patient data, field values, HTML, URLs, cookies,
+                credentials, or raw Playwright exception text.
         """
+        if timeout <= 0:
+            raise NavigationError(self._DEMOGRAPHICS_TIMEOUT_MESSAGE)
+
         page = self._resolve_active_page()
         if page is None:
-            logger.warning(
-                "Cannot extract demographics via legacy actions: "
-                "no active page available"
-            )
-            return {}
+            raise NavigationError(self._DEMOGRAPHICS_NO_PAGE_MESSAGE)
 
+        deadline_s = time.monotonic() + timeout
         try:
-            ensure_search_screen(page)
-            search_patient(page, patient_record=patient_record)
-            return build_demographics(page)
-        except NavigationError as exc:
-            logger.warning(
-                "Demographics legacy action navigation failed (sanitized): %s",
-                exc,
+            ensure_search_screen(page, timeout_ms=_remaining_ms(deadline_s))
+            search_patient(
+                page,
+                patient_record=patient_record,
+                timeout_ms=_remaining_ms(deadline_s),
             )
-            return {}
-        except Exception as exc:  # noqa: BLE001 - sanitized fallback
-            logger.warning(
-                "Unexpected error during demographics extraction: %s",
-                exc,
-            )
-            return {}
+            return build_demographics(page, timeout_ms=_remaining_ms(deadline_s))
+        except NavigationError:
+            # Already a constant sanitized message; propagate unchanged.
+            raise
+        except Exception:
+            # Wrap any unexpected failure in a constant sanitized message.
+            # Suppress the raw chain so no underlying text can leak.
+            raise NavigationError(self._DEMOGRAPHICS_UNEXPECTED_MESSAGE) from None
 
     # ------------------------------------------------------------------
     # PSW-S13: real legacy evolution action navigation (full-sync)
