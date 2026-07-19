@@ -459,7 +459,8 @@ class Command(BaseCommand):
 
             self.stderr.write(
                 f"  Run #{run.pk} failed permanently "
-                f"(attempt {run.attempt_count}/{run.max_attempts}): {exc}"
+                f"(attempt {run.attempt_count}/{run.max_attempts}, "
+                f"reason={failure_reason})"
             )
 
     def _process_run(
@@ -552,7 +553,8 @@ class Command(BaseCommand):
             )
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during admissions capture: {exc}"
+                f"  Run #{run.pk} failed during admissions capture "
+                f"(reason={self._classify_failure_reason(exc)[0]})"
             )
             return
 
@@ -846,7 +848,8 @@ class Command(BaseCommand):
             )
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during admissions capture: {exc}"
+                f"  Run #{run.pk} failed during admissions capture "
+                f"(reason={self._classify_failure_reason(exc)[0]})"
             )
             return
 
@@ -877,7 +880,8 @@ class Command(BaseCommand):
                 details_json=self._stage_error_details(exc),
             )
             self._mark_run_failed(run, exc)
-            self.stderr.write(f"  Run #{run.pk} failed during gap planning: {exc}")
+            self.stderr.write(f"  Run #{run.pk} failed during gap planning "
+                              f"(reason={self._classify_failure_reason(exc)[0]})")
             return
 
         run.gaps_json = plan["gaps"]
@@ -944,7 +948,8 @@ class Command(BaseCommand):
                 details_json=self._stage_error_details(exc),
             )
             self._mark_run_failed(run, exc)
-            self.stderr.write(f"  Run #{run.pk} failed during evolution extraction: {exc}")
+            self.stderr.write(f"  Run #{run.pk} failed during evolution extraction "
+                              f"(reason={self._classify_failure_reason(exc)[0]})")
             return
         self._record_stage(
             run=run,
@@ -970,7 +975,8 @@ class Command(BaseCommand):
                 details_json=self._stage_error_details(exc),
             )
             self._mark_run_failed(run, exc)
-            self.stderr.write(f"  Run #{run.pk} failed during ingestion persistence: {exc}")
+            self.stderr.write(f"  Run #{run.pk} failed during ingestion persistence "
+                              f"(reason={self._classify_failure_reason(exc)[0]})")
             return
 
         self._record_stage(

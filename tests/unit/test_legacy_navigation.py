@@ -332,6 +332,13 @@ class FakeNavigationLocator:
         except Exception:
             return 0
 
+    def is_visible(self) -> bool:
+        """Simulate Playwright's ``locator.is_visible()``."""
+        try:
+            return bool(self._visible_getter())
+        except Exception:
+            return False
+
     def locator(self, selector: str) -> "FakeNavigationLocator":
         """Return a sub-locator (delegates visibility to parent)."""
         return FakeNavigationLocator(
@@ -1315,8 +1322,42 @@ class TestWaitForReportOrNoEvolutions:
         assert result is True
 
     def test_reports_false_when_no_evolutions_detected(self) -> None:
-        """Returns False when no-evolutions dialog is detected."""
+        """Returns False ONLY when an explicit no-evolutions dialog appears.
+
+        PSW-S17 R2/R3 correction: a polling-budget expiry is a TIMEOUT
+        and raises ``NavigationTimeoutError``; it must NOT be conflated
+        with the genuine no-evolutions result.
+        """
         from apps.ingestion.extractors.legacy_navigation import (
+            SEL_NO_EVOLUTIONS_DIALOG,
+            wait_for_report_or_no_evolutions,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        frame.set_url(
+            "https://legacy/consultaDetalheInternacao.xhtml"
+        )
+        # Explicit no-evolutions dialog visible -> False (not a timeout).
+        frame.make_selector_visible(SEL_NO_EVOLUTIONS_DIALOG)
+        page.set_frame(frame)
+
+        result = wait_for_report_or_no_evolutions(
+            page, timeout_ms=5000
+        )
+
+        assert result is False
+
+    def test_polling_budget_expiry_raises_typed_timeout(self) -> None:
+        """Polling timeout raises NavigationTimeoutError (not False).
+
+        PSW-S17 R2/R3: a wait timeout MUST surface as a typed timeout so
+        the run records ``failure_reason=timeout``.
+        """
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
             wait_for_report_or_no_evolutions,
         )
 
@@ -1327,12 +1368,10 @@ class TestWaitForReportOrNoEvolutions:
         )
         page.set_frame(frame)
 
-        # Without report URL and without dialog, timeout -> False
-        result = wait_for_report_or_no_evolutions(
-            page, timeout_ms=1000
-        )
-
-        assert result is False
+        with pytest.raises(NavigationTimeoutError):
+            wait_for_report_or_no_evolutions(
+                page, timeout_ms=200
+            )
 
 
 class TestFullEvolutionFlowThroughBridge:

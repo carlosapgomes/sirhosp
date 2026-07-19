@@ -288,6 +288,15 @@
 - [x] 17.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S17-report.md`.
 
+PSW-S17 corrective closure owns the typed persistent timeout invariant:
+`NavigationTimeoutError`, `EvolutionPdfTimeoutError`, and the typed timeout
+raised by `PlaywrightSessionHandle.open_tab` cross the adapter/command
+boundary so the shared classifier maps them to `("timeout", True)` without
+any cause/context chain walk. PSW-S20 and PSW-S22 preserve and deepen this
+invariant (selectors, required actions, HTTP/PDF validation, live flow
+behavior) but must not regress the typed outer-exception contract delivered
+here.
+
 ## 18. PSW-S18: Internal legacy-tab cleanup and recovery
 
 - [ ] 18.1 Add failing tests reproducing multiple legacy DOM tabs inside one
@@ -319,8 +328,13 @@
   legacy action navigation without first opening a synthetic evolution URL.
 - [ ] 20.2 Make action navigation the real-handle path while retaining URL-based
   behavior only for explicit stubs/tests.
-- [ ] 20.3 Make required date filling and report waits fail safely with typed,
-  sanitized timeout/error semantics instead of continuing with default dates.
+- [ ] 20.3 Make required date filling and report waits fail safely with
+  typed, sanitized timeout/error semantics instead of continuing with
+  default dates. PSW-S17 corrective closure already delivers the typed
+  outer-exception contract at the source boundary
+  (`NavigationTimeoutError`, `EvolutionPdfTimeoutError`); this task
+  hardens selectors and required actions and MUST preserve and reverify
+  that contract rather than claim a new owner.
 - [ ] 20.4 Preserve fast paths only where they do not bypass required real
   navigation or persistence.
 - [ ] 20.5 Run official validation and create
@@ -346,8 +360,12 @@
   fallback with synthetic ViewState and PDF bytes.
 - [ ] 22.2 Implement authenticated form fallback through the existing
   `context.request` without filesystem clinical artifacts.
-- [ ] 22.3 Propagate timeout and validate HTTP response, content type, and PDF
-  signature with sanitized typed failures.
+- [ ] 22.3 Propagate timeout and validate HTTP response, content type, and
+  PDF signature with sanitized typed failures. PSW-S17 corrective closure
+  already maps the persistent download timeout to a typed
+  `EvolutionPdfTimeoutError` at the source boundary; this task hardens
+  HTTP/PDF validation and MUST preserve and reverify the typed
+  outer-exception contract rather than claim a new owner.
 - [ ] 22.4 Preserve normalization, shared persistence, cleanup, and no-new-login
   guarantees.
 - [ ] 22.5 Run official validation and create

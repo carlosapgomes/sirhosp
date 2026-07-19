@@ -989,7 +989,8 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             self.stderr.write(
                 f"  Run #{run.pk} failed during admissions capture "
-                f"(invalid JSON from persistent session): {exc}"
+                f"(invalid JSON from persistent session, "
+                f"reason={self._classify_failure_reason(exc)[0]})"
             )
             return
         except SnapshotContainerMissingError as exc:
@@ -1004,7 +1005,8 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             self.stderr.write(
                 f"  Run #{run.pk} failed during admissions capture "
-                f"(snapshot data missing from persistent session): {exc}"
+                f"(snapshot data missing from persistent session, "
+                f"reason={self._classify_failure_reason(exc)[0]})"
             )
             return
         except ExtractionError as exc:
@@ -1017,7 +1019,7 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             self.stderr.write(
                 f"  Run #{run.pk} failed during admissions capture "
-                f"(persistent session): {exc}"
+                f"(persistent session, reason={self._classify_failure_reason(exc)[0]})"
             )
             return
         except Exception as exc:
@@ -1045,7 +1047,8 @@ class Command(BaseCommand):
             )
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during admissions persistence: {exc}"
+                f"  Run #{run.pk} failed during admissions persistence "
+                f"(reason={self._classify_failure_reason(exc)[0]})"
             )
             return
 
@@ -1161,7 +1164,7 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             self.stderr.write(
                 f"  Run #{run.pk} failed during demographics capture "
-                f"(persistent session): {exc}"
+                f"(persistent session, reason={self._classify_failure_reason(exc)[0]})"
             )
             return
         except ExtractionError as exc:
@@ -1174,7 +1177,7 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             self.stderr.write(
                 f"  Run #{run.pk} failed during demographics capture "
-                f"(persistent session): {exc}"
+                f"(persistent session, reason={self._classify_failure_reason(exc)[0]})"
             )
             return
         except Exception as exc:
@@ -1203,7 +1206,7 @@ class Command(BaseCommand):
             self._mark_run_failed(run, identity_exc)
             self.stderr.write(
                 f"  Run #{run.pk} failed during demographics capture "
-                f"(identity mismatch): {identity_exc}"
+                f"(identity mismatch, reason={self._classify_failure_reason(identity_exc)[0]})"
             )
             return
 
@@ -1229,7 +1232,8 @@ class Command(BaseCommand):
             )
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during demographics persistence: {exc}"
+                f"  Run #{run.pk} failed during demographics persistence "
+                f"(reason={self._classify_failure_reason(exc)[0]})"
             )
             return
 
@@ -1499,12 +1503,13 @@ class Command(BaseCommand):
 
         Delegates to the shared
         :func:`apps.ingestion.run_lifecycle.classify_failure_reason` so the
-        persistent-session and current workers cannot drift apart (PSW-S17).
-        The shared classifier recognizes every typed timeout
-        (``ExtractionTimeoutError``, ``SubprocessTimeoutError``, persistent
-        ``NavigationTimeoutError``) and walks the cause/context chain so a
-        Playwright ``TimeoutError`` reached through a sanitizing wrapper is
-        still classified as ``("timeout", True)``.
+        persistent-session and current workers cannot drift apart
+        (PSW-S17). The shared classifier recognizes every TYPED domain
+        timeout (``ExtractionTimeoutError``, ``SubprocessTimeoutError``,
+        persistent ``NavigationTimeoutError``/``EvolutionPdfTimeoutError``).
+        It does NOT walk the cause/context chain — persistent source
+        boundaries are responsible for raising typed outer exceptions
+        (PSW-S17 R2/R3 correction).
         """
         from apps.ingestion.run_lifecycle import classify_failure_reason
 
@@ -1630,5 +1635,6 @@ class Command(BaseCommand):
             self._try_close_batch(run.batch)
             self.stderr.write(
                 f"  Run #{run.pk} failed permanently "
-                f"(attempt {run.attempt_count}/{run.max_attempts}): {exc}"
+                f"(attempt {run.attempt_count}/{run.max_attempts}, "
+                f"reason={failure_reason})"
             )

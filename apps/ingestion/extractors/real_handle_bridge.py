@@ -44,8 +44,10 @@ import re
 import time
 from typing import Any
 
+from apps.ingestion.extractors.errors import is_playwright_timeout_error
 from apps.ingestion.extractors.legacy_navigation import (
     NavigationError,
+    NavigationTimeoutError,
     _read_and_build_snapshot,
     _remaining_ms,
     build_demographics,
@@ -61,8 +63,10 @@ from apps.ingestion.extractors.legacy_navigation import (
     wait_for_report_or_no_evolutions,
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
+    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE,
     EvolutionPdfError,
     EvolutionPdfFlow,
+    EvolutionPdfTimeoutError,
 )
 from apps.ingestion.extractors.session_controller import SessionHandle
 
@@ -475,16 +479,24 @@ class RealHandleBridge:
 
             return True
 
-        except NavigationError as exc:
+        except NavigationTimeoutError:
+            # PSW-S17 R2/R3: a typed navigation/wait timeout MUST propagate
+            # so the adapter and command record ("timeout", True). It must
+            # NOT be collapsed into a fresh unchained ExtractionError.
+            raise
+        except NavigationError:
+            # Non-timeout navigation failure: log a constant sanitized
+            # message and return False so the adapter raises its own
+            # sanitized ExtractionError (no URL, raw text, or patient data).
             logger.warning(
-                "Legacy UI navigation to admissions failed (sanitized): %s",
-                exc,
+                "Legacy UI navigation to admissions failed (sanitized)"
             )
             return False
-        except Exception as exc:
+        except Exception:
+            # Unexpected non-timeout error: best-effort sanitized log + False
+            # so the adapter surfaces a sanitized ExtractionError.
             logger.warning(
-                "Unexpected error during admissions navigation: %s",
-                exc,
+                "Unexpected error during admissions navigation (sanitized)"
             )
             return False
 
@@ -631,43 +643,50 @@ class RealHandleBridge:
             )
             return []
 
+        # PSW-S17 R2/R3: typed navigation/wait timeouts MUST propagate as
+        # typed timeouts so the run records ("timeout", True). Non-timeout
+        # NavigationError failures keep the legacy empty-result behavior.
         # Step 1: Ensure search screen visible (reuse PSW-S12 helpers)
         try:
             ensure_search_screen(page)
-        except NavigationError as exc:
+        except NavigationTimeoutError:
+            raise
+        except NavigationError:
             logger.warning(
-                "Evolution action flow: search screen not available (%s)",
-                exc,
+                "Evolution action flow: search screen not available (sanitized)"
             )
             return []
 
         # Step 2: Search for the patient
         try:
             search_patient(page, patient_record=patient_record)
-        except NavigationError as exc:
+        except NavigationTimeoutError:
+            raise
+        except NavigationError:
             logger.warning(
-                "Evolution action flow: patient search failed (%s)",
-                exc,
+                "Evolution action flow: patient search failed (sanitized)"
             )
             return []
 
         # Step 3: Click Interna\u00e7\u00f5es
         try:
             click_internacoes(page)
-        except NavigationError as exc:
+        except NavigationTimeoutError:
+            raise
+        except NavigationError:
             logger.warning(
-                "Evolution action flow: Interna\u00e7\u00f5es click failed (%s)",
-                exc,
+                "Evolution action flow: Interna\u00e7\u00f5es click failed (sanitized)"
             )
             return []
 
         # Step 4: Read admissions and select overlapping ones
         try:
             admissions = _read_and_build_snapshot(page)
-        except NavigationError as exc:
+        except NavigationTimeoutError:
+            raise
+        except NavigationError:
             logger.warning(
-                "Evolution action flow: admissions snapshot failed (%s)",
-                exc,
+                "Evolution action flow: admissions snapshot failed (sanitized)"
             )
             return []
 
@@ -697,11 +716,11 @@ class RealHandleBridge:
                 try:
                     click_internacoes(page)
                     admissions = _read_and_build_snapshot(page)
+                except NavigationTimeoutError:
+                    raise
                 except NavigationError:
                     logger.warning(
-                        "Evolution action flow: re-navigation failed "
-                        "for admission %s",
-                        admission.get("admissionKey"),
+                        "Evolution action flow: re-navigation failed (sanitized)"
                     )
                     continue
 
@@ -713,24 +732,22 @@ class RealHandleBridge:
                     page,
                     admission_key=admission_key,
                 )
-            except NavigationError as exc:
+            except NavigationTimeoutError:
+                raise
+            except NavigationError:
                 logger.warning(
-                    "Evolution action flow: detail open failed for "
-                    "key=%s (%s)",
-                    admission_key,
-                    exc,
+                    "Evolution action flow: detail open failed (sanitized)"
                 )
                 continue
 
             # Step 5b: Click Evolu\u00e7\u00e3o
             try:
                 click_evolucao(page)
-            except NavigationError as exc:
+            except NavigationTimeoutError:
+                raise
+            except NavigationError:
                 logger.warning(
-                    "Evolution action flow: Evolu\u00e7\u00e3o click failed "
-                    "for key=%s (%s)",
-                    admission_key,
-                    exc,
+                    "Evolution action flow: Evolu\u00e7\u00e3o click failed (sanitized)"
                 )
                 continue
 
@@ -747,45 +764,50 @@ class RealHandleBridge:
                     start_date_br=br_start,
                     end_date_br=br_end,
                 )
+            except NavigationTimeoutError:
+                raise
             except Exception:
                 logger.warning(
-                    "Evolution action flow: date fill failed for "
-                    "key=%s (continuing)",
-                    admission_key,
+                    "Evolution action flow: date fill failed (continuing)"
                 )
 
             # Step 5d: Select ascending order
             try:
                 select_ascending_order(page)
+            except NavigationTimeoutError:
+                raise
             except Exception:
                 logger.debug(
                     "Evolution action flow: ascending order select "
-                    "failed (no-op) for key=%s",
-                    admission_key,
+                    "failed (no-op)"
                 )
 
             # Step 5e: Click visualize
             try:
                 click_visualizar_report(page)
-            except NavigationError as exc:
+            except NavigationTimeoutError:
+                raise
+            except NavigationError:
                 logger.warning(
-                    "Evolution action flow: visualize click failed "
-                    "for key=%s (%s)",
-                    admission_key,
-                    exc,
+                    "Evolution action flow: visualize click failed (sanitized)"
                 )
                 continue
 
-            # Step 5f: Wait for report or detect no-evolutions
-            report_ready = wait_for_report_or_no_evolutions(
-                page,
-                timeout_ms=min(120_000, download_timeout_ms),
-            )
+            # Step 5f: Wait for report or detect no-evolutions.
+            # PSW-S17 R2/R3: polling-budget expiry raises a typed
+            # NavigationTimeoutError; only an explicit no-evolutions dialog
+            # may yield the False (skip) result.
+            try:
+                report_ready = wait_for_report_or_no_evolutions(
+                    page,
+                    timeout_ms=min(120_000, download_timeout_ms),
+                )
+            except NavigationTimeoutError:
+                raise
             if not report_ready:
                 logger.debug(
-                    "Evolution action flow: no report for key=%s "
-                    "(no evolutions in window)",
-                    admission_key,
+                    "Evolution action flow: explicit no-evolutions dialog "
+                    "for this admission (sanitized)"
                 )
                 continue
 
@@ -794,9 +816,7 @@ class RealHandleBridge:
                 pdf_url = self._resolve_pdf_url_from_report_page(page)
             except Exception:
                 logger.warning(
-                    "Evolution action flow: PDF URL resolution failed "
-                    "for key=%s",
-                    admission_key,
+                    "Evolution action flow: PDF URL resolution failed (sanitized)"
                 )
                 continue
 
@@ -807,11 +827,11 @@ class RealHandleBridge:
                 pdf_bytes = self._download_pdf(
                     page, pdf_url, download_timeout_ms
                 )
+            except EvolutionPdfTimeoutError:
+                raise
             except Exception:
                 logger.warning(
-                    "Evolution action flow: PDF download failed "
-                    "for key=%s",
-                    admission_key,
+                    "Evolution action flow: PDF download failed (sanitized)"
                 )
                 continue
 
@@ -909,14 +929,17 @@ class RealHandleBridge:
 
         Args:
             page: A Playwright ``Page`` object.
-            pdf_url: The PDF URL to download.
+            pdf_url: The PDF URL to download (used only for the request;
+                never logged or surfaced).
             timeout_ms: Timeout in milliseconds.
 
         Returns:
             Raw PDF bytes.
 
         Raises:
-            EvolutionPdfError: If the download fails.
+            EvolutionPdfTimeoutError: on a Playwright/request timeout, so
+                the run records ("timeout", True) (PSW-S17 R2/R3).
+            EvolutionPdfError: any other download failure.
         """
         context = getattr(page, "context", None)
         request = getattr(context, "request", None) if context is not None else None
@@ -927,10 +950,14 @@ class RealHandleBridge:
 
         try:
             response = request.get(pdf_url, timeout=timeout_ms)
-        except Exception:
+        except Exception as exc:
+            if is_playwright_timeout_error(exc):
+                raise EvolutionPdfTimeoutError(
+                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
+                ) from None
             logger.warning(
                 "Evolution action flow: PDF download request failed "
-                "(sanitized)"
+                "(sanitized, non-timeout)"
             )
             raise EvolutionPdfError(
                 "Falha ao baixar o PDF do relatório de evolução"
@@ -943,7 +970,11 @@ class RealHandleBridge:
 
         try:
             body = response.body()
-        except Exception:
+        except Exception as exc:
+            if is_playwright_timeout_error(exc):
+                raise EvolutionPdfTimeoutError(
+                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
+                ) from None
             raise EvolutionPdfError(
                 "Falha ao ler o corpo do PDF do relatório de evolução"
             ) from None

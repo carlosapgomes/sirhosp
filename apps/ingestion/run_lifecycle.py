@@ -9,23 +9,25 @@ worker (``process_ingestion_runs``) and the persistent-session worker
   taxonomy for any exception raised during a run.
 - :func:`record_final_run_failure` — creates exactly one
   :class:`~apps.ingestion.models.FinalRunFailure` row when a run exhausts
-  its retry budget, with the same conditions and fields in both workers.
+  its retry budget.
+- :func:`safe_failure_text` — stable category-specific error text for
+  command stdout/stderr failure lines.
 
-Scope discipline (PSW-S17 R7): only classification and finalization live
-here. Browser cleanup, tab management, retry backoff, stage metrics, and
-extraction-specific error wrapping stay in the worker commands and
-extractors.
+Scope discipline (PSW-S17 R7): only classification, finalization, and
+failure-line text live here. Browser cleanup, tab management, retry backoff,
+stage metrics, and extraction-specific error wrapping stay in the worker
+commands and extractors.
 
-Timeout coverage (PSW-S17 R2/R3): the classifier recognizes every typed
-timeout in the project — :class:`ExtractionTimeoutError`,
-:class:`SubprocessTimeoutError`, and the persistent navigation
-:class:`~apps.ingestion.extractors.legacy_navigation.NavigationTimeoutError`
-— plus Playwright's own ``TimeoutError`` reached through a wrapping chain
-(``__cause__`` or ``__context__``). The chain walk lets a typed timeout
-survive the sanitizing ``except Exception: raise ExtractionError(...) from exc``
-boundaries used by the persistent adapter and bridge, so the externally
-visible ``failure_reason`` is ``"timeout"`` regardless of which worker
-raised the failure.
+Timeout contract (PSW-S17 R2/R3 correction): the classifier recognizes
+typed domain timeouts ONLY — :class:`ExtractionTimeoutError`,
+:class:`SubprocessTimeoutError`, the persistent
+:class:`~apps.ingestion.extractors.legacy_navigation.NavigationTimeoutError`,
+and :class:`~apps.ingestion.extractors.persistent_evolution_pdf.EvolutionPdfTimeoutError`.
+Persistent source boundaries are responsible for raising a typed outer
+exception (never a generic ``ExtractionError`` that happens to wrap a
+Playwright timeout). The previous cause/context chain walker was removed
+because it reinterpreted raw Playwright exceptions in the current worker,
+changing its pre-S17 taxonomy (R8 violation).
 """
 
 from __future__ import annotations
@@ -38,63 +40,15 @@ from apps.ingestion.extractors.errors import (
     InvalidJsonError,
     SnapshotContainerMissingError,
 )
-from apps.ingestion.extractors.persistent_evolution_pdf import EvolutionPdfError
+from apps.ingestion.extractors.persistent_evolution_pdf import (
+    EvolutionPdfError,
+    EvolutionPdfTimeoutError,
+)
 from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
 
 # ---------------------------------------------------------------------------
 # Failure taxonomy
 # ---------------------------------------------------------------------------
-
-
-def _is_playwright_timeout(exc: Any) -> bool:
-    """Return True if ``exc`` looks like Playwright's ``TimeoutError``.
-
-    Playwright is not a hard import dependency of this module (the workers
-    must remain importable without a running browser stack), so detection is
-    done by class name AND module prefix. Real Playwright raises
-    ``playwright._impl._errors.TimeoutError``; tests inject duck-typed
-    subclasses with the same qualified shape.
-    """
-    cls = type(exc)
-    if cls.__name__ != "TimeoutError":
-        return False
-    module = getattr(cls, "__module__", "") or ""
-    return "playwright" in module
-
-
-def _walk_chain_for_timeout(exc: Any) -> bool:
-    """Walk ``__cause__`` then ``__context__`` looking for a typed timeout.
-
-    Sanitizing boundaries in the persistent path wrap the original error
-    (``raise ExtractionError(...) from exc`` or ``raise X from None``). The
-    original is still reachable through ``__cause__`` (when ``from exc``) or
-    ``__context__`` (always set when raised inside an ``except`` block, even
-    when ``from None`` suppresses its display).
-
-    Defends against cycles via a visited set bounded by chain length.
-    """
-    seen: set[int] = set()
-    cur: Any = exc
-    # Bound the walk to avoid pathological chains; 32 levels is far more
-    # than any real wrapping stack.
-    for _ in range(32):
-        if cur is None:
-            return False
-        cur_id = id(cur)
-        if cur_id in seen:
-            return False
-        seen.add(cur_id)
-        if isinstance(cur, (ExtractionTimeoutError, SubprocessTimeoutError)):
-            return True
-        if _is_playwright_timeout(cur):
-            return True
-        # Prefer __cause__ (explicit chain); fall back to __context__ so
-        # ``raise X from None`` does not hide the underlying timeout.
-        nxt = getattr(cur, "__cause__", None)
-        if nxt is None:
-            nxt = getattr(cur, "__context__", None)
-        cur = nxt
-    return False
 
 
 def classify_failure_reason(exc: Exception) -> tuple[str, bool]:
@@ -104,27 +58,33 @@ def classify_failure_reason(exc: Exception) -> tuple[str, bool]:
         ``(failure_reason, timed_out)`` where ``failure_reason`` is one of
         the values allowed by ``IngestionRun.FAILURE_REASON_CHOICES``:
 
-        - ``"timeout"`` — any typed timeout (``ExtractionTimeoutError``,
-          ``SubprocessTimeoutError``, persistent
-          ``NavigationTimeoutError``) or a Playwright ``TimeoutError``
-          reached through a wrapping chain.
+        - ``"timeout"`` — any typed domain timeout
+          (``ExtractionTimeoutError``, ``SubprocessTimeoutError``,
+          persistent ``NavigationTimeoutError``/``EvolutionPdfTimeoutError``).
         - ``"invalid_payload"`` — extractor produced data that could not be
           parsed/validated as a payload (``InvalidJsonError``,
-          ``SnapshotContainerMissingError``, ``EvolutionPdfError``).
-        - ``"validation_error"`` — Django ``ValidationError`` raised by
-          domain validators.
+          ``SnapshotContainerMissingError``, non-timeout
+          ``EvolutionPdfError``).
+        - ``"validation_error"`` — Django ``ValidationError``.
         - ``"source_unavailable"`` — any other ``ExtractionError`` (session
           not ready, renewal failed, navigation element missing, etc.).
-        - ``"unexpected_exception"`` — anything else.
+        - ``"unexpected_exception"`` — anything else (including a raw
+          Playwright ``TimeoutError`` that was not mapped to a typed domain
+          timeout at a source boundary).
 
-    This function MUST be used by both worker commands so they produce
-    identical externally observable classifications for the same failure.
+    R3 (correction): the classifier does NOT walk ``__cause__``/``__context__``
+    and does NOT reinterpret raw Playwright exceptions. Persistent source
+    boundaries must raise typed outer exceptions; the current worker's
+    pre-S17 taxonomy is preserved verbatim (a raw Playwright ``TimeoutError``
+    that surfaces directly is ``unexpected_exception``, not ``timeout``).
     """
-    # R2/R3: timeouts first — a typed timeout must never be collapsed into
-    # source_unavailable or invalid_payload by an outer wrapper.
-    if isinstance(exc, (ExtractionTimeoutError, SubprocessTimeoutError)):
-        return ("timeout", True)
-    if _walk_chain_for_timeout(exc):
+    # R2/R3: typed domain timeouts. Order matters: EvolutionPdfTimeoutError
+    # is both an EvolutionPdfError and an ExtractionTimeoutError; test the
+    # timeout branch before the invalid_payload branch.
+    if isinstance(
+        exc,
+        (ExtractionTimeoutError, SubprocessTimeoutError, EvolutionPdfTimeoutError),
+    ):
         return ("timeout", True)
 
     # invalid_payload family (data-level failures).
@@ -146,6 +106,39 @@ def classify_failure_reason(exc: Exception) -> tuple[str, bool]:
         return ("source_unavailable", False)
 
     return ("unexpected_exception", False)
+
+
+# ---------------------------------------------------------------------------
+# Safe failure-line text (R4)
+# ---------------------------------------------------------------------------
+
+
+# Stable category-specific constants used for command stdout/stderr failure
+# lines. They never include ``str(exc)`` (which could carry a URL, cookie,
+# credential, patient record, admission key, selector, or raw Playwright
+# text). Persisted ``error_message``/``details_json`` fields continue to
+# store ``str(exc)`` because source boundaries (PSW-S17 R2/R4) now raise
+# typed exceptions with constant sanitized messages.
+_FAILURE_TEXT: dict[str, str] = {
+    "timeout": "source-system action timed out",
+    "source_unavailable": "source-system action unavailable",
+    "invalid_payload": "source-system payload invalid or unavailable",
+    "validation_error": "source-system validation error",
+    "unexpected_exception": "unexpected worker failure",
+}
+_UNKNOWN_FAILURE_TEXT = "worker failure"
+
+
+def safe_failure_text(failure_reason: str) -> str:
+    """Return the stable, sanitized failure-line text for a category.
+
+    Used by command stdout/stderr failure summaries so operator logs never
+    echo ``str(exc)`` for an unexpected/source exception. Persisted DB
+    fields (``error_message``, ``details_json``) are governed by their own
+    contracts and may keep ``str(exc)`` for typed domain exceptions whose
+    messages are themselves sanitized constants.
+    """
+    return _FAILURE_TEXT.get(failure_reason, _UNKNOWN_FAILURE_TEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +171,6 @@ def record_final_run_failure(run: Any) -> None:
     patient_record = params.get("patient_record", "")
     batch = getattr(run, "batch", None)
 
-    # Same conditions as the current worker: only census-batched runs with
-    # a resolvable patient record get a row.
     if batch is None or not patient_record:
         return
 

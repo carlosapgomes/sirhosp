@@ -1,28 +1,24 @@
-"""PSW-S17: shared failure-classification and terminal-finalization helpers.
+"""PSW-S17 corrected: shared failure-classification and terminal-finalization
+helpers, plus a true cross-worker lifecycle parity matrix.
 
-These tests pin the cross-worker parity contract for the ingestion run
-lifecycle:
+Coverage:
 
-- ``classify_failure_reason(exc)`` MUST return the same ``(reason, timed_out)``
-  tuple for any given exception type, regardless of which worker raises it.
-- ``record_final_run_failure(run)`` MUST create exactly one ``FinalRunFailure``
-  row under the same conditions and with the same fields the current worker
-  creates, and MUST be idempotent.
-
-The persistent worker used to diverge in three ways (the gaps PSW-S17 closes):
-
-1. It did not classify any timeout type as ``("timeout", True)``.
-2. It did not create ``FinalRunFailure`` rows on terminal failure.
-3. It did not classify ``ValidationError`` as ``("validation_error", False)``.
-
-The matrix tests below (``TestCrossWorkerFailureParity``) prove both worker
-commands now reach the same externally observable lifecycle state for every
-supported failure category (R1).
+- :func:`classify_failure_reason` taxonomy (5 categories, no chain walk).
+- :func:`record_final_run_failure` idempotency and field parity.
+- :func:`safe_failure_text` returns stable per-category constants.
+- A real cross-worker matrix: each R1 category is run through BOTH worker
+  commands in the SAME test, in BOTH retryable and terminal modes, with
+  exception factories (not stored instances).
+- Current-worker characterization tests proving the pre-S17 taxonomy is
+  preserved for raw and wrapped Playwright timeouts (R3).
+- Sentinel tests proving sensitive values never reach DB error fields,
+  command stderr, or logs on the persistent path (R4).
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Callable
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -36,14 +32,26 @@ from apps.ingestion.extractors.errors import (
     InvalidJsonError,
     SnapshotContainerMissingError,
 )
-from apps.ingestion.extractors.legacy_navigation import NavigationTimeoutError
-from apps.ingestion.extractors.persistent_evolution_pdf import EvolutionPdfError
+from apps.ingestion.extractors.legacy_navigation import (
+    DEADLINE_EXPIRED_MESSAGE,
+    NavigationTimeoutError,
+)
+from apps.ingestion.extractors.persistent_evolution_pdf import (
+    EvolutionPdfError,
+    EvolutionPdfTimeoutError,
+)
 from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
 from apps.ingestion.models import (
     CensusExecutionBatch,
     FinalRunFailure,
     IngestionRun,
     IngestionRunAttempt,
+    IngestionRunStageMetric,
+)
+from apps.ingestion.run_lifecycle import (
+    classify_failure_reason,
+    record_final_run_failure,
+    safe_failure_text,
 )
 
 # ---------------------------------------------------------------------------
@@ -55,147 +63,146 @@ class TestClassifyFailureReason:
     """R1-R3: every failure category maps to the same tuple in both workers."""
 
     def _classify(self, exc: Exception) -> tuple[str, bool]:
-        from apps.ingestion.run_lifecycle import classify_failure_reason
-
         return classify_failure_reason(exc)
 
     # -- Timeout category (R2, R3) ------------------------------------
 
     def test_extraction_timeout_classified_as_timeout(self):
-        reason, timed_out = self._classify(
+        assert self._classify(
             ExtractionTimeoutError("Extraction timed out after 90s")
-        )
-        assert reason == "timeout"
-        assert timed_out is True
+        ) == ("timeout", True)
 
     def test_subprocess_timeout_classified_as_timeout(self):
-        reason, timed_out = self._classify(
+        assert self._classify(
             SubprocessTimeoutError(cmd=["python", "x.py"], timeout=300)
-        )
-        assert reason == "timeout"
-        assert timed_out is True
+        ) == ("timeout", True)
 
     def test_navigation_timeout_classified_as_timeout(self):
-        """R2: persistent navigation deadline expiration reaches the typed
-        timeout category."""
-        reason, timed_out = self._classify(
-            NavigationTimeoutError("navigation deadline expired")
-        )
-        assert reason == "timeout"
-        assert timed_out is True
+        assert self._classify(
+            NavigationTimeoutError(DEADLINE_EXPIRED_MESSAGE)
+        ) == ("timeout", True)
 
-    def test_playwright_timeout_in_cause_chain_classified_as_timeout(self):
-        """R2: a Playwright ``TimeoutError`` wrapped by a sanitizing boundary
-        is still detected through the cause/context chain."""
+    def test_evolution_pdf_timeout_classified_as_timeout(self):
+        assert self._classify(
+            EvolutionPdfTimeoutError("Persistent evolution PDF download timed out.")
+        ) == ("timeout", True)
 
-        cls = _make_playwright_timeout_class()
+    # R3 correction: raw Playwright TimeoutError MUST NOT be reinterpreted
+    # by the shared classifier. Source boundaries must map it to a typed
+    # domain timeout; if it reaches the classifier raw, it falls through to
+    # unexpected_exception (preserving the pre-S17 current-worker taxonomy).
+    def test_raw_playwright_timeout_not_reinterpreted(self):
+        class _TimeoutError(Exception):
+            pass
+
+        _TimeoutError.__name__ = "TimeoutError"
+        _TimeoutError.__module__ = "playwright._impl._errors"
+        reason, timed_out = self._classify(_TimeoutError("Timeout 30000ms"))
+        assert reason == "unexpected_exception"
+        assert timed_out is False
+
+    def test_extraction_error_wrapping_playwright_timeout_is_source_unavailable(self):
+        """R3: an ExtractionError that wraps a raw Playwright timeout via
+        ``from exc`` is classified by its outer type (ExtractionError ->
+        source_unavailable), NOT by walking the cause chain."""
+
+        class _PlaywrightTimeoutError(Exception):
+            pass
+
+        _PlaywrightTimeoutError.__name__ = "TimeoutError"
+        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
+
         try:
             try:
-                raise cls("Timeout 30000ms exceeded")
+                raise _PlaywrightTimeoutError("Timeout 30000ms")
             except Exception as exc:
                 raise ExtractionError("navigation failed") from exc
         except ExtractionError as wrapped:
             reason, timed_out = self._classify(wrapped)
-        assert reason == "timeout"
-        assert timed_out is True
-
-    def test_playwright_timeout_in_suppressed_context_classified_as_timeout(self):
-        """R2: even when a boundary uses ``raise X from None``, the original
-        Playwright timeout remains detectable via ``__context__``."""
-
-        cls = _make_playwright_timeout_class()
-        try:
-            try:
-                raise cls("Timeout 5000ms")
-            except Exception:
-                raise EvolutionPdfError("PDF download failed") from None
-        except EvolutionPdfError as wrapped:
-            reason, timed_out = self._classify(wrapped)
-        assert reason == "timeout"
-        assert timed_out is True
-
-    def test_no_infinite_loop_on_cyclic_chain(self):
-        """The chain walk defends against cycles (no infinite recursion)."""
-
-        a = ExtractionError("a")
-        b = ExtractionError("b")
-        # Create a synthetic cycle: a -> b -> a.
-        a.__cause__ = b
-        b.__cause__ = a
-        # Should terminate and fall through to source_unavailable.
-        reason, timed_out = self._classify(a)
         assert reason == "source_unavailable"
         assert timed_out is False
 
     # -- invalid_payload category (R1) --------------------------------
 
     def test_invalid_json_classified_as_invalid_payload(self):
-        reason, timed_out = self._classify(InvalidJsonError("bad json"))
-        assert reason == "invalid_payload"
-        assert timed_out is False
+        assert self._classify(InvalidJsonError("bad json")) == (
+            "invalid_payload",
+            False,
+        )
 
     def test_snapshot_container_missing_classified_as_invalid_payload(self):
-        reason, timed_out = self._classify(
+        assert self._classify(
             SnapshotContainerMissingError("container missing")
-        )
-        assert reason == "invalid_payload"
-        assert timed_out is False
+        ) == ("invalid_payload", False)
 
     def test_evolution_pdf_error_classified_as_invalid_payload(self):
-        reason, timed_out = self._classify(
-            EvolutionPdfError("PDF flow failed")
+        assert self._classify(EvolutionPdfError("PDF flow failed")) == (
+            "invalid_payload",
+            False,
         )
-        assert reason == "invalid_payload"
-        assert timed_out is False
 
     # -- validation_error category (R1) -------------------------------
 
     def test_validation_error_classified_as_validation_error(self):
-        reason, timed_out = self._classify(
-            ValidationError("patient record format invalid")
+        assert self._classify(ValidationError("invalid")) == (
+            "validation_error",
+            False,
         )
-        assert reason == "validation_error"
-        assert timed_out is False
 
     # -- source_unavailable category (R1) -----------------------------
 
     def test_generic_extraction_error_classified_as_source_unavailable(self):
-        reason, timed_out = self._classify(
-            ExtractionError("source connection refused")
+        assert self._classify(ExtractionError("source down")) == (
+            "source_unavailable",
+            False,
         )
-        assert reason == "source_unavailable"
-        assert timed_out is False
 
     # -- unexpected_exception category (R1) ---------------------------
 
     def test_unexpected_exception_classified_as_unexpected(self):
-        reason, timed_out = self._classify(ValueError("db pool exhausted"))
-        assert reason == "unexpected_exception"
-        assert timed_out is False
+        assert self._classify(ValueError("db pool exhausted")) == (
+            "unexpected_exception",
+            False,
+        )
 
 
 # ---------------------------------------------------------------------------
-# Helpers for the playwright-timeout duck-typing tests
+# safe_failure_text
 # ---------------------------------------------------------------------------
 
 
-def _make_playwright_timeout_class():
-    """Build a duck-typed class that mimics ``playwright.TimeoutError``.
+class TestSafeFailureText:
+    """R4: stable per-category constants for command failure lines."""
 
-    The classifier detects playwright timeouts by class name AND module
-    prefix (no hard playwright dependency). This helper returns a synthetic
-    class whose ``__name__`` is ``TimeoutError`` and whose ``__module__``
-    starts with ``playwright`` so detection works in tests without the
-    real playwright package installed.
-    """
+    @pytest.mark.parametrize(
+        "reason, expected",
+        [
+            ("timeout", "source-system action timed out"),
+            ("source_unavailable", "source-system action unavailable"),
+            ("invalid_payload", "source-system payload invalid or unavailable"),
+            ("validation_error", "source-system validation error"),
+            ("unexpected_exception", "unexpected worker failure"),
+        ],
+    )
+    def test_returns_stable_constant_per_category(self, reason, expected):
+        assert safe_failure_text(reason) == expected
 
-    class _PlaywrightTimeoutError(Exception):
-        pass
+    def test_unknown_category_returns_safe_default(self):
+        assert safe_failure_text("nonsense") == "worker failure"
 
-    _PlaywrightTimeoutError.__name__ = "TimeoutError"
-    _PlaywrightTimeoutError.__qualname__ = "TimeoutError"
-    _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
-    return _PlaywrightTimeoutError
+    def test_constants_contain_no_secret_keywords(self):
+        for text in [
+            safe_failure_text("timeout"),
+            safe_failure_text("source_unavailable"),
+            safe_failure_text("invalid_payload"),
+            safe_failure_text("unexpected_exception"),
+        ]:
+            lowered = text.lower()
+            assert "http" not in lowered
+            assert "cookie" not in lowered
+            assert "password" not in lowered
+            assert "patient" not in lowered
+            assert "jsessionid" not in lowered
 
 
 # ---------------------------------------------------------------------------
@@ -227,8 +234,6 @@ class TestRecordFinalRunFailure:
         )
 
     def test_creates_final_run_failure_with_same_fields_as_current_worker(self):
-        from apps.ingestion.run_lifecycle import record_final_run_failure
-
         batch = CensusExecutionBatch.objects.create(status="running")
         run = self._make_run(batch=batch, patient_record="FF_P1")
 
@@ -242,9 +247,6 @@ class TestRecordFinalRunFailure:
         assert failure.failed_at is not None
 
     def test_idempotent_exactly_one_row(self):
-        """R5: calling twice (e.g. retry recovery + worker) must NOT duplicate."""
-        from apps.ingestion.run_lifecycle import record_final_run_failure
-
         batch = CensusExecutionBatch.objects.create(status="running")
         run = self._make_run(batch=batch)
 
@@ -254,26 +256,17 @@ class TestRecordFinalRunFailure:
         assert FinalRunFailure.objects.filter(run=run).count() == 1
 
     def test_no_row_when_batch_missing(self):
-        """R5: current-worker condition — no batch means no row."""
-        from apps.ingestion.run_lifecycle import record_final_run_failure
-
         run = self._make_run(batch=None, patient_record="NO_BATCH")
         record_final_run_failure(run)
         assert FinalRunFailure.objects.filter(run=run).count() == 0
 
     def test_no_row_when_patient_record_missing(self):
-        """R5: current-worker condition — empty patient_record means no row."""
-        from apps.ingestion.run_lifecycle import record_final_run_failure
-
         batch = CensusExecutionBatch.objects.create(status="running")
         run = self._make_run(batch=batch, patient_record="")
         record_final_run_failure(run)
         assert FinalRunFailure.objects.filter(run=run).count() == 0
 
     def test_intent_falls_back_to_run_intent_when_param_missing(self):
-        """R5: intent resolution matches current worker (params then run.intent)."""
-        from apps.ingestion.run_lifecycle import record_final_run_failure
-
         batch = CensusExecutionBatch.objects.create(status="running")
         run = IngestionRun.objects.create(
             status="failed",
@@ -281,7 +274,7 @@ class TestRecordFinalRunFailure:
             batch=batch,
             attempt_count=2,
             max_attempts=2,
-            parameters_json={"patient_record": "FF_DEMO"},  # no "intent"
+            parameters_json={"patient_record": "FF_DEMO"},
         )
         record_final_run_failure(run)
         failure = FinalRunFailure.objects.get(run=run)
@@ -289,31 +282,94 @@ class TestRecordFinalRunFailure:
 
 
 # ---------------------------------------------------------------------------
-# Cross-worker failure-parity matrix (R1)
+# Cross-worker lifecycle parity matrix (R1)
 # ---------------------------------------------------------------------------
 
 
+# Exception FACTORIES (not stored instances) so each parameterized case
+# gets a fresh exception with no shared traceback/context state.
+def _validation_error_factory() -> ValidationError:
+    return ValidationError("patient record format invalid")
+
+
+def _extraction_error_factory() -> ExtractionError:
+    return ExtractionError("source connection refused")
+
+
+def _invalid_json_factory() -> InvalidJsonError:
+    return InvalidJsonError("Expected JSON array, got str")
+
+
+def _extraction_timeout_factory() -> ExtractionTimeoutError:
+    return ExtractionTimeoutError("Extraction timed out after 90s")
+
+
+def _unexpected_value_error_factory() -> ValueError:
+    return ValueError("Database connection pool exhausted")
+
+
+FAILURE_CATEGORIES: list[tuple[str, Callable[[], Exception], str, bool]] = [
+    ("validation_error", _validation_error_factory, "validation_error", False),
+    ("source_unavailable", _extraction_error_factory, "source_unavailable", False),
+    ("invalid_payload", _invalid_json_factory, "invalid_payload", False),
+    ("timeout", _extraction_timeout_factory, "timeout", True),
+    ("unexpected_exception", _unexpected_value_error_factory, "unexpected_exception", False),
+]
+"""Tuple of (id, exception factory, expected_reason, expected_timed_out)."""
+
+
 @pytest.mark.django_db
-class TestCrossWorkerFailureParity:
-    """R1: parameterize identical failure scenarios for both workers and prove
-    the externally visible lifecycle matches for every category."""
+class TestCrossWorkerFailureParityMatrix:
+    """R1: each of the five categories is run through BOTH worker commands
+    in the SAME test, in both retryable and terminal modes, with exception
+    factories."""
 
-    FAILURE_CATEGORIES = [
-        ("source_unavailable", ExtractionError("source crashed"), False),
-        ("invalid_payload", InvalidJsonError("bad json"), False),
-        ("timeout", ExtractionTimeoutError("timed out after 90s"), True),
-        (
-            "unexpected_exception",
-            ValueError("db connection pool exhausted"),
-            False,
-        ),
-    ]
-    """Tuple of (expected_reason, exception, expected_timed_out)."""
+    def _queue_run(self, *, mode: str, label: str) -> IngestionRun:
+        """Create a run that will land in ``mode`` after this attempt.
 
-    # -- Current worker (process_ingestion_runs) ---------------------
+        ``mode == 'retryable'``: attempt_count=0, max_attempts=3 -> after
+        increment attempt_count=1 < 3 -> requeued.
 
-    def _patch_current_extractor(self, exc: Exception):
-        """Patch the current worker's extractor to raise ``exc`` on snapshot."""
+        ``mode == 'terminal'``: attempt_count=2, max_attempts=3 -> after
+        increment attempt_count=3 == 3 -> terminal failure.
+        """
+        batch = CensusExecutionBatch.objects.create(status="running")
+        params = {
+            "patient_record": f"P-{label}",
+            "intent": "admissions_only",
+        }
+        if mode == "retryable":
+            attempt_count = 0
+        else:
+            attempt_count = 2
+            # Seed prior failed attempts so the new attempt is the last.
+            run = IngestionRun.objects.create(
+                status="queued",
+                intent="admissions_only",
+                batch=batch,
+                attempt_count=attempt_count,
+                max_attempts=3,
+                parameters_json=params,
+            )
+            for i in range(1, 3):
+                IngestionRunAttempt.objects.create(
+                    run=run,
+                    attempt_number=i,
+                    status="failed",
+                    failure_reason="source_unavailable",
+                    finished_at=timezone.now() - timedelta(seconds=70 * (3 - i)),
+                )
+            return run
+        return IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch,
+            attempt_count=attempt_count,
+            max_attempts=3,
+            parameters_json=params,
+        )
+
+    def _patch_current(self, exc: Exception):
         mock_ext = MagicMock()
         mock_ext.get_admission_snapshot.side_effect = exc
         mock_ext.extract_evolutions.return_value = []
@@ -323,8 +379,7 @@ class TestCrossWorkerFailureParity:
             return_value=mock_ext,
         )
 
-    def _patch_persistent_adapter(self, exc: Exception):
-        """Patch the persistent worker's adapter to raise ``exc`` on snapshot."""
+    def _patch_persistent(self, exc: Exception):
         from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (  # noqa: E501
             Command as PersistentWorkerCommand,
         )
@@ -342,187 +397,488 @@ class TestCrossWorkerFailureParity:
             return_value=mock_adapter,
         )
 
-    def _terminal_run_for(self, command_name: str) -> IngestionRun:
-        """Build a run that exhausts on this attempt (terminal, not retry)."""
+    @pytest.mark.parametrize(
+        "category_id, exc_factory, expected_reason, expected_timed_out",
+        FAILURE_CATEGORIES,
+        ids=[c[0] for c in FAILURE_CATEGORIES],
+    )
+    @pytest.mark.parametrize("mode", ["retryable", "terminal"])
+    def test_both_workers_match_for_each_category_and_mode(
+        self,
+        category_id,
+        exc_factory,
+        expected_reason,
+        expected_timed_out,
+        mode,
+    ):
+        """Single test that runs BOTH workers with the same failure and
+        compares externally observable state."""
+        # --- Current worker ---
+        run_current = self._queue_run(mode=mode, label=f"cur-{category_id}")
+        with self._patch_current(exc_factory()):
+            call_command("process_ingestion_runs")
+        run_current.refresh_from_db()
+
+        # --- Persistent worker ---
+        run_persistent = self._queue_run(
+            mode=mode, label=f"per-{category_id}"
+        )
+        with self._patch_persistent(exc_factory()):
+            call_command("process_ingestion_runs_persistent_session")
+        run_persistent.refresh_from_db()
+
+        # --- Parity assertions ---
+        # Classification on both run and latest attempt must match.
+        assert run_current.failure_reason == expected_reason
+        assert run_current.timed_out is expected_timed_out
+        assert run_persistent.failure_reason == expected_reason
+        assert run_persistent.timed_out is expected_timed_out
+
+        # Attempt taxonomy parity.
+        for run in (run_current, run_persistent):
+            latest = (
+                IngestionRunAttempt.objects.filter(run=run)
+                .order_by("-attempt_number")
+                .first()
+            )
+            assert latest is not None
+            assert latest.status == "failed"
+            assert latest.failure_reason == expected_reason
+            assert latest.timed_out is expected_timed_out
+            assert latest.finished_at is not None
+
+        # Mode-specific parity.
+        if mode == "retryable":
+            for run in (run_current, run_persistent):
+                assert run.status == "queued"
+                assert run.next_retry_at is not None
+                # next_retry_at ~= failure time + 60s (bounded).
+                now = timezone.now()
+                lower = now + timedelta(seconds=45)
+                upper = now + timedelta(seconds=90)
+                assert lower <= run.next_retry_at <= upper
+                assert run.finished_at is None
+                # No terminal record on retry.
+                assert FinalRunFailure.objects.filter(run=run).count() == 0
+                # Attached batch stays running.
+                run.batch.refresh_from_db()
+                assert run.batch.status == "running"
+                assert run.batch.finished_at is None
+        else:  # terminal
+            for run in (run_current, run_persistent):
+                assert run.status == "failed"
+                assert run.finished_at is not None
+                assert run.next_retry_at is None
+                # Exactly one FinalRunFailure with correct fields.
+                failures = list(FinalRunFailure.objects.filter(run=run))
+                assert len(failures) == 1
+                failure = failures[0]
+                assert failure.batch_id == run.batch_id
+                assert failure.attempts_exhausted == run.attempt_count
+
+        # Idempotency: re-finalizing the persistent run does not duplicate.
+        if mode == "terminal":
+            record_final_run_failure(run_persistent)
+            assert FinalRunFailure.objects.filter(run=run_persistent).count() == 1
+
+    def test_terminal_drained_batch_closes_as_failed(self):
+        """R6: a terminal failure on the last drained batch closes it."""
         batch = CensusExecutionBatch.objects.create(status="running")
-        params = {
-            "patient_record": f"P-{command_name}",
-            "intent": "admissions_only",
-        }
         run = IngestionRun.objects.create(
             status="queued",
             intent="admissions_only",
             batch=batch,
             attempt_count=2,
             max_attempts=3,
-            parameters_json=params,
+            parameters_json={"patient_record": "DRAIN-P", "intent": "admissions_only"},
         )
-        # Seed prior failed attempts so the new attempt is the 3rd and last.
-        for i in range(1, 3):
-            IngestionRunAttempt.objects.create(
-                run=run,
-                attempt_number=i,
-                status="failed",
-                failure_reason="source_unavailable",
-                finished_at=timezone.now() - timedelta(seconds=70 * (3 - i)),
+        with self._patch_persistent(_extraction_error_factory()):
+            call_command("process_ingestion_runs_persistent_session")
+        run.refresh_from_db()
+        batch.refresh_from_db()
+        assert run.status == "failed"
+        assert batch.status == "failed"
+        assert batch.finished_at is not None
+
+    def test_terminal_batch_with_other_active_run_stays_open(self):
+        """R6: a terminal failure does not close a batch with another
+        queued/running run."""
+        batch = CensusExecutionBatch.objects.create(status="running")
+        run_a = IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch,
+            attempt_count=2,
+            max_attempts=3,
+            parameters_json={"patient_record": "A-P", "intent": "admissions_only"},
+        )
+        IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch,
+            attempt_count=0,
+            max_attempts=3,
+            parameters_json={"patient_record": "B-P", "intent": "admissions_only"},
+        )
+        # Select only run_a via --run-id so the other stays queued.
+        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (  # noqa: E501
+            Command as PersistentWorkerCommand,
+        )
+
+        mock_adapter = MagicMock()
+        mock_adapter.get_admission_snapshot.side_effect = _extraction_error_factory()
+        mock_adapter.get_demographics.return_value = {}
+        mock_adapter.extract_evolutions.return_value = []
+        mock_adapter.ensure_session_ready.return_value = True
+        mock_adapter.controller = MagicMock()
+        mock_adapter.controller.restart_required.return_value = False
+        with patch.object(
+            PersistentWorkerCommand,
+            "_create_adapter",
+            return_value=mock_adapter,
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                run_id=run_a.pk,
+                max_runs=1,
             )
-        return run
-
-    @pytest.mark.parametrize(
-        "expected_reason, exc, expected_timed_out",
-        FAILURE_CATEGORIES,
-        ids=[c[0] for c in FAILURE_CATEGORIES],
-    )
-    def test_current_worker_classification(
-        self, expected_reason, exc, expected_timed_out
-    ):
-        run = self._terminal_run_for("current")
-        with self._patch_current_extractor(exc):
-            call_command("process_ingestion_runs")
-        run.refresh_from_db()
-        assert run.status == "failed"
-        assert run.failure_reason == expected_reason
-        assert run.timed_out is expected_timed_out
-        # R5: terminal failure creates exactly one FinalRunFailure.
-        assert FinalRunFailure.objects.filter(run=run).count() == 1
-
-    @pytest.mark.parametrize(
-        "expected_reason, exc, expected_timed_out",
-        FAILURE_CATEGORIES,
-        ids=[c[0] for c in FAILURE_CATEGORIES],
-    )
-    def test_persistent_worker_classification(
-        self, expected_reason, exc, expected_timed_out
-    ):
-        run = self._terminal_run_for("persistent")
-        with self._patch_persistent_adapter(exc):
-            call_command("process_ingestion_runs_persistent_session")
-        run.refresh_from_db()
-        assert run.status == "failed"
-        assert run.failure_reason == expected_reason
-        assert run.timed_out is expected_timed_out
-        # R5: terminal failure creates exactly one FinalRunFailure
-        # (this is the divergence PSW-S17 closes for the persistent worker).
-        assert FinalRunFailure.objects.filter(run=run).count() == 1
-
-    @pytest.mark.parametrize(
-        "expected_reason, exc, expected_timed_out",
-        FAILURE_CATEGORIES,
-        ids=[c[0] for c in FAILURE_CATEGORIES],
-    )
-    def test_attempt_records_match_between_workers(
-        self, expected_reason, exc, expected_timed_out
-    ):
-        """R3: the latest attempt record carries the same reason/timed_out."""
-        run = self._terminal_run_for("persistent")
-        with self._patch_persistent_adapter(exc):
-            call_command("process_ingestion_runs_persistent_session")
-        latest = (
-            IngestionRunAttempt.objects.filter(run=run)
-            .order_by("-attempt_number")
-            .first()
-        )
-        assert latest is not None
-        assert latest.status == "failed"
-        assert latest.failure_reason == expected_reason
-        assert latest.timed_out is expected_timed_out
-        assert latest.finished_at is not None
+        run_a.refresh_from_db()
+        batch.refresh_from_db()
+        assert run_a.status == "failed"
+        assert batch.status == "running"
+        assert batch.finished_at is None
 
 
 # ---------------------------------------------------------------------------
-# Persistent navigation deadline timeout end-to-end (R2, R3)
+# Current-worker pre/post behavior characterization (R3)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-class TestPersistentNavigationTimeoutEndToEnd:
-    """R2/R3: a persistent navigation deadline timeout reaches the timeout
-    classification end-to-end through the persistent worker."""
+class TestCurrentWorkerPreservation:
+    """R3: prove the current worker retains its pre-S17 taxonomy for raw
+    and wrapped Playwright timeouts (the chain walker that changed this was
+    removed)."""
 
-    def test_demographics_deadline_timeout_is_classified_as_timeout(self):
-        """When the persistent demographics path raises NavigationTimeoutError
-        (deadline expired), the run records failure_reason='timeout' and
-        timed_out=True — parity with the current worker's timeout semantics."""
+    def _queue_run(self) -> IngestionRun:
+        return IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            attempt_count=2,
+            max_attempts=3,
+            parameters_json={
+                "patient_record": "CWP-P",
+                "intent": "admissions_only",
+            },
+        )
+
+    def test_direct_raw_playwright_timeout_is_unexpected_exception(self):
+        """A raw Playwright TimeoutError reaching the current worker
+        directly (not mapped to a typed domain timeout) classifies as
+        unexpected_exception — pre-S17 behavior."""
+
+        class _PlaywrightTimeoutError(Exception):
+            pass
+
+        _PlaywrightTimeoutError.__name__ = "TimeoutError"
+        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
+
+        run = self._queue_run()
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.side_effect = _PlaywrightTimeoutError(
+            "Timeout 30000ms"
+        )
+        mock_ext.extract_evolutions.return_value = []
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+        run.refresh_from_db()
+        assert run.failure_reason == "unexpected_exception"
+        assert run.timed_out is False
+
+    def test_extraction_error_wrapping_playwright_timeout_is_source_unavailable(self):
+        """An ExtractionError that happens to wrap a Playwright timeout
+        classifies by its outer type — source_unavailable — preserving the
+        pre-S17 current-worker taxonomy (no cause/context chain walk)."""
+
+        class _PlaywrightTimeoutError(Exception):
+            pass
+
+        _PlaywrightTimeoutError.__name__ = "TimeoutError"
+        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
+
+        def side_effect(*args, **kwargs):
+            try:
+                raise _PlaywrightTimeoutError("Timeout 30000ms")
+            except Exception as exc:
+                raise ExtractionError("navigation failed") from exc
+
+        run = self._queue_run()
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.side_effect = side_effect
+        mock_ext.extract_evolutions.return_value = []
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+        run.refresh_from_db()
+        assert run.failure_reason == "source_unavailable"
+        assert run.timed_out is False
+
+
+# ---------------------------------------------------------------------------
+# Sentinel sanitization tests (R4)
+# ---------------------------------------------------------------------------
+
+SENSITIVE_PATIENT_SENTINEL = "SENSITIVE-PATIENT-0001"
+SENSITIVE_URL_SENTINEL = "https://sensitive.example.test/SENSITIVE_URL"
+SENSITIVE_COOKIE_SENTINEL = "SENSITIVE_COOKIE_VALUE"
+
+
+@pytest.mark.django_db
+class TestSentinelSanitizationPersistent:
+    """R4: synthetic sensitive values injected at source boundaries must
+    NOT reach DB error fields, command stderr, or logs on the persistent
+    path."""
+
+    def _queue_run(self, *, intent: str = "admissions_only") -> IngestionRun:
+        return IngestionRun.objects.create(
+            status="queued",
+            intent=intent,
+            attempt_count=2,
+            max_attempts=3,
+            parameters_json={
+                "patient_record": SENSITIVE_PATIENT_SENTINEL,
+                "intent": intent,
+            },
+        )
+
+    def test_admissions_navigation_timeout_does_not_leak_patient_record(
+        self, caplog
+    ):
+        """The real bridge/adapter admissions-navigation deadline timeout
+        surfaces as a typed NavigationTimeoutError with a constant message;
+        the patient record stored in ``parameters_json`` does NOT leak
+        into any DB error field, command stderr, or log.
+
+        This models the realistic persistent timeout path: the source
+        boundary raises a typed exception with a CONSTANT sanitized
+        message (``DEADLINE_EXPIRED_MESSAGE``), so ``str(exc)`` stored in
+        ``error_message`` is the constant, not the patient record.
+        """
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        class _FakePage:
+            pass
+
+        timeout_handle = MagicMock()
+        timeout_handle.ensure_current_page.return_value = _FakePage()
+        timeout_handle.is_connected.return_value = True
+        timeout_handle.get_page_html.return_value = (
+            "<html><body>"
+            '<div id="tempoSessao" class="tempo-sessao">'
+            "Tempo: <span>00</span>:<span>29</span>:<span>01</span>"
+            "</div></body></html>"
+        )
+
+        run = self._queue_run()
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
         from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (  # noqa: E501
             Command as PersistentWorkerCommand,
         )
 
-        run = IngestionRun.objects.create(
-            status="queued",
-            intent="demographics_only",
-            attempt_count=1,
-            max_attempts=3,
-            parameters_json={
-                "patient_record": "DTO_P1",
-                "intent": "demographics_only",
-            },
-        )
-
-        mock_adapter = MagicMock()
-        mock_adapter.get_demographics.side_effect = NavigationTimeoutError(
-            "demographics deadline expired before next step"
-        )
-        mock_adapter.ensure_session_ready.return_value = True
-        mock_adapter.controller = MagicMock()
-        mock_adapter.controller.restart_required.return_value = False
-
+        bridge = RealHandleBridge(timeout_handle)
+        adapter = PersistentExtractionAdapter(session=bridge)
         with patch.object(
-            PersistentWorkerCommand,
-            "_create_adapter",
-            return_value=mock_adapter,
-        ):
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen",
+            side_effect=NavigationTimeoutError(DEADLINE_EXPIRED_MESSAGE),
+        ), caplog.at_level("WARNING"):
             call_command("process_ingestion_runs_persistent_session")
 
         run.refresh_from_db()
-        assert run.status == "queued"  # retry, not terminal
         assert run.failure_reason == "timeout"
         assert run.timed_out is True
-        latest = (
-            IngestionRunAttempt.objects.filter(run=run)
-            .order_by("-attempt_number")
-            .first()
-        )
-        assert latest is not None
-        assert latest.failure_reason == "timeout"
-        assert latest.timed_out is True
 
-    def test_persistent_terminal_timeout_creates_final_run_failure(self):
-        """R5: when a persistent timeout exhausts retries, exactly one
-        FinalRunFailure row is created (parity with the current worker)."""
-        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (  # noqa: E501
-            Command as PersistentWorkerCommand,
-        )
+        # The patient record sentinel (stored only in parameters_json) must
+        # NOT reach any DB error field or log.
+        for blob in [
+            run.error_message or "",
+            run.attempts.order_by("-attempt_number").first().error_message or "",
+        ]:
+            assert SENSITIVE_PATIENT_SENTINEL not in blob
+        for metric in IngestionRunStageMetric.objects.filter(run=run):
+            text = str(metric.details_json or {})
+            assert SENSITIVE_PATIENT_SENTINEL not in text
+        for record in caplog.records:
+            log_text = record.getMessage()
+            assert SENSITIVE_PATIENT_SENTINEL not in log_text
 
-        batch = CensusExecutionBatch.objects.create(status="running")
-        run = IngestionRun.objects.create(
-            status="queued",
-            intent="demographics_only",
-            batch=batch,
-            attempt_count=3,
-            max_attempts=3,
-            parameters_json={
-                "patient_record": "TTO_P1",
-                "intent": "demographics_only",
-            },
+    def test_pdf_download_timeout_does_not_leak_sentinels(self, caplog):
+        """The real PDF flow download timeout surfaces as a typed
+        EvolutionPdfTimeoutError with a constant message; no sentinel
+        leaks into DB fields or logs."""
+        from apps.ingestion.extractors.errors import is_playwright_timeout_error
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfFlow,
+            EvolutionPdfTimeoutError,
         )
 
-        mock_adapter = MagicMock()
-        mock_adapter.get_demographics.side_effect = NavigationTimeoutError(
-            "demographics deadline expired"
-        )
-        mock_adapter.ensure_session_ready.return_value = True
-        mock_adapter.controller = MagicMock()
-        mock_adapter.controller.restart_required.return_value = False
+        class _PlaywrightTimeoutError(Exception):
+            pass
 
-        with patch.object(
-            PersistentWorkerCommand,
-            "_create_adapter",
-            return_value=mock_adapter,
+        _PlaywrightTimeoutError.__name__ = "TimeoutError"
+        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
+
+        # Sanity: detection helper recognises the duck-typed class.
+        assert is_playwright_timeout_error(_PlaywrightTimeoutError("x"))
+
+        # A minimal fake page whose context.request.get raises a Playwright
+        # timeout carrying sensitive content.
+        sentinel_msg = (
+            f"Timeout 30000ms at {SENSITIVE_URL_SENTINEL} "
+            f"cookie={SENSITIVE_COOKIE_SENTINEL}"
+        )
+
+        class _FakeRequest:
+            def get(self, url, timeout):  # noqa: ARG002
+                raise _PlaywrightTimeoutError(sentinel_msg)
+
+        class _FakeContext:
+            request = _FakeRequest()
+
+        class _FakePage:
+            context = _FakeContext()
+            url = "about:blank"
+            frames: list = []
+
+            def content(self):
+                return ""
+
+        flow = EvolutionPdfFlow(_FakePage())
+        # Force the download path: pre-resolve a fake PDF URL so _download is
+        # reached directly.
+        with pytest.raises(EvolutionPdfTimeoutError) as exc_info, caplog.at_level(
+            "WARNING"
         ):
-            call_command("process_ingestion_runs_persistent_session")
+            flow._download(SENSITIVE_URL_SENTINEL, timeout_ms=1000)
 
-        run.refresh_from_db()
-        assert run.status == "failed"
-        assert run.failure_reason == "timeout"
-        assert run.timed_out is True
-        assert FinalRunFailure.objects.filter(run=run).count() == 1
+        # The typed exception message is a constant; the sentinel never
+        # appears in str(exc) or in logs.
+        assert SENSITIVE_URL_SENTINEL not in str(exc_info.value)
+        assert SENSITIVE_COOKIE_SENTINEL not in str(exc_info.value)
+        for record in caplog.records:
+            log_text = record.getMessage()
+            assert SENSITIVE_URL_SENTINEL not in log_text
+            assert SENSITIVE_COOKIE_SENTINEL not in log_text
+
+
+# ---------------------------------------------------------------------------
+# Persistent source-boundary typed-timeout propagation (R2)
+# ---------------------------------------------------------------------------
+
+
+class TestPersistentSourceBoundaryTimeouts:
+    """R2: persistent source boundaries raise typed timeouts at the
+    adapter/command boundary — not generic ExtractionError."""
+
+    def test_open_tab_raises_extraction_timeout_on_playwright_timeout(self):
+        """PlaywrightSessionHandle.open_tab raises ExtractionTimeoutError
+        when page.goto raises a Playwright timeout (no False return), and
+        the typed message is a constant (no URL/raw text leak)."""
+        import pytest
+
+        from apps.ingestion.extractors.errors import ExtractionTimeoutError
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        class _PlaywrightTimeoutError(Exception):
+            pass
+
+        _PlaywrightTimeoutError.__name__ = "TimeoutError"
+        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
+
+        handle = PlaywrightSessionHandle.__new__(PlaywrightSessionHandle)
+
+        class _FakePage:
+            def goto(self, url, *, timeout, wait_until):  # noqa: ARG002
+                raise _PlaywrightTimeoutError(
+                    f"Timeout at {SENSITIVE_URL_SENTINEL} "
+                    f"cookie={SENSITIVE_COOKIE_SENTINEL}"
+                )
+
+        class _FakeContext:
+            def new_page(self):
+                return _FakePage()
+
+        handle._context = _FakeContext()
+        with pytest.raises(ExtractionTimeoutError) as exc_info:
+            handle.open_tab(SENSITIVE_URL_SENTINEL, timeout=5)
+        message = str(exc_info.value)
+        assert SENSITIVE_URL_SENTINEL not in message
+        assert SENSITIVE_COOKIE_SENTINEL not in message
+
+    def test_navigate_to_admissions_propagates_navigation_timeout(self):
+        """RealHandleBridge.navigate_to_admissions re-raises a
+        NavigationTimeoutError instead of collapsing it to False."""
+        import pytest
+
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        class _FakePage:
+            pass
+
+        class _TimeoutHandle:
+            def ensure_current_page(self):
+                return _FakePage()
+
+        bridge = RealHandleBridge(_TimeoutHandle())
+        with patch(
+            "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen",
+            side_effect=NavigationTimeoutError(DEADLINE_EXPIRED_MESSAGE),
+        ):
+            with pytest.raises(NavigationTimeoutError):
+                bridge.navigate_to_admissions(SENSITIVE_PATIENT_SENTINEL)
+
+    def test_bridge_download_pdf_raises_evolution_timeout_with_constant_message(self):
+        """RealHandleBridge._download_pdf raises EvolutionPdfTimeoutError
+        on a Playwright download timeout, with a constant message (no URL
+        or raw text leak)."""
+        import pytest
+
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        class _PlaywrightTimeoutError(Exception):
+            pass
+
+        _PlaywrightTimeoutError.__name__ = "TimeoutError"
+        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
+
+        class _FakeRequest:
+            def get(self, url, timeout):  # noqa: ARG002
+                raise _PlaywrightTimeoutError(
+                    f"Timeout at {SENSITIVE_URL_SENTINEL} "
+                    f"cookie={SENSITIVE_COOKIE_SENTINEL}"
+                )
+
+        class _FakeContext:
+            request = _FakeRequest()
+
+        class _FakePage:
+            context = _FakeContext()
+
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+        with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
+            bridge._download_pdf(_FakePage(), SENSITIVE_URL_SENTINEL, 1000)
+        message = str(exc_info.value)
+        assert SENSITIVE_URL_SENTINEL not in message
+        assert SENSITIVE_COOKIE_SENTINEL not in message

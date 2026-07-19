@@ -24,6 +24,7 @@ from apps.ingestion.extractors.admission_snapshot_parser import (
 )
 from apps.ingestion.extractors.errors import (
     ExtractionError,
+    ExtractionTimeoutError,
     InvalidJsonError,
     SnapshotContainerMissingError,
 )
@@ -425,6 +426,10 @@ class PersistentExtractionAdapter:
         # the session supports it — this is the path for real legacy
         # Java/JSP/PrimeFaces systems that don't expose reloadable deep
         # links. Fallback: URL template (``open_tab``) for stub/test compat.
+        # PSW-S17 R2/R3: typed timeouts (NavigationTimeoutError from the
+        # action path, ExtractionTimeoutError from open_tab) propagate as
+        # typed ExtractionTimeoutError subclasses. Non-timeout failures use
+        # a constant sanitized message (no URL, patient record, or token).
         _navigate_to_admissions = getattr(
             self._session, "navigate_to_admissions", None
         )
@@ -432,8 +437,8 @@ class PersistentExtractionAdapter:
             # Action-based UI navigation (PSW-S12).
             if not _navigate_to_admissions(patient_record=patient_record):
                 raise ExtractionError(
-                    "Failed to navigate to admissions page "
-                    "via legacy UI actions"
+                    "Failed to navigate to the admissions page "
+                    "via legacy UI actions."
                 )
         else:
             # URL template fallback (legacy/test path).
@@ -445,7 +450,7 @@ class PersistentExtractionAdapter:
             )
             if not self._session.open_tab(url, timeout=timeout):
                 raise ExtractionError(
-                    f"Failed to navigate to admissions page: {url}"
+                    "Failed to navigate to the admissions page."
                 )
 
         # Step 4: Extract JSON data from page HTML
@@ -524,9 +529,12 @@ class PersistentExtractionAdapter:
             start_date=start_date,
             end_date=end_date,
         )
+        # PSW-S17 R2/R3: a Playwright navigation timeout surfaces as a
+        # typed ExtractionTimeoutError from ``open_tab`` and propagates.
+        # Non-timeout failures produce a constant sanitized message (no URL).
         if not self._session.open_tab(url, timeout=timeout):
             raise ExtractionError(
-                f"Failed to navigate to evolution page: {url}"
+                "Failed to navigate to the evolution page."
             )
 
         # Step 4: Extract JSON data from evolution container
@@ -648,10 +656,14 @@ class PersistentExtractionAdapter:
         if callable(_extract_via_actions):
             # Real legacy action navigation (PSW-S16). Reuses the
             # already-open persistent page/context.
+            # PSW-S17 R2/R3: a typed NavigationTimeoutError MUST propagate
+            # unchanged; only non-timeout failures are wrapped.
             try:
                 demographics = _extract_via_actions(
                     patient_record=patient_record, timeout=timeout
                 )
+            except ExtractionTimeoutError:
+                raise
             except Exception as exc:  # noqa: BLE001 - sanitized taxonomy
                 raise ExtractionError(
                     "Failed to extract demographics via legacy UI actions"

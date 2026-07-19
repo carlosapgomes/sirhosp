@@ -908,7 +908,12 @@ def wait_for_report_or_no_evolutions(
     - ``True`` when the report page is detected
       (URL contains ``relatorioAnaEvoInternacaoPdf.xhtml`` AND
       ``#printLinks`` is available).
-    - ``False`` when a no-evolutions dialog is detected or timeout expires.
+    - ``False`` ONLY when an explicit no-evolutions dialog is detected.
+
+    PSW-S17 R2/R3 correction: a polling-budget expiry is a TIMEOUT and
+    raises :class:`NavigationTimeoutError`; it MUST NOT be conflated with
+    the genuine no-evolutions result. Only an observed no-evolutions
+    dialog may return ``False``.
 
     Modeled after ``path2.wait_for_report_page()`` and
     ``detect_no_evolutions_dialog_and_recover()``.
@@ -919,14 +924,21 @@ def wait_for_report_or_no_evolutions(
         poll_ms: Polling interval in milliseconds.
 
     Returns:
-        ``True`` if the report page is ready, ``False`` otherwise.
+        ``True`` if the report page is ready, ``False`` if an explicit
+        no-evolutions dialog is detected.
+
+    Raises:
+        NavigationTimeoutError: when the polling budget expires before
+            either condition is observed.
     """
     started_at = time.monotonic()
 
     while True:
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         if elapsed_ms >= timeout_ms:
-            return False
+            raise NavigationTimeoutError(
+                DEADLINE_EXPIRED_MESSAGE,
+            )
 
         frame = page.frame(name=SEL_FRAME_POL)
         if frame is None:
@@ -954,7 +966,7 @@ def wait_for_report_or_no_evolutions(
             if dialog.count() > 0:
                 try:
                     if dialog.first.is_visible():
-                        # Detected no-evolutions dialog
+                        # Detected explicit no-evolutions dialog
                         return False
                 except Exception:
                     pass

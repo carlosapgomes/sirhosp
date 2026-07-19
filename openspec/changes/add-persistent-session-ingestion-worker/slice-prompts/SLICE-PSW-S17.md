@@ -131,3 +131,52 @@ changed files, risks, and verifier handoff.
 
 Final prompt: implement only PSW-S17. Any unclassified timeout, missing terminal
 record, current-worker regression, or absent gate makes the slice incomplete.
+
+## Corrective Appendix (PSW-S17 corrective closure)
+
+The original prompt above contained two internally inconsistent constraints
+that blocked a correct closure: a six-file cap and a blanket
+"browser-navigation" prohibition, both incompatible with the requirement
+that every persistent navigation, wait, report, and download timeout be
+typed at the source boundary. This appendix authorizes the single
+exception and records the expanded file cap.
+
+### Authorized exception to the browser-navigation prohibition
+
+Typed timeout propagation and error-message sanitization may touch the
+following source boundaries, but only to:
+
+- raise a typed domain timeout (`NavigationTimeoutError`,
+  `EvolutionPdfTimeoutError`, or `ExtractionTimeoutError`) where the
+  current code returns `False`, returns `[]`, swallows the timeout into a
+  generic `ExtractionError`/`EvolutionPdfError`, or `continue`s;
+- re-raise typed timeouts through broad `except` clauses instead of
+  wrapping them;
+- replace URL/patient-record/raw-exception text in logs and error messages
+  with constant sanitized strings.
+
+This explicitly forbids selector redesign, new navigation actions, new
+browser/context launches, subprocesses, second logins, and any change to
+navigation sequencing, clinical persistence, counters, cleanup policy, or
+restart policy.
+
+### Expanded file cap
+
+The six-file cap is replaced by a maximum of **18 versioned files**,
+including OpenSpec artifacts. The expected files are listed in the
+corrective closure prompt (`/tmp/sirhosp-slice-PSW-S17-correction-prompt.md`).
+Exceeding 18 requires `Status: INCOMPLETE`.
+
+### Classifier contract
+
+The shared `classify_failure_reason` MUST NOT walk `__cause__`/`__context__`
+or reinterpret raw Playwright exceptions (the previous chain walker changed
+the current worker's pre-S17 taxonomy and is removed). Persistent source
+boundaries are the sole owners of typed outer-exception conversion.
+
+### Ownership boundary
+
+PSW-S17 owns the typed persistent timeout invariant delivered here.
+PSW-S20 and PSW-S22 may harden selectors, required actions, HTTP/PDF
+validation, and live flow behavior, but MUST preserve and reverify the
+typed outer-exception contract rather than claim a new owner.

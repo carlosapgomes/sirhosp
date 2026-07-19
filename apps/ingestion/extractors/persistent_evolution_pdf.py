@@ -47,7 +47,11 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
-from apps.ingestion.extractors.errors import ExtractionError
+from apps.ingestion.extractors.errors import (
+    ExtractionError,
+    ExtractionTimeoutError,
+    is_playwright_timeout_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +81,30 @@ class EvolutionPdfError(ExtractionError):
     command's failure taxonomy classifies it as a recoverable data-level
     failure (a job tab was already opened).
     """
+
+
+class EvolutionPdfTimeoutError(EvolutionPdfError, ExtractionTimeoutError):
+    """Typed timeout raised by the persistent evolution PDF flow.
+
+    PSW-S17 R2/R3: report-render waits and authenticated PDF downloads
+    through ``page.context.request.get`` MUST surface as typed timeouts so
+    the shared classifier maps the failure to ``("timeout", True)`` instead
+    of the generic ``invalid_payload`` bucket. This subclass is both an
+    :class:`EvolutionPdfError` (so existing ``except EvolutionPdfError``
+    cleanup dispatch still catches it) and an
+    :class:`ExtractionTimeoutError` (so the classifier recognises it without
+    any cause/context chain walk).
+    """
+
+
+# Constant sanitized timeout messages (PSW-S17 R4: no URL, raw text,
+# cookies, credentials, patient data, or admission keys in error text).
+_EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE = (
+    "Persistent evolution PDF report render timed out."
+)
+_EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE = (
+    "Persistent evolution PDF download timed out."
+)
 
 
 # ===========================================================================
@@ -608,14 +636,28 @@ class EvolutionPdfFlow:
             logger.warning("Persistent evolution PDF: report generation not applicable (sanitized)")
 
     def _wait_for_report(self) -> None:
-        """Best-effort wait for the report/PDF object to render."""
+        """Wait for the report/PDF object to render; raise typed timeout.
+
+        PSW-S17 R2/R3: a Playwright timeout while waiting for the report
+        object MUST surface as a typed
+        :class:`EvolutionPdfTimeoutError` rather than being silently
+        treated as best-effort. Non-timeout exceptions remain best-effort
+        (the report UI is optional on some pages).
+        """
         try:
             self._page.wait_for_selector(
                 _PDF_OBJECT_SELECTOR,
                 timeout=self._report_wait_timeout_ms,
             )
-        except Exception:  # noqa: BLE001 - sanitized: wait is best-effort
-            logger.warning("Persistent evolution PDF: report render wait interrupted (sanitized)")
+        except Exception as exc:  # noqa: BLE001 - sanitized below
+            if is_playwright_timeout_error(exc):
+                raise EvolutionPdfTimeoutError(
+                    _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
+                ) from None
+            logger.warning(
+                "Persistent evolution PDF: report render wait interrupted "
+                "(sanitized, non-timeout)"
+            )
 
     def _resolve_pdf_url(self) -> str | None:
         """Resolve the PDF URL from the page content and viewer frames."""
@@ -634,22 +676,39 @@ class EvolutionPdfFlow:
         return _resolve_pdf_url_from_viewer(frame_urls, base_url)
 
     def _download(self, pdf_url: str, timeout_ms: int) -> bytes:
-        """Download the PDF bytes through the existing browser context."""
+        """Download the PDF bytes through the existing browser context.
+
+        PSW-S17 R2/R3: a Playwright/playwright-request timeout MUST surface
+        as :class:`EvolutionPdfTimeoutError` so the run/attempt records
+        ``failure_reason=timeout``. Other download failures remain
+        :class:`EvolutionPdfError`.
+        """
         context = getattr(self._page, "context", None)
         request = getattr(context, "request", None) if context is not None else None
         if request is None:
             raise EvolutionPdfError("Browser context unavailable for PDF download")
         try:
             response = request.get(pdf_url, timeout=timeout_ms)
-        except Exception:  # noqa: BLE001 - sanitized below
-            logger.warning("Persistent evolution PDF: download request failed (sanitized)")
+        except Exception as exc:  # noqa: BLE001 - sanitized below
+            if is_playwright_timeout_error(exc):
+                raise EvolutionPdfTimeoutError(
+                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
+                ) from None
+            logger.warning(
+                "Persistent evolution PDF: download request failed "
+                "(sanitized, non-timeout)"
+            )
             raise EvolutionPdfError("Failed to download the evolution report PDF") from None
 
         if not getattr(response, "ok", False):
             raise EvolutionPdfError("Failed to download the evolution report PDF")
         try:
             body = response.body()
-        except Exception:  # noqa: BLE001 - sanitized below
+        except Exception as exc:  # noqa: BLE001 - sanitized below
+            if is_playwright_timeout_error(exc):
+                raise EvolutionPdfTimeoutError(
+                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
+                ) from None
             raise EvolutionPdfError("Failed to read the evolution report PDF body") from None
         return bytes(body or b"")
 

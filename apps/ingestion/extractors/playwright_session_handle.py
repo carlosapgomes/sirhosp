@@ -22,6 +22,10 @@ import logging
 from typing import Any
 
 from apps.ingestion.extractors.browser_profile import ExclusiveBrowserProfile
+from apps.ingestion.extractors.errors import (
+    ExtractionTimeoutError,
+    is_playwright_timeout_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +160,14 @@ class PlaywrightSessionHandle:
 
         Returns:
             ``True`` if the tab opened and rendered successfully,
-            ``False`` otherwise.
+            ``False`` for non-timeout navigation failures.
+
+        Raises:
+            ExtractionTimeoutError: when Playwright signals a navigation
+                timeout. PSW-S17 R2/R3: the typed timeout must cross the
+                adapter/command boundary so the run records
+                ``failure_reason=timeout``. Non-timeout failures keep the
+                ``False`` return for compatibility with existing callers.
         """
         if self._context is None:
             return False
@@ -167,7 +178,17 @@ class PlaywrightSessionHandle:
             page.goto(url, timeout=timeout_ms, wait_until="networkidle")
             return True
         except Exception as exc:
-            logger.warning("Failed to open tab %r: %s", url, exc)
+            # PSW-S17 R2/R3: a Playwright navigation timeout must surface as
+            # a typed ExtractionTimeoutError so the shared classifier maps
+            # the run/attempt to ("timeout", True). The constant message
+            # contains no URL, cookie, credential, or raw payload.
+            if is_playwright_timeout_error(exc):
+                raise ExtractionTimeoutError(
+                    "Persistent session navigation timed out."
+                ) from None
+            # Non-timeout failures keep the legacy False return; the log
+            # message is constant and sanitized (no URL, no raw exception).
+            logger.warning("Persistent session open_tab failed (sanitized)")
             return False
 
     def get_tab_classes(self) -> list[str]:
