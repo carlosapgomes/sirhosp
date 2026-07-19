@@ -184,6 +184,10 @@ class FakeNavigationPage:
             selector=key,
             visible_getter=lambda: key in self._visible_selectors,
             on_click_callback=lambda: self._on_click_hook(key),
+            wait_callback=self._record_wait,
+            click_callback=self._record_click,
+            fill_timeout_callback=self._record_fill,
+            action_hook=self._fire_action,
         )
 
     def wait_for_timeout(self, timeout_ms: int) -> None:  # noqa: ARG002
@@ -482,8 +486,7 @@ class FakeClock:
     one test.
 
     ``advance(seconds)`` jumps the clock forward by an explicit amount (used
-    by fake action hooks to model that an operation consumed time). ``peek()``
-    reads the next value without consuming it.
+    by fake action hooks to model that an operation consumed time).
     """
 
     def __init__(self, *, start: float = 1000.0, step: float = 0.0) -> None:
@@ -500,10 +503,6 @@ class FakeClock:
     def advance(self, seconds: float) -> None:
         """Jump the clock forward by ``seconds`` (model consumed time)."""
         self._next += seconds
-
-    def peek(self) -> float:
-        """Return the next value ``monotonic()`` would return, without advancing."""
-        return self._next
 
 
 # ===========================================================================
@@ -2132,3 +2131,37 @@ class TestWaitForDemographicsFrameDeadline:
         assert page.wait_for_timeout_calls == []
         # No wait or pause ever received zero (Playwright treats 0 as disabled).
         assert all(t != 0 for t in wait_timeouts), wait_timeouts
+
+
+class TestGetByTextActionHookFidelity:
+    """R4: a locator returned by ``FakeNavigationPage.get_by_text()`` must
+    participate in the shared deterministic action hook, exactly like
+    ``locator()`` and ``get_by_role()``.
+
+    ``wait_for()``, ``click()``, and ``fill()`` on a text locator must emit
+    chronological hook events with action, selector, and timeout.
+    """
+
+    def test_get_by_text_locator_emits_wait_click_fill_events(self) -> None:
+        events: list[tuple[str, str, int | None]] = []
+
+        page = FakeNavigationPage()
+        page.set_action_hook(
+            lambda action, selector, timeout: events.append(
+                (action, selector, timeout)
+            )
+        )
+        page.make_selector_visible("text:Pesquisa Avançada")
+
+        locator = page.get_by_text("Pesquisa Avançada")
+        assert locator is not None
+
+        locator.wait_for(state="visible", timeout=1500)
+        locator.click(timeout=2500)
+        locator.fill("SENTINEL", timeout=3500)
+
+        assert events == [
+            ("wait", "text:Pesquisa Avançada", 1500),
+            ("click", "text:Pesquisa Avançada", 2500),
+            ("fill", "text:Pesquisa Avançada", 3500),
+        ], events

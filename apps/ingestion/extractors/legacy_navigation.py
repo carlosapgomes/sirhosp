@@ -1209,10 +1209,6 @@ def wait_for_demographics_frame(
         # polling pause; never reuse a value computed before the attempt.
         page.wait_for_timeout(_bound_ms(deadline_s, 500))
 
-    raise NavigationError(
-        "The demographics Cadastro tab did not become ready in time."
-    )
-
 
 def read_demographic_fields(frame: Any) -> dict[str, str]:
     """Read every demographic field value from the Cadastro tab in memory.
@@ -1267,9 +1263,16 @@ def build_demographics(
     every demographic field into an in-memory dict in one call. The dict
     uses the external keys ``upsert_patient_demographics`` consumes.
 
-    When ``timeout_ms`` is provided it is treated as a single shared budget:
-    each sub-step receives only the remaining budget (PSW-S16 R5), so the
-    advertised timeout is never multiplied across steps.
+    Deadline boundary: ``timeout_ms`` is a single shared monotonic budget
+    that covers the Playwright action/navigation/readiness phases, each of
+    which recomputes and passes the remaining time to its bounded wait,
+    click, fill, or pause. The field read
+    (:func:`read_demographic_fields` → synchronous ``frame.evaluate``)
+    is gated **before it starts** by the final readiness check
+    (``_remaining_ms_strict``), so it can only begin while the budget is
+    still active. Synchronous ``Frame.evaluate()`` has no per-call timeout
+    in the current Playwright API; once the read starts, this shared
+    deadline does not interrupt or bound its execution duration.
 
     Args:
         page: A Playwright ``Page`` object on the patient search screen.
