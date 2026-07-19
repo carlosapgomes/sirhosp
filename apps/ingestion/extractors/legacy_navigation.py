@@ -27,6 +27,8 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any, Mapping
 
+from apps.ingestion.extractors.errors import ExtractionTimeoutError
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -61,6 +63,21 @@ class NavigationError(Exception):
     Messages never include credentials, cookies, or raw page payloads. The
     command layer converts this into a user-facing failure before any run is
     claimed.
+    """
+
+
+class NavigationTimeoutError(NavigationError, ExtractionTimeoutError):
+    """Sanitized timeout raised when legacy UI navigation exceeds its budget.
+
+    PSW-S17 R2/R3: persistent navigation and wait timeouts (deadline
+    expiration) must reach the shared ``("timeout", True)`` classification.
+    This subclass is both a :class:`NavigationError` (so existing
+    ``except NavigationError:`` clauses still catch and propagate it
+    unchanged) and an :class:`ExtractionTimeoutError` (so
+    :func:`apps.ingestion.run_lifecycle.classify_failure_reason` recognizes
+    it as a timeout even after a sanitizing wrapper).
+
+    Messages stay constant and sanitized (see ``DEADLINE_EXPIRED_MESSAGE``).
     """
 
 
@@ -157,11 +174,16 @@ def _remaining_ms_strict(deadline_s: float) -> int:
 
     Uses ``ceil`` so a small positive remainder is never collapsed to zero
     (Playwright treats ``timeout=0`` as *disabled*). An exhausted deadline
-    raises ``NavigationError(DEADLINE_EXPIRED_MESSAGE)``.
+    raises ``NavigationTimeoutError(DEADLINE_EXPIRED_MESSAGE)``.
+
+    PSW-S17 R2/R3: the typed timeout (a ``NavigationError`` AND an
+    ``ExtractionTimeoutError``) lets existing ``except NavigationError:``
+    clauses keep propagating it unchanged while the shared classifier
+    recognizes it as ``("timeout", True)``.
     """
     remaining = deadline_s - time.monotonic()
     if remaining <= 0:
-        raise NavigationError(DEADLINE_EXPIRED_MESSAGE)
+        raise NavigationTimeoutError(DEADLINE_EXPIRED_MESSAGE)
     return max(1, math.ceil(remaining * 1000))
 
 

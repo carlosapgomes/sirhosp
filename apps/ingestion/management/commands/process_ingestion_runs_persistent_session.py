@@ -1495,20 +1495,20 @@ class Command(BaseCommand):
 
     @staticmethod
     def _classify_failure_reason(exc: Exception) -> tuple[str, bool]:
-        """Classify an exception into normalized failure taxonomy."""
-        if isinstance(exc, InvalidJsonError):
-            return ("invalid_payload", False)
-        if isinstance(exc, SnapshotContainerMissingError):
-            # Page rendered but the expected data container was absent — a
-            # data-level issue, not a session/availability issue.
-            return ("invalid_payload", False)
-        if isinstance(exc, EvolutionPdfError):
-            # PSW-S11: real legacy PDF flow failed after a tab was opened —
-            # data-level/recoverable (e.g. PDF unavailable, invalid PDF).
-            return ("invalid_payload", False)
-        if isinstance(exc, ExtractionError):
-            return ("source_unavailable", False)
-        return ("unexpected_exception", False)
+        """Classify an exception into normalized failure taxonomy.
+
+        Delegates to the shared
+        :func:`apps.ingestion.run_lifecycle.classify_failure_reason` so the
+        persistent-session and current workers cannot drift apart (PSW-S17).
+        The shared classifier recognizes every typed timeout
+        (``ExtractionTimeoutError``, ``SubprocessTimeoutError``, persistent
+        ``NavigationTimeoutError``) and walks the cause/context chain so a
+        Playwright ``TimeoutError`` reached through a sanitizing wrapper is
+        still classified as ``("timeout", True)``.
+        """
+        from apps.ingestion.run_lifecycle import classify_failure_reason
+
+        return classify_failure_reason(exc)
 
     @staticmethod
     def _record_stage(run, stage_name, status, started_at,
@@ -1620,6 +1620,13 @@ class Command(BaseCommand):
                     "next_retry_at",
                 ]
             )
+            # PSW-S17 R5: record the terminal FinalRunFailure row through
+            # the shared helper so the current and persistent workers create
+            # it under the same conditions and with the same fields (and
+            # remain idempotent under retry recovery).
+            from apps.ingestion.run_lifecycle import record_final_run_failure
+
+            record_final_run_failure(run)
             self._try_close_batch(run.batch)
             self.stderr.write(
                 f"  Run #{run.pk} failed permanently "

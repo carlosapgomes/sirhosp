@@ -32,7 +32,6 @@ from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionEx
 from apps.ingestion.gap_planner import plan_extraction_windows
 from apps.ingestion.models import (
     CensusExecutionBatch,
-    FinalRunFailure,
     IngestionRun,
     IngestionRunAttempt,
 )
@@ -323,29 +322,17 @@ class Command(BaseCommand):
     def _classify_failure_reason(exc: Exception) -> tuple[str, bool]:
         """Classify an exception into normalized failure taxonomy.
 
+        Delegates to the shared
+        :func:`apps.ingestion.run_lifecycle.classify_failure_reason` so the
+        current and persistent-session workers cannot drift apart. See
+        PSW-S17.
+
         Returns:
             (failure_reason, timed_out)
         """
-        from django.core.exceptions import ValidationError
+        from apps.ingestion.run_lifecycle import classify_failure_reason
 
-        from apps.ingestion.extractors.errors import (
-            ExtractionError,
-            ExtractionTimeoutError,
-            InvalidJsonError,
-        )
-        from apps.ingestion.extractors.subprocess_utils import (
-            SubprocessTimeoutError,
-        )
-
-        if isinstance(exc, (ExtractionTimeoutError, SubprocessTimeoutError)):
-            return ("timeout", True)
-        if isinstance(exc, InvalidJsonError):
-            return ("invalid_payload", False)
-        if isinstance(exc, ValidationError):
-            return ("validation_error", False)
-        if isinstance(exc, ExtractionError):
-            return ("source_unavailable", False)
-        return ("unexpected_exception", False)
+        return classify_failure_reason(exc)
 
     @staticmethod
     def _record_stage(
@@ -458,20 +445,14 @@ class Command(BaseCommand):
                 ]
             )
 
-            # CQM-S4: Record final failure for operational analysis
-            params = run.parameters_json or {}
-            patient_record = params.get("patient_record", "")
-            intent = params.get("intent", "") or run.intent
-            if run.batch_id and patient_record:
-                FinalRunFailure.objects.get_or_create(
-                    run=run,
-                    defaults={
-                        "batch": run.batch,
-                        "patient_record": patient_record,
-                        "intent": intent,
-                        "attempts_exhausted": run.attempt_count,
-                    },
-                )
+            # CQM-S4 / PSW-S17: Record final failure for operational
+            # analysis. Delegated to the shared
+            # :func:`apps.ingestion.run_lifecycle.record_final_run_failure`
+            # so the current and persistent-session workers create the row
+            # under the same conditions and with the same fields.
+            from apps.ingestion.run_lifecycle import record_final_run_failure
+
+            record_final_run_failure(run)
 
             # CQM-S4: Attempt to close batch after terminal failure
             self._try_close_batch(run.batch)

@@ -278,14 +278,14 @@
 
 ## 17. PSW-S17: Failure and attempt lifecycle parity
 
-- [ ] 17.1 Add failing cross-worker tests for timeout classification, retry
+- [x] 17.1 Add failing cross-worker tests for timeout classification, retry
   scheduling, terminal attempts, `FinalRunFailure`, and batch closure.
-- [ ] 17.2 Share or align failure classification without duplicating divergent
+- [x] 17.2 Share or align failure classification without duplicating divergent
   command-local rules.
-- [ ] 17.3 Ensure persistent source timeouts record `failure_reason=timeout` and
+- [x] 17.3 Ensure persistent source timeouts record `failure_reason=timeout` and
   `timed_out=True`, including navigation, report, and download timeouts.
-- [ ] 17.4 Preserve sanitized errors and current-worker behavior.
-- [ ] 17.5 Run official validation and create
+- [x] 17.4 Preserve sanitized errors and current-worker behavior.
+- [x] 17.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S17-report.md`.
 
 ## 18. PSW-S18: Internal legacy-tab cleanup and recovery
