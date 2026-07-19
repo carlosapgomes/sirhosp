@@ -1175,26 +1175,39 @@ def wait_for_demographics_frame(
         NavigationError: If readiness is not reached within the budget.
     """
     deadline_s = _deadline_s(timeout_ms if timeout_ms is not None else 15000)
+    # timeout_ms is always defaulted to 15000 above, so the deadline is a
+    # concrete float (never None). Narrow for the strict final-check call.
+    assert deadline_s is not None
     identity_selector = DEMOGRAPHIC_FIELD_SELECTORS["prontuario"]
     while True:
-        remaining = _remaining_ms(deadline_s)
-        if remaining is not None and remaining <= 0:
-            break
         frame = page.frame(name=SEL_FRAME_POL)
         if frame is not None:
             try:
-                step = min(500, max(1, remaining or 500))
                 cadastro = frame.locator(SEL_CADASTRO_TAB)
-                cadastro.first.wait_for(state="visible", timeout=step)
+                # Recompute the budget immediately before the Cadastro wait.
+                cadastro.first.wait_for(
+                    state="visible",
+                    timeout=_bound_ms(deadline_s, 500),
+                )
                 # Require the identity input to be readable before accepting.
+                # Recompute the budget immediately before the identity wait;
+                # never reuse the Cadastro timeout.
                 identity = frame.locator(identity_selector)
-                identity.first.wait_for(state="visible", timeout=step)
+                identity.first.wait_for(
+                    state="visible",
+                    timeout=_bound_ms(deadline_s, 500),
+                )
+                # Final expiry check: the identity wait may have consumed the
+                # last of the budget. Never return readiness after expiry.
+                _remaining_ms_strict(deadline_s)
                 return frame
             except NavigationError:
                 raise
             except Exception:
                 pass
-        page.wait_for_timeout(min(500, max(1, remaining or 500)))
+        # Readiness not reached. Recompute the budget immediately before the
+        # polling pause; never reuse a value computed before the attempt.
+        page.wait_for_timeout(_bound_ms(deadline_s, 500))
 
     raise NavigationError(
         "The demographics Cadastro tab did not become ready in time."

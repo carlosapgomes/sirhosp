@@ -115,12 +115,28 @@ class FakeNavigationPage:
         self._click_timeouts: list[int] = []
         self._fill_timeouts: list[int] = []
         self._action_timeouts: list[int] = []
+        self._wait_for_timeout_calls: list[int] = []
+        self._action_hook = None
 
     def set_html(self, html: str) -> None:
         self._html = html
 
     def set_frame(self, frame: FakeNavigationFrame) -> None:
         self._frame = frame
+
+    def set_action_hook(self, hook) -> None:
+        """Install ``hook(action, selector, timeout)`` for fake actions.
+
+        Shared with this page's locators and ``wait_for_timeout``. Tests use
+        it to advance a controlled clock by a chosen amount on a chosen
+        action, modeling operation duration. ``None`` (default) keeps
+        immediate/no-op behavior so unrelated tests are undisturbed.
+        """
+        self._action_hook = hook
+
+    def _fire_action(self, action: str, selector: str, timeout: int | None) -> None:
+        if self._action_hook is not None:
+            self._action_hook(action, selector, timeout)
 
     def make_selector_visible(self, selector: str) -> None:
         """Mark a CSS selector as visible (locator wait succeeds)."""
@@ -145,6 +161,7 @@ class FakeNavigationPage:
             wait_callback=self._record_wait,
             click_callback=self._record_click,
             fill_timeout_callback=self._record_fill,
+            action_hook=self._fire_action,
         )
 
     def get_by_role(self, role: str, *, name: str | None = None) -> FakeNavigationLocator:
@@ -157,6 +174,7 @@ class FakeNavigationPage:
             wait_callback=self._record_wait,
             click_callback=self._record_click,
             fill_timeout_callback=self._record_fill,
+            action_hook=self._fire_action,
         )
 
     def get_by_text(self, text: str, *, exact: bool = False) -> FakeNavigationLocator:  # noqa: ARG002
@@ -169,8 +187,13 @@ class FakeNavigationPage:
         )
 
     def wait_for_timeout(self, timeout_ms: int) -> None:  # noqa: ARG002
-        """Simulate Playwright's page.wait_for_timeout()."""
-        pass
+        """Simulate Playwright's page.wait_for_timeout().
+
+        Recorded (not a silent no-op) and fires the optional action hook so
+        tests can model that a polling pause consumes controlled time.
+        """
+        self._wait_for_timeout_calls.append(timeout_ms)
+        self._fire_action("wait_for_timeout", "page", timeout_ms)
 
     def _on_click_hook(self, clicked_selector: str) -> None:
         """Internal callback when a locator is clicked."""
@@ -236,6 +259,11 @@ class FakeNavigationPage:
         """Every wait/click/fill timeout in call order (time-ordered)."""
         return list(self._action_timeouts)
 
+    @property
+    def wait_for_timeout_calls(self) -> list[int]:
+        """Timeout values passed to ``page.wait_for_timeout()`` in order."""
+        return list(self._wait_for_timeout_calls)
+
 
 class FakeNavigationLocator:
     """Fake Playwright locator with lazy visibility check."""
@@ -249,6 +277,7 @@ class FakeNavigationLocator:
         wait_callback=None,
         click_callback=None,
         fill_timeout_callback=None,
+        action_hook=None,
     ) -> None:
         self._selector = selector
         self._visible_getter = visible_getter
@@ -257,6 +286,7 @@ class FakeNavigationLocator:
         self._wait_callback = wait_callback
         self._click_callback = click_callback
         self._fill_timeout_callback = fill_timeout_callback
+        self._action_hook = action_hook
         self._clicked = False
         self._filled_value: str | None = None
 
@@ -268,12 +298,16 @@ class FakeNavigationLocator:
     def wait_for(self, *, state: str = "visible", timeout: int | None = None) -> None:  # noqa: ARG002
         if self._wait_callback is not None:
             self._wait_callback(state, timeout)
+        if self._action_hook is not None:
+            self._action_hook("wait", self._selector, timeout)
         if state == "visible" and not self._visible_getter():
             raise Exception(f"Locator {self._selector} not visible")  # noqa: TRY002
 
     def click(self, *, timeout: int | None = None) -> None:
         if self._click_callback is not None:
             self._click_callback(timeout)
+        if self._action_hook is not None:
+            self._action_hook("click", self._selector, timeout)
         self._clicked = True
         if self._on_click_callback:
             self._on_click_callback()
@@ -281,6 +315,8 @@ class FakeNavigationLocator:
     def fill(self, value: str, *, timeout: int | None = None) -> None:
         if self._fill_timeout_callback is not None:
             self._fill_timeout_callback(timeout)
+        if self._action_hook is not None:
+            self._action_hook("fill", self._selector, timeout)
         self._filled_value = value
         if self._fill_callback:
             self._fill_callback(value)
@@ -298,6 +334,7 @@ class FakeNavigationLocator:
             selector=f"{self._selector} >> {selector}",
             visible_getter=self._visible_getter,
             on_click_callback=self._on_click_callback,
+            action_hook=self._action_hook,
         )
 
     @property
@@ -327,12 +364,26 @@ class FakeNavigationFrame:
         self._click_timeouts: list[int] = []
         self._fill_timeouts: list[int] = []
         self._action_timeouts: list[int] = []
+        self._action_hook = None
 
     def set_html(self, html: str) -> None:
         self._html = html
 
     def set_url(self, url: str) -> None:
         self._url = url
+
+    def set_action_hook(self, hook) -> None:
+        """Install ``hook(action, selector, timeout)`` for frame actions.
+
+        Shared with this frame's locators so readiness waits (Cadastro and
+        identity) can model operation duration against one clock. ``None``
+        (default) keeps immediate/no-op behavior.
+        """
+        self._action_hook = hook
+
+    def _fire_action(self, action: str, selector: str, timeout: int | None) -> None:
+        if self._action_hook is not None:
+            self._action_hook(action, selector, timeout)
 
     def make_selector_visible(self, selector: str) -> None:
         self._visible_selectors.add(selector)
@@ -352,6 +403,7 @@ class FakeNavigationFrame:
             wait_callback=self._record_wait,
             click_callback=self._record_click,
             fill_timeout_callback=self._record_fill,
+            action_hook=self._fire_action,
         )
 
     def get_by_role(self, role: str, *, name: str | None = None) -> FakeNavigationLocator:
@@ -363,6 +415,7 @@ class FakeNavigationFrame:
             wait_callback=self._record_wait,
             click_callback=self._record_click,
             fill_timeout_callback=self._record_fill,
+            action_hook=self._fire_action,
         )
 
     def eval_on_selector_all(self, selector: str, expression: str) -> list[dict]:  # noqa: ARG002
@@ -427,6 +480,10 @@ class FakeClock:
     ``step`` seconds. Tests pass ``step > 0`` to model elapsed time without
     wall-clock sleeps. Patch it onto ``time.monotonic`` for the duration of
     one test.
+
+    ``advance(seconds)`` jumps the clock forward by an explicit amount (used
+    by fake action hooks to model that an operation consumed time). ``peek()``
+    reads the next value without consuming it.
     """
 
     def __init__(self, *, start: float = 1000.0, step: float = 0.0) -> None:
@@ -439,6 +496,14 @@ class FakeClock:
         self._next += self._step
         self.calls += 1
         return value
+
+    def advance(self, seconds: float) -> None:
+        """Jump the clock forward by ``seconds`` (model consumed time)."""
+        self._next += seconds
+
+    def peek(self) -> float:
+        """Return the next value ``monotonic()`` would return, without advancing."""
+        return self._next
 
 
 # ===========================================================================
@@ -1802,9 +1867,9 @@ class TestDeadlineHelpers:
 
         assert _remaining_ms(None) is None
 
-    def test_expired_deadline_raises_not_zero(self) -> None:
-        import time
-
+    def test_expired_deadline_raises_not_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import pytest
 
         from apps.ingestion.extractors.legacy_navigation import (
@@ -1812,27 +1877,33 @@ class TestDeadlineHelpers:
             _bound_ms,
         )
 
-        past = time.monotonic() - 10  # expired
+        clock = FakeClock(start=1000.0, step=0.0)
+        monkeypatch.setattr("time.monotonic", clock.monotonic)
+        past = 990.0  # expired (10 s ago), deterministic
         with pytest.raises(NavigationError):
             _bound_ms(past, 5000)
 
-    def test_sub_millisecond_remainder_is_positive(self) -> None:
-        import time
-
+    def test_sub_millisecond_remainder_is_positive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from apps.ingestion.extractors.legacy_navigation import _remaining_ms
 
-        deadline = time.monotonic() + 0.0001  # ~0.1 ms remaining
+        clock = FakeClock(start=1000.0, step=0.0)
+        monkeypatch.setattr("time.monotonic", clock.monotonic)
+        deadline = 1000.0 + 0.0001  # ~0.1 ms remaining, deterministic
         result = _remaining_ms(deadline)
         assert result is not None
         assert result >= 1  # never zero for an active deadline
 
-    def test_bound_ms_active_never_returns_zero(self) -> None:
-        import time
-
+    def test_bound_ms_active_never_returns_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from apps.ingestion.extractors.legacy_navigation import _bound_ms
 
+        clock = FakeClock(start=1000.0, step=0.0)
+        monkeypatch.setattr("time.monotonic", clock.monotonic)
         # A barely-active deadline must yield a strictly positive bound.
-        deadline = time.monotonic() + 0.0005
+        deadline = 1000.0 + 0.0005
         assert _bound_ms(deadline, 5000) >= 1
 
     def test_expired_navigation_error_not_swallowed_by_fallback(self) -> None:
@@ -1852,9 +1923,9 @@ class TestDeadlineHelpers:
         # Expiry must raise in strategy 1, before the POL menu fallback.
         assert SEL_POL_MENU not in page.locator_calls
 
-    def test_deadline_expired_message_constant_and_sanitized(self) -> None:
-        import time
-
+    def test_deadline_expired_message_constant_and_sanitized(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         import pytest
 
         from apps.ingestion.extractors.legacy_navigation import (
@@ -1863,10 +1934,201 @@ class TestDeadlineHelpers:
             _bound_ms,
         )
 
+        clock = FakeClock(start=1000.0, step=0.0)
+        monkeypatch.setattr("time.monotonic", clock.monotonic)
         with pytest.raises(NavigationError) as exc_info:
-            _bound_ms(time.monotonic() - 1, 5000)
+            _bound_ms(999.0, 5000)  # expired, deterministic
         message = str(exc_info.value)
         assert message == DEADLINE_EXPIRED_MESSAGE
         # No patient/selector/URL payload in the constant message.
         assert "patient" not in message.lower()
         assert "http" not in message.lower()
+
+
+class TestWaitForDemographicsFrameDeadline:
+    """R1: ``wait_for_demographics_frame`` recomputes the monotonic budget
+    immediately before every blocking operation.
+
+    The Cadastro wait, identity wait, polling pause, and successful return
+    each independently recompute the remaining budget. If a prior operation
+    consumes the budget, ``NavigationError(DEADLINE_EXPIRED_MESSAGE)`` is
+    raised before the next operation starts. No operation may reuse a value
+    computed before another blocking operation.
+    """
+
+    @staticmethod
+    def _ready(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        cadastro_visible: bool = True,
+        identity_visible: bool = True,
+    ):
+        from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
+            SEL_CADASTRO_TAB,
+            wait_for_demographics_frame,
+        )
+
+        clock = FakeClock(start=1000.0, step=0.0)
+        monkeypatch.setattr("time.monotonic", clock.monotonic)
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame()
+        page.set_frame(frame)
+        if cadastro_visible:
+            frame.make_selector_visible(SEL_CADASTRO_TAB)
+        if identity_visible:
+            frame.make_selector_visible(DEMOGRAPHIC_FIELD_SELECTORS["prontuario"])
+        return (
+            clock,
+            page,
+            frame,
+            wait_for_demographics_frame,
+            SEL_CADASTRO_TAB,
+            DEMOGRAPHIC_FIELD_SELECTORS["prontuario"],
+        )
+
+    @staticmethod
+    def _wire(page, frame, *, advance_on=None, seconds=0.0):
+        """Install a shared recording hook; optionally advance the clock.
+
+        ``advance_on`` is a selector string; whenever a fake action targets
+        that selector, the shared ``FakeClock`` jumps forward by ``seconds``.
+        Returns the chronological event log.
+        """
+        events: list[tuple[str, str, int | None]] = []
+
+        clock_ref = {"clock": None}  # filled by caller after wiring
+
+        def hook(action: str, selector: str, timeout: int | None) -> None:
+            events.append((action, selector, timeout))
+            if advance_on is not None and selector == advance_on:
+                if clock_ref["clock"] is not None:
+                    clock_ref["clock"].advance(seconds)
+
+        page.set_action_hook(hook)
+        frame.set_action_hook(hook)
+        return events, clock_ref
+
+    def test_cadastro_consumes_budget_identity_wait_never_started(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import NavigationError
+
+        clock, page, frame, fn, cad_sel, id_sel = self._ready(monkeypatch)
+        events, clock_ref = self._wire(
+            page, frame, advance_on=cad_sel, seconds=10.0
+        )
+        clock_ref["clock"] = clock
+
+        with pytest.raises(NavigationError):
+            fn(page, timeout_ms=1000)
+
+        identity_waits = [e for e in events if e[0] == "wait" and e[1] == id_sel]
+        assert identity_waits == [], (
+            "identity wait must not start after Cadastro consumed the budget"
+        )
+
+    def test_identity_receives_strictly_smaller_timeout_after_cadastro(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock, page, frame, fn, cad_sel, id_sel = self._ready(monkeypatch)
+        events, clock_ref = self._wire(
+            page, frame, advance_on=cad_sel, seconds=0.5
+        )
+        clock_ref["clock"] = clock
+
+        frame_returned = fn(page, timeout_ms=800)
+        assert frame_returned is frame
+
+        cad_t = next(t for a, s, t in events if a == "wait" and s == cad_sel)
+        id_t = next(t for a, s, t in events if a == "wait" and s == id_sel)
+        assert cad_t == 500
+        assert id_t < cad_t, (cad_t, id_t)
+        assert id_t >= 1
+
+    def test_identity_consumes_budget_prevents_successful_return(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import NavigationError
+
+        clock, page, frame, fn, cad_sel, id_sel = self._ready(monkeypatch)
+        events, clock_ref = self._wire(
+            page, frame, advance_on=id_sel, seconds=10.0
+        )
+        clock_ref["clock"] = clock
+
+        returned = {}
+        with pytest.raises(NavigationError):
+            returned["frame"] = fn(page, timeout_ms=1000)
+        assert "frame" not in returned, (
+            "frame must not be returned after identity consumed the deadline"
+        )
+
+    def test_failed_readiness_consumes_budget_pause_never_started(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import NavigationError
+
+        clock, page, frame, fn, cad_sel, id_sel = self._ready(
+            monkeypatch, cadastro_visible=False
+        )
+        events, clock_ref = self._wire(
+            page, frame, advance_on=cad_sel, seconds=10.0
+        )
+        clock_ref["clock"] = clock
+
+        with pytest.raises(NavigationError):
+            fn(page, timeout_ms=1000)
+
+        assert page.wait_for_timeout_calls == [], (
+            "polling pause must not start after a readiness wait consumed "
+            "the budget"
+        )
+
+    def test_failed_readiness_partial_budget_reduces_pause_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import NavigationError
+
+        clock, page, frame, fn, cad_sel, id_sel = self._ready(
+            monkeypatch, cadastro_visible=False
+        )
+        events, clock_ref = self._wire(
+            page, frame, advance_on=cad_sel, seconds=0.5
+        )
+        clock_ref["clock"] = clock
+
+        with pytest.raises(NavigationError):
+            fn(page, timeout_ms=800)
+
+        assert page.wait_for_timeout_calls, "polling pause must run at least once"
+        first_pause = page.wait_for_timeout_calls[0]
+        assert first_pause < 500, first_pause
+        assert first_pause >= 1, first_pause
+
+    def test_no_readiness_wait_or_pause_receives_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        clock, page, frame, fn, cad_sel, id_sel = self._ready(monkeypatch)
+        events, clock_ref = self._wire(page, frame)
+        clock_ref["clock"] = clock
+
+        frame_returned = fn(page, timeout_ms=1000)
+        assert frame_returned is frame
+
+        wait_timeouts = [t for a, s, t in events if a == "wait"]
+        assert wait_timeouts, "readiness waits must be recorded"
+        assert all(t is not None and t >= 1 for t in wait_timeouts), wait_timeouts
+        # Success path issues no polling pause.
+        assert page.wait_for_timeout_calls == []
+        # No wait or pause ever received zero (Playwright treats 0 as disabled).
+        assert all(t != 0 for t in wait_timeouts), wait_timeouts
