@@ -26,6 +26,7 @@ from apps.ingestion.extractors.persistent_extraction_adapter import (
     _EVOLUTION_DATA_DIV_ID,
 )
 from tests.unit.test_legacy_navigation import (  # noqa: PLC0415
+    FakeClock,
     FakeNavigationFrame,
     FakeNavigationPage,
 )
@@ -1613,3 +1614,113 @@ class TestBridgeExtractDemographicsViaLegacyActions:
                 patient_record="14160147",
                 timeout=0,
             )
+
+
+# ===========================================================================
+# PSW-S16 final closure: timeout fidelity for the demographics action flow
+# ===========================================================================
+
+
+class TestDemographicsTimeoutFidelity:
+    """R2: every Playwright wait/click/fill receives a positive remaining
+    timeout; later timeouts decrease under a controlled clock."""
+
+    @staticmethod
+    def _ready_page():
+        from apps.ingestion.extractors.legacy_navigation import (
+            DEMOGRAPHIC_FIELD_SELECTORS,
+            SEL_CADASTRO_TAB,
+            SEL_DADOS_DO_PACIENTE,
+        )
+
+        page = FakeNavigationPage()
+        page.make_selector_visible("#prontuarioInput")
+        page.make_selector_visible("role:link:Pesquisa Avançada")
+        page.make_selector_visible(SEL_DADOS_DO_PACIENTE)
+        frame = FakeNavigationFrame()
+        frame.make_selector_visible(SEL_CADASTRO_TAB)
+        frame.make_selector_visible(DEMOGRAPHIC_FIELD_SELECTORS["prontuario"])
+        frame.set_evaluate_result({"prontuario": "14160147", "nome": "X"})
+        page.set_frame(frame)
+        return page
+
+    def test_every_wait_click_fill_receives_positive_timeout(self) -> None:
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        page = self._ready_page()
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+
+        bridge.extract_demographics_via_legacy_actions(
+            patient_record="14160147", timeout=30
+        )
+
+        actions = list(page.action_timeouts) + list(page._frame.action_timeouts)
+        assert actions, "demographics actions must be recorded"
+        # Every wait/click/fill received a strictly positive timeout (None
+        # would mean an action omitted its deadline-bound timeout).
+        assert all(t is not None and t > 0 for t in actions), actions
+        # click and fill are observed (not just wait_for).
+        assert page.click_timeouts, "click actions must record timeouts"
+        assert page.fill_timeouts, "fill actions must record timeouts"
+
+    def test_role_pesquisa_avancada_action_recorded(self) -> None:
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        page = self._ready_page()
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+
+        bridge.extract_demographics_via_legacy_actions(
+            patient_record="14160147", timeout=30
+        )
+
+        assert ("link", "Pesquisa Avançada") in page.role_calls
+
+    def test_timeouts_decrease_under_controlled_clock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        clock = FakeClock(step=0.0005)  # 0.5 ms per monotonic call
+        monkeypatch.setattr("time.monotonic", clock.monotonic)
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        page = self._ready_page()
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+
+        bridge.extract_demographics_via_legacy_actions(
+            patient_record="14160147", timeout=1
+        )
+
+        actions = list(page.action_timeouts) + list(page._frame.action_timeouts)
+        assert len(actions) >= 2
+        assert all(b <= a for a, b in zip(actions, actions[1:], strict=False)), actions
+        assert actions[-1] < actions[0], actions
+        assert all(t is not None and t > 0 for t in actions)
+
+    def test_budget_exhaustion_stops_next_operation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import NavigationError
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        clock = FakeClock(step=5.0)  # budget exhausts almost immediately
+        monkeypatch.setattr("time.monotonic", clock.monotonic)
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+        page = self._ready_page()
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+
+        with pytest.raises(NavigationError):
+            bridge.extract_demographics_via_legacy_actions(
+                patient_record="14160147", timeout=1
+            )
+        # The frame field read (a late operation) never ran.
+        assert page._frame.evaluate_calls == []

@@ -21,6 +21,7 @@ Design (per PSW-S12 scope):
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from datetime import date, datetime, timedelta
@@ -125,8 +126,23 @@ def _format_iso_date(value: date | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Deadline helpers (PSW-S16 correction: real timeout budget)
+# Deadline helpers (PSW-S16 final closure: real, never-zero deadline budget)
 # ---------------------------------------------------------------------------
+#
+# Playwright treats ``timeout=0`` as *disabled* (unbounded), so an expired
+# deadline must RAISE rather than be passed as zero. These helpers distinguish:
+#   - ``None``: no shared deadline (legacy callers use their own fixed waits);
+#   - active deadline: return a strictly-positive remaining/bounded timeout;
+#   - expired deadline: raise a constant sanitized ``NavigationError``.
+
+DEADLINE_EXPIRED_MESSAGE = (
+    "The demographics action deadline expired before the next step."
+)
+"""Constant sanitized message raised when a shared deadline is exhausted.
+
+Contains no patient record, selector payload, HTML, URL, cookie, credential,
+or raw underlying error text.
+"""
 
 
 def _deadline_s(timeout_ms: int | None) -> float | None:
@@ -136,23 +152,58 @@ def _deadline_s(timeout_ms: int | None) -> float | None:
     return time.monotonic() + max(0, timeout_ms) / 1000
 
 
-def _remaining_ms(deadline_s: float | None) -> int | None:
-    """Return milliseconds remaining until ``deadline_s``, or None.
+def _remaining_ms_strict(deadline_s: float) -> int:
+    """Strictly-positive remaining ms for a non-None deadline; raise on expiry.
 
-    ``None`` means "no deadline" (caller uses its own fixed defaults).
+    Uses ``ceil`` so a small positive remainder is never collapsed to zero
+    (Playwright treats ``timeout=0`` as *disabled*). An exhausted deadline
+    raises ``NavigationError(DEADLINE_EXPIRED_MESSAGE)``.
+    """
+    remaining = deadline_s - time.monotonic()
+    if remaining <= 0:
+        raise NavigationError(DEADLINE_EXPIRED_MESSAGE)
+    return max(1, math.ceil(remaining * 1000))
+
+
+def _remaining_ms(deadline_s: float | None) -> int | None:
+    """Return strictly-positive milliseconds remaining, or ``None``.
+
+    ``None`` means no shared deadline (caller uses fixed defaults). An active
+    deadline returns at least ``1`` ms; an expired deadline raises via
+    :func:`_remaining_ms_strict`.
     """
     if deadline_s is None:
         return None
-    return max(0, int(round((deadline_s - time.monotonic()) * 1000)))
+    return _remaining_ms_strict(deadline_s)
 
 
 def _bound_ms(deadline_s: float | None, default_ms: int) -> int:
-    """Return ``default_ms`` when there is no deadline, else the smaller of
-    the default and the remaining budget (never negative)."""
+    """Return a strictly-positive Playwright timeout for a bounded operation.
+
+    ``None`` deadline -> ``default_ms`` (legacy fixed wait). Active deadline ->
+    the smaller of ``default_ms`` and the strictly-positive remaining budget.
+    Expired deadline -> raise ``NavigationError`` (never return ``0``).
+    """
     if deadline_s is None:
         return default_ms
-    remaining = max(0, int(round((deadline_s - time.monotonic()) * 1000)))
-    return min(default_ms, remaining)
+    return min(default_ms, _remaining_ms_strict(deadline_s))
+
+
+def _timeout_kwargs(deadline_s: float | None, default_ms: int) -> dict[str, int]:
+    """Return ``{"timeout": ms}`` for a bounded click/fill, or ``{}`` to omit.
+
+    When there is no shared deadline, ``{}`` lets Playwright apply its own
+    default (backward compatible for non-demographics callers). When a
+    deadline is active, returns the bounded remaining timeout; an expired
+    deadline raises ``NavigationError`` via ``_bound_ms``.
+    """
+    if deadline_s is None:
+        return {}
+    return {"timeout": _bound_ms(deadline_s, default_ms)}
+
+
+_DEFAULT_ACTION_TIMEOUT_MS = 30000
+"""Playwright's default action timeout, used as the cap for bounded click/fill."""
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +237,9 @@ def ensure_search_screen(page: Any, *, timeout_ms: int | None = None) -> None:
         prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 5000))
         logger.debug("Search screen already visible via #prontuarioInput.")
         return
+    except NavigationError:
+        # Deadline expiry must propagate, not trigger a fallback strategy.
+        raise
     except Exception:
         logger.debug("#prontuarioInput not immediately visible, trying fallbacks...")
 
@@ -193,14 +247,18 @@ def ensure_search_screen(page: Any, *, timeout_ms: int | None = None) -> None:
     pol_menu = page.locator(SEL_POL_MENU)
     try:
         pol_menu.wait_for(state="visible", timeout=_bound_ms(deadline_s, 5000))
-        pol_menu.click()
+        pol_menu.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
         page.wait_for_timeout(_bound_ms(deadline_s, 1800))
         try:
             prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
             logger.debug("Search screen opened via #polMenu.")
             return
+        except NavigationError:
+            raise
         except Exception:
             logger.debug("#polMenu click did not reveal search screen.")
+    except NavigationError:
+        raise
     except Exception:
         logger.debug("#polMenu not available.")
 
@@ -211,14 +269,18 @@ def ensure_search_screen(page: Any, *, timeout_ms: int | None = None) -> None:
             name=re.compile(r"Clique aqui para acessar o", re.IGNORECASE),
         )
         dashboard.wait_for(state="visible", timeout=_bound_ms(deadline_s, 3000))
-        dashboard.click()
+        dashboard.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
         page.wait_for_timeout(_bound_ms(deadline_s, 1800))
         try:
             prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
             logger.debug("Search screen opened via dashboard shortcut.")
             return
+        except NavigationError:
+            raise
         except Exception:
             logger.debug("Dashboard shortcut did not reveal search screen.")
+    except NavigationError:
+        raise
     except Exception:
         logger.debug("Dashboard shortcut not available.")
 
@@ -259,8 +321,13 @@ def search_patient(
     prontuario = page.locator(SEL_PRONTUARIO_INPUT)
     try:
         prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
-        prontuario.click()
-        prontuario.fill(normalized)
+        prontuario.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+        prontuario.fill(
+            normalized,
+            **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS),
+        )
+    except NavigationError:
+        raise
     except Exception as exc:
         raise NavigationError(
             "Could not fill the patient record field (#prontuarioInput)."
@@ -270,7 +337,9 @@ def search_patient(
     try:
         pesquisa_link = page.get_by_role("link", name="Pesquisa Avançada")
         pesquisa_link.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
-        pesquisa_link.click()
+        pesquisa_link.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+    except NavigationError:
+        raise
     except Exception as exc:
         raise NavigationError(
             "Could not find or click the 'Pesquisa Avançada' link."
@@ -1047,6 +1116,8 @@ def click_dados_do_paciente(
         locator.first.wait_for(
             state="visible", timeout=_bound_ms(deadline_s, 10000)
         )
+    except NavigationError:
+        raise
     except Exception:
         # Broader fallback search in the POL accordion.
         locator = page.locator(
@@ -1057,13 +1128,19 @@ def click_dados_do_paciente(
             locator.first.wait_for(
                 state="visible", timeout=_bound_ms(deadline_s, 5000)
             )
+        except NavigationError:
+            raise
         except Exception as exc:
             raise NavigationError(
                 "Could not locate 'Dados do Paciente' in the POL menu."
             ) from exc
 
     try:
-        locator.first.click()
+        locator.first.click(
+            **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
+        )
+    except NavigationError:
+        raise
     except Exception as exc:
         raise NavigationError(
             "Could not click 'Dados do Paciente' in the POL menu."
@@ -1113,6 +1190,8 @@ def wait_for_demographics_frame(
                 identity = frame.locator(identity_selector)
                 identity.first.wait_for(state="visible", timeout=step)
                 return frame
+            except NavigationError:
+                raise
             except Exception:
                 pass
         page.wait_for_timeout(min(500, max(1, remaining or 500)))

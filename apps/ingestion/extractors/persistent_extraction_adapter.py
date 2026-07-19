@@ -668,7 +668,7 @@ class PersistentExtractionAdapter:
             )
             if not self._session.open_tab(url, timeout=timeout):
                 raise ExtractionError(
-                    f"Failed to navigate to demographics page: {url}"
+                    "Failed to navigate to the demographics page."
                 )
             html = self._session.get_page_html()
             json_text = _extract_json_from_container(

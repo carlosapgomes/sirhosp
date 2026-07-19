@@ -112,6 +112,9 @@ class FakeNavigationPage:
         self._click_callbacks: dict[str, list[str]] = {}
         self._filled_values: dict[str, str] = {}
         self._wait_timeouts: list[int] = []
+        self._click_timeouts: list[int] = []
+        self._fill_timeouts: list[int] = []
+        self._action_timeouts: list[int] = []
 
     def set_html(self, html: str) -> None:
         self._html = html
@@ -139,9 +142,9 @@ class FakeNavigationPage:
             fill_callback=lambda value: self._filled_values.__setitem__(
                 selector, value
             ),
-            wait_callback=lambda state, timeout: self._wait_timeouts.append(
-                timeout
-            ),
+            wait_callback=self._record_wait,
+            click_callback=self._record_click,
+            fill_timeout_callback=self._record_fill,
         )
 
     def get_by_role(self, role: str, *, name: str | None = None) -> FakeNavigationLocator:
@@ -151,6 +154,9 @@ class FakeNavigationPage:
             selector=key,
             visible_getter=lambda: key in self._visible_selectors,
             on_click_callback=lambda: self._on_click_hook(key),
+            wait_callback=self._record_wait,
+            click_callback=self._record_click,
+            fill_timeout_callback=self._record_fill,
         )
 
     def get_by_text(self, text: str, *, exact: bool = False) -> FakeNavigationLocator:  # noqa: ARG002
@@ -170,6 +176,18 @@ class FakeNavigationPage:
         """Internal callback when a locator is clicked."""
         for make_visible in self._click_callbacks.get(clicked_selector, []):
             self._visible_selectors.add(make_visible)
+
+    def _record_wait(self, state: str, timeout: int) -> None:  # noqa: ARG002
+        self._wait_timeouts.append(timeout)
+        self._action_timeouts.append(timeout)
+
+    def _record_click(self, timeout: int) -> None:
+        self._click_timeouts.append(timeout)
+        self._action_timeouts.append(timeout)
+
+    def _record_fill(self, timeout: int) -> None:
+        self._fill_timeouts.append(timeout)
+        self._action_timeouts.append(timeout)
 
     def frame(self, name: str) -> FakeNavigationFrame | None:
         self._frame_name_calls.append(name)
@@ -203,6 +221,21 @@ class FakeNavigationPage:
         """Timeout values passed to ``wait_for`` on locators from this page."""
         return list(self._wait_timeouts)
 
+    @property
+    def click_timeouts(self) -> list[int]:
+        """Timeout values passed to ``click`` on locators from this page."""
+        return list(self._click_timeouts)
+
+    @property
+    def fill_timeouts(self) -> list[int]:
+        """Timeout values passed to ``fill`` on locators from this page."""
+        return list(self._fill_timeouts)
+
+    @property
+    def action_timeouts(self) -> list[int]:
+        """Every wait/click/fill timeout in call order (time-ordered)."""
+        return list(self._action_timeouts)
+
 
 class FakeNavigationLocator:
     """Fake Playwright locator with lazy visibility check."""
@@ -214,12 +247,16 @@ class FakeNavigationLocator:
         on_click_callback=None,
         fill_callback=None,
         wait_callback=None,
+        click_callback=None,
+        fill_timeout_callback=None,
     ) -> None:
         self._selector = selector
         self._visible_getter = visible_getter
         self._on_click_callback = on_click_callback
         self._fill_callback = fill_callback
         self._wait_callback = wait_callback
+        self._click_callback = click_callback
+        self._fill_timeout_callback = fill_timeout_callback
         self._clicked = False
         self._filled_value: str | None = None
 
@@ -228,18 +265,22 @@ class FakeNavigationLocator:
         """Simulate Playwright's ``locator.first``."""
         return self
 
-    def wait_for(self, *, state: str = "visible", timeout: int = 5000) -> None:  # noqa: ARG002
+    def wait_for(self, *, state: str = "visible", timeout: int | None = None) -> None:  # noqa: ARG002
         if self._wait_callback is not None:
             self._wait_callback(state, timeout)
         if state == "visible" and not self._visible_getter():
             raise Exception(f"Locator {self._selector} not visible")  # noqa: TRY002
 
-    def click(self, *, timeout: int = 5000) -> None:  # noqa: ARG002
+    def click(self, *, timeout: int | None = None) -> None:
+        if self._click_callback is not None:
+            self._click_callback(timeout)
         self._clicked = True
         if self._on_click_callback:
             self._on_click_callback()
 
-    def fill(self, value: str) -> None:
+    def fill(self, value: str, *, timeout: int | None = None) -> None:
+        if self._fill_timeout_callback is not None:
+            self._fill_timeout_callback(timeout)
         self._filled_value = value
         if self._fill_callback:
             self._fill_callback(value)
@@ -283,6 +324,9 @@ class FakeNavigationFrame:
         self._evaluate_result: dict[str, str] = {}
         self._evaluate_calls: list[str] = []
         self._wait_timeouts: list[int] = []
+        self._click_timeouts: list[int] = []
+        self._fill_timeouts: list[int] = []
+        self._action_timeouts: list[int] = []
 
     def set_html(self, html: str) -> None:
         self._html = html
@@ -305,9 +349,9 @@ class FakeNavigationFrame:
         return FakeNavigationLocator(
             selector=selector,
             visible_getter=lambda: selector in self._visible_selectors,
-            wait_callback=lambda state, timeout: self._wait_timeouts.append(
-                timeout
-            ),
+            wait_callback=self._record_wait,
+            click_callback=self._record_click,
+            fill_timeout_callback=self._record_fill,
         )
 
     def get_by_role(self, role: str, *, name: str | None = None) -> FakeNavigationLocator:
@@ -316,6 +360,9 @@ class FakeNavigationFrame:
         return FakeNavigationLocator(
             selector=key,
             visible_getter=lambda: key in self._visible_selectors,
+            wait_callback=self._record_wait,
+            click_callback=self._record_click,
+            fill_timeout_callback=self._record_fill,
         )
 
     def eval_on_selector_all(self, selector: str, expression: str) -> list[dict]:  # noqa: ARG002
@@ -331,6 +378,18 @@ class FakeNavigationFrame:
         """Register the dict returned by frame.evaluate() (demographics read)."""
         self._evaluate_result = dict(result)
 
+    def _record_wait(self, state: str, timeout: int) -> None:  # noqa: ARG002
+        self._wait_timeouts.append(timeout)
+        self._action_timeouts.append(timeout)
+
+    def _record_click(self, timeout: int) -> None:
+        self._click_timeouts.append(timeout)
+        self._action_timeouts.append(timeout)
+
+    def _record_fill(self, timeout: int) -> None:
+        self._fill_timeouts.append(timeout)
+        self._action_timeouts.append(timeout)
+
     def evaluate(self, expression: str, arg: Any = None) -> Any:  # noqa: ARG002
         """Simulate Playwright's frame.evaluate(expression, arg)."""
         self._evaluate_calls.append(expression)
@@ -344,6 +403,42 @@ class FakeNavigationFrame:
     def wait_timeouts(self) -> list[int]:
         """Timeout values passed to ``wait_for`` on locators from this frame."""
         return list(self._wait_timeouts)
+
+    @property
+    def click_timeouts(self) -> list[int]:
+        """Timeout values passed to ``click`` on locators from this frame."""
+        return list(self._click_timeouts)
+
+    @property
+    def fill_timeouts(self) -> list[int]:
+        """Timeout values passed to ``fill`` on locators from this frame."""
+        return list(self._fill_timeouts)
+
+    @property
+    def action_timeouts(self) -> list[int]:
+        """Every wait/click/fill timeout in call order (time-ordered)."""
+        return list(self._action_timeouts)
+
+
+class FakeClock:
+    """Deterministic monotonic clock for deadline tests.
+
+    Each call to ``monotonic()`` returns the next value, advancing by
+    ``step`` seconds. Tests pass ``step > 0`` to model elapsed time without
+    wall-clock sleeps. Patch it onto ``time.monotonic`` for the duration of
+    one test.
+    """
+
+    def __init__(self, *, start: float = 1000.0, step: float = 0.0) -> None:
+        self._next = start
+        self._step = step
+        self.calls = 0
+
+    def monotonic(self) -> float:
+        value = self._next
+        self._next += self._step
+        self.calls += 1
+        return value
 
 
 # ===========================================================================
@@ -1683,3 +1778,95 @@ class TestDemographicsIdentityValidator:
             requested_patient_record="DEMO-2",
             demographics={"prontuario": "DEMO-1"},
         )
+
+
+# ===========================================================================
+# PSW-S16 final closure: deadline states (R1) and timeout fidelity (R2)
+# ===========================================================================
+
+
+class TestDeadlineHelpers:
+    """R1: deadline helpers distinguish None / active / expired unambiguously.
+
+    A real Playwright ``timeout=0`` means *disabled*, so an expired budget
+    must raise rather than be passed as zero.
+    """
+
+    def test_bound_ms_returns_default_when_no_deadline(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import _bound_ms
+
+        assert _bound_ms(None, 5000) == 5000
+
+    def test_remaining_ms_returns_none_when_no_deadline(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import _remaining_ms
+
+        assert _remaining_ms(None) is None
+
+    def test_expired_deadline_raises_not_zero(self) -> None:
+        import time
+
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            _bound_ms,
+        )
+
+        past = time.monotonic() - 10  # expired
+        with pytest.raises(NavigationError):
+            _bound_ms(past, 5000)
+
+    def test_sub_millisecond_remainder_is_positive(self) -> None:
+        import time
+
+        from apps.ingestion.extractors.legacy_navigation import _remaining_ms
+
+        deadline = time.monotonic() + 0.0001  # ~0.1 ms remaining
+        result = _remaining_ms(deadline)
+        assert result is not None
+        assert result >= 1  # never zero for an active deadline
+
+    def test_bound_ms_active_never_returns_zero(self) -> None:
+        import time
+
+        from apps.ingestion.extractors.legacy_navigation import _bound_ms
+
+        # A barely-active deadline must yield a strictly positive bound.
+        deadline = time.monotonic() + 0.0005
+        assert _bound_ms(deadline, 5000) >= 1
+
+    def test_expired_navigation_error_not_swallowed_by_fallback(self) -> None:
+        """An expired deadline raises in strategy 1 before any fallback."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            SEL_POL_MENU,
+            NavigationError,
+            ensure_search_screen,
+        )
+
+        page = FakeNavigationPage()
+        with pytest.raises(NavigationError):
+            # timeout_ms=0 -> deadline is now -> immediately expired.
+            ensure_search_screen(page, timeout_ms=0)
+        # Expiry must raise in strategy 1, before the POL menu fallback.
+        assert SEL_POL_MENU not in page.locator_calls
+
+    def test_deadline_expired_message_constant_and_sanitized(self) -> None:
+        import time
+
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            DEADLINE_EXPIRED_MESSAGE,
+            NavigationError,
+            _bound_ms,
+        )
+
+        with pytest.raises(NavigationError) as exc_info:
+            _bound_ms(time.monotonic() - 1, 5000)
+        message = str(exc_info.value)
+        assert message == DEADLINE_EXPIRED_MESSAGE
+        # No patient/selector/URL payload in the constant message.
+        assert "patient" not in message.lower()
+        assert "http" not in message.lower()

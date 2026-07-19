@@ -3796,7 +3796,13 @@ class TestDemographicsFailureLifecycle:
         assert batch.finished_at is None
 
     def test_terminal_failure_marks_run_failed_and_closes_batch_failed(self):
+        from apps.ingestion.models import CensusExecutionBatch
+        from apps.patients.models import Patient
+
+        batch = CensusExecutionBatch.objects.create()
         run = self._queue("DEMO-LC-2", max_attempts=1)
+        run.batch = batch
+        run.save(update_fields=["batch"])
         mock_adapter = _make_adapter_mock(
             demographics_fail_mode="extraction_error",
         )
@@ -3806,7 +3812,93 @@ class TestDemographicsFailureLifecycle:
             call_command("process_ingestion_runs_persistent_session", max_runs=1)
 
         run.refresh_from_db()
+        batch.refresh_from_db()
         assert run.status == "failed"  # terminal
         assert run.attempt_count == 1
         attempt = run.attempts.order_by("-attempt_number").first()
         assert attempt.status == "failed"
+        # A terminal failure drains the batch and marks it failed.
+        assert batch.status == "failed"
+        assert batch.finished_at is not None
+        # No clinical write and no persistence stage for the failed run.
+        assert not Patient.objects.filter(
+            patient_source_key="DEMO-LC-2"
+        ).exists()
+        stages = {
+            m.stage_name
+            for m in IngestionRunStageMetric.objects.filter(run=run)
+        }
+        assert "demographics_persistence" not in stages
+
+
+class _ReadyFailingStubSession:
+    """Minimal ready SessionHandle whose open_tab always fails.
+
+    Used to drive the REAL adapter stub path through the command so the
+    sanitized stub-navigation error is observable end to end.
+    """
+
+    def get_page_html(self) -> str:
+        return (
+            "<html><body>"
+            '<div id="tempoSessao" class="tempo-sessao">'
+            "Tempo: <span>00</span>:<span>29</span>:<span>01</span>"
+            "</div></body></html>"
+        )
+
+    def is_connected(self) -> bool:
+        return True
+
+    def click_selector(self, selector: str) -> None:  # noqa: ARG002
+        pass
+
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+        return False
+
+    def get_tab_classes(self) -> list[str]:
+        return ["tabs-first tabs-last tabs-selected"]
+
+    def close_last_non_root_tab(self) -> None:
+        pass
+
+    def restart_browser(self) -> None:
+        pass
+
+
+@pytest.mark.django_db
+class TestDemographicsStubSanitizationDispatch:
+    """R5: a stub navigation failure exposes no URL or patient record in any
+    command-level error field when tested through dispatch."""
+
+    def test_stub_nav_failure_no_patient_in_run_or_stage_errors(self):
+        sentinel = "SENTINEL-REC-9000"
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="demographics_only",
+            max_attempts=1,
+            parameters_json={
+                "patient_record": sentinel,
+                "intent": "demographics_only",
+            },
+        )
+        # Drive the REAL adapter (do not mock _create_adapter); inject a
+        # ready session whose open_tab fails so the stub path raises.
+        with patch.object(
+            PersistentWorkerCommand,
+            "_create_session_handle",
+            return_value=_ReadyFailingStubSession(),
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        # The sentinel patient record and any URL must be absent from every
+        # persisted error surface.
+        assert sentinel not in (run.error_message or "")
+        attempt = run.attempts.order_by("-attempt_number").first()
+        assert attempt is not None
+        assert sentinel not in (attempt.error_message or "")
+        for metric in IngestionRunStageMetric.objects.filter(run=run):
+            blob = str(metric.details_json or "")
+            assert sentinel not in blob
+            assert "/demographics/" not in blob

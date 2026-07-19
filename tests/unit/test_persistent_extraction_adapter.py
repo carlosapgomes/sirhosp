@@ -1273,3 +1273,31 @@ class TestGetDemographicsTimeoutPropagation:
         session.extract_demographics_via_legacy_actions.assert_called_once_with(
             patient_record="14160147", timeout=45
         )
+
+
+class TestGetDemographicsStubSanitization:
+    """R5: the stub navigation failure exposes no URL or patient record."""
+
+    def test_stub_navigation_failure_message_has_no_url_or_patient(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.errors import ExtractionError
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        sentinel = "SENTINEL-PATIENT-4242"
+        session = FakeExtractionSession()
+        session.set_html(_READY_SESSION_HTML)
+        session.fail_next_open_tab()
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+
+        with pytest.raises(ExtractionError) as exc_info:
+            adapter.get_demographics(patient_record=sentinel, timeout=10)
+
+        message = str(exc_info.value)
+        assert sentinel not in message
+        assert "/demographics/" not in message
+        assert "http" not in message.lower()
