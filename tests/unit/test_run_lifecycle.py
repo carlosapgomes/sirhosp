@@ -199,6 +199,78 @@ class TestSafeFailureText:
 
 
 # ---------------------------------------------------------------------------
+# Strict normalized sanitization (D4 / R2 final closure)
+# ---------------------------------------------------------------------------
+
+
+SENSITIVE_PATIENT_SENTINEL = "SENSITIVE-PATIENT-0001"
+SENSITIVE_URL_SENTINEL = "https://sensitive.example.test/SENSITIVE_URL"
+SENSITIVE_COOKIE_SENTINEL = "SENSITIVE_COOKIE_VALUE"
+SENSITIVE_STDOUT_SENTINEL = "SENSITIVE_STDOUT_LEAK"
+SENSITIVE_STDERR_SENTINEL = "SENSITIVE_STDERR_LEAK"
+
+
+class TestStrictNormalizedSanitization:
+    """D4/R2 final closure: safe_error_message and safe_error_type derive
+    text solely from the normalized category. No ``str(exc)`` or dynamic
+    class name may be persisted for ANY exception class."""
+
+    def test_typed_extraction_error_message_is_category_constant(self):
+        """ExtractionError with sensitive text must NOT persist str(exc);"""
+        from apps.ingestion.run_lifecycle import safe_error_message
+
+        exc = ExtractionError(f"boom at {SENSITIVE_URL_SENTINEL}")
+        msg = safe_error_message(exc, "source_unavailable")
+        assert msg == safe_failure_text("source_unavailable")
+        assert SENSITIVE_URL_SENTINEL not in msg
+
+    def test_typed_extraction_timeout_message_is_category_constant(self):
+        """ExtractionTimeoutError with sensitive text must NOT persist str(exc)."""
+        from apps.ingestion.run_lifecycle import safe_error_message
+
+        exc = ExtractionTimeoutError(
+            f"timed out at {SENSITIVE_URL_SENTINEL} cookie={SENSITIVE_COOKIE_SENTINEL}"
+        )
+        msg = safe_error_message(exc, "timeout")
+        assert msg == safe_failure_text("timeout")
+        assert SENSITIVE_URL_SENTINEL not in msg
+        assert SENSITIVE_COOKIE_SENTINEL not in msg
+
+    def test_invalid_json_error_message_is_category_constant(self):
+        """InvalidJsonError with sensitive text must NOT persist str(exc)."""
+        from apps.ingestion.run_lifecycle import safe_error_message
+
+        exc = InvalidJsonError(
+            f"bad json at {SENSITIVE_URL_SENTINEL}"
+        )
+        msg = safe_error_message(exc, "invalid_payload")
+        assert msg == safe_failure_text("invalid_payload")
+        assert SENSITIVE_URL_SENTINEL not in msg
+
+    def test_unexpected_exception_message_is_category_constant(self):
+        """ValueError with sensitive text must NOT persist str(exc)."""
+        from apps.ingestion.run_lifecycle import safe_error_message
+
+        exc = ValueError(f"cookie={SENSITIVE_COOKIE_SENTINEL}")
+        msg = safe_error_message(exc, "unexpected_exception")
+        assert msg == safe_failure_text("unexpected_exception")
+        assert SENSITIVE_COOKIE_SENTINEL not in msg
+
+    def test_error_type_never_dynamic_class_name(self):
+        """safe_error_type returns the normalized category, never a dynamic
+        class name (which could carry misleading context)."""
+        from apps.ingestion.run_lifecycle import safe_error_type
+
+        for exc, reason in [
+            (ExtractionError("x"), "source_unavailable"),
+            (ExtractionTimeoutError("x"), "timeout"),
+            (InvalidJsonError("x"), "invalid_payload"),
+            (ValueError("x"), "unexpected_exception"),
+        ]:
+            assert safe_error_type(exc, reason) == reason
+
+
+# ---------------------------------------------------------------------------
 # record_final_run_failure integration tests (DB)
 # ---------------------------------------------------------------------------
 
@@ -655,11 +727,7 @@ class TestCurrentWorkerPreservation:
 # Sentinel sanitization tests (R4)
 # ---------------------------------------------------------------------------
 
-SENSITIVE_PATIENT_SENTINEL = "SENSITIVE-PATIENT-0001"
-SENSITIVE_URL_SENTINEL = "https://sensitive.example.test/SENSITIVE_URL"
-SENSITIVE_COOKIE_SENTINEL = "SENSITIVE_COOKIE_VALUE"
-SENSITIVE_STDOUT_SENTINEL = "SENSITIVE_STDOUT_LEAK"
-SENSITIVE_STDERR_SENTINEL = "SENSITIVE_STDERR_LEAK"
+SENSITIVE_PATIENT_SENTINEL_ALREADY_DEFINED = True  # sentinels moved up
 
 
 @pytest.mark.django_db
@@ -991,3 +1059,387 @@ class TestCurrentWorkerSubprocessSentinels:
             assert SENSITIVE_COOKIE_SENTINEL not in text
         err = capsys.readouterr().err
         assert SENSITIVE_COOKIE_SENTINEL not in err
+
+
+# ---------------------------------------------------------------------------
+# D7: Cross-worker stage metric + batch closure parity (final closure)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestCrossWorkerStageMetricParity:
+    """D7: both workers produce identical normalized stage details for each
+    failure category. Compares exact stage error_type and error_message."""
+
+    @pytest.mark.parametrize(
+        "category_id, exc_factory, expected_reason",
+        [
+            ("validation_error", _validation_error_factory, "validation_error"),
+            ("source_unavailable", _extraction_error_factory, "source_unavailable"),
+            ("invalid_payload", _invalid_json_factory, "invalid_payload"),
+            ("timeout", _extraction_timeout_factory, "timeout"),
+            ("unexpected_exception", _unexpected_value_error_factory, "unexpected_exception"),
+        ],
+        ids=[c[0] for c in FAILURE_CATEGORIES],
+    )
+    def test_both_workers_same_stage_details(
+        self, category_id, exc_factory, expected_reason
+    ):
+        """The admissions_capture stage metric details (error_type,
+        error_message) are identical between both workers for the same
+        failure category."""
+        from apps.ingestion.run_lifecycle import safe_failure_text
+
+        batch_c = CensusExecutionBatch.objects.create(status="running")
+        run_c = IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch_c,
+            attempt_count=0,
+            max_attempts=1,
+            parameters_json={"patient_record": f"SMC-{category_id}", "intent": "admissions_only"},
+        )
+        with _PatchCurrent(exc_factory()):
+            call_command("process_ingestion_runs")
+        run_c.refresh_from_db()
+
+        batch_p = CensusExecutionBatch.objects.create(status="running")
+        run_p = IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch_p,
+            attempt_count=0,
+            max_attempts=1,
+            parameters_json={"patient_record": f"SMP-{category_id}", "intent": "admissions_only"},
+        )
+        with _PatchPersistent(exc_factory()):
+            call_command("process_ingestion_runs_persistent_session")
+        run_p.refresh_from_db()
+
+        expected_msg = safe_failure_text(expected_reason)
+        for run in (run_c, run_p):
+            stage = IngestionRunStageMetric.objects.get(
+                run=run, stage_name="admissions_capture"
+            )
+            assert stage.status == "failed"
+            assert stage.details_json["error_type"] == expected_reason
+            assert stage.details_json["error_message"] == expected_msg
+
+
+class _PatchCurrent:
+    """Context manager patching the current worker extractor."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __enter__(self):
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.side_effect = self._exc
+        mock_ext.extract_evolutions.return_value = []
+        self._patch = patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        )
+        return self._patch.__enter__()
+
+    def __exit__(self, *args):
+        self._patch.__exit__(*args)
+
+
+class _PatchPersistent:
+    """Context manager patching the persistent worker adapter."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    def __enter__(self):
+        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (  # noqa: E501
+            Command as PersistentWorkerCommand,
+        )
+        mock_adapter = MagicMock()
+        mock_adapter.get_admission_snapshot.side_effect = self._exc
+        mock_adapter.get_demographics.return_value = {}
+        mock_adapter.extract_evolutions.return_value = []
+        mock_adapter.ensure_session_ready.return_value = True
+        mock_adapter.controller = MagicMock()
+        mock_adapter.controller.restart_required.return_value = False
+        self._patch = patch.object(
+            PersistentWorkerCommand,
+            "_create_adapter",
+            return_value=mock_adapter,
+        )
+        return self._patch.__enter__()
+
+    def __exit__(self, *args):
+        self._patch.__exit__(*args)
+
+
+@pytest.mark.django_db
+class TestCrossWorkerBatchClosureParity:
+    """D7: batch closure semantics are identical for both workers — drained
+    terminal batches close as failed; batches with another active run stay
+    open."""
+
+    def _seed_drained_batch(self, worker_label: str):
+        batch = CensusExecutionBatch.objects.create(status="running")
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch,
+            attempt_count=2,
+            max_attempts=3,
+            parameters_json={
+                "patient_record": f"DB-{worker_label}",
+                "intent": "admissions_only",
+            },
+        )
+        return batch, run
+
+    def _seed_active_sibling_batch(self, worker_label: str):
+        batch = CensusExecutionBatch.objects.create(status="running")
+        run_a = IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch,
+            attempt_count=2,
+            max_attempts=3,
+            parameters_json={
+                "patient_record": f"AC-{worker_label}",
+                "intent": "admissions_only",
+            },
+        )
+        IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch,
+            attempt_count=0,
+            max_attempts=3,
+            parameters_json={
+                "patient_record": f"AC2-{worker_label}",
+                "intent": "admissions_only",
+            },
+        )
+        return batch, run_a
+
+    def test_current_drained_terminal_batch_closes_as_failed(self):
+        batch, run = self._seed_drained_batch("cur-d")
+        with _PatchCurrent(_extraction_error_factory()):
+            call_command("process_ingestion_runs")
+        run.refresh_from_db()
+        batch.refresh_from_db()
+        assert run.status == "failed"
+        assert batch.status == "failed"
+        assert batch.finished_at is not None
+
+    def test_persistent_drained_terminal_batch_closes_as_failed(self):
+        batch, run = self._seed_drained_batch("per-d")
+        with _PatchPersistent(_extraction_error_factory()):
+            call_command("process_ingestion_runs_persistent_session")
+        run.refresh_from_db()
+        batch.refresh_from_db()
+        assert run.status == "failed"
+        assert batch.status == "failed"
+        assert batch.finished_at is not None
+
+    def test_current_batch_with_other_active_run_stays_open(self):
+        batch, run_a = self._seed_active_sibling_batch("cur-a")
+        with _PatchCurrent(_extraction_error_factory()):
+            call_command("process_ingestion_runs")
+        run_a.refresh_from_db()
+        batch.refresh_from_db()
+        assert run_a.status == "failed"
+        assert batch.status == "running"
+        assert batch.finished_at is None
+
+    def test_persistent_batch_with_other_active_run_stays_open(self):
+        batch, run_a = self._seed_active_sibling_batch("per-a")
+        with _PatchPersistent(_extraction_error_factory()):
+            call_command("process_ingestion_runs_persistent_session")
+        run_a.refresh_from_db()
+        batch.refresh_from_db()
+        assert run_a.status == "failed"
+        assert batch.status == "running"
+        assert batch.finished_at is None
+
+
+# ---------------------------------------------------------------------------
+# D8: Command-level persistent PDF download timeout
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestCommandLevelPersistentPdfTimeout:
+    """D8: a persistent full_sync run whose PDF download times out records
+    failure_reason=timeout, timed_out=True, through the real
+    PersistentExtractionAdapter -> RealHandleBridge -> EvolutionPdfFlow chain.
+
+    The timeout originates as the public real
+    ``playwright.sync_api.TimeoutError`` type from a synthetic browser-like
+    fake request. No Chromium is launched."""
+
+    def test_pdf_download_timeout_records_timeout_category(
+        self, caplog, capsys
+    ):
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (  # noqa: E501
+            Command as PersistentWorkerCommand,
+        )
+
+        class _FakeRequest:
+            def get(self, url, timeout):  # noqa: ARG002
+                raise PlaywrightTimeoutError(
+                    f"Timeout at {SENSITIVE_URL_SENTINEL} "
+                    f"cookie={SENSITIVE_COOKIE_SENTINEL}"
+                )
+
+        class _FakeContext:
+            request = _FakeRequest()
+
+        class _FakePdfPage:
+            context = _FakeContext()
+            url = "https://legacy/relatorioAnaEvoInternacaoPdf.xhtml"
+            frames: list = []
+
+            def content(self):
+                return (
+                    '<html><body>'
+                    f'<object type="application/pdf" data="{SENSITIVE_URL_SENTINEL}/report.pdf">'
+                    '</object></body></html>'
+                )
+
+            def locator(self, selector):  # noqa: ARG002
+                # Return a locator whose count() is 0 so date/generate
+                # probes are skipped.
+                loc = MagicMock()
+                loc.count.return_value = 0
+                return loc
+
+        class _FakeHandle:
+            def __init__(self):
+                self._html = _build_admissions_html()
+
+            def ensure_current_page(self):
+                return _FakePdfPage()
+
+            def is_connected(self):
+                return True
+
+            def get_page_html(self):
+                return self._html
+
+            def set_html(self, html):
+                self._html = html
+
+            def open_tab(self, url, *, timeout=120):  # noqa: ARG002
+                return True
+
+            def click_selector(self, selector):  # noqa: ARG002
+                pass
+
+            def get_tab_classes(self):
+                return []
+
+            def close_last_non_root_tab(self):
+                pass
+
+            def restart_browser(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+        handle = _FakeHandle()
+        bridge = RealHandleBridge(handle)
+        adapter = PersistentExtractionAdapter(session=bridge)
+
+        batch = CensusExecutionBatch.objects.create(status="running")
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="full_sync",
+            batch=batch,
+            attempt_count=0,
+            max_attempts=1,
+            parameters_json={
+                "patient_record": SENSITIVE_PATIENT_SENTINEL,
+                "intent": "full_sync",
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-15",
+            },
+        )
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ), patch.object(
+            RealHandleBridge, "navigate_to_admissions", return_value=True
+        ), patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session.persist_admissions_snapshot",
+            return_value=(MagicMock(), {"seen": 1, "created": 1, "updated": 0}),
+        ), caplog.at_level("WARNING"):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        # Command-level: timeout category with timed_out=True.
+        assert run.status == "failed"
+        assert run.failure_reason == "timeout"
+        assert run.timed_out is True
+
+        latest = (
+            IngestionRunAttempt.objects.filter(run=run)
+            .order_by("-attempt_number")
+            .first()
+        )
+        assert latest is not None
+        assert latest.failure_reason == "timeout"
+        assert latest.timed_out is True
+
+        # Stage metric uses normalized timeout category and constant message.
+        ev_stage = IngestionRunStageMetric.objects.get(
+            run=run, stage_name="evolution_extraction"
+        )
+        assert ev_stage.status == "failed"
+        assert ev_stage.details_json["error_type"] == "timeout"
+        assert ev_stage.details_json["error_message"] == safe_failure_text("timeout")
+
+        # Sentinel assertions: no sensitive URL, cookie, patient, stdout, or
+        # stderr text reaches run/attempt/stage/stdout/stderr/logs.
+        for blob in [
+            run.error_message or "",
+            latest.error_message or "",
+            str(ev_stage.details_json or {}),
+        ]:
+            assert SENSITIVE_URL_SENTINEL not in blob
+            assert SENSITIVE_COOKIE_SENTINEL not in blob
+            assert SENSITIVE_PATIENT_SENTINEL not in blob
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            assert SENSITIVE_URL_SENTINEL not in stream
+            assert SENSITIVE_COOKIE_SENTINEL not in stream
+            assert SENSITIVE_PATIENT_SENTINEL not in stream
+        for record in caplog.records:
+            text = record.getMessage()
+            assert SENSITIVE_URL_SENTINEL not in text
+            assert SENSITIVE_COOKIE_SENTINEL not in text
+            assert SENSITIVE_PATIENT_SENTINEL not in text
+
+
+def _build_admissions_html() -> str:
+    """Synthetic legacy page HTML with a valid session counter and an
+    admission snapshot container (used by D8 command-level test)."""
+    return (
+        "<html><body>\n"
+        '<div id="tempoSessao">'
+        "Tempo: <span>00</span>:<span>29</span>:<span>01</span>"
+        "</div>\n"
+        '<div id="admission-snapshot-data">\n'
+        '[{"admissionKey":"ADM1","admissionStart":"2026-01-01",'
+        '"admissionEnd":"","ward":"UTI","bed":"1"}]\n'
+        "</div>\n"
+        "</body></html>"
+    )

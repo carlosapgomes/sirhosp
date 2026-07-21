@@ -1290,6 +1290,53 @@ class TestEvolutionNavigationHelpers:
         # Should not raise
         select_ascending_order(page)
 
+    def test_select_ascending_order_absent_remains_noop(self) -> None:
+        """D2: when the order select is absent (count() == 0), the function
+        is a non-blocking no-op (no timeout raised)."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            select_ascending_order,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        # Do NOT make the selector visible — count() returns 0.
+        page.set_frame(frame)
+
+        # Should not raise (absence is a no-op).
+        select_ascending_order(page)
+
+    def test_select_ascending_order_present_timeout_raises_typed(self) -> None:
+        """D2: when the order select IS present but a Playwright timeout
+        occurs during interaction, a typed NavigationTimeoutError is raised
+        (NOT swallowed as optional absence)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            select_ascending_order,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        # Selector IS present (visible → count() returns 1).
+        frame.make_selector_visible(
+            '#ordenacaoCrescente\\:ordenacaoCrescente\\:inputId_input'
+        )
+        page.set_frame(frame)
+
+        original_wait_for = FakeNavigationLocator.wait_for
+
+        def _raise_timeout(self, *, state="visible", timeout=None):
+            raise PlaywrightTimeoutError("Timeout 5000ms")
+
+        FakeNavigationLocator.wait_for = _raise_timeout  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                select_ascending_order(page)
+        finally:
+            FakeNavigationLocator.wait_for = original_wait_for  # type: ignore[method-assign]
+
     def test_click_visualizar_report(self) -> None:
         """click_visualizar_report clicks the visualize button."""
         from apps.ingestion.extractors.legacy_navigation import (
@@ -1309,6 +1356,63 @@ class TestEvolutionNavigationHelpers:
             "bt_UltimosQuinzedias" in c
             for c in frame._locator_calls
         )
+
+    def test_click_evolucao_wait_timeout_becomes_navigation_timeout(self) -> None:
+        """D1: a real Playwright TimeoutError from the Evolução button
+        wait_for becomes NavigationTimeoutError (typed), not a generic
+        NavigationError."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            click_evolucao,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        frame.make_selector_visible("role:button:Evolução")
+        page.set_frame(frame)
+
+        original_wait_for = FakeNavigationLocator.wait_for
+
+        def _raise_timeout(self, *, state="visible", timeout=None):
+            raise PlaywrightTimeoutError("Timeout 15000ms")
+
+        FakeNavigationLocator.wait_for = _raise_timeout  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                click_evolucao(page)
+        finally:
+            FakeNavigationLocator.wait_for = original_wait_for  # type: ignore[method-assign]
+
+    def test_click_evolucao_click_timeout_becomes_navigation_timeout(self) -> None:
+        """D1: a real Playwright TimeoutError from the Evolução button click
+        becomes NavigationTimeoutError (typed), not a generic NavigationError."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            click_evolucao,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        frame.make_selector_visible("role:button:Evolução")
+        page.set_frame(frame)
+
+        original_click = FakeNavigationLocator.click
+
+        def _raise_timeout(self, *, timeout=None):
+            raise PlaywrightTimeoutError("Timeout 30000ms")
+
+        FakeNavigationLocator.click = _raise_timeout  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                click_evolucao(page)
+        finally:
+            FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
 
     def test_evolucao_button_disabled_raises(self) -> None:
         """Disabled Evolução button raises NavigationError."""

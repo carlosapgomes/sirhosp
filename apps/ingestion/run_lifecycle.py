@@ -113,12 +113,13 @@ def classify_failure_reason(exc: Exception) -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 
 
-# Stable category-specific constants used for command stdout/stderr failure
-# lines. They never include ``str(exc)`` (which could carry a URL, cookie,
-# credential, patient record, admission key, selector, or raw Playwright
-# text). Persisted ``error_message``/``details_json`` fields continue to
-# store ``str(exc)`` because source boundaries (PSW-S17 R2/R4) now raise
-# typed exceptions with constant sanitized messages.
+# Stable category-specific constants used as the single source of truth for
+# BOTH command stdout/stderr failure lines AND persisted ``error_message`` /
+# ``details_json`` error text. PSW-S17 final closure (D4/R2): no ``str(exc)``
+# is persisted for any exception class — these constants are the only error
+# text that reaches run/attempt/stage error fields. They never include a
+# URL, cookie, credential, patient record, admission key, selector, raw
+# Playwright text, or subprocess preview.
 _FAILURE_TEXT: dict[str, str] = {
     "timeout": "source-system action timed out",
     "source_unavailable": "source-system action unavailable",
@@ -130,13 +131,13 @@ _UNKNOWN_FAILURE_TEXT = "worker failure"
 
 
 def safe_failure_text(failure_reason: str) -> str:
-    """Return the stable, sanitized failure-line text for a category.
+    """Return the stable, sanitized failure text for a category.
 
-    Used by command stdout/stderr failure summaries so operator logs never
-    echo ``str(exc)`` for an unexpected/source exception. Persisted DB
-    fields (``error_message``, ``details_json``) are governed by their own
-    contracts and may keep ``str(exc)`` for typed domain exceptions whose
-    messages are themselves sanitized constants.
+    PSW-S17 final closure (D4/R2): this is the single source of truth for
+    all persisted and emitted error text. Both worker commands, stage
+    metrics, run/attempt ``error_message``, and command stdout/stderr use
+    this constant so no ``str(exc)`` ever reaches a persisted or emitted
+    surface.
     """
     return _FAILURE_TEXT.get(failure_reason, _UNKNOWN_FAILURE_TEXT)
 
@@ -144,32 +145,28 @@ def safe_failure_text(failure_reason: str) -> str:
 def safe_error_message(exc: BaseException, failure_reason: str) -> str:
     """Return the safe ``error_message`` text to persist for ``exc``.
 
-    PSW-S17 R4 (second corrective closure): hybrid sanitization.
-
-    - Typed domain exceptions (:class:`ExtractionError` subclasses)
-      carry sanitized constant messages from source boundaries (after
-      R3/R5/R6), so ``str(exc)`` is safe to persist verbatim. This
-      preserves operator diagnostics for known typed failures.
-    - Unexpected exceptions (``ValueError``, ``RuntimeError``, raw
-      Playwright errors that escaped a source boundary, etc.) may carry
-      arbitrary sensitive text, so they are replaced with the stable
-      category constant from :func:`safe_failure_text`.
+    PSW-S17 final closure (D4/R2): strict normalized sanitization.
+    Derives storage text solely from the normalized failure category.
+    No ``str(exc)`` is persisted for ANY exception class — not even
+    typed :class:`ExtractionError` subclasses. This guarantees no URL,
+    cookie, credential, patient record, admission key, selector, raw
+    Playwright text, or subprocess preview can reach persisted error
+    fields regardless of what a source boundary includes in its
+    exception message.
     """
-    if isinstance(exc, ExtractionError):
-        return str(exc)
     return safe_failure_text(failure_reason)
 
 
 def safe_error_type(exc: BaseException, failure_reason: str) -> str:
     """Return the safe ``error_type`` label to persist for ``exc``.
 
-    Typed domain exceptions keep their class name (e.g. ``"ExtractionError"``,
-    ``"ExtractionTimeoutError"``) for operator diagnostics. Unexpected
-    exceptions are labeled by their normalized failure category so an
-    unsafe dynamic class name cannot carry misleading context.
+    PSW-S17 final closure (D4/R2): strict normalized sanitization.
+    Returns the normalized failure category — never a dynamic exception
+    class name (which could carry misleading context or leak internal
+    structure). Both worker commands consume this for stage-level
+    ``error_type`` so the field is identical across workers for the same
+    category.
     """
-    if isinstance(exc, ExtractionError):
-        return exc.__class__.__name__
     return failure_reason
 
 

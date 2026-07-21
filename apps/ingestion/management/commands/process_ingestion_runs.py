@@ -397,8 +397,9 @@ class Command(BaseCommand):
         failure_reason, timed_out = self._classify_failure_reason(exc)
         now = timezone.now()
 
-        # PSW-S17 R4: safe hybrid error_message (typed -> str(exc) which is
-        # a sanitized constant after source fixes; unexpected -> constant).
+        # PSW-S17 R4 (final closure): strict normalized error_message
+        # derived solely from the failure category constant. No str(exc)
+        # is persisted for any exception class.
         from apps.ingestion.run_lifecycle import safe_error_message
 
         safe_msg = safe_error_message(exc, failure_reason)

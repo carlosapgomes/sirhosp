@@ -74,19 +74,27 @@ class TestConnectorOutputCorruptionRegression:
         assert run.finished_at is not None, "Failed run must have finished_at."
 
     def test_json_is_string_instead_of_array_causes_run_failure(self):
-        """RED: subprocess writes a JSON string (not array) → run must fail.
+        """D5: subprocess writes a JSON string (not array) to the
+        ``--admissions-output`` path → run must fail with
+        ``failure_reason=invalid_payload``.
 
-        Simulates: path2.py returns a single JSON string instead of an array.
-        Expected: InvalidJsonError → IngestionRun.status = 'failed'.
+        The admissions command uses ``--admissions-output`` (not
+        ``--json-output``). The fake must write the bad payload to the
+        actual admissions output path so the real parsing path is
+        exercised end to end.
         """
+        sentinel = "SENSITIVE_INVALID_PAYLOAD"
         run = self._queue_run()
 
         def fake_subprocess_run(cmd, **kwargs):
-            json_idx = cmd.index("--json-output") + 1
-            output_path = Path(cmd[json_idx])
+            # The admissions command uses --admissions-output.
+            adm_idx = cmd.index("--admissions-output") + 1
+            output_path = Path(cmd[adm_idx])
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            # Valid JSON but wrong type — string instead of array
-            output_path.write_text('"some error message"', encoding="utf-8")
+            # Valid JSON but wrong type — string (carrying sentinel) instead of array.
+            output_path.write_text(
+                f'"{sentinel}"', encoding="utf-8"
+            )
             result = MagicMock()
             result.returncode = 0
             result.stderr = ""
@@ -100,7 +108,17 @@ class TestConnectorOutputCorruptionRegression:
 
         run.refresh_from_db()
         assert run.status == "failed"
-        assert "array" in run.error_message.lower() or "json" in run.error_message.lower()
+        assert run.failure_reason == "invalid_payload"
+        assert run.timed_out is False
+        # The injected payload sentinel must NOT appear in any persisted
+        # or emitted error surface.
+        assert sentinel not in (run.error_message or "")
+        attempt = run.attempts.order_by("-attempt_number").first()
+        assert sentinel not in (attempt.error_message or "")
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        for metric in IngestionRunStageMetric.objects.filter(run=run):
+            assert sentinel not in str(metric.details_json or {})
 
     def test_missing_output_file_causes_run_failure(self):
         """RED: subprocess exits 0 but doesn't create output file → run must fail.

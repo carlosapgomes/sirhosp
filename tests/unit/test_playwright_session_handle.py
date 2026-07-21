@@ -637,3 +637,197 @@ class TestNoRealLegacyAccess:
         assert hasattr(handle, "open_tab")
         assert hasattr(handle, "get_page_html")
         assert hasattr(handle, "restart_browser")
+
+
+# ===========================================================================
+# PSW-S17 final closure: source-boundary typed timeouts + sanitized logs
+# ===========================================================================
+
+
+SENSITIVE_URL_SENTINEL = "https://sensitive.example.test/SENSITIVE_URL"
+SENSITIVE_COOKIE_SENTINEL = "SENSITIVE_COOKIE_VALUE"
+
+
+class TestSourceBoundaryTypedTimeouts:
+    """D3: source operations that can affect run classification must
+    propagate a typed ExtractionTimeoutError on a real Playwright timeout."""
+
+    def test_get_page_html_timeout_raises_extraction_timeout(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_page: MagicMock,
+        sync_playwright_mock: MagicMock,
+        caplog,
+    ) -> None:
+        """get_page_html raises ExtractionTimeoutError when page.content()
+        raises a real Playwright timeout (not swallowed + logged)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.errors import ExtractionTimeoutError
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        mock_page.content.side_effect = PlaywrightTimeoutError(
+            f"Timeout at {SENSITIVE_URL_SENTINEL} cookie={SENSITIVE_COOKIE_SENTINEL}"
+        )
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            with pytest.raises(ExtractionTimeoutError) as exc_info:
+                handle.get_page_html()
+
+        message = str(exc_info.value)
+        assert SENSITIVE_URL_SENTINEL not in message
+        assert SENSITIVE_COOKIE_SENTINEL not in message
+
+    def test_click_selector_timeout_raises_extraction_timeout(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_page: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """click_selector raises ExtractionTimeoutError when locator.click()
+        raises a real Playwright timeout."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.errors import ExtractionTimeoutError
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        locator_mock = MagicMock()
+        locator_mock.click.side_effect = PlaywrightTimeoutError(
+            f"Timeout at {SENSITIVE_URL_SENTINEL}"
+        )
+        mock_page.locator.return_value = locator_mock
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            with pytest.raises(ExtractionTimeoutError):
+                handle.click_selector(".my-button")
+
+    def test_get_tab_classes_timeout_raises_extraction_timeout(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_page: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """get_tab_classes raises ExtractionTimeoutError when page.evaluate()
+        raises a real Playwright timeout."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.errors import ExtractionTimeoutError
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        mock_page.evaluate.side_effect = PlaywrightTimeoutError(
+            f"Timeout at {SENSITIVE_URL_SENTINEL}"
+        )
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            with pytest.raises(ExtractionTimeoutError):
+                handle.get_tab_classes()
+
+
+class TestHandleLogSanitization:
+    """D3: all logs use constant sanitized messages — no raw exception,
+    traceback, URL, selector, or source identifier."""
+
+    def test_get_page_html_non_timeout_failure_log_sanitized(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_page: MagicMock,
+        sync_playwright_mock: MagicMock,
+        caplog,
+    ) -> None:
+        """A non-timeout failure in get_page_html logs a constant message
+        (no raw exception text, URL, or cookie)."""
+        import logging
+
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        mock_page.content.side_effect = RuntimeError(
+            f"boom at {SENSITIVE_URL_SENTINEL} cookie={SENSITIVE_COOKIE_SENTINEL}"
+        )
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            with caplog.at_level(
+                logging.WARNING,
+                logger="apps.ingestion.extractors.playwright_session_handle",
+            ):
+                result = handle.get_page_html()
+
+        # Non-timeout failure keeps the legacy empty-string return.
+        assert result == ""
+        # No sentinel may appear in any log record text.
+        for record in caplog.records:
+            text = record.getMessage()
+            assert SENSITIVE_URL_SENTINEL not in text
+            assert SENSITIVE_COOKIE_SENTINEL not in text
+        # No traceback attached (exc_info must not carry the raw exception).
+        for record in caplog.records:
+            assert record.exc_info is None
+
+    def test_click_selector_non_timeout_failure_log_sanitized(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_page: MagicMock,
+        sync_playwright_mock: MagicMock,
+        caplog,
+    ) -> None:
+        """A non-timeout failure in click_selector logs a constant message
+        with no selector or raw exception text."""
+        import logging
+
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        sensitive_selector = "#SENSITIVE_SELECTOR"
+        locator_mock = MagicMock()
+        locator_mock.click.side_effect = RuntimeError(
+            f"boom at {SENSITIVE_URL_SENTINEL}"
+        )
+        mock_page.locator.return_value = locator_mock
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            with caplog.at_level(
+                logging.WARNING,
+                logger="apps.ingestion.extractors.playwright_session_handle",
+            ):
+                handle.click_selector(sensitive_selector)
+
+        for record in caplog.records:
+            text = record.getMessage()
+            assert sensitive_selector not in text
+            assert SENSITIVE_URL_SENTINEL not in text

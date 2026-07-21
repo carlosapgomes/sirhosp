@@ -265,3 +265,77 @@ assert the pre-S17 unsafe passthrough behavior that R4/R5 remove. They
 must be updated to assert classification/category rather than message
 passthrough in a separate change. Until then tasks 17.3-17.5 remain
 unchecked and the slice is INCOMPLETE.
+
+## Final Corrective Appendix (PSW-S17 final closure)
+
+The second corrective appendix left two integration tests asserting the
+pre-S17 unsafe passthrough behavior and kept a hybrid sanitization policy
+that still persisted ``str(exc)`` for typed ``ExtractionError`` subclasses.
+An audit identified ten additional defects (D1-D10) that are corrected in
+this final closure so PSW-S17 can be marked complete.
+
+### D1: `click_evolucao` typed timeouts
+
+`click_evolucao` now uses `_raise_required_action_error` for both its
+``wait_for`` and ``click`` exception handlers. A real Playwright timeout
+becomes a typed ``NavigationTimeoutError`` (not a generic
+``NavigationError`` with a raw cause chain).
+
+### D2: optional probe vs terminal timeout
+
+`select_ascending_order` now probes presence via a non-blocking
+``_locator_count()`` before interacting. When the select is absent, the
+function is a documented no-op. When it IS present, a Playwright timeout
+from its ``wait_for`` or ``evaluate`` raises a typed
+``NavigationTimeoutError`` instead of being swallowed as optional absence.
+
+### D3: `PlaywrightSessionHandle` typed timeouts and sanitized logs
+
+`get_page_html`, `click_selector`, and `get_tab_classes` now propagate a
+typed ``ExtractionTimeoutError`` on a real Playwright timeout. Non-timeout
+failures keep their legacy fallback (empty string / empty list / no-op)
+with constant sanitized log messages — no raw exception object, traceback,
+URL, selector, or ``exc_info=True``. All cleanup paths (``shutdown``,
+``restart_browser``, ``close_last_non_root_tab``, ``ensure_current_page``)
+use constant sanitized logs.
+
+### D4: strict normalized sanitization
+
+`safe_error_message` and `safe_error_type` in `run_lifecycle.py` derive
+text solely from the normalized failure category. No ``str(exc)`` is
+persisted for ANY exception class — not even typed ``ExtractionError``
+subclasses. ``error_type`` is always the normalized category, never a
+dynamic class name. This is the single source of truth consumed by both
+worker commands for run, attempt, and stage error fields.
+
+### D5-D6: corrected integration contracts
+
+`test_json_is_string_instead_of_array_causes_run_failure` now writes the
+bad JSON payload to the real ``--admissions-output`` path and asserts
+``failure_reason=invalid_payload``. `test_ingestion_persistence_stage_failed`
+now asserts the normalized category/type and proves an injected sentinel
+appears nowhere persisted.
+
+### D7-D9: cross-worker matrix and sentinel coverage
+
+The matrix now compares exact normalized stage details (``error_type``,
+``error_message``) for all five categories through both workers. Batch
+closure parity (drained terminal closes as failed; active sibling stays
+open) is tested through both commands. Sentinel assertions cover run,
+attempt, stage, stdout, stderr, and every log record.
+
+### D8: command-level persistent PDF timeout
+
+A new test drives the real chain (persistent command ->
+``PersistentExtractionAdapter`` -> ``RealHandleBridge`` ->
+``EvolutionPdfFlow``) with a synthetic browser-like fake whose
+``context.request.get`` raises the public real
+``playwright.sync_api.TimeoutError``. The timeout propagates as
+``EvolutionPdfTimeoutError`` and records ``failure_reason=timeout``,
+``timed_out=True`` end to end.
+
+### D10: report accuracy
+
+The report distinguishes genuine behavioral RED at source/persistence
+boundaries from implementation-detail changes, records exact baseline
+counts, and claims only behavior proved by tests or inspection.

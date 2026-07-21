@@ -282,14 +282,10 @@
   scheduling, terminal attempts, `FinalRunFailure`, and batch closure.
 - [x] 17.2 Share or align failure classification without duplicating divergent
   command-local rules.
-- [ ] 17.3 Ensure persistent source timeouts record `failure_reason=timeout`
+- [x] 17.3 Ensure persistent source timeouts record `failure_reason=timeout`
   and `timed_out=True`, including navigation, report, and download timeouts.
-  Second corrective closure (in progress): required-action timeouts are now
-  typed at the source boundary, but tasks 17.3-17.5 remain unchecked because
-  two integration tests outside the corrective file cap still assert the
-  pre-S17 unsafe passthrough behavior that the sanitization removes.
-- [ ] 17.4 Preserve sanitized errors and current-worker behavior.
-- [ ] 17.5 Run official validation and create
+- [x] 17.4 Preserve sanitized errors and current-worker behavior.
+- [x] 17.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S17-report.md`.
 
 PSW-S17 corrective closure owns the typed persistent timeout invariant:
@@ -313,6 +309,19 @@ typed domain exceptions carry sanitized constant messages from source
 boundaries; unexpected exceptions are replaced with stable category-specific
 text and label so no arbitrary ``str(exc)`` reaches run/attempt/stage error
 fields.
+
+Final corrective closure (D1-D10): strict normalized sanitization replaces
+the hybrid policy — no ``str(exc)`` is persisted for ANY exception class, not
+even typed ``ExtractionError`` subclasses; ``error_type`` is always the
+normalized category, never a dynamic class name. Every required source
+operation (``click_evolucao`` wait/click, ``select_ascending_order`` when
+present, ``get_page_html``, ``click_selector``, ``get_tab_classes``) raises
+a typed ``ExtractionTimeoutError`` on a real Playwright timeout. A
+command-level persistent PDF download timeout test proves the full chain
+(command -> adapter -> bridge -> EvolutionPdfFlow -> typed timeout) records
+``failure_reason=timeout`` end to end. Cross-worker stage metric and batch
+closure parity is tested through both worker commands for all five
+categories.
 
 ## 18. PSW-S18: Internal legacy-tab cleanup and recovery
 

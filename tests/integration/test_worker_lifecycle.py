@@ -123,7 +123,10 @@ class TestWorkerLifecycle:
         # Assert
         run.refresh_from_db()
         assert run.status == "failed"
-        assert "JSON" in run.error_message or "json" in run.error_message.lower()
+        assert run.failure_reason == "invalid_payload"
+        from apps.ingestion.run_lifecycle import safe_failure_text
+
+        assert run.error_message == safe_failure_text("invalid_payload")
 
     def test_worker_persists_metrics(self):
         """Worker persists event counts after successful processing."""
@@ -323,7 +326,10 @@ class TestWorkerAdmissionSemantics:
         # Assert
         run.refresh_from_db()
         assert run.status == "failed"
-        assert "admission" in run.error_message.lower() or "connection" in run.error_message.lower()
+        assert run.failure_reason == "source_unavailable"
+        from apps.ingestion.run_lifecycle import safe_failure_text
+
+        assert run.error_message == safe_failure_text("source_unavailable")
         # evolutions extraction never called
         mock_ext.extract_evolutions.assert_not_called()
 
@@ -358,7 +364,10 @@ class TestWorkerAdmissionSemantics:
         # Assert
         run.refresh_from_db()
         assert run.status == "failed"
-        assert "PDF extraction" in run.error_message
+        assert run.failure_reason == "source_unavailable"
+        from apps.ingestion.run_lifecycle import safe_failure_text
+
+        assert run.error_message == safe_failure_text("source_unavailable")
         # Admissions should be persisted
         assert Admission.objects.filter(source_admission_key="ADM001").exists()
         patient = Patient.objects.get(patient_source_key="12345")
@@ -842,6 +851,7 @@ class TestWorkerStageMetrics:
         run.refresh_from_db()
         assert run.status == "failed"
         from apps.ingestion.models import IngestionRunStageMetric
+        from apps.ingestion.run_lifecycle import safe_failure_text
 
         stages = IngestionRunStageMetric.objects.filter(run=run)
         stage_names = [s.stage_name for s in stages]
@@ -850,8 +860,10 @@ class TestWorkerStageMetrics:
         assert adm_stage.status == "failed"
         assert adm_stage.started_at is not None
         assert adm_stage.finished_at is not None
-        assert adm_stage.details_json["error_type"] == "ExtractionError"
-        assert "Source unavailable" in adm_stage.details_json["error_message"]
+        assert adm_stage.details_json["error_type"] == "source_unavailable"
+        assert adm_stage.details_json["error_message"] == (
+            safe_failure_text("source_unavailable")
+        )
         assert run.finished_at is not None
         assert adm_stage.finished_at <= run.finished_at
 
@@ -889,6 +901,7 @@ class TestWorkerStageMetrics:
         """gap_planning stage is persisted as failed on planning error."""
         from apps.ingestion.extractors.errors import ExtractionError
         from apps.ingestion.models import IngestionRunStageMetric
+        from apps.ingestion.run_lifecycle import safe_failure_text
 
         run = self._queue_run()
         admissions_snapshot = [
@@ -916,8 +929,10 @@ class TestWorkerStageMetrics:
         assert run.status == "failed"
         stage = IngestionRunStageMetric.objects.get(run=run, stage_name="gap_planning")
         assert stage.status == "failed"
-        assert stage.details_json["error_type"] == "ExtractionError"
-        assert "Gap planner unavailable" in stage.details_json["error_message"]
+        assert stage.details_json["error_type"] == "source_unavailable"
+        assert stage.details_json["error_message"] == (
+            safe_failure_text("source_unavailable")
+        )
         assert run.finished_at is not None
         assert stage.finished_at <= run.finished_at
 
@@ -1006,6 +1021,8 @@ class TestWorkerStageMetrics:
     def test_evolution_extraction_stage_failed(self):
         """evolution_extraction stage is persisted as failed on error."""
         from apps.ingestion.extractors.errors import ExtractionError
+        from apps.ingestion.models import IngestionRunStageMetric
+        from apps.ingestion.run_lifecycle import safe_failure_text
 
         run = self._queue_run()
         admissions_snapshot = [
@@ -1024,14 +1041,14 @@ class TestWorkerStageMetrics:
 
         self._patch_and_call(mock_ext)
 
-        from apps.ingestion.models import IngestionRunStageMetric
-
         stages = IngestionRunStageMetric.objects.filter(run=run)
         assert stages.filter(stage_name="evolution_extraction").exists()
         ev_stage = stages.get(stage_name="evolution_extraction")
         assert ev_stage.status == "failed"
-        assert ev_stage.details_json["error_type"] == "ExtractionError"
-        assert "PDF extraction crashed" in ev_stage.details_json["error_message"]
+        assert ev_stage.details_json["error_type"] == "source_unavailable"
+        assert ev_stage.details_json["error_message"] == (
+            safe_failure_text("source_unavailable")
+        )
         run.refresh_from_db()
         assert run.finished_at is not None
         assert ev_stage.finished_at <= run.finished_at
@@ -1080,9 +1097,12 @@ class TestWorkerStageMetrics:
         assert ip_stage.finished_at is not None
 
     def test_ingestion_persistence_stage_failed(self):
-        """ingestion_persistence stage is persisted as failed on ingest error."""
+        """D6: ingestion_persistence stage is persisted as failed on ingest
+        error, with normalized category/type and a sentinel-safe message."""
         from apps.ingestion.models import IngestionRunStageMetric
+        from apps.ingestion.run_lifecycle import safe_failure_text
 
+        sentinel = "SENSITIVE_PERSISTENCE_BLOW"
         run = self._queue_run()
         admissions_snapshot = [
             {
@@ -1114,7 +1134,7 @@ class TestWorkerStageMetrics:
         with patch(
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.Command._ingest_evolutions",
-            side_effect=RuntimeError("Persistence layer unavailable"),
+            side_effect=RuntimeError(f"Persistence layer unavailable {sentinel}"),
         ):
             self._patch_and_call(mock_ext)
 
@@ -1125,10 +1145,16 @@ class TestWorkerStageMetrics:
             stage_name="ingestion_persistence",
         )
         assert stage.status == "failed"
-        assert stage.details_json["error_type"] == "RuntimeError"
-        assert "Persistence layer unavailable" in stage.details_json["error_message"]
+        # Normalized category/type (not a dynamic class name).
+        assert stage.details_json["error_type"] == "unexpected_exception"
+        # Exact constant safe message.
+        expected_msg = safe_failure_text("unexpected_exception")
+        assert stage.details_json["error_message"] == expected_msg
         assert run.finished_at is not None
         assert stage.finished_at <= run.finished_at
+        # The sentinel must NOT appear anywhere persisted.
+        assert sentinel not in (run.error_message or "")
+        assert sentinel not in str(stage.details_json or {})
 
     def test_admissions_only_has_admissions_capture_stage(self):
         """Admissions-only run also records admissions_capture stage."""

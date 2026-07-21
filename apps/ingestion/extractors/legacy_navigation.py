@@ -793,7 +793,11 @@ def click_evolucao(page: Any) -> None:
         page: A Playwright ``Page`` object.
 
     Raises:
-        NavigationError: If the button is not found or is disabled.
+        NavigationTimeoutError: on a Playwright timeout from wait/click
+            (PSW-S17 final closure D1: previously raised as generic
+            NavigationError with a raw cause chain).
+        NavigationError: If the button is not found or is disabled for
+            non-timeout reasons.
     """
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
@@ -805,18 +809,26 @@ def click_evolucao(page: Any) -> None:
     evo_button = frame.get_by_role("button", name="Evolução")
     try:
         evo_button.first.wait_for(state="visible", timeout=15000)
+    except NavigationError:
+        raise
     except Exception as exc:
-        raise NavigationError(
-            "Botão Evolução não encontrado na tela de detalhes "
-            "da internação."
-        ) from exc
+        _raise_required_action_error(
+            exc,
+            fallback_message=(
+                "Botão Evolução não encontrado na tela de detalhes "
+                "da internação."
+            ),
+        )
 
     try:
         evo_button.first.click()
+    except NavigationError:
+        raise
     except Exception as exc:
-        raise NavigationError(
-            "Falha ao acionar o botão Evolução."
-        ) from exc
+        _raise_required_action_error(
+            exc,
+            fallback_message="Falha ao acionar o botão Evolução.",
+        )
 
     page.wait_for_timeout(1000)
 
@@ -904,21 +916,42 @@ def select_ascending_order(page: Any) -> None:
     to set the hidden PrimeFaces select value, as direct interaction with
     the visible label may not propagate the change correctly.
 
-    It is a no-op if the order select is not present (no error).
+    PSW-S17 final closure (D2): the order select is optional. Its presence
+    is probed via a non-blocking ``count()`` probe. When absent, the
+    function is a documented no-op. When present, a Playwright timeout
+    from its ``wait_for``/``evaluate`` raises a typed
+    :class:`NavigationTimeoutError` instead of being swallowed as optional
+    absence.
 
     Args:
         page: A Playwright ``Page`` object.
+
+    Raises:
+        NavigationTimeoutError: when the order select IS present and a
+            Playwright timeout occurs during interaction.
     """
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         return
 
-    try:
-        order_select = frame.locator(SEL_ORDER_SELECT)
-        order_select.first.wait_for(state="attached", timeout=5000)
-    except Exception:
-        # Ascending order selector not present — no-op
+    order_select = frame.locator(SEL_ORDER_SELECT)
+    # D2: non-blocking presence probe. Absent → no-op.
+    if _locator_count(order_select) == 0:
         return
+
+    # The select IS present. A Playwright timeout from here is a typed
+    # timeout, not optional absence.
+    try:
+        order_select.first.wait_for(state="attached", timeout=5000)
+    except NavigationError:
+        raise
+    except Exception as exc:
+        _raise_required_action_error(
+            exc,
+            fallback_message=(
+                "Could not attach to the ascending-order select."
+            ),
+        )
 
     # Evaluate JS to select 'Crescente' option
     try:
@@ -939,8 +972,13 @@ def select_ascending_order(page: Any) -> None:
             """,
             SEL_ORDER_SELECT,
         )
-    except Exception:
-        logger.debug("Order select evaluation failed (sanitized).")
+    except NavigationError:
+        raise
+    except Exception as exc:
+        _raise_required_action_error(
+            exc,
+            fallback_message="Ascending-order evaluation failed.",
+        )
 
     page.wait_for_timeout(500)
 

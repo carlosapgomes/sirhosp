@@ -95,16 +95,16 @@ class PlaywrightSessionHandle:
         if self._browser is not None:
             try:
                 self._browser.close()
-            except Exception as exc:
-                logger.warning("Error closing browser: %s", exc)
+            except Exception:
+                logger.warning("Error closing browser (sanitized)")
             self._browser = None
             self._context = None
 
         if self._playwright is not None:
             try:
                 self._playwright.__exit__(None, None, None)
-            except Exception as exc:
-                logger.warning("Error stopping Playwright: %s", exc)
+            except Exception:
+                logger.warning("Error stopping Playwright (sanitized)")
             self._playwright = None
 
         if self._profile.is_in_use:
@@ -117,14 +117,28 @@ class PlaywrightSessionHandle:
     # ------------------------------------------------------------------
 
     def get_page_html(self) -> str:
-        """Return the current page HTML."""
+        """Return the current page HTML.
+
+        PSW-S17 final closure (D3): a real Playwright timeout from
+        ``page.content()`` propagates as a typed
+        :class:`ExtractionTimeoutError` so the run records
+        ``failure_reason=timeout``. Non-timeout failures keep the legacy
+        empty-string return with a constant sanitized log (no raw
+        exception, URL, cookie, or traceback).
+        """
         page = self._current_page()
         if page is None:
             return ""
         try:
             return page.content()
-        except Exception:
-            logger.warning("Failed to get page HTML", exc_info=True)
+        except Exception as exc:
+            if is_playwright_timeout_error(exc):
+                raise ExtractionTimeoutError(
+                    "Persistent session page content read timed out."
+                ) from None
+            logger.warning(
+                "Persistent session get_page_html failed (sanitized)"
+            )
             return ""
 
     def is_connected(self) -> bool:
@@ -140,15 +154,28 @@ class PlaywrightSessionHandle:
             return False
 
     def click_selector(self, selector: str) -> None:
-        """Click the element matching the given CSS selector."""
+        """Click the element matching the given CSS selector.
+
+        PSW-S17 final closure (D3): a real Playwright timeout propagates
+        as a typed :class:`ExtractionTimeoutError`. Non-timeout failures
+        log a constant sanitized message (no selector or raw exception).
+        """
         page = self._current_page()
         if page is None:
-            logger.warning("Cannot click selector %r — no page available", selector)
+            logger.warning(
+                "Persistent session click_selector failed (sanitized)"
+            )
             return
         try:
             page.locator(selector).click()
         except Exception as exc:
-            logger.warning("Failed to click selector %r: %s", selector, exc)
+            if is_playwright_timeout_error(exc):
+                raise ExtractionTimeoutError(
+                    "Persistent session selector click timed out."
+                ) from None
+            logger.warning(
+                "Persistent session click_selector failed (sanitized)"
+            )
 
     def open_tab(self, url: str, *, timeout: int = _DEFAULT_NAVIGATION_TIMEOUT_SECONDS) -> bool:
         """Open a new tab with the given URL and wait for render.
@@ -196,6 +223,10 @@ class PlaywrightSessionHandle:
 
         Evaluates JavaScript on the current page to extract class
         attributes from each tab ``<li>`` element in DOM order.
+
+        PSW-S17 final closure (D3): a real Playwright timeout propagates
+        as a typed :class:`ExtractionTimeoutError`. Non-timeout failures
+        return ``[]`` with a constant sanitized log.
         """
         page = self._current_page()
         if page is None:
@@ -211,7 +242,13 @@ class PlaywrightSessionHandle:
                 return [str(cls) for cls in result]
             return []
         except Exception as exc:
-            logger.warning("Failed to get tab classes: %s", exc)
+            if is_playwright_timeout_error(exc):
+                raise ExtractionTimeoutError(
+                    "Persistent session tab-class read timed out."
+                ) from None
+            logger.warning(
+                "Persistent session get_tab_classes failed (sanitized)"
+            )
             return []
 
     def close_last_non_root_tab(self) -> None:
@@ -227,8 +264,10 @@ class PlaywrightSessionHandle:
             last_page = pages[-1]
             try:
                 last_page.close()
-            except Exception as exc:
-                logger.warning("Failed to close last non-root tab: %s", exc)
+            except Exception:
+                logger.warning(
+                    "Failed to close last non-root tab (sanitized)"
+                )
 
     def restart_browser(self) -> None:
         """Restart the browser and session completely.
@@ -240,8 +279,10 @@ class PlaywrightSessionHandle:
         if self._browser is not None:
             try:
                 self._browser.close()
-            except Exception as exc:
-                logger.warning("Error closing browser during restart: %s", exc)
+            except Exception:
+                logger.warning(
+                    "Error closing browser during restart (sanitized)"
+                )
             self._browser = None
             self._context = None
 
@@ -260,8 +301,10 @@ class PlaywrightSessionHandle:
         if self._playwright is not None:
             try:
                 self._playwright.__exit__(None, None, None)
-            except Exception as exc:
-                logger.warning("Error stopping Playwright during restart: %s", exc)
+            except Exception:
+                logger.warning(
+                    "Error stopping Playwright during restart (sanitized)"
+                )
 
         # Launch a fresh Playwright + browser.
         self._playwright = sync_playwright().__enter__()
@@ -305,8 +348,10 @@ class PlaywrightSessionHandle:
             return None
         try:
             return self._context.new_page()
-        except Exception as exc:  # noqa: BLE001 - degraded to None below
-            logger.warning("Failed to create initial page for bootstrap: %s", exc)
+        except Exception:
+            logger.warning(
+                "Failed to create initial page for bootstrap (sanitized)"
+            )
             return None
 
     # ------------------------------------------------------------------
