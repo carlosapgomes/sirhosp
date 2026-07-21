@@ -366,10 +366,24 @@ class Command(BaseCommand):
 
     @staticmethod
     def _stage_error_details(exc: Exception) -> dict:
-        """Build normalized stage-level error details payload."""
+        """Build normalized stage-level error details payload.
+
+        PSW-S17 R4 (second corrective closure): typed domain exceptions
+        carry sanitized constant messages and keep their class name for
+        diagnostics; unexpected exceptions are replaced with stable
+        category-specific text and label so no arbitrary ``str(exc)`` or
+        unsafe class name reaches stage details.
+        """
+        from apps.ingestion.run_lifecycle import (
+            classify_failure_reason,
+            safe_error_message,
+            safe_error_type,
+        )
+
+        reason, _ = classify_failure_reason(exc)
         return {
-            "error_type": exc.__class__.__name__,
-            "error_message": str(exc),
+            "error_type": safe_error_type(exc, reason),
+            "error_message": safe_error_message(exc, reason),
         }
 
     def _mark_run_failed(self, run: IngestionRun, exc: Exception) -> None:
@@ -383,6 +397,12 @@ class Command(BaseCommand):
         failure_reason, timed_out = self._classify_failure_reason(exc)
         now = timezone.now()
 
+        # PSW-S17 R4: safe hybrid error_message (typed -> str(exc) which is
+        # a sanitized constant after source fixes; unexpected -> constant).
+        from apps.ingestion.run_lifecycle import safe_error_message
+
+        safe_msg = safe_error_message(exc, failure_reason)
+
         # Update the existing attempt record (created in _process_run)
         attempt = (
             IngestionRunAttempt.objects
@@ -395,7 +415,7 @@ class Command(BaseCommand):
             attempt.status = "failed"
             attempt.failure_reason = failure_reason
             attempt.timed_out = timed_out
-            attempt.error_message = str(exc)
+            attempt.error_message = safe_msg
             attempt.save(
                 update_fields=[
                     "finished_at",
@@ -412,7 +432,7 @@ class Command(BaseCommand):
             run.next_retry_at = now + timedelta(seconds=60)
             run.failure_reason = failure_reason
             run.timed_out = timed_out
-            run.error_message = str(exc)
+            run.error_message = safe_msg
             run.save(
                 update_fields=[
                     "status",
@@ -429,7 +449,7 @@ class Command(BaseCommand):
         else:
             # Terminal failure — no more retries
             run.status = "failed"
-            run.error_message = str(exc)
+            run.error_message = safe_msg
             run.finished_at = now
             run.failure_reason = failure_reason
             run.timed_out = timed_out

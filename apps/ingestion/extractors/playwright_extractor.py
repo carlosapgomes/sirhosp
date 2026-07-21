@@ -70,51 +70,14 @@ _TYPE_MAP: dict[str, str] = {
 
 DEFAULT_EVOLUTION_TIMEOUT_SECONDS = 900
 DEFAULT_ADMISSION_TIMEOUT_SECONDS = 120
-_TIMEOUT_PREVIEW_MAX_CHARS = 1200
 
 
-def _format_timeout_stream(value: str | bytes | None) -> str:
-    """Normalize and truncate subprocess stream output for error messages."""
-    if value is None:
-        return ""
-
-    if isinstance(value, bytes):
-        text = value.decode("utf-8", errors="replace")
-    else:
-        text = value
-
-    text = text.strip()
-    if not text:
-        return ""
-
-    if len(text) <= _TIMEOUT_PREVIEW_MAX_CHARS:
-        return text
-
-    remaining = len(text) - _TIMEOUT_PREVIEW_MAX_CHARS
-    return f"{text[:_TIMEOUT_PREVIEW_MAX_CHARS]}... [truncated {remaining} chars]"
-
-
-def _build_process_output_context(
-    stdout_value: str | bytes | None,
-    stderr_value: str | bytes | None,
-) -> str:
-    """Build diagnostic context from subprocess stdout/stderr."""
-    stdout_preview = _format_timeout_stream(stdout_value)
-    stderr_preview = _format_timeout_stream(stderr_value)
-
-    parts: list[str] = []
-    if stdout_preview:
-        parts.append(f"stdout preview: {stdout_preview}")
-    if stderr_preview:
-        parts.append(f"stderr preview: {stderr_preview}")
-
-    return " | ".join(parts)
-
-
-def _build_timeout_context(exc: SubprocessTimeoutError) -> str:
-    """Build diagnostic context from SubprocessTimeoutError output/stderr."""
-    stdout_value = exc.output
-    return _build_process_output_context(stdout_value, exc.stderr)
+# PSW-S17 R5 (second corrective closure): the previous
+# ``_build_timeout_context`` / ``_build_process_output_context`` helpers
+# inlined subprocess stdout/stderr previews into persisted lifecycle error
+# messages. They are removed because those previews can carry arbitrary
+# source/system text. Operators needing subprocess diagnostics must use a
+# separate explicitly redacted channel (out of scope for this slice).
 
 
 class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
@@ -200,18 +163,16 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
                     timeout=timeout,
                 )
             except SubprocessTimeoutError as exc:
-                timeout_context = _build_timeout_context(exc)
-                message = (
-                    f"Extraction timed out after {exc.timeout}s "
-                    f"for patient_record={patient_record}"
-                )
-                if timeout_context:
-                    message = f"{message}. {timeout_context}"
-                raise ExtractionTimeoutError(message) from exc
-            except Exception as exc:
+                # PSW-S17 R5 (second corrective closure): constant sanitized
+                # timeout message; no patient_record, no subprocess
+                # stdout/stderr preview, raw chain suppressed.
+                raise ExtractionTimeoutError(
+                    f"Extraction timed out after {exc.timeout}s."
+                ) from None
+            except Exception:
                 raise ExtractionError(
-                    f"Failed to execute extractor: {exc}"
-                ) from exc
+                    "Failed to execute the evolution extractor."
+                ) from None
 
             if result.returncode != 0:
                 # Best-effort: check if JSON output was produced despite
@@ -223,14 +184,11 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
                         rescued, patient_source_key=patient_record
                     )
 
-                output_context = _build_process_output_context(
-                    getattr(result, "stdout", None),
-                    getattr(result, "stderr", None),
+                # PSW-S17 R5: keep only the non-sensitive return code; drop
+                # subprocess stdout/stderr previews from persisted messages.
+                raise ExtractionError(
+                    f"Extractor exited with code {result.returncode}."
                 )
-                message = f"Extractor exited with code {result.returncode}"
-                if output_context:
-                    message = f"{message}. {output_context}"
-                raise ExtractionError(message)
 
             raw_items = self._parse_json_output(json_output_path)
             return self._normalize_collection(raw_items, patient_source_key=patient_record)
@@ -295,31 +253,23 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
                     timeout=timeout,
                 )
             except SubprocessTimeoutError as exc:
-                timeout_context = _build_timeout_context(exc)
-                message = (
-                    f"Admission snapshot extraction timed out after {exc.timeout}s "
-                    f"for patient_record={patient_record}"
-                )
-                if timeout_context:
-                    message = f"{message}. {timeout_context}"
-                raise ExtractionTimeoutError(message) from exc
-            except Exception as exc:
+                # PSW-S17 R5: constant sanitized timeout message; raw chain
+                # suppressed.
+                raise ExtractionTimeoutError(
+                    f"Admission snapshot extraction timed out "
+                    f"after {exc.timeout}s."
+                ) from None
+            except Exception:
                 raise ExtractionError(
-                    f"Failed to execute extractor for admission snapshot: {exc}"
-                ) from exc
+                    "Failed to execute the admission snapshot extractor."
+                ) from None
 
             if result.returncode != 0:
-                output_context = _build_process_output_context(
-                    getattr(result, "stdout", None),
-                    getattr(result, "stderr", None),
+                # PSW-S17 R5: keep only the non-sensitive return code.
+                raise ExtractionError(
+                    "Admission snapshot extractor exited with code "
+                    f"{result.returncode}."
                 )
-                message = (
-                    "Extractor exited with code "
-                    f"{result.returncode} during admission snapshot extraction"
-                )
-                if output_context:
-                    message = f"{message}. {output_context}"
-                raise ExtractionError(message)
 
             parser = AdmissionSnapshotParser()
             return parser.parse_file(admissions_output_path)

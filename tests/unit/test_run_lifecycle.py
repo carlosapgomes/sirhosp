@@ -25,6 +25,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.utils import timezone
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from apps.ingestion.extractors.errors import (
     ExtractionError,
@@ -92,12 +93,10 @@ class TestClassifyFailureReason:
     # domain timeout; if it reaches the classifier raw, it falls through to
     # unexpected_exception (preserving the pre-S17 current-worker taxonomy).
     def test_raw_playwright_timeout_not_reinterpreted(self):
-        class _TimeoutError(Exception):
-            pass
-
-        _TimeoutError.__name__ = "TimeoutError"
-        _TimeoutError.__module__ = "playwright._impl._errors"
-        reason, timed_out = self._classify(_TimeoutError("Timeout 30000ms"))
+        # PSW-S17 R1 (second closure): use the real Playwright TimeoutError type.
+        reason, timed_out = self._classify(
+            PlaywrightTimeoutError("Timeout 30000ms")
+        )
         assert reason == "unexpected_exception"
         assert timed_out is False
 
@@ -106,15 +105,9 @@ class TestClassifyFailureReason:
         ``from exc`` is classified by its outer type (ExtractionError ->
         source_unavailable), NOT by walking the cause chain."""
 
-        class _PlaywrightTimeoutError(Exception):
-            pass
-
-        _PlaywrightTimeoutError.__name__ = "TimeoutError"
-        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
-
         try:
             try:
-                raise _PlaywrightTimeoutError("Timeout 30000ms")
+                raise PlaywrightTimeoutError("Timeout 30000ms")
             except Exception as exc:
                 raise ExtractionError("navigation failed") from exc
         except ExtractionError as wrapped:
@@ -475,6 +468,45 @@ class TestCrossWorkerFailureParityMatrix:
                 failure = failures[0]
                 assert failure.batch_id == run.batch_id
                 assert failure.attempts_exhausted == run.attempt_count
+                # PSW-S17 R7 (second closure): FinalRunFailure field parity.
+                params = run.parameters_json or {}
+                assert failure.patient_record == params.get("patient_record", "")
+                assert failure.intent == "admissions_only"
+
+        # PSW-S17 R7 (second closure): normalized snapshot parity between
+        # workers. Compare run + latest attempt externally observable
+        # fields directly (excluding DB identities and timestamps).
+        def _snap(run):
+            latest = (
+                IngestionRunAttempt.objects.filter(run=run)
+                .order_by("-attempt_number")
+                .first()
+            )
+            return {
+                "run_status": run.status,
+                "attempt_count": run.attempt_count,
+                "failure_reason": run.failure_reason,
+                "timed_out": run.timed_out,
+                "run_error_present": bool(run.error_message),
+                "run_finished_at_present": run.finished_at is not None,
+                "next_retry_at_present": run.next_retry_at is not None,
+                "attempt_status": latest.status if latest else None,
+                "attempt_number": latest.attempt_number if latest else None,
+                "attempt_failure_reason": latest.failure_reason if latest else None,
+                "attempt_timed_out": latest.timed_out if latest else None,
+                "attempt_error_present": bool(latest and latest.error_message),
+                "attempt_finished_at_present": bool(latest and latest.finished_at),
+                "final_failure_count": FinalRunFailure.objects.filter(run=run).count(),
+            }
+
+        snap_current = _snap(run_current)
+        snap_persistent = _snap(run_persistent)
+        # attempt_number may differ if the seeded prior attempts differ; both
+        # workers use the same seeding so they must match.
+        assert snap_current == snap_persistent, (
+            f"Worker snapshot mismatch ({category_id}/{mode}):\n"
+            f"current={snap_current}\npersistent={snap_persistent}"
+        )
 
         # Idempotency: re-finalizing the persistent run does not duplicate.
         if mode == "terminal":
@@ -577,15 +609,9 @@ class TestCurrentWorkerPreservation:
         directly (not mapped to a typed domain timeout) classifies as
         unexpected_exception — pre-S17 behavior."""
 
-        class _PlaywrightTimeoutError(Exception):
-            pass
-
-        _PlaywrightTimeoutError.__name__ = "TimeoutError"
-        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
-
         run = self._queue_run()
         mock_ext = MagicMock()
-        mock_ext.get_admission_snapshot.side_effect = _PlaywrightTimeoutError(
+        mock_ext.get_admission_snapshot.side_effect = PlaywrightTimeoutError(
             "Timeout 30000ms"
         )
         mock_ext.extract_evolutions.return_value = []
@@ -604,15 +630,9 @@ class TestCurrentWorkerPreservation:
         classifies by its outer type — source_unavailable — preserving the
         pre-S17 current-worker taxonomy (no cause/context chain walk)."""
 
-        class _PlaywrightTimeoutError(Exception):
-            pass
-
-        _PlaywrightTimeoutError.__name__ = "TimeoutError"
-        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
-
         def side_effect(*args, **kwargs):
             try:
-                raise _PlaywrightTimeoutError("Timeout 30000ms")
+                raise PlaywrightTimeoutError("Timeout 30000ms")
             except Exception as exc:
                 raise ExtractionError("navigation failed") from exc
 
@@ -638,6 +658,8 @@ class TestCurrentWorkerPreservation:
 SENSITIVE_PATIENT_SENTINEL = "SENSITIVE-PATIENT-0001"
 SENSITIVE_URL_SENTINEL = "https://sensitive.example.test/SENSITIVE_URL"
 SENSITIVE_COOKIE_SENTINEL = "SENSITIVE_COOKIE_VALUE"
+SENSITIVE_STDOUT_SENTINEL = "SENSITIVE_STDOUT_LEAK"
+SENSITIVE_STDERR_SENTINEL = "SENSITIVE_STDERR_LEAK"
 
 
 @pytest.mark.django_db
@@ -732,14 +754,8 @@ class TestSentinelSanitizationPersistent:
             EvolutionPdfTimeoutError,
         )
 
-        class _PlaywrightTimeoutError(Exception):
-            pass
-
-        _PlaywrightTimeoutError.__name__ = "TimeoutError"
-        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
-
         # Sanity: detection helper recognises the duck-typed class.
-        assert is_playwright_timeout_error(_PlaywrightTimeoutError("x"))
+        assert is_playwright_timeout_error(PlaywrightTimeoutError("x"))
 
         # A minimal fake page whose context.request.get raises a Playwright
         # timeout carrying sensitive content.
@@ -750,7 +766,7 @@ class TestSentinelSanitizationPersistent:
 
         class _FakeRequest:
             def get(self, url, timeout):  # noqa: ARG002
-                raise _PlaywrightTimeoutError(sentinel_msg)
+                raise PlaywrightTimeoutError(sentinel_msg)
 
         class _FakeContext:
             request = _FakeRequest()
@@ -801,17 +817,11 @@ class TestPersistentSourceBoundaryTimeouts:
             PlaywrightSessionHandle,
         )
 
-        class _PlaywrightTimeoutError(Exception):
-            pass
-
-        _PlaywrightTimeoutError.__name__ = "TimeoutError"
-        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
-
         handle = PlaywrightSessionHandle.__new__(PlaywrightSessionHandle)
 
         class _FakePage:
             def goto(self, url, *, timeout, wait_until):  # noqa: ARG002
-                raise _PlaywrightTimeoutError(
+                raise PlaywrightTimeoutError(
                     f"Timeout at {SENSITIVE_URL_SENTINEL} "
                     f"cookie={SENSITIVE_COOKIE_SENTINEL}"
                 )
@@ -857,15 +867,9 @@ class TestPersistentSourceBoundaryTimeouts:
 
         from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
 
-        class _PlaywrightTimeoutError(Exception):
-            pass
-
-        _PlaywrightTimeoutError.__name__ = "TimeoutError"
-        _PlaywrightTimeoutError.__module__ = "playwright._impl._errors"
-
         class _FakeRequest:
             def get(self, url, timeout):  # noqa: ARG002
-                raise _PlaywrightTimeoutError(
+                raise PlaywrightTimeoutError(
                     f"Timeout at {SENSITIVE_URL_SENTINEL} "
                     f"cookie={SENSITIVE_COOKIE_SENTINEL}"
                 )
@@ -882,3 +886,108 @@ class TestPersistentSourceBoundaryTimeouts:
         message = str(exc_info.value)
         assert SENSITIVE_URL_SENTINEL not in message
         assert SENSITIVE_COOKIE_SENTINEL not in message
+
+
+# ---------------------------------------------------------------------------
+# Current-worker subprocess sentinel tests (R5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestCurrentWorkerSubprocessSentinels:
+    """R5: current-worker subprocess failures must not leak sensitive
+    cmd/output content into persisted error_message or command output."""
+
+    def _queue_run(self) -> IngestionRun:
+        return IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            attempt_count=2,
+            max_attempts=3,
+            parameters_json={
+                "patient_record": SENSITIVE_PATIENT_SENTINEL,
+                "intent": "admissions_only",
+            },
+        )
+
+    def test_subprocess_timeout_does_not_leak_cmd_or_patient_record(
+        self, capsys
+    ):
+        """SubprocessTimeoutError carrying a sensitive cmd (incl. patient
+        record) must NOT propagate that cmd into run/attempt error_message
+        or command stderr."""
+        from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
+
+        run = self._queue_run()
+        sensitive_cmd = [
+            "python",
+            "path2.py",
+            "--patient-record",
+            SENSITIVE_PATIENT_SENTINEL,
+        ]
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.side_effect = SubprocessTimeoutError(
+            cmd=sensitive_cmd,
+            timeout=120,
+            output=f"leaked {SENSITIVE_STDOUT_SENTINEL}",
+            stderr=f"leaked {SENSITIVE_STDERR_SENTINEL}",
+        )
+        mock_ext.extract_evolutions.return_value = []
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        # Classification preserved (timeout).
+        assert run.failure_reason == "timeout"
+        assert run.timed_out is True
+        # DB error_message and attempt error_message must NOT contain any
+        # sentinel (cmd content, patient record, stdout/stderr previews).
+        for blob in [
+            run.error_message or "",
+            run.attempts.order_by("-attempt_number").first().error_message or "",
+        ]:
+            assert SENSITIVE_PATIENT_SENTINEL not in blob
+            assert SENSITIVE_STDOUT_SENTINEL not in blob
+            assert SENSITIVE_STDERR_SENTINEL not in blob
+        # Stage details sanitized too.
+        for metric in IngestionRunStageMetric.objects.filter(run=run):
+            text = str(metric.details_json or {})
+            assert SENSITIVE_PATIENT_SENTINEL not in text
+            assert SENSITIVE_STDOUT_SENTINEL not in text
+            assert SENSITIVE_STDERR_SENTINEL not in text
+        # Command stderr must not echo the sentinel-laden cmd.
+        err = capsys.readouterr().err
+        assert SENSITIVE_PATIENT_SENTINEL not in err
+        assert SENSITIVE_STDOUT_SENTINEL not in err
+
+    def test_arbitrary_value_error_sanitized_to_constant(self, capsys):
+        """An arbitrary ValueError carrying a sentinel cannot reach run,
+        attempt, stage, or command stderr error text."""
+        run = self._queue_run()
+        mock_ext = MagicMock()
+        mock_ext.get_admission_snapshot.side_effect = ValueError(
+            f"cookie={SENSITIVE_COOKIE_SENTINEL}"
+        )
+        mock_ext.extract_evolutions.return_value = []
+        with patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs.PlaywrightEvolutionExtractor",
+            return_value=mock_ext,
+        ):
+            call_command("process_ingestion_runs")
+
+        run.refresh_from_db()
+        assert run.failure_reason == "unexpected_exception"
+        # The sentinel must NOT appear in any persisted error surface.
+        assert SENSITIVE_COOKIE_SENTINEL not in (run.error_message or "")
+        attempt = run.attempts.order_by("-attempt_number").first()
+        assert SENSITIVE_COOKIE_SENTINEL not in (attempt.error_message or "")
+        for metric in IngestionRunStageMetric.objects.filter(run=run):
+            text = str(metric.details_json or {})
+            assert SENSITIVE_COOKIE_SENTINEL not in text
+        err = capsys.readouterr().err
+        assert SENSITIVE_COOKIE_SENTINEL not in err

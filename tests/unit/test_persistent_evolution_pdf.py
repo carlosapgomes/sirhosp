@@ -389,6 +389,75 @@ class TestEvolutionPdfFlowSanitizedFailures:
             assert secret.lower() not in message
 
 
+class TestEvolutionPdfFlowTypedTimeouts:
+    """PSW-S17 R2 (second closure): Playwright timeouts from present
+    optional/required controls become typed EvolutionPdfTimeoutError.
+    Absent optional controls remain no-ops."""
+
+    def test_absent_date_input_is_optional_noop(self) -> None:
+        """A date input that is absent (count 0) is a no-op, not a timeout."""
+        page = _FakePdfPage(html="<html><body>no inputs</body></html>")
+        flow = EvolutionPdfFlow(page)
+        # Should not raise just because the inputs are absent.
+        # The flow will later fail at PDF URL resolution, but the date
+        # application must be a no-op.
+        flow._apply_dates_if_present("01/01/2024", "31/12/2024")
+
+    def test_present_date_input_playwright_timeout_raises_typed(self) -> None:
+        """A Playwright timeout from filling a present date input raises
+        EvolutionPdfTimeoutError (not swallowed)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _DATE_START_SELECTOR,
+            EvolutionPdfTimeoutError,
+        )
+
+        class _TimeoutFillLocator(_FakeLocator):
+            def __init__(self):
+                super().__init__(count_value=1)
+
+            def fill(self, value: str) -> None:
+                raise PlaywrightTimeoutError("Timeout 10000ms")
+
+        page = _FakePdfPage(
+            html="<html><body></body></html>",
+            locators={_DATE_START_SELECTOR: _TimeoutFillLocator()},
+        )
+        flow = EvolutionPdfFlow(page)
+
+        with pytest.raises(EvolutionPdfTimeoutError):
+            flow._apply_dates_if_present("01/01/2024", "31/12/2024")
+
+    def test_present_generate_button_playwright_timeout_raises_typed(self) -> None:
+        """A Playwright timeout from clicking a present generate button
+        raises EvolutionPdfTimeoutError (not swallowed)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _GENERATE_BUTTON_SELECTOR,
+            EvolutionPdfTimeoutError,
+        )
+
+        class _TimeoutClickLocator(_FakeLocator):
+            def __init__(self):
+                super().__init__(count_value=1)
+
+            def click(self) -> None:
+                raise PlaywrightTimeoutError("Timeout 10000ms")
+
+        page = _FakePdfPage(
+            html="<html><body></body></html>",
+            locators={_GENERATE_BUTTON_SELECTOR: _TimeoutClickLocator()},
+        )
+        flow = EvolutionPdfFlow(page)
+
+        with pytest.raises(EvolutionPdfTimeoutError):
+            flow._generate_report_if_present()
+
+
 class TestEvolutionPdfFlowNoSubprocessNoNewBrowser:
     """The persistent path never uses subprocess, path2.py, or a new browser."""
 

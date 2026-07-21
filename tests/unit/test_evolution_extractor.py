@@ -288,8 +288,9 @@ class TestSubprocessErrors:
 
             assert "90" in str(exc_info.value)
 
-    def test_timeout_includes_stdout_stderr_preview(self, tmp_path: Path):
-        """Timeout message should include partial stdout/stderr for diagnosis."""
+    def test_timeout_message_is_sanitized(self, tmp_path: Path):
+        """Timeout message must NOT include stdout/stderr previews or patient
+        record (PSW-S17 R5)."""
         extractor = _build_extractor(tmp_path)
 
         with patch("apps.ingestion.extractors.playwright_extractor.run_subprocess") as mock_run:
@@ -309,10 +310,13 @@ class TestSubprocessErrors:
 
             message = str(exc_info.value)
             assert "timed out" in message
-            assert "stdout" in message
-            assert "stderr" in message
-            assert "log parcial de progresso" in message
-            assert "erro parcial" in message
+            assert "300" in message
+            # PSW-S17 R5: no subprocess previews, no patient record.
+            assert "stdout" not in message
+            assert "stderr" not in message
+            assert "log parcial de progresso" not in message
+            assert "erro parcial" not in message
+            assert "123" not in message
 
     def test_nonzero_exit_raises_extraction_error(self, tmp_path: Path):
         """Non-zero exit code should raise ExtractionError."""
@@ -333,8 +337,9 @@ class TestSubprocessErrors:
 
             assert "code 1" in str(exc_info.value)
 
-    def test_nonzero_exit_includes_stdout_stderr_preview(self, tmp_path: Path):
-        """Non-zero exit should include partial stdout/stderr for diagnosis."""
+    def test_nonzero_exit_message_is_sanitized(self, tmp_path: Path):
+        """Non-zero exit message must NOT include stdout/stderr previews
+        (PSW-S17 R5)."""
         extractor = _build_extractor(tmp_path)
 
         with patch("apps.ingestion.extractors.playwright_extractor.run_subprocess") as mock_run:
@@ -353,10 +358,11 @@ class TestSubprocessErrors:
 
             message = str(exc_info.value)
             assert "code 1" in message
-            assert "stdout" in message
-            assert "stderr" in message
-            assert "stdout parcial" in message
-            assert "stderr parcial" in message
+            # PSW-S17 R5: no subprocess previews.
+            assert "stdout" not in message
+            assert "stderr" not in message
+            assert "stdout parcial" not in message
+            assert "stderr parcial" not in message
 
     def test_generic_exception_raises_extraction_error(self, tmp_path: Path):
         """Generic exceptions should be wrapped in ExtractionError."""
@@ -881,8 +887,9 @@ class TestGetAdmissionSnapshot:
                     end_date="2024-07-31",
                 )
 
-    def test_snapshot_nonzero_exit_includes_stdout_stderr_preview(self, tmp_path: Path):
-        """Non-zero snapshot failure should include stdout/stderr context."""
+    def test_snapshot_nonzero_exit_message_is_sanitized(self, tmp_path: Path):
+        """Non-zero snapshot failure must NOT include stdout/stderr previews
+        (PSW-S17 R5)."""
         fake_script = tmp_path / "path2.py"
         fake_script.write_text("# fake")
         extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
@@ -905,10 +912,11 @@ class TestGetAdmissionSnapshot:
 
             message = str(exc_info.value)
             assert "code 1" in message
-            assert "stdout" in message
-            assert "stderr" in message
-            assert "stdout parcial" in message
-            assert "stderr parcial" in message
+            # PSW-S17 R5: no subprocess previews.
+            assert "stdout" not in message
+            assert "stderr" not in message
+            assert "stdout parcial" not in message
+            assert "stderr parcial" not in message
 
     def test_timeout_raises_extraction_timeout_error(self, tmp_path: Path):
         """Subprocess timeout should raise ExtractionTimeoutError."""
@@ -928,8 +936,9 @@ class TestGetAdmissionSnapshot:
                     end_date="2024-07-31",
                 )
 
-    def test_snapshot_timeout_includes_stdout_stderr_preview(self, tmp_path: Path):
-        """Admission timeout should include partial stdout/stderr for diagnosis."""
+    def test_snapshot_timeout_message_is_sanitized(self, tmp_path: Path):
+        """Admission timeout must NOT include stdout/stderr previews or
+        patient record (PSW-S17 R5)."""
         fake_script = tmp_path / "path2.py"
         fake_script.write_text("# fake")
         extractor = PlaywrightEvolutionExtractor(script_path=str(fake_script))
@@ -952,10 +961,14 @@ class TestGetAdmissionSnapshot:
                 )
 
             message = str(exc_info.value)
-            assert "stdout" in message
-            assert "stderr" in message
-            assert "stdout parcial" in message
-            assert "stderr parcial" in message
+            assert "timed out" in message
+            assert "120" in message
+            # PSW-S17 R5: no subprocess previews, no patient record.
+            assert "stdout" not in message
+            assert "stderr" not in message
+            assert "stdout parcial" not in message
+            assert "stderr parcial" not in message
+            assert "123" not in message
 
     def test_date_conversion_in_snapshot_extraction(self, tmp_path: Path):
         """Dates should be converted to DD/MM/YYYY for path2."""

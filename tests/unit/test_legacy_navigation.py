@@ -633,6 +633,34 @@ class TestClickInternacoes:
 
         assert "Internações" in page.text_calls
 
+    def test_playwright_timeout_becomes_navigation_timeout(self) -> None:
+        """PSW-S17 R2 (second closure): a real Playwright TimeoutError from
+        the required wait/click becomes NavigationTimeoutError, not a
+        generic NavigationError."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            click_internacoes,
+        )
+
+        page = FakeNavigationPage()
+
+        # Force the FakeNavigationLocator.wait_for to raise a real
+        # Playwright TimeoutError so the source boundary can map it.
+        original_wait_for = FakeNavigationLocator.wait_for
+
+        def _raise_playwright_timeout(self, *, state="visible", timeout=None):
+            raise PlaywrightTimeoutError("Timeout 15000ms")
+
+        FakeNavigationLocator.wait_for = _raise_playwright_timeout  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                click_internacoes(page)
+        finally:
+            FakeNavigationLocator.wait_for = original_wait_for  # type: ignore[method-assign]
+
 
 class TestWaitForAdmissionsTable:
     """Tests for wait_for_admissions_table()."""
@@ -656,16 +684,17 @@ class TestWaitForAdmissionsTable:
         assert "frame_pol" in page.frame_name_calls
 
     def test_raises_when_frame_not_found(self) -> None:
-        """Raises NavigationError when frame_pol is never found."""
+        """Raises NavigationTimeoutError when frame_pol is never found within
+        the whole-operation budget (PSW-S17 R2 second closure)."""
         from apps.ingestion.extractors.legacy_navigation import (
-            NavigationError,
+            NavigationTimeoutError,
             wait_for_admissions_table,
         )
 
         page = FakeNavigationPage()
-        # No frame set — should fail
+        # No frame set — whole-operation budget expires.
 
-        with pytest.raises(NavigationError, match="frame_pol"):
+        with pytest.raises(NavigationTimeoutError):
             wait_for_admissions_table(page, timeout_ms=500)
 
 
@@ -1174,7 +1203,9 @@ class TestEvolutionNavigationHelpers:
         assert row_selector in frame._locator_calls
 
     def test_open_internacao_detail_nonexistent_key_raises(self) -> None:
-        """Opening detail for non-existent key raises NavigationError."""
+        """Opening detail for non-existent key raises a sanitized
+        NavigationError that does NOT include the admission key
+        (PSW-S17 R6 second closure)."""
         from apps.ingestion.extractors.legacy_navigation import (
             NavigationError,
             open_internacao_detail,
@@ -1184,13 +1215,14 @@ class TestEvolutionNavigationHelpers:
         frame = FakeNavigationFrame(html="")
         page.set_frame(frame)
 
-        with pytest.raises(
-            NavigationError,
-            match="Não foi possível localizar a internação",
-        ):
+        sentinel_key = "SENSITIVE-ADMISSION-KEY"
+        with pytest.raises(NavigationError) as exc_info:
             open_internacao_detail(
-                page, admission_key="NONEXISTENT"
+                page, admission_key=sentinel_key
             )
+        message = str(exc_info.value)
+        # PSW-S17 R6: admission key must NOT leak into the error message.
+        assert sentinel_key not in message
 
     def test_click_evolucao_button(self) -> None:
         """click_evolucao clicks the Evolução button in frame_pol."""

@@ -141,6 +141,38 @@ def safe_failure_text(failure_reason: str) -> str:
     return _FAILURE_TEXT.get(failure_reason, _UNKNOWN_FAILURE_TEXT)
 
 
+def safe_error_message(exc: BaseException, failure_reason: str) -> str:
+    """Return the safe ``error_message`` text to persist for ``exc``.
+
+    PSW-S17 R4 (second corrective closure): hybrid sanitization.
+
+    - Typed domain exceptions (:class:`ExtractionError` subclasses)
+      carry sanitized constant messages from source boundaries (after
+      R3/R5/R6), so ``str(exc)`` is safe to persist verbatim. This
+      preserves operator diagnostics for known typed failures.
+    - Unexpected exceptions (``ValueError``, ``RuntimeError``, raw
+      Playwright errors that escaped a source boundary, etc.) may carry
+      arbitrary sensitive text, so they are replaced with the stable
+      category constant from :func:`safe_failure_text`.
+    """
+    if isinstance(exc, ExtractionError):
+        return str(exc)
+    return safe_failure_text(failure_reason)
+
+
+def safe_error_type(exc: BaseException, failure_reason: str) -> str:
+    """Return the safe ``error_type`` label to persist for ``exc``.
+
+    Typed domain exceptions keep their class name (e.g. ``"ExtractionError"``,
+    ``"ExtractionTimeoutError"``) for operator diagnostics. Unexpected
+    exceptions are labeled by their normalized failure category so an
+    unsafe dynamic class name cannot carry misleading context.
+    """
+    if isinstance(exc, ExtractionError):
+        return exc.__class__.__name__
+    return failure_reason
+
+
 # ---------------------------------------------------------------------------
 # Terminal finalization
 # ---------------------------------------------------------------------------

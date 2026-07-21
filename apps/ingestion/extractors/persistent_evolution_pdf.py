@@ -610,30 +610,66 @@ class EvolutionPdfFlow:
         return max(self._pdf_download_timeout_ms, candidate)
 
     def _apply_dates_if_present(self, br_start_date: str, br_end_date: str) -> None:
-        """Fill the legacy date inputs (``DD/MM/YYYY``) when present (no-op if absent)."""
-        try:
-            start_input = self._page.locator(_DATE_START_SELECTOR)
-            if self._locator_count(start_input) > 0:
+        """Fill the legacy date inputs when present (PSW-S17 R2).
+
+        PSW-S17 R2 (second corrective closure): date inputs are optional —
+        their presence is probed via ``_locator_count``. When an input is
+        present, a Playwright timeout from its ``fill`` raises a typed
+        :class:`EvolutionPdfTimeoutError` instead of being swallowed.
+        """
+        start_input = self._page.locator(_DATE_START_SELECTOR)
+        if self._locator_count(start_input) > 0:
+            try:
                 start_input.first.fill(br_start_date)
-            end_input = self._page.locator(_DATE_END_SELECTOR)
-            if self._locator_count(end_input) > 0:
+            except Exception as exc:  # noqa: BLE001 - sanitized below
+                if is_playwright_timeout_error(exc):
+                    raise EvolutionPdfTimeoutError(
+                        _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
+                    ) from None
+                logger.warning(
+                    "Persistent evolution PDF: start date input not "
+                    "fillable (sanitized, non-timeout)"
+                )
+        end_input = self._page.locator(_DATE_END_SELECTOR)
+        if self._locator_count(end_input) > 0:
+            try:
                 end_input.first.fill(br_end_date)
-        except EvolutionPdfError:
-            raise
-        except Exception:  # noqa: BLE001 - sanitized: date UI optional
-            logger.warning("Persistent evolution PDF: date inputs not applicable (sanitized)")
+            except Exception as exc:  # noqa: BLE001 - sanitized below
+                if is_playwright_timeout_error(exc):
+                    raise EvolutionPdfTimeoutError(
+                        _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
+                    ) from None
+                logger.warning(
+                    "Persistent evolution PDF: end date input not "
+                    "fillable (sanitized, non-timeout)"
+                )
 
     def _generate_report_if_present(self) -> None:
-        """Click the report generate button when present (defensive no-op)."""
+        """Click the report generate button when present (PSW-S17 R2).
+
+        PSW-S17 R2 (second corrective closure): the generate button is
+        optional — its presence is probed via ``_locator_count``. When it
+        is present, a Playwright timeout from its ``click`` (or the
+        subsequent report wait) raises a typed
+        :class:`EvolutionPdfTimeoutError` instead of being swallowed.
+        """
+        button = self._page.locator(_GENERATE_BUTTON_SELECTOR)
+        if self._locator_count(button) == 0:
+            return
         try:
-            button = self._page.locator(_GENERATE_BUTTON_SELECTOR)
-            if self._locator_count(button) > 0:
-                button.first.click()
-                self._wait_for_report()
+            button.first.click()
+            self._wait_for_report()
         except EvolutionPdfError:
             raise
-        except Exception:  # noqa: BLE001 - sanitized: generate UI optional
-            logger.warning("Persistent evolution PDF: report generation not applicable (sanitized)")
+        except Exception as exc:  # noqa: BLE001 - sanitized below
+            if is_playwright_timeout_error(exc):
+                raise EvolutionPdfTimeoutError(
+                    _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
+                ) from None
+            logger.warning(
+                "Persistent evolution PDF: report generation not applicable "
+                "(sanitized, non-timeout)"
+            )
 
     def _wait_for_report(self) -> None:
         """Wait for the report/PDF object to render; raise typed timeout.

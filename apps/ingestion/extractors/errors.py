@@ -2,6 +2,32 @@
 
 from __future__ import annotations
 
+_PLAYWRIGHT_TIMEOUT_ERROR: type[BaseException] | None = None
+_PLAYWRIGHT_IMPORT_ATTEMPTED: bool = False
+
+
+def _get_playwright_timeout_error() -> type[BaseException] | None:
+    """Return Playwright's public ``TimeoutError`` type, or None if unavailable.
+
+    PSW-S17 R1 (second corrective closure): the previous implementation
+    detected Playwright timeouts by class name + module prefix, which is
+    fragile and untestable with the real type. This helper imports the real
+    public ``playwright.sync_api.TimeoutError`` lazily (no browser is
+    launched at import time) and caches it.
+    """
+    global _PLAYWRIGHT_TIMEOUT_ERROR, _PLAYWRIGHT_IMPORT_ATTEMPTED
+    if not _PLAYWRIGHT_IMPORT_ATTEMPTED:
+        _PLAYWRIGHT_IMPORT_ATTEMPTED = True
+        try:
+            from playwright.sync_api import (  # noqa: PLC0415 - lazy import
+                TimeoutError as _PlaywrightTimeoutError,
+            )
+
+            _PLAYWRIGHT_TIMEOUT_ERROR = _PlaywrightTimeoutError
+        except ImportError:
+            _PLAYWRIGHT_TIMEOUT_ERROR = None
+    return _PLAYWRIGHT_TIMEOUT_ERROR
+
 
 class ExtractionError(Exception):
     """Base error for evolution extraction failures."""
@@ -37,19 +63,11 @@ class SnapshotContainerMissingError(ExtractionError):
 def is_playwright_timeout_error(exc: BaseException) -> bool:
     """Return True if ``exc`` is a Playwright ``TimeoutError``.
 
-    Playwright is not a hard import dependency of this module (the workers
-    must remain importable without a running browser stack), so detection is
-    done by class name AND module prefix. Real Playwright raises
-    ``playwright._impl._errors.TimeoutError``.
-
-    Used at source boundaries (``open_tab``, ``_download_pdf``,
-    ``_wait_for_report``) to MAP a Playwright timeout to a typed domain
-    timeout (``ExtractionTimeoutError`` subclass) so the outer exception
-    crossing the adapter/command boundary is itself typed — not via a
-    classifier-side cause/context chain walk (PSW-S17 R2/R3 correction).
+    PSW-S17 R1 (second corrective closure): uses ``isinstance()`` against
+    the real public ``playwright.sync_api.TimeoutError`` type (lazy import,
+    no browser launch). Returns ``False`` if Playwright is not installable
+    in the runtime — never falls back to class-name/module-prefix duck
+    typing.
     """
-    cls = type(exc)
-    if cls.__name__ != "TimeoutError":
-        return False
-    module = getattr(cls, "__module__", "") or ""
-    return module.startswith("playwright")
+    pt = _get_playwright_timeout_error()
+    return pt is not None and isinstance(exc, pt)

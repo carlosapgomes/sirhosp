@@ -851,8 +851,7 @@ class RealHandleBridge:
             except EvolutionPdfError:
                 logger.warning(
                     "Evolution action flow: PDF text extraction/normalization "
-                    "failed for key=%s",
-                    admission_key,
+                    "failed (sanitized)"
                 )
                 continue
 

@@ -282,10 +282,14 @@
   scheduling, terminal attempts, `FinalRunFailure`, and batch closure.
 - [x] 17.2 Share or align failure classification without duplicating divergent
   command-local rules.
-- [x] 17.3 Ensure persistent source timeouts record `failure_reason=timeout` and
-  `timed_out=True`, including navigation, report, and download timeouts.
-- [x] 17.4 Preserve sanitized errors and current-worker behavior.
-- [x] 17.5 Run official validation and create
+- [ ] 17.3 Ensure persistent source timeouts record `failure_reason=timeout`
+  and `timed_out=True`, including navigation, report, and download timeouts.
+  Second corrective closure (in progress): required-action timeouts are now
+  typed at the source boundary, but tasks 17.3-17.5 remain unchecked because
+  two integration tests outside the corrective file cap still assert the
+  pre-S17 unsafe passthrough behavior that the sanitization removes.
+- [ ] 17.4 Preserve sanitized errors and current-worker behavior.
+- [ ] 17.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S17-report.md`.
 
 PSW-S17 corrective closure owns the typed persistent timeout invariant:
@@ -296,6 +300,19 @@ any cause/context chain walk. PSW-S20 and PSW-S22 preserve and deepen this
 invariant (selectors, required actions, HTTP/PDF validation, live flow
 behavior) but must not regress the typed outer-exception contract delivered
 here.
+
+Second corrective closure rule (R2): an optional UI element that is absent
+is detected with a non-blocking presence probe (``count()``) and remains a
+documented no-op; an internal short polling wait may continue only while a
+separate whole-operation budget is still active; expiration of that budget
+raises a typed timeout; once a required element is positively present, a
+Playwright timeout from its ``wait_for``/``click``/``fill``/``goto``/report
+wait/download action raises a typed domain timeout. Lifecycle DB text is
+normalized by category via ``safe_error_message``/``safe_error_type``:
+typed domain exceptions carry sanitized constant messages from source
+boundaries; unexpected exceptions are replaced with stable category-specific
+text and label so no arbitrary ``str(exc)`` reaches run/attempt/stage error
+fields.
 
 ## 18. PSW-S18: Internal legacy-tab cleanup and recovery
 

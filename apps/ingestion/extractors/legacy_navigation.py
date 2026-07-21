@@ -27,7 +27,10 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any, Mapping
 
-from apps.ingestion.extractors.errors import ExtractionTimeoutError
+from apps.ingestion.extractors.errors import (
+    ExtractionTimeoutError,
+    is_playwright_timeout_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +230,42 @@ def _timeout_kwargs(deadline_s: float | None, default_ms: int) -> dict[str, int]
 _DEFAULT_ACTION_TIMEOUT_MS = 30000
 """Playwright's default action timeout, used as the cap for bounded click/fill."""
 
+# PSW-S17 R3 (second corrective closure): constant sanitized message for any
+# required-action Playwright timeout. Contains no patient record, admission
+# key, URL, selector, date value, cookie, credential, or raw exception text.
+_REQUIRED_ACTION_TIMEOUT_MESSAGE = (
+    "A required legacy UI action timed out."
+)
+
+
+def _raise_required_action_error(
+    exc: BaseException,
+    *,
+    fallback_message: str,
+) -> None:
+    """Re-raise a required-action exception as a typed/sanitized NavigationError.
+
+    PSW-S17 R3 (second corrective closure): a Playwright timeout from a
+    required action (``wait_for``/``click``/``fill``/``goto``) MUST become a
+    typed :class:`NavigationTimeoutError`. Other failures become a constant
+    sanitized :class:`NavigationError`. The raw chain is suppressed
+    (``from None``) so no underlying Playwright text can leak if the
+    exception is later logged with traceback.
+
+    Args:
+        exc: The caught underlying exception.
+        fallback_message: Constant sanitized message for non-timeout failures.
+
+    Raises:
+        NavigationTimeoutError: when ``exc`` is a Playwright timeout.
+        NavigationError: for any other non-timeout failure.
+    """
+    if is_playwright_timeout_error(exc):
+        raise NavigationTimeoutError(
+            _REQUIRED_ACTION_TIMEOUT_MESSAGE
+        ) from None
+    raise NavigationError(fallback_message) from None
+
 
 # ---------------------------------------------------------------------------
 # Navigation actions
@@ -351,9 +390,12 @@ def search_patient(
     except NavigationError:
         raise
     except Exception as exc:
-        raise NavigationError(
-            "Could not fill the patient record field (#prontuarioInput)."
-        ) from exc
+        _raise_required_action_error(
+            exc,
+            fallback_message=(
+                "Could not fill the patient record field (#prontuarioInput)."
+            ),
+        )
 
     # Step 2: Click advanced search link
     try:
@@ -363,9 +405,12 @@ def search_patient(
     except NavigationError:
         raise
     except Exception as exc:
-        raise NavigationError(
-            "Could not find or click the 'Pesquisa Avançada' link."
-        ) from exc
+        _raise_required_action_error(
+            exc,
+            fallback_message=(
+                "Could not find or click the 'Pesquisa Avançada' link."
+            ),
+        )
 
     page.wait_for_timeout(_bound_ms(deadline_s, 1200))
 
@@ -380,16 +425,22 @@ def click_internacoes(page: Any) -> None:
         page: A Playwright ``Page`` object.
 
     Raises:
-        NavigationError: If the Internações element is not found.
+        NavigationTimeoutError: If the wait/click times out (Playwright timeout).
+        NavigationError: If the Internações element is not found for other reasons.
     """
     try:
         internacoes = page.get_by_text("Internações", exact=True)
         internacoes.wait_for(state="visible", timeout=15000)
         internacoes.click()
+    except NavigationError:
+        raise
     except Exception as exc:
-        raise NavigationError(
-            "Could not find or click the 'Internações' element."
-        ) from exc
+        _raise_required_action_error(
+            exc,
+            fallback_message=(
+                "Could not find or click the 'Internações' element."
+            ),
+        )
 
     page.wait_for_timeout(500)
 
@@ -439,9 +490,8 @@ def wait_for_admissions_table(
 
         page.wait_for_timeout(min(500, max(1, remaining_ms)))
 
-    raise NavigationError(
-        f"Iframe '{SEL_FRAME_POL}' did not become available with the "
-        f"admissions table within {timeout_ms} ms."
+    raise NavigationTimeoutError(
+        _REQUIRED_ACTION_TIMEOUT_MESSAGE
     )
 
 
@@ -670,21 +720,25 @@ def open_internacao_detail(
     row with the given ``admission_key`` (``data-rk`` attribute) inside
     ``frame_pol`` and clicks the ``Detalhes da Internação`` link.
 
+    PSW-S17 R6 (second corrective closure): error messages and logs no
+    longer include ``admission_key`` or any source identifier.
+
     Args:
         page: A Playwright ``Page`` object.
         admission_key: The ``data-rk`` value identifying the admission.
+            Used only to locate the row; never surfaced in errors/logs.
 
     Raises:
-        NavigationError: If the row or details link cannot be found.
+        NavigationTimeoutError: on Playwright timeout.
+        NavigationError: if the row or details link cannot be found.
     """
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         raise NavigationError(
-            f"Iframe '{SEL_FRAME_POL}' não encontrado ao tentar "
-            "abrir detalhes da internação."
+            "The admissions iframe was not available when opening "
+            "admission details."
         )
 
-    # Try primary: match by data-rk (admission key)
     escaped_key = admission_key.replace('"', '\\"')
     row_selector = (
         f'{SEL_INTERNACOES_TABLE_BODY} > '
@@ -694,10 +748,10 @@ def open_internacao_detail(
     try:
         row_locator.first.wait_for(state="visible", timeout=10000)
     except Exception:
-        # Fallback: try first row with details link
+        # Fallback: try first row with details link (sanitized log; no key).
         logger.debug(
-            "Row with data-rk=%s not found, trying first visible row",
-            admission_key,
+            "Admission row not found by key; trying first visible "
+            "row (sanitized)."
         )
         row_locator = frame.locator(
             f'{SEL_INTERNACOES_TABLE_ROWS}:has({SEL_DETAILS_LINK})'
@@ -705,13 +759,13 @@ def open_internacao_detail(
         try:
             row_locator.first.wait_for(state="visible", timeout=5000)
         except Exception as exc:
-            raise NavigationError(
-                f"Não foi possível localizar a internação na tabela. "
-                f"key={admission_key}"
-            ) from exc
+            _raise_required_action_error(
+                exc,
+                fallback_message=(
+                    "Could not locate the admission row in the table."
+                ),
+            )
 
-    # Click the details link inside the row (use frame locator directly
-    # to avoid chained locator.combined-locator issues in tests/fakes).
     details_row_selector = (
         f'{row_selector} {SEL_DETAILS_LINK}'
     )
@@ -720,9 +774,12 @@ def open_internacao_detail(
         details_link.first.wait_for(state="visible", timeout=10000)
         details_link.first.click()
     except Exception as exc:
-        raise NavigationError(
-            "Não foi possível clicar no link 'Detalhes da Internação'."
-        ) from exc
+        _raise_required_action_error(
+            exc,
+            fallback_message=(
+                "Could not click the admission details link."
+            ),
+        )
 
     page.wait_for_timeout(1500)
 
@@ -772,9 +829,10 @@ def fill_evolution_dates(
 ) -> None:
     """Fill date inputs inside the evolution modal with ``DD/MM/YYYY``.
 
-    Both dates are filled inside ``frame_pol``. Missing inputs are treated
-    as a warning (no-op) rather than a failure, as the modal may already
-    have default values.
+    PSW-S17 R2 (second corrective closure): optional date inputs are probed
+    for presence (``count()``); when an input is present, a Playwright
+    timeout from its ``wait_for``/``click``/``fill`` raises a typed
+    :class:`NavigationTimeoutError` instead of being swallowed.
 
     Modeled after ``path2.open_report_for_interval()``.
 
@@ -782,40 +840,61 @@ def fill_evolution_dates(
         page: A Playwright ``Page`` object.
         start_date_br: Start date in ``DD/MM/YYYY`` format.
         end_date_br: End date in ``DD/MM/YYYY`` format.
+
+    Raises:
+        NavigationTimeoutError: when a present date input times out.
     """
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         logger.warning(
-            "Iframe %s not found for date filling (sanitized).",
-            SEL_FRAME_POL,
+            "Evolution date iframe not available (sanitized)."
         )
         return
 
-    # Fill start date
-    try:
-        start_input = frame.locator(SEL_DATE_START)
-        start_input.first.wait_for(state="visible", timeout=10000)
-        start_input.first.click()
-        start_input.first.fill(start_date_br)
-    except Exception:
-        logger.warning(
-            "Evolution start date input not found or not fillable "
-            "(sanitized)."
-        )
+    # Fill start date (only if the input is present).
+    start_input = frame.locator(SEL_DATE_START)
+    if _locator_count(start_input) > 0:
+        try:
+            start_input.first.wait_for(state="visible", timeout=10000)
+            start_input.first.click()
+            start_input.first.fill(start_date_br)
+        except Exception as exc:
+            _raise_required_action_error(
+                exc,
+                fallback_message=(
+                    "Could not fill the evolution start date input."
+                ),
+            )
 
-    # Fill end date
-    try:
-        end_input = frame.locator(SEL_DATE_END)
-        end_input.first.wait_for(state="visible", timeout=10000)
-        end_input.first.click()
-        end_input.first.fill(end_date_br)
-    except Exception:
-        logger.warning(
-            "Evolution end date input not found or not fillable "
-            "(sanitized)."
-        )
+    # Fill end date (only if the input is present).
+    end_input = frame.locator(SEL_DATE_END)
+    if _locator_count(end_input) > 0:
+        try:
+            end_input.first.wait_for(state="visible", timeout=10000)
+            end_input.first.click()
+            end_input.first.fill(end_date_br)
+        except Exception as exc:
+            _raise_required_action_error(
+                exc,
+                fallback_message=(
+                    "Could not fill the evolution end date input."
+                ),
+            )
 
     page.wait_for_timeout(500)
+
+
+def _locator_count(locator: Any) -> int:
+    """Return the count for a locator, treating access failures as 0.
+
+    PSW-S17 R2 (second corrective closure): a non-blocking presence probe
+    for optional elements. Used to decide whether an optional UI control is
+    present before attempting required actions on it.
+    """
+    try:
+        return int(locator.count())
+    except Exception:
+        return 0
 
 
 def select_ascending_order(page: Any) -> None:
@@ -875,13 +954,14 @@ def click_visualizar_report(page: Any) -> None:
         page: A Playwright ``Page`` object.
 
     Raises:
+        NavigationTimeoutError: on Playwright timeout.
         NavigationError: If the button is not found.
     """
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         raise NavigationError(
-            f"Iframe '{SEL_FRAME_POL}' não encontrado ao tentar "
-            "visualizar relatório."
+            "The admissions iframe was not available when visualizing "
+            "the evolution report."
         )
 
     button = frame.locator(SEL_VISUALIZAR_BUTTON)
@@ -889,10 +969,10 @@ def click_visualizar_report(page: Any) -> None:
         button.first.wait_for(state="visible", timeout=15000)
         button.first.click()
     except Exception as exc:
-        raise NavigationError(
-            "Botão de visualizar relatório não encontrado ou "
-            "não clicável."
-        ) from exc
+        _raise_required_action_error(
+            exc,
+            fallback_message="Could not find or click the visualize button.",
+        )
 
     page.wait_for_timeout(1500)
 
@@ -1165,9 +1245,12 @@ def click_dados_do_paciente(
         except NavigationError:
             raise
         except Exception as exc:
-            raise NavigationError(
-                "Could not locate 'Dados do Paciente' in the POL menu."
-            ) from exc
+            _raise_required_action_error(
+                exc,
+                fallback_message=(
+                    "Could not locate 'Dados do Paciente' in the POL menu."
+                ),
+            )
 
     try:
         locator.first.click(
@@ -1176,9 +1259,12 @@ def click_dados_do_paciente(
     except NavigationError:
         raise
     except Exception as exc:
-        raise NavigationError(
-            "Could not click 'Dados do Paciente' in the POL menu."
-        ) from exc
+        _raise_required_action_error(
+            exc,
+            fallback_message=(
+                "Could not click 'Dados do Paciente' in the POL menu."
+            ),
+        )
 
     page.wait_for_timeout(_bound_ms(deadline_s, _DEMOGRAPHICS_PAUSE_MS))
 
