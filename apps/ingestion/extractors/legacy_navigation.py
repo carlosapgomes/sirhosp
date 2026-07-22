@@ -305,45 +305,71 @@ def ensure_search_screen(page: Any, *, timeout_ms: int | None = None) -> None:
         logger.debug("#prontuarioInput not immediately visible, trying fallbacks...")
 
     # Strategy 2: Try the POL menu button (most reliable fallback).
+    # PSW-S17 post-ce2c494 (D11): non-blocking presence probe for optional
+    # discovery; once present, interaction failures go through the typed
+    # required-action mapping and are NOT swallowed as fallback misses.
     pol_menu = page.locator(SEL_POL_MENU)
-    try:
-        pol_menu.wait_for(state="visible", timeout=_bound_ms(deadline_s, 5000))
-        pol_menu.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
-        page.wait_for_timeout(_bound_ms(deadline_s, 1800))
+    if _locator_count(pol_menu) > 0:
         try:
-            prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
-            logger.debug("Search screen opened via #polMenu.")
-            return
+            pol_menu.first.click(
+                **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
+            )
+            page.wait_for_timeout(_bound_ms(deadline_s, 1800))
+            try:
+                prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
+                logger.debug("Search screen opened via #polMenu.")
+                return
+            except NavigationError:
+                raise
+            except Exception as exc:
+                _raise_required_action_error(
+                    exc,
+                    fallback_message=(
+                        "Could not reveal the patient search screen "
+                        "after clicking the POL menu."
+                    ),
+                )
         except NavigationError:
             raise
-        except Exception:
-            logger.debug("#polMenu click did not reveal search screen.")
-    except NavigationError:
-        raise
-    except Exception:
-        logger.debug("#polMenu not available.")
+        except Exception as exc:
+            _raise_required_action_error(
+                exc,
+                fallback_message="Could not click the POL menu button.",
+            )
 
     # Strategy 3: Try the dashboard shortcut.
-    try:
-        dashboard = page.get_by_role(
-            "button",
-            name=re.compile(r"Clique aqui para acessar o", re.IGNORECASE),
-        )
-        dashboard.wait_for(state="visible", timeout=_bound_ms(deadline_s, 3000))
-        dashboard.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
-        page.wait_for_timeout(_bound_ms(deadline_s, 1800))
+    # PSW-S17 post-ce2c494 (D11): same non-blocking probe + typed mapping.
+    dashboard = page.get_by_role(
+        "button",
+        name=re.compile(r"Clique aqui para acessar o", re.IGNORECASE),
+    )
+    if _locator_count(dashboard) > 0:
         try:
-            prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
-            logger.debug("Search screen opened via dashboard shortcut.")
-            return
+            dashboard.first.click(
+                **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
+            )
+            page.wait_for_timeout(_bound_ms(deadline_s, 1800))
+            try:
+                prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
+                logger.debug("Search screen opened via dashboard shortcut.")
+                return
+            except NavigationError:
+                raise
+            except Exception as exc:
+                _raise_required_action_error(
+                    exc,
+                    fallback_message=(
+                        "Could not reveal the patient search screen "
+                        "after clicking the dashboard shortcut."
+                    ),
+                )
         except NavigationError:
             raise
-        except Exception:
-            logger.debug("Dashboard shortcut did not reveal search screen.")
-    except NavigationError:
-        raise
-    except Exception:
-        logger.debug("Dashboard shortcut not available.")
+        except Exception as exc:
+            _raise_required_action_error(
+                exc,
+                fallback_message="Could not click the dashboard shortcut.",
+            )
 
     raise NavigationError(
         "Could not make the patient search screen visible. "
@@ -1397,9 +1423,16 @@ def read_demographic_fields(frame: Any) -> dict[str, str]:
             _DEMOGRAPHIC_READ_JS, DEMOGRAPHIC_FIELD_SELECTORS
         )
     except Exception as exc:
+        # PSW-S17 post-ce2c494 (D13): a real Playwright timeout from
+        # Frame.evaluate() becomes a typed NavigationTimeoutError; other
+        # failures stay ordinary NavigationError. Raw chain suppressed.
+        if is_playwright_timeout_error(exc):
+            raise NavigationTimeoutError(
+                _REQUIRED_ACTION_TIMEOUT_MESSAGE
+            ) from None
         raise NavigationError(
             "Could not read demographic fields from the Cadastro tab."
-        ) from exc
+        ) from None
     if not isinstance(result, dict):
         raise NavigationError(
             "Could not read demographic fields from the Cadastro tab."

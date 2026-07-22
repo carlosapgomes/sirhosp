@@ -339,3 +339,60 @@ A new test drives the real chain (persistent command ->
 The report distinguishes genuine behavioral RED at source/persistence
 boundaries from implementation-detail changes, records exact baseline
 counts, and claims only behavior proved by tests or inspection.
+
+## Post-ce2c494 Corrective Appendix (PSW-S17 final evidence closure)
+
+The `ce2c494` commit was pushed while source-timeout and evidence
+requirements remained incomplete. Independent reproduction with the
+public real `playwright.sync_api.TimeoutError` identified six additional
+defects (D11-D16) that are corrected in this closure.
+
+### D11: ensure_search_screen present-element timeouts
+
+`ensure_search_screen()` now uses a non-blocking `_locator_count()` probe
+for optional POL-menu/dashboard discovery. Once an element is positively
+present, its click and the post-click readiness wait route through
+`_raise_required_action_error`, so a real Playwright timeout becomes a
+typed `NavigationTimeoutError` — not a swallowed fallback miss.
+
+### D12: PDF report-content timeout
+
+`EvolutionPdfFlow._resolve_pdf_url()` and
+`RealHandleBridge._resolve_pdf_url_from_report_page()` detect a real
+Playwright timeout from `page.content()` and raise
+`EvolutionPdfTimeoutError` instead of substituting empty HTML. The
+bridge action-flow caller re-raises the typed timeout instead of
+catching generic `Exception` and continuing.
+
+### D13: demographics field-read timeout
+
+`read_demographic_fields()` detects a Playwright timeout from
+`Frame.evaluate()` and raises `NavigationTimeoutError`. Non-timeout
+evaluation failures stay ordinary `NavigationError`.
+
+### D14: strict PDF deadline
+
+`EvolutionPdfFlow.extract()` uses a single monotonic deadline
+(`_deadline_s` / `_remaining_ms` / `_bound_ms`). The caller `timeout` is
+an UPPER BOUND: a 5-second caller budget never yields a 120-second
+download. Every phase (date fills, generate click, report wait, content
+read, download) receives a strictly-positive bounded timeout no greater
+than the remaining budget. Expiration raises `EvolutionPdfTimeoutError`.
+
+### D15: exact cross-worker matrix
+
+The main matrix now compares exact normalized run/attempt error messages
+(equal to `safe_failure_text(expected_reason)`), stage metric
+`error_type`/`error_message`, batch status, and `FinalRunFailure` fields
+(batch_id, run_id, patient_record, intent, attempts_exhausted,
+failed_at). Both retryable and terminal modes are exercised through both
+worker commands.
+
+### D16: complete sentinel coverage
+
+Every injected sentinel is asserted absent from run error_message,
+latest-attempt error_message, every stage `details_json`, command
+stdout, command stderr, and every captured log record. The
+current-worker subprocess test now checks stderr sentinel against
+command stderr (not just stdout). The persistent and integration tests
+capture stdout, stderr, and logs.

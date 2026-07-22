@@ -1096,9 +1096,15 @@ class TestWorkerStageMetrics:
         assert ip_stage.started_at is not None
         assert ip_stage.finished_at is not None
 
-    def test_ingestion_persistence_stage_failed(self):
+    def test_ingestion_persistence_stage_failed(self, capsys, caplog):
         """D6: ingestion_persistence stage is persisted as failed on ingest
-        error, with normalized category/type and a sentinel-safe message."""
+        error, with normalized category/type and a sentinel-safe message.
+
+        D16: sentinel is asserted absent from latest attempt, stdout,
+        stderr, and logs.
+        """
+        import logging
+
         from apps.ingestion.models import IngestionRunStageMetric
         from apps.ingestion.run_lifecycle import safe_failure_text
 
@@ -1135,7 +1141,7 @@ class TestWorkerStageMetrics:
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.Command._ingest_evolutions",
             side_effect=RuntimeError(f"Persistence layer unavailable {sentinel}"),
-        ):
+        ), caplog.at_level(logging.WARNING):
             self._patch_and_call(mock_ext)
 
         run.refresh_from_db()
@@ -1152,9 +1158,17 @@ class TestWorkerStageMetrics:
         assert stage.details_json["error_message"] == expected_msg
         assert run.finished_at is not None
         assert stage.finished_at <= run.finished_at
-        # The sentinel must NOT appear anywhere persisted.
+        # D6: sentinel absent from persisted run/stage surfaces.
         assert sentinel not in (run.error_message or "")
         assert sentinel not in str(stage.details_json or {})
+        # D16: sentinel absent from latest attempt, stdout, stderr, logs.
+        latest = run.attempts.order_by("-attempt_number").first()
+        assert sentinel not in (latest.error_message if latest else "")
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            assert sentinel not in stream
+        for record in caplog.records:
+            assert sentinel not in record.getMessage()
 
     def test_admissions_only_has_admissions_capture_stage(self):
         """Admissions-only run also records admissions_capture stage."""

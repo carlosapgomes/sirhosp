@@ -173,12 +173,12 @@ class _FakeLocator:
     def count(self) -> int:
         return self._count
 
-    def fill(self, value: str) -> None:
+    def fill(self, value: str, **kwargs: Any) -> None:
         if self._fill_error:
             raise RuntimeError("fill failed")
         self.filled.append(value)
 
-    def click(self) -> None:
+    def click(self, **kwargs: Any) -> None:
         self.clicked += 1
 
     def get_attribute(self, name: str) -> str | None:  # noqa: ARG002
@@ -316,9 +316,12 @@ class TestEvolutionPdfFlowDownload:
 
 
 class TestEvolutionPdfFlowTimeoutPropagation:
-    """Timeout values reach the report/download waits."""
+    """Timeout values reach the report/download waits.
 
-    def test_download_timeout_honours_overall_hint(self) -> None:
+    PSW-S17 post-ce2c494 (D14): the caller hint is an UPPER BOUND. When the
+    caller budget exceeds the configured default, the default caps it."""
+
+    def test_download_timeout_caps_larger_caller_budget(self) -> None:
         pdf_bytes = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
         page = _FakePdfPage(
             html=_object_html("https://legacy.example/r.pdf"),
@@ -329,21 +332,24 @@ class TestEvolutionPdfFlowTimeoutPropagation:
         flow.extract(start_date="2024-01-01", end_date="2024-01-02", timeout=30)
 
         _, kwargs = page.request.get_calls[0]
-        # The caller hint (30s) must be honoured even if it exceeds the default.
-        assert kwargs["timeout"] == 30_000
+        # The conservative default (5s) caps the larger caller budget (30s).
+        assert kwargs["timeout"] == 5_000
 
-    def test_download_timeout_falls_back_to_default(self) -> None:
+    def test_download_timeout_small_caller_budget_is_upper_bound(self) -> None:
         pdf_bytes = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
         page = _FakePdfPage(
             html=_object_html("https://legacy.example/r.pdf"),
             response=_FakeResponse(ok=True, body=pdf_bytes),
         )
-        flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS)
+        flow = EvolutionPdfFlow(
+            page, pdf_download_timeout_ms=DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS
+        )
 
         flow.extract(start_date="2024-01-01", end_date="2024-01-02", timeout=1)
 
         _, kwargs = page.request.get_calls[0]
-        assert kwargs["timeout"] == DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS
+        # The caller hint (1s) is the upper bound; the larger default is capped.
+        assert kwargs["timeout"] == 1_000
 
 
 class TestEvolutionPdfFlowSanitizedFailures:
@@ -396,12 +402,16 @@ class TestEvolutionPdfFlowTypedTimeouts:
 
     def test_absent_date_input_is_optional_noop(self) -> None:
         """A date input that is absent (count 0) is a no-op, not a timeout."""
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+
         page = _FakePdfPage(html="<html><body>no inputs</body></html>")
         flow = EvolutionPdfFlow(page)
         # Should not raise just because the inputs are absent.
-        # The flow will later fail at PDF URL resolution, but the date
-        # application must be a no-op.
-        flow._apply_dates_if_present("01/01/2024", "31/12/2024")
+        flow._apply_dates_if_present(
+            "01/01/2024", "31/12/2024", _pdf_deadline_s(120)
+        )
 
     def test_present_date_input_playwright_timeout_raises_typed(self) -> None:
         """A Playwright timeout from filling a present date input raises
@@ -418,7 +428,7 @@ class TestEvolutionPdfFlowTypedTimeouts:
             def __init__(self):
                 super().__init__(count_value=1)
 
-            def fill(self, value: str) -> None:
+            def fill(self, value: str, **kwargs) -> None:
                 raise PlaywrightTimeoutError("Timeout 10000ms")
 
         page = _FakePdfPage(
@@ -427,8 +437,14 @@ class TestEvolutionPdfFlowTypedTimeouts:
         )
         flow = EvolutionPdfFlow(page)
 
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+
         with pytest.raises(EvolutionPdfTimeoutError):
-            flow._apply_dates_if_present("01/01/2024", "31/12/2024")
+            flow._apply_dates_if_present(
+                "01/01/2024", "31/12/2024", _pdf_deadline_s(120)
+            )
 
     def test_present_generate_button_playwright_timeout_raises_typed(self) -> None:
         """A Playwright timeout from clicking a present generate button
@@ -445,7 +461,7 @@ class TestEvolutionPdfFlowTypedTimeouts:
             def __init__(self):
                 super().__init__(count_value=1)
 
-            def click(self) -> None:
+            def click(self, **kwargs) -> None:
                 raise PlaywrightTimeoutError("Timeout 10000ms")
 
         page = _FakePdfPage(
@@ -454,8 +470,12 @@ class TestEvolutionPdfFlowTypedTimeouts:
         )
         flow = EvolutionPdfFlow(page)
 
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+
         with pytest.raises(EvolutionPdfTimeoutError):
-            flow._generate_report_if_present()
+            flow._generate_report_if_present(_pdf_deadline_s(120))
 
 
 class TestEvolutionPdfFlowNoSubprocessNoNewBrowser:
@@ -673,3 +693,205 @@ class TestEvolutionPdfFlowDateValidation:
         # Validation failed before any page interaction.
         assert page.request.get_calls == []
         assert gen_loc.clicked == 0
+
+
+# ===========================================================================
+# PSW-S17 post-ce2c494: D12 (content-read timeout) and D14 (strict deadline)
+# ===========================================================================
+
+
+class TestEvolutionPdfFlowContentReadTimeout:
+    """D12: a real Playwright timeout from page.content() during PDF URL
+    resolution must surface as EvolutionPdfTimeoutError, not be swallowed
+    into an EvolutionPdfError ('could not be located')."""
+
+    def test_content_timeout_in_resolve_pdf_url_raises_typed(self) -> None:
+        """Direct _resolve_pdf_url: page.content() raises real Playwright
+        timeout → EvolutionPdfTimeoutError."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+
+        class _TimeoutContentPage(_FakePdfPage):
+            def content(self):
+                raise PlaywrightTimeoutError("Timeout 30000ms")
+
+        page = _TimeoutContentPage(html="")
+        flow = EvolutionPdfFlow(page)
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+
+        with pytest.raises(EvolutionPdfTimeoutError):
+            flow._resolve_pdf_url(_pdf_deadline_s(120))
+
+    def test_content_timeout_in_extract_raises_typed(self) -> None:
+        """End-to-end through extract(): page.content() real timeout →
+        EvolutionPdfTimeoutError (not EvolutionPdfError)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+
+        class _TimeoutContentPage(_FakePdfPage):
+            def content(self):
+                raise PlaywrightTimeoutError("Timeout 30000ms")
+
+        page = _TimeoutContentPage(html="")
+        flow = EvolutionPdfFlow(page)
+
+        with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
+            flow.extract(start_date="2024-01-01", end_date="2024-01-02")
+
+        # The message must NOT be the ordinary "could not be located" text.
+        message = str(exc_info.value)
+        assert "could not be located" not in message
+        assert "timed out" in message.lower()
+
+
+class TestEvolutionPdfFlowStrictDeadline:
+    """D14: the caller timeout is an upper bound. A 5-second caller budget
+    must never yield a 120000 ms report wait or download. Deterministic
+    tests with a controlled clock — no real sleeping."""
+
+    def test_small_caller_budget_caps_download_timeout(self) -> None:
+        """caller_hint=5s → derived download timeout ≤ 5000 ms."""
+        page = _FakePdfPage(html="<html></html>")
+        flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=120_000)
+
+        # The derived download timeout must not exceed the caller hint.
+        derived = flow._derive_download_timeout_ms(timeout_seconds=5)
+        assert derived <= 5_000
+        assert derived >= 1
+
+    def test_larger_caller_budget_capped_by_configured_default(self) -> None:
+        """When caller budget is larger than the configured default, the
+        default remains a conservative cap."""
+        page = _FakePdfPage(html="<html></html>")
+        flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=30_000)
+
+        derived = flow._derive_download_timeout_ms(timeout_seconds=600)
+        # Conservative cap: no larger than the configured default.
+        assert derived <= 30_000
+
+    def test_extract_phases_share_single_deadline(self) -> None:
+        """Elapsed phases reduce later timeouts; the download never receives
+        more than the remaining caller budget. Uses a controlled clock."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        # Controlled monotonic clock.
+        class _Clock:
+            def __init__(self):
+                self._t = 1000.0
+
+            def monotonic(self):
+                return self._t
+
+            def advance(self, seconds):
+                self._t += seconds
+
+        clock = _Clock()
+
+        # A page where date fill "consumes" most of a 10-second budget.
+        consumed = {"s": 0.0}
+
+        class _SlowFillLocator(_FakeLocator):
+            def __init__(self):
+                super().__init__(count_value=1)
+
+            def fill(self, value, **kwargs):
+                # Simulate fill consuming 9.5 seconds of the 10s budget.
+                clock.advance(9.5)
+                consumed["s"] += 9.5
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _DATE_START_SELECTOR,
+        )
+
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            response=_FakeResponse(ok=True, body=b"%PDF-1.4 truncated"),
+            locators={_DATE_START_SELECTOR: _SlowFillLocator()},
+        )
+        flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=120_000)
+
+        with patch.object(time_mod, "monotonic", clock.monotonic):
+            try:
+                flow.extract(
+                    start_date="2024-01-01",
+                    end_date="2024-01-02",
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
+        # The download timeout passed to request.get must be ≤ remaining
+        # budget (10s - 9.5s consumed = 0.5s = 500ms), not 120000ms.
+        if page.request.get_calls:
+            _, kwargs = page.request.get_calls[0]
+            assert kwargs["timeout"] <= 500
+            assert kwargs["timeout"] >= 1
+
+    def test_deadline_expiry_before_download_raises_typed(self) -> None:
+        """When the budget is fully consumed before the download, a typed
+        EvolutionPdfTimeoutError is raised (not a zero timeout or 120s)."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _DATE_START_SELECTOR,
+            EvolutionPdfTimeoutError,
+        )
+
+        class _Clock:
+            def __init__(self):
+                self._t = 1000.0
+
+            def monotonic(self):
+                return self._t
+
+            def advance(self, seconds):
+                self._t += seconds
+
+        clock = _Clock()
+
+        class _ExhaustBudgetLocator(_FakeLocator):
+            def __init__(self):
+                super().__init__(count_value=1)
+
+            def fill(self, value, **kwargs):
+                # Consume the entire 5s budget.
+                clock.advance(10.0)
+
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            response=_FakeResponse(ok=True, body=b"%PDF-1.4 truncated"),
+            locators={_DATE_START_SELECTOR: _ExhaustBudgetLocator()},
+        )
+        flow = EvolutionPdfFlow(page)
+
+        with patch.object(time_mod, "monotonic", clock.monotonic):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                flow.extract(
+                    start_date="2024-01-01",
+                    end_date="2024-01-02",
+                    timeout=5,
+                )
+
+    def test_no_phase_receives_zero_timeout(self) -> None:
+        """No passed timeout is ever zero."""
+        page = _FakePdfPage(html="<html></html>")
+        flow = EvolutionPdfFlow(page)
+
+        # Even with a tiny caller hint, every derived timeout is ≥ 1.
+        derived = flow._derive_download_timeout_ms(timeout_seconds=1)
+        assert derived >= 1

@@ -42,7 +42,9 @@ This module is split into two intentionally separate concerns:
 from __future__ import annotations
 
 import logging
+import math
 import re
+import time
 from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -64,6 +66,9 @@ DEFAULT_REPORT_WAIT_TIMEOUT_MS = 30_000
 
 DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS = 120_000
 """Default timeout (ms) for the authenticated PDF download request."""
+
+_DEFAULT_ACTION_TIMEOUT_MS = 30_000
+"""Conservative cap (ms) for a single Playwright fill/click in the PDF flow."""
 
 # CSS selectors used to drive the legacy evolution report flow. Kept here so
 # they are isolated from the SessionHandle protocol and testable with fakes.
@@ -105,6 +110,42 @@ _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE = (
 _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE = (
     "Persistent evolution PDF download timed out."
 )
+
+
+# ---------------------------------------------------------------------------
+# PSW-S17 post-ce2c494 (D14): strict single-deadline helpers.
+# The caller's ``timeout`` (seconds) is an UPPER BOUND, not a lower bound.
+# A 5-second caller budget must never yield a 120-second download. Every
+# phase of ``extract()`` shares one monotonic deadline; expiration raises
+# ``EvolutionPdfTimeoutError`` with constant text. No phase receives zero.
+# ---------------------------------------------------------------------------
+
+
+def _deadline_s(timeout_s: int | float) -> float:
+    """Return a monotonic deadline (seconds) for a caller budget."""
+    return time.monotonic() + max(1, int(timeout_s))
+
+
+def _remaining_ms(deadline_s: float) -> int:
+    """Strictly-positive remaining ms; raise typed timeout on expiry.
+
+    Uses ``ceil`` so a small positive remainder is never collapsed to zero
+    (Playwright treats ``timeout=0`` as *disabled*). An exhausted deadline
+    raises ``EvolutionPdfTimeoutError``.
+    """
+    remaining = deadline_s - time.monotonic()
+    if remaining <= 0:
+        raise EvolutionPdfTimeoutError(_EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE)
+    return max(1, math.ceil(remaining * 1000))
+
+
+def _bound_ms(deadline_s: float, default_ms: int) -> int:
+    """Return a strictly-positive timeout bounded by both default and budget.
+
+    ``default_ms`` is a conservative cap; the remaining budget may be smaller.
+    Expired deadline raises typed timeout (never returns zero).
+    """
+    return min(default_ms, _remaining_ms(deadline_s))
 
 
 # ===========================================================================
@@ -555,45 +596,48 @@ class EvolutionPdfFlow:
     ) -> list[dict[str, Any]]:
         """Run the PDF flow for one date window and return normalised events.
 
+        PSW-S17 post-ce2c494 (D14): the caller ``timeout`` is an UPPER BOUND.
+        A single monotonic deadline bounds every phase (date fills, report
+        generation, report-content read, download). Each phase receives a
+        strictly-positive bounded timeout no greater than the remaining
+        caller budget; expiration raises :class:`EvolutionPdfTimeoutError`.
+
         Args:
-            start_date: Window start in ``YYYY-MM-DD`` (public contract). It is
-                converted to ``DD/MM/YYYY`` before filling the legacy inputs.
-            end_date: Window end in ``YYYY-MM-DD`` (public contract). It is
-                converted to ``DD/MM/YYYY`` before filling the legacy inputs.
+            start_date: Window start in ``YYYY-MM-DD``.
+            end_date: Window end in ``YYYY-MM-DD``.
             admission_key: Admission key to stamp on events (may be empty).
-            timeout: Overall hint in seconds; the download wait honours it.
+            timeout: Overall budget in seconds (upper bound for all phases).
 
         Returns:
             Normalised evolution dicts (possibly empty).
 
         Raises:
-            EvolutionPdfError: On any sanitised failure — including an invalid
-                date window (raised before report generation/download), a
-                missing PDF URL, a download failure, or invalid/empty PDF text.
+            EvolutionPdfError: On any sanitised non-timeout failure.
+            EvolutionPdfTimeoutError: On any Playwright/deadline timeout.
         """
         if self._page is None:
             raise EvolutionPdfError("No active page for evolution PDF flow")
 
-        # The public contract keeps ISO YYYY-MM-DD; the legacy report inputs
-        # require DD/MM/YYYY. Validate + convert before any page interaction so
-        # invalid windows fail fast without generating or downloading anything.
+        # Validate + convert dates before any page interaction.
         br_start_date = _format_br_date(start_date)
         br_end_date = _format_br_date(end_date)
 
-        download_timeout_ms = self._derive_download_timeout_ms(timeout)
+        # Single monotonic deadline shared by all phases (D14).
+        deadline_s = _deadline_s(timeout)
 
         # Steps 1-2: only interact when the legacy filter UI is present.
-        self._apply_dates_if_present(br_start_date, br_end_date)
-        self._generate_report_if_present()
+        self._apply_dates_if_present(br_start_date, br_end_date, deadline_s)
+        self._generate_report_if_present(deadline_s)
 
         # Step 3: resolve the PDF URL from the rendered report.
-        pdf_url = self._resolve_pdf_url()
+        pdf_url = self._resolve_pdf_url(deadline_s)
         if not pdf_url:
             raise EvolutionPdfError(
                 "Evolution report PDF could not be located on the page"
             )
 
-        # Step 4: download through the existing browser context.
+        # Step 4: download bounded by the remaining budget.
+        download_timeout_ms = _bound_ms(deadline_s, self._pdf_download_timeout_ms)
         pdf_bytes = self._download(pdf_url, download_timeout_ms)
 
         # Step 5: extract + normalise.
@@ -605,22 +649,25 @@ class EvolutionPdfFlow:
     # ------------------------------------------------------------------
 
     def _derive_download_timeout_ms(self, timeout_seconds: int) -> int:
-        """Pick a download timeout that honours the caller's overall hint."""
-        candidate = max(1, int(timeout_seconds)) * 1000
-        return max(self._pdf_download_timeout_ms, candidate)
+        """Return a download timeout bounded by the caller hint (D14).
 
-    def _apply_dates_if_present(self, br_start_date: str, br_end_date: str) -> None:
-        """Fill the legacy date inputs when present (PSW-S17 R2).
-
-        PSW-S17 R2 (second corrective closure): date inputs are optional —
-        their presence is probed via ``_locator_count``. When an input is
-        present, a Playwright timeout from its ``fill`` raises a typed
-        :class:`EvolutionPdfTimeoutError` instead of being swallowed.
+        PSW-S17 post-ce2c494: the caller hint is an UPPER BOUND, not a lower
+        bound. The configured ``_pdf_download_timeout_ms`` remains a
+        conservative cap when the caller budget is larger.
         """
+        caller_ms = max(1, int(timeout_seconds)) * 1000
+        return min(self._pdf_download_timeout_ms, caller_ms)
+
+    def _apply_dates_if_present(
+        self, br_start_date: str, br_end_date: str, deadline_s: float
+    ) -> None:
+        """Fill the legacy date inputs when present (D14: bounded by deadline)."""
         start_input = self._page.locator(_DATE_START_SELECTOR)
         if self._locator_count(start_input) > 0:
             try:
-                start_input.first.fill(br_start_date)
+                start_input.first.fill(
+                    br_start_date, timeout=_bound_ms(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
+                )
             except Exception as exc:  # noqa: BLE001 - sanitized below
                 if is_playwright_timeout_error(exc):
                     raise EvolutionPdfTimeoutError(
@@ -633,7 +680,9 @@ class EvolutionPdfFlow:
         end_input = self._page.locator(_DATE_END_SELECTOR)
         if self._locator_count(end_input) > 0:
             try:
-                end_input.first.fill(br_end_date)
+                end_input.first.fill(
+                    br_end_date, timeout=_bound_ms(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
+                )
             except Exception as exc:  # noqa: BLE001 - sanitized below
                 if is_playwright_timeout_error(exc):
                     raise EvolutionPdfTimeoutError(
@@ -644,21 +693,14 @@ class EvolutionPdfFlow:
                     "fillable (sanitized, non-timeout)"
                 )
 
-    def _generate_report_if_present(self) -> None:
-        """Click the report generate button when present (PSW-S17 R2).
-
-        PSW-S17 R2 (second corrective closure): the generate button is
-        optional — its presence is probed via ``_locator_count``. When it
-        is present, a Playwright timeout from its ``click`` (or the
-        subsequent report wait) raises a typed
-        :class:`EvolutionPdfTimeoutError` instead of being swallowed.
-        """
+    def _generate_report_if_present(self, deadline_s: float) -> None:
+        """Click the report generate button when present (D14: bounded)."""
         button = self._page.locator(_GENERATE_BUTTON_SELECTOR)
         if self._locator_count(button) == 0:
             return
         try:
-            button.first.click()
-            self._wait_for_report()
+            button.first.click(timeout=_bound_ms(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+            self._wait_for_report(deadline_s)
         except EvolutionPdfError:
             raise
         except Exception as exc:  # noqa: BLE001 - sanitized below
@@ -671,19 +713,12 @@ class EvolutionPdfFlow:
                 "(sanitized, non-timeout)"
             )
 
-    def _wait_for_report(self) -> None:
-        """Wait for the report/PDF object to render; raise typed timeout.
-
-        PSW-S17 R2/R3: a Playwright timeout while waiting for the report
-        object MUST surface as a typed
-        :class:`EvolutionPdfTimeoutError` rather than being silently
-        treated as best-effort. Non-timeout exceptions remain best-effort
-        (the report UI is optional on some pages).
-        """
+    def _wait_for_report(self, deadline_s: float) -> None:
+        """Wait for the report/PDF object to render; raise typed timeout."""
         try:
             self._page.wait_for_selector(
                 _PDF_OBJECT_SELECTOR,
-                timeout=self._report_wait_timeout_ms,
+                timeout=_bound_ms(deadline_s, self._report_wait_timeout_ms),
             )
         except Exception as exc:  # noqa: BLE001 - sanitized below
             if is_playwright_timeout_error(exc):
@@ -695,12 +730,23 @@ class EvolutionPdfFlow:
                 "(sanitized, non-timeout)"
             )
 
-    def _resolve_pdf_url(self) -> str | None:
-        """Resolve the PDF URL from the page content and viewer frames."""
+    def _resolve_pdf_url(self, deadline_s: float) -> str | None:
+        """Resolve the PDF URL from the page content and viewer frames.
+
+        PSW-S17 post-ce2c494 (D12): a real Playwright timeout from
+        ``page.content()`` raises ``EvolutionPdfTimeoutError`` instead of
+        being swallowed into an empty-HTML missing-URL path.
+        """
+        # Deadline expiry before the content read must raise.
+        _remaining_ms(deadline_s)
         base_url = self._safe_url()
         try:
             html = self._page.content()
-        except Exception:  # noqa: BLE001 - sanitized below
+        except Exception as exc:  # noqa: BLE001 - sanitized below
+            if is_playwright_timeout_error(exc):
+                raise EvolutionPdfTimeoutError(
+                    _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
+                ) from None
             logger.warning("Persistent evolution PDF: page content unavailable (sanitized)")
             html = ""
 

@@ -814,6 +814,11 @@ class RealHandleBridge:
             # Step 5g: Download PDF through existing context
             try:
                 pdf_url = self._resolve_pdf_url_from_report_page(page)
+            except EvolutionPdfTimeoutError:
+                # PSW-S17 post-ce2c494 (D12): typed content-read timeout
+                # MUST propagate; it must not be swallowed as a generic
+                # URL-resolution failure.
+                raise
             except Exception:
                 logger.warning(
                     "Evolution action flow: PDF URL resolution failed (sanitized)"
@@ -860,6 +865,10 @@ class RealHandleBridge:
     def _resolve_pdf_url_from_report_page(self, page: Any) -> str | None:
         """Resolve a PDF URL from the report page content or viewer frames.
 
+        PSW-S17 post-ce2c494 (D12): a real Playwright timeout from
+        ``page.content()`` raises ``EvolutionPdfTimeoutError`` instead of
+        being swallowed into empty HTML.
+
         Checks:
         1. ``<object type="application/pdf" data="...">``
         2. Viewer frame URL (``.pdf`` path or ``file=`` param).
@@ -869,6 +878,9 @@ class RealHandleBridge:
 
         Returns:
             The PDF URL string, or ``None`` if unresolvable.
+
+        Raises:
+            EvolutionPdfTimeoutError: on a Playwright content-read timeout.
         """
         from urllib.parse import parse_qs, urljoin, urlparse  # noqa: PLC0415
 
@@ -877,7 +889,11 @@ class RealHandleBridge:
         # Strategy 1: <object> tag
         try:
             html = page.content()
-        except Exception:
+        except Exception as exc:
+            if is_playwright_timeout_error(exc):
+                raise EvolutionPdfTimeoutError(
+                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
+                ) from None
             html = ""
 
         import re  # noqa: PLC0415

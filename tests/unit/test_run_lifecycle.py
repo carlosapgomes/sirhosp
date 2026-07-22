@@ -545,43 +545,70 @@ class TestCrossWorkerFailureParityMatrix:
                 assert failure.patient_record == params.get("patient_record", "")
                 assert failure.intent == "admissions_only"
 
-        # PSW-S17 R7 (second closure): normalized snapshot parity between
-        # workers. Compare run + latest attempt externally observable
-        # fields directly (excluding DB identities and timestamps).
+        # PSW-S17 post-ce2c494 (D15): EXACT normalized snapshot parity
+        # between workers. Compares exact run/attempt error messages (not
+        # just presence), stage metric details, and batch state.
+        from apps.ingestion.run_lifecycle import safe_failure_text
+
         def _snap(run):
             latest = (
                 IngestionRunAttempt.objects.filter(run=run)
                 .order_by("-attempt_number")
                 .first()
             )
+            stage = IngestionRunStageMetric.objects.filter(
+                run=run, stage_name="admissions_capture"
+            ).first()
+            batch = run.batch
             return {
                 "run_status": run.status,
                 "attempt_count": run.attempt_count,
                 "failure_reason": run.failure_reason,
                 "timed_out": run.timed_out,
-                "run_error_present": bool(run.error_message),
+                "run_error_message": run.error_message or "",
                 "run_finished_at_present": run.finished_at is not None,
                 "next_retry_at_present": run.next_retry_at is not None,
                 "attempt_status": latest.status if latest else None,
                 "attempt_number": latest.attempt_number if latest else None,
                 "attempt_failure_reason": latest.failure_reason if latest else None,
                 "attempt_timed_out": latest.timed_out if latest else None,
-                "attempt_error_present": bool(latest and latest.error_message),
+                "attempt_error_message": (latest.error_message if latest else "") or "",
                 "attempt_finished_at_present": bool(latest and latest.finished_at),
+                "stage_status": stage.status if stage else None,
+                "stage_error_type": (stage.details_json or {}).get("error_type")
+                if stage else None,
+                "stage_error_message": (stage.details_json or {}).get("error_message")
+                if stage else None,
                 "final_failure_count": FinalRunFailure.objects.filter(run=run).count(),
+                "batch_status": batch.status if batch else None,
+                "batch_finished_at_present": bool(batch and batch.finished_at),
             }
 
         snap_current = _snap(run_current)
         snap_persistent = _snap(run_persistent)
-        # attempt_number may differ if the seeded prior attempts differ; both
-        # workers use the same seeding so they must match.
         assert snap_current == snap_persistent, (
             f"Worker snapshot mismatch ({category_id}/{mode}):\n"
             f"current={snap_current}\npersistent={snap_persistent}"
         )
 
+        # Exact normalized error messages equal the category constant.
+        expected_msg = safe_failure_text(expected_reason)
+        assert run_current.error_message == expected_msg
+        assert run_persistent.error_message == expected_msg
+
         # Idempotency: re-finalizing the persistent run does not duplicate.
         if mode == "terminal":
+            # D15: explicit FinalRunFailure field snapshot.
+            for run in (run_current, run_persistent):
+                ff = FinalRunFailure.objects.filter(run=run).first()
+                assert ff is not None
+                params = run.parameters_json or {}
+                assert ff.batch_id == run.batch_id
+                assert ff.run_id == run.id
+                assert ff.patient_record == params.get("patient_record", "")
+                assert ff.intent == "admissions_only"
+                assert ff.attempts_exhausted == run.attempt_count
+                assert ff.failed_at is not None
             record_final_run_failure(run_persistent)
             assert FinalRunFailure.objects.filter(run=run_persistent).count() == 1
 
@@ -749,7 +776,7 @@ class TestSentinelSanitizationPersistent:
         )
 
     def test_admissions_navigation_timeout_does_not_leak_patient_record(
-        self, caplog
+        self, caplog, capsys
     ):
         """The real bridge/adapter admissions-navigation deadline timeout
         surfaces as a typed NavigationTimeoutError with a constant message;
@@ -811,6 +838,10 @@ class TestSentinelSanitizationPersistent:
         for record in caplog.records:
             log_text = record.getMessage()
             assert SENSITIVE_PATIENT_SENTINEL not in log_text
+        # D16: command stdout AND stderr must not leak the sentinel.
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            assert SENSITIVE_PATIENT_SENTINEL not in stream
 
     def test_pdf_download_timeout_does_not_leak_sentinels(self, caplog):
         """The real PDF flow download timeout surfaces as a typed
@@ -979,11 +1010,13 @@ class TestCurrentWorkerSubprocessSentinels:
         )
 
     def test_subprocess_timeout_does_not_leak_cmd_or_patient_record(
-        self, capsys
+        self, capsys, caplog
     ):
         """SubprocessTimeoutError carrying a sensitive cmd (incl. patient
-        record) must NOT propagate that cmd into run/attempt error_message
-        or command stderr."""
+        record) must NOT propagate that cmd into run/attempt error_message,
+        command stdout, command stderr, or logs."""
+        import logging
+
         from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
 
         run = self._queue_run()
@@ -1005,36 +1038,41 @@ class TestCurrentWorkerSubprocessSentinels:
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.PlaywrightEvolutionExtractor",
             return_value=mock_ext,
-        ):
+        ), caplog.at_level(logging.WARNING):
             call_command("process_ingestion_runs")
 
         run.refresh_from_db()
-        # Classification preserved (timeout).
         assert run.failure_reason == "timeout"
         assert run.timed_out is True
-        # DB error_message and attempt error_message must NOT contain any
-        # sentinel (cmd content, patient record, stdout/stderr previews).
+        latest = run.attempts.order_by("-attempt_number").first()
         for blob in [
             run.error_message or "",
-            run.attempts.order_by("-attempt_number").first().error_message or "",
+            latest.error_message if latest else "",
         ]:
             assert SENSITIVE_PATIENT_SENTINEL not in blob
             assert SENSITIVE_STDOUT_SENTINEL not in blob
             assert SENSITIVE_STDERR_SENTINEL not in blob
-        # Stage details sanitized too.
         for metric in IngestionRunStageMetric.objects.filter(run=run):
             text = str(metric.details_json or {})
             assert SENSITIVE_PATIENT_SENTINEL not in text
             assert SENSITIVE_STDOUT_SENTINEL not in text
             assert SENSITIVE_STDERR_SENTINEL not in text
-        # Command stderr must not echo the sentinel-laden cmd.
-        err = capsys.readouterr().err
-        assert SENSITIVE_PATIENT_SENTINEL not in err
-        assert SENSITIVE_STDOUT_SENTINEL not in err
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            assert SENSITIVE_PATIENT_SENTINEL not in stream
+            assert SENSITIVE_STDOUT_SENTINEL not in stream
+            assert SENSITIVE_STDERR_SENTINEL not in stream
+        for record in caplog.records:
+            text = record.getMessage()
+            assert SENSITIVE_PATIENT_SENTINEL not in text
+            assert SENSITIVE_STDOUT_SENTINEL not in text
+            assert SENSITIVE_STDERR_SENTINEL not in text
 
-    def test_arbitrary_value_error_sanitized_to_constant(self, capsys):
+    def test_arbitrary_value_error_sanitized_to_constant(self, capsys, caplog):
         """An arbitrary ValueError carrying a sentinel cannot reach run,
-        attempt, stage, or command stderr error text."""
+        attempt, stage, command stdout, command stderr, or logs."""
+        import logging
+
         run = self._queue_run()
         mock_ext = MagicMock()
         mock_ext.get_admission_snapshot.side_effect = ValueError(
@@ -1045,20 +1083,24 @@ class TestCurrentWorkerSubprocessSentinels:
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.PlaywrightEvolutionExtractor",
             return_value=mock_ext,
-        ):
+        ), caplog.at_level(logging.WARNING):
             call_command("process_ingestion_runs")
 
         run.refresh_from_db()
         assert run.failure_reason == "unexpected_exception"
-        # The sentinel must NOT appear in any persisted error surface.
+        latest = run.attempts.order_by("-attempt_number").first()
         assert SENSITIVE_COOKIE_SENTINEL not in (run.error_message or "")
-        attempt = run.attempts.order_by("-attempt_number").first()
-        assert SENSITIVE_COOKIE_SENTINEL not in (attempt.error_message or "")
+        assert SENSITIVE_COOKIE_SENTINEL not in (
+            latest.error_message if latest else ""
+        )
         for metric in IngestionRunStageMetric.objects.filter(run=run):
             text = str(metric.details_json or {})
             assert SENSITIVE_COOKIE_SENTINEL not in text
-        err = capsys.readouterr().err
-        assert SENSITIVE_COOKIE_SENTINEL not in err
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            assert SENSITIVE_COOKIE_SENTINEL not in stream
+        for record in caplog.records:
+            assert SENSITIVE_COOKIE_SENTINEL not in record.getMessage()
 
 
 # ---------------------------------------------------------------------------

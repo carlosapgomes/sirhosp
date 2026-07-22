@@ -1724,3 +1724,94 @@ class TestDemographicsTimeoutFidelity:
             )
         # The frame field read (a late operation) never ran.
         assert page._frame.evaluate_calls == []
+
+
+# ===========================================================================
+# PSW-S17 post-ce2c494: D12 — bridge report-content timeout propagation
+# ===========================================================================
+
+
+class TestBridgePdfContentReadTimeout:
+    """D12: a real Playwright timeout from page.content() during PDF URL
+    resolution must surface as EvolutionPdfTimeoutError at the bridge
+    boundary and must NOT be swallowed by the action-flow caller."""
+
+    def test_resolve_pdf_url_content_timeout_raises_typed(self) -> None:
+        """_resolve_pdf_url_from_report_page: page.content() raises real
+        Playwright timeout → EvolutionPdfTimeoutError."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        class _TimeoutContentPage:
+            url = "https://legacy/relatorio.xhtml"
+            frames: list = []
+
+            def content(self):
+                raise PlaywrightTimeoutError("Timeout 30000ms")
+
+        with pytest.raises(EvolutionPdfTimeoutError):
+            bridge._resolve_pdf_url_from_report_page(_TimeoutContentPage())
+
+    def test_action_flow_does_not_swallow_content_timeout(self) -> None:
+        """The extract_evolutions_via_legacy_actions caller around PDF URL
+        resolution re-raises EvolutionPdfTimeoutError instead of catching
+        generic Exception and continuing."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        class _TimeoutPage:
+            url = "https://legacy/relatorioAnaEvoInternacaoPdf.xhtml"
+            frames: list = []
+
+            def content(self):
+                raise PlaywrightTimeoutError("Timeout 30000ms")
+
+        # Patch the full action flow so the report is "ready" and the
+        # content-read path is reached directly.
+        with patch(
+            "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.search_patient"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.click_internacoes"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge._read_and_build_snapshot",
+            return_value=[{"admissionKey": "K1", "admissionStart": "2026-01-01",
+                           "admissionEnd": "", "ward": "", "bed": ""}],
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.open_internacao_detail"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.click_evolucao"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.fill_evolution_dates"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.select_ascending_order"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.click_visualizar_report"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.wait_for_report_or_no_evolutions",
+            return_value=True,
+        ), patch.object(
+            bridge, "_resolve_active_page", return_value=_TimeoutPage()
+        ):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="123",
+                    start_date="2026-01-01",
+                    end_date="2026-01-15",
+                )

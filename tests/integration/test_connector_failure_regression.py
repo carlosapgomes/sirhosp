@@ -73,25 +73,25 @@ class TestConnectorOutputCorruptionRegression:
         assert run.error_message, "Failed run must have an error message."
         assert run.finished_at is not None, "Failed run must have finished_at."
 
-    def test_json_is_string_instead_of_array_causes_run_failure(self):
+    def test_json_is_string_instead_of_array_causes_run_failure(
+        self, capsys, caplog
+    ):
         """D5: subprocess writes a JSON string (not array) to the
         ``--admissions-output`` path → run must fail with
         ``failure_reason=invalid_payload``.
 
-        The admissions command uses ``--admissions-output`` (not
-        ``--json-output``). The fake must write the bad payload to the
-        actual admissions output path so the real parsing path is
-        exercised end to end.
+        D16: the injected sentinel must be absent from DB, stdout, stderr,
+        and every log record.
         """
+        import logging
+
         sentinel = "SENSITIVE_INVALID_PAYLOAD"
         run = self._queue_run()
 
         def fake_subprocess_run(cmd, **kwargs):
-            # The admissions command uses --admissions-output.
             adm_idx = cmd.index("--admissions-output") + 1
             output_path = Path(cmd[adm_idx])
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            # Valid JSON but wrong type — string (carrying sentinel) instead of array.
             output_path.write_text(
                 f'"{sentinel}"', encoding="utf-8"
             )
@@ -103,22 +103,30 @@ class TestConnectorOutputCorruptionRegression:
         with patch(
             "apps.ingestion.extractors.playwright_extractor.run_subprocess",
             side_effect=fake_subprocess_run,
-        ):
+        ), caplog.at_level(logging.WARNING):
             call_command("process_ingestion_runs")
 
         run.refresh_from_db()
         assert run.status == "failed"
         assert run.failure_reason == "invalid_payload"
         assert run.timed_out is False
-        # The injected payload sentinel must NOT appear in any persisted
-        # or emitted error surface.
-        assert sentinel not in (run.error_message or "")
-        attempt = run.attempts.order_by("-attempt_number").first()
-        assert sentinel not in (attempt.error_message or "")
         from apps.ingestion.models import IngestionRunStageMetric
 
+        attempt = run.attempts.order_by("-attempt_number").first()
+        # Sentinel absent from all DB error surfaces.
+        for blob in [
+            run.error_message or "",
+            attempt.error_message if attempt else "",
+        ]:
+            assert sentinel not in blob
         for metric in IngestionRunStageMetric.objects.filter(run=run):
             assert sentinel not in str(metric.details_json or {})
+        # D16: sentinel absent from stdout, stderr, and logs.
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            assert sentinel not in stream
+        for record in caplog.records:
+            assert sentinel not in record.getMessage()
 
     def test_missing_output_file_causes_run_failure(self):
         """RED: subprocess exits 0 but doesn't create output file → run must fail.

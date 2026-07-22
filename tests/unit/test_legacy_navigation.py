@@ -584,6 +584,109 @@ class TestEnsureSearchScreen:
         # Should have tried #polMenu as fallback
         assert "#polMenu" in page.locator_calls
 
+    def test_pol_menu_present_click_timeout_raises_typed(self) -> None:
+        """D11: POL menu present but click raises Playwright timeout → typed."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            ensure_search_screen,
+        )
+
+        page = FakeNavigationPage()
+        page.make_selector_visible("#polMenu")
+
+        original_click = FakeNavigationLocator.click
+
+        def _raise_timeout(self, *, timeout=None):
+            raise PlaywrightTimeoutError("Timeout 30000ms")
+
+        FakeNavigationLocator.click = _raise_timeout  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                ensure_search_screen(page)
+        finally:
+            FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
+
+    def test_pol_menu_present_readiness_wait_timeout_raises_typed(self) -> None:
+        """D11: POL menu present, click ok, but prontuario readiness wait
+        raises Playwright timeout → typed."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            ensure_search_screen,
+        )
+
+        page = FakeNavigationPage()
+        page.make_selector_visible("#polMenu")
+        page.on_click_make_visible("#polMenu", "#prontuarioInput")
+
+        call_count = {"n": 0}
+        original_wait_for = FakeNavigationLocator.wait_for
+
+        def _conditional_timeout(self, *, state="visible", timeout=None):
+            call_count["n"] += 1
+            # Call 1: Strategy 1 prontuario (not visible → generic Exception).
+            # Call 2: Strategy 2 readiness prontuario (after POL click) →
+            # Playwright timeout (must not be swallowed).
+            if call_count["n"] >= 2:
+                raise PlaywrightTimeoutError("Timeout 6000ms")
+            if state == "visible" and not self._visible_getter():
+                raise Exception(f"not visible: {self._selector}")
+
+        FakeNavigationLocator.wait_for = _conditional_timeout  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                ensure_search_screen(page)
+        finally:
+            FakeNavigationLocator.wait_for = original_wait_for  # type: ignore[method-assign]
+
+    def test_dashboard_present_click_timeout_raises_typed(self) -> None:
+        """D11: dashboard present but click raises Playwright timeout → typed."""
+        import re
+
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            ensure_search_screen,
+        )
+
+        page = FakeNavigationPage()
+        # Compute the exact key produced by get_by_role with a regex name.
+        name_re = re.compile(r"Clique aqui para acessar o", re.IGNORECASE)
+        page.make_selector_visible(f"role:button:{name_re}")
+
+        original_click = FakeNavigationLocator.click
+
+        def _raise_timeout(self, *, timeout=None):
+            raise PlaywrightTimeoutError("Timeout 30000ms")
+
+        FakeNavigationLocator.click = _raise_timeout  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                ensure_search_screen(page)
+        finally:
+            FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
+
+    def test_both_fallbacks_absent_raises_navigation_error(self) -> None:
+        """D11: both POL menu and dashboard absent → ordinary NavigationError."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            ensure_search_screen,
+        )
+
+        page = FakeNavigationPage()
+        # Nothing visible at all.
+        with pytest.raises(NavigationError):
+            ensure_search_screen(page)
+
 
 class TestSearchPatient:
     """Tests for search_patient()."""
@@ -1913,6 +2016,44 @@ class TestReadDemographicFields:
         frame = _ListFrame()
         with pytest.raises(NavigationError):
             read_demographic_fields(frame)
+
+    def test_evaluate_playwright_timeout_raises_typed(self) -> None:
+        """D13: a real Playwright TimeoutError from Frame.evaluate() must
+        become a typed NavigationTimeoutError."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            read_demographic_fields,
+        )
+
+        class _TimeoutFrame(FakeNavigationFrame):
+            def evaluate(self, expression: str, arg: Any = None) -> Any:  # noqa: ARG002
+                raise PlaywrightTimeoutError("Timeout 30000ms")
+
+        frame = _TimeoutFrame()
+        with pytest.raises(NavigationTimeoutError):
+            read_demographic_fields(frame)
+
+    def test_evaluate_non_timeout_failure_stays_navigation_error(self) -> None:
+        """D13: a non-timeout evaluate failure stays ordinary NavigationError."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            NavigationTimeoutError,
+            read_demographic_fields,
+        )
+
+        class _BrokenFrame(FakeNavigationFrame):
+            def evaluate(self, expression: str, arg: Any = None) -> Any:  # noqa: ARG002
+                raise RuntimeError("frame detached")
+
+        frame = _BrokenFrame()
+        with pytest.raises(NavigationError) as exc_info:
+            read_demographic_fields(frame)
+        assert not isinstance(exc_info.value, NavigationTimeoutError)
 
 
 class TestBuildDemographics:
