@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from apps.ingestion.extractors.persistent_evolution_pdf import (
+    _PDF_OBJECT_SELECTOR,
     DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS,
     EvolutionPdfError,
     EvolutionPdfFlow,
@@ -163,11 +164,21 @@ class TestExtractPdfText:
 
 
 class _FakeLocator:
-    def __init__(self, *, count_value: int = 0, fill_error: bool = False):
+    def __init__(
+        self,
+        *,
+        count_value: int = 0,
+        fill_error: bool = False,
+        attribute: str | None = None,
+        attribute_error: Exception | None = None,
+    ):
         self._count = count_value
         self._fill_error = fill_error
+        self._attribute = attribute
+        self._attribute_error = attribute_error
         self.filled: list[str] = []
         self.clicked: int = 0
+        self.attribute_calls: list[tuple[str, dict[str, Any]]] = []
         self.first = self
 
     def count(self) -> int:
@@ -181,8 +192,11 @@ class _FakeLocator:
     def click(self, **kwargs: Any) -> None:
         self.clicked += 1
 
-    def get_attribute(self, name: str) -> str | None:  # noqa: ARG002
-        return None
+    def get_attribute(self, name: str, **kwargs: Any) -> str | None:
+        self.attribute_calls.append((name, kwargs))
+        if self._attribute_error is not None:
+            raise self._attribute_error
+        return self._attribute
 
 
 class _FakeResponse:
@@ -236,14 +250,25 @@ class _FakePdfPage:
         self._wait_raises = wait_raises
         self._content_raises = content_raises
         self.wait_calls: list[tuple[str, dict[str, Any]]] = []
+        self.content_calls: int = 0
 
     def content(self) -> str:
+        self.content_calls += 1
         if self._content_raises:
             raise RuntimeError("content unavailable")
         return self._html
 
     def locator(self, selector: str) -> _FakeLocator:
-        return self._locators.get(selector, _FakeLocator())
+        # Prefer an explicit locator injected for this selector.
+        if selector in self._locators:
+            return self._locators[selector]
+        # Derive the PDF object locator from the stored HTML so the bounded
+        # locator-based URL resolution works without calling content().
+        if selector == _PDF_OBJECT_SELECTOR:
+            data = _object_data_from_html(self._html)
+            if data is not None:
+                return _FakeLocator(count_value=1, attribute=data)
+        return _FakeLocator()
 
     def wait_for_selector(self, selector: str, **kwargs: Any) -> None:
         self.wait_calls.append((selector, kwargs))
@@ -270,6 +295,29 @@ def _object_html(pdf_url: str) -> str:
         f'<html><body><object type="application/pdf" data="{pdf_url}">'
         "</object></body></html>"
     )
+
+
+def _object_data_from_html(html: str) -> str | None:
+    """Extract the ``data`` attribute of the PDF ``<object>`` tag from HTML.
+
+    Used to build a bounded locator fake that resolves the PDF URL via
+    ``get_attribute('data')`` instead of ``page.content()``.
+    """
+    import re
+
+    match = re.search(
+        r'<object[^>]*\btype\s*=\s*["\']application/pdf["\'][^>]*>',
+        html,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    data_match = re.search(
+        r'\bdata\s*=\s*["\']([^"\']+)["\']',
+        match.group(0),
+        re.IGNORECASE,
+    )
+    return data_match.group(1) if data_match else None
 
 
 # ===========================================================================
@@ -700,14 +748,36 @@ class TestEvolutionPdfFlowDateValidation:
 # ===========================================================================
 
 
-class TestEvolutionPdfFlowContentReadTimeout:
-    """D12: a real Playwright timeout from page.content() during PDF URL
-    resolution must surface as EvolutionPdfTimeoutError, not be swallowed
-    into an EvolutionPdfError ('could not be located')."""
+class TestEvolutionPdfFlowBoundedLocatorResolution:
+    """PSW-S17 post-cbf50c1 (D17/R1): PDF URL resolution must NOT call the
+    unbounded ``page.content()``. It resolves the PDF URL through bounded
+    locator/frame operations governed by the caller deadline."""
 
-    def test_content_timeout_in_resolve_pdf_url_raises_typed(self) -> None:
-        """Direct _resolve_pdf_url: page.content() raises real Playwright
-        timeout → EvolutionPdfTimeoutError."""
+    def test_trap_page_content_not_called_when_object_locator_resolves_url(
+        self,
+    ) -> None:
+        """A trap page proves the old unbounded ``page.content()`` path is
+        not called: when the object locator resolves the URL via
+        ``get_attribute('data')``, ``page.content()`` is never invoked."""
+
+        pdf_bytes = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/report.pdf"),
+            response=_FakeResponse(ok=True, body=pdf_bytes),
+        )
+        flow = EvolutionPdfFlow(page)
+
+        flow.extract(start_date="2024-01-01", end_date="2024-01-02", timeout=90)
+
+        # The bounded locator path resolved the URL; content() was a trap
+        # that must never be tripped.
+        assert page.content_calls == 0
+        assert len(page.request.get_calls) == 1
+
+    def test_object_get_attribute_playwright_timeout_raises_typed(self) -> None:
+        """A positively present PDF object whose bounded attribute read times
+        out raises EvolutionPdfTimeoutError with a constant sanitized
+        message — not a generic 'could not be located' EvolutionPdfError."""
         import pytest
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -715,23 +785,66 @@ class TestEvolutionPdfFlowContentReadTimeout:
             EvolutionPdfTimeoutError,
         )
 
-        class _TimeoutContentPage(_FakePdfPage):
-            def content(self):
-                raise PlaywrightTimeoutError("Timeout 30000ms")
-
-        page = _TimeoutContentPage(html="")
+        timeout_locator = _FakeLocator(
+            count_value=1,
+            attribute_error=PlaywrightTimeoutError("Timeout 30000ms"),
+        )
+        page = _FakePdfPage(
+            html="<html><body></body></html>",
+            locators={_PDF_OBJECT_SELECTOR: timeout_locator},
+        )
         flow = EvolutionPdfFlow(page)
 
+        with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
+            flow.extract(start_date="2024-01-01", end_date="2024-01-02", timeout=5)
+
+        message = str(exc_info.value)
+        assert "could not be located" not in message
+        # content() must not be the resolution path even on this failure.
+        assert page.content_calls == 0
+
+    def test_content_method_never_invoked_during_resolution(self) -> None:
+        """Even when no object/frame resolves a URL, resolution must never
+        fall back to ``page.content()``."""
+        page = _FakePdfPage(html="<html><body>no pdf here</body></html>")
+        flow = EvolutionPdfFlow(page)
+
+        with pytest.raises(EvolutionPdfError, match="could not be located"):
+            flow.extract(start_date="2024-01-01", end_date="2024-01-02")
+
+        assert page.content_calls == 0
+
+
+class TestEvolutionPdfFlowUrlResolutionTimeout:
+    """D17/R3: a real Playwright timeout during bounded PDF URL resolution
+    (object attribute read) must surface as EvolutionPdfTimeoutError at the
+    flow boundary and through extract()."""
+
+    def test_resolve_pdf_url_locator_timeout_raises_typed(self) -> None:
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
         from apps.ingestion.extractors.persistent_evolution_pdf import (
             _deadline_s as _pdf_deadline_s,
         )
 
+        timeout_locator = _FakeLocator(
+            count_value=1,
+            attribute_error=PlaywrightTimeoutError("Timeout 30000ms"),
+        )
+        page = _FakePdfPage(
+            html="",
+            locators={_PDF_OBJECT_SELECTOR: timeout_locator},
+        )
+        flow = EvolutionPdfFlow(page)
+
         with pytest.raises(EvolutionPdfTimeoutError):
             flow._resolve_pdf_url(_pdf_deadline_s(120))
 
-    def test_content_timeout_in_extract_raises_typed(self) -> None:
-        """End-to-end through extract(): page.content() real timeout →
-        EvolutionPdfTimeoutError (not EvolutionPdfError)."""
+    def test_extract_locator_timeout_raises_typed_not_generic(self) -> None:
         import pytest
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -739,54 +852,52 @@ class TestEvolutionPdfFlowContentReadTimeout:
             EvolutionPdfTimeoutError,
         )
 
-        class _TimeoutContentPage(_FakePdfPage):
-            def content(self):
-                raise PlaywrightTimeoutError("Timeout 30000ms")
-
-        page = _TimeoutContentPage(html="")
+        timeout_locator = _FakeLocator(
+            count_value=1,
+            attribute_error=PlaywrightTimeoutError("Timeout 30000ms"),
+        )
+        page = _FakePdfPage(
+            html="",
+            locators={_PDF_OBJECT_SELECTOR: timeout_locator},
+        )
         flow = EvolutionPdfFlow(page)
 
         with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
-            flow.extract(start_date="2024-01-01", end_date="2024-01-02")
+            flow.extract(start_date="2024-01-01", end_date="2024-01-02", timeout=5)
 
-        # The message must NOT be the ordinary "could not be located" text.
         message = str(exc_info.value)
         assert "could not be located" not in message
         assert "timed out" in message.lower()
 
 
 class TestEvolutionPdfFlowStrictDeadline:
-    """D14: the caller timeout is an upper bound. A 5-second caller budget
-    must never yield a 120000 ms report wait or download. Deterministic
-    tests with a controlled clock — no real sleeping."""
+    """D14/D17/R4: the caller timeout is an upper bound. Deterministic tests
+    with a controlled clock and the REAL ``extract()`` methods (never a proxy
+    helper). Assertions are unconditional."""
 
-    def test_small_caller_budget_caps_download_timeout(self) -> None:
-        """caller_hint=5s → derived download timeout ≤ 5000 ms."""
-        page = _FakePdfPage(html="<html></html>")
+    def test_small_caller_budget_never_sends_large_timeout_to_download(self) -> None:
+        """A 5-second caller budget never sends 120000 ms to the download."""
+        pdf_bytes = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            response=_FakeResponse(ok=True, body=pdf_bytes),
+        )
         flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=120_000)
 
-        # The derived download timeout must not exceed the caller hint.
-        derived = flow._derive_download_timeout_ms(timeout_seconds=5)
-        assert derived <= 5_000
-        assert derived >= 1
+        flow.extract(start_date="2024-01-01", end_date="2024-01-02", timeout=5)
 
-    def test_larger_caller_budget_capped_by_configured_default(self) -> None:
-        """When caller budget is larger than the configured default, the
-        default remains a conservative cap."""
-        page = _FakePdfPage(html="<html></html>")
-        flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=30_000)
+        # Unconditional: the download MUST have happened and its timeout MUST
+        # be bounded by the 5-second caller budget (never 120000 ms).
+        assert len(page.request.get_calls) == 1
+        _, kwargs = page.request.get_calls[0]
+        assert 1 <= kwargs["timeout"] <= 5_000
 
-        derived = flow._derive_download_timeout_ms(timeout_seconds=600)
-        # Conservative cap: no larger than the configured default.
-        assert derived <= 30_000
-
-    def test_extract_phases_share_single_deadline(self) -> None:
-        """Elapsed phases reduce later timeouts; the download never receives
-        more than the remaining caller budget. Uses a controlled clock."""
+    def test_elapsed_date_work_reduces_download_timeout(self) -> None:
+        """Elapsed report/URL-resolution work reduces the request timeout;
+        the download never receives more than the remaining budget."""
         import time as time_mod
         from unittest.mock import patch
 
-        # Controlled monotonic clock.
         class _Clock:
             def __init__(self):
                 self._t = 1000.0
@@ -799,17 +910,13 @@ class TestEvolutionPdfFlowStrictDeadline:
 
         clock = _Clock()
 
-        # A page where date fill "consumes" most of a 10-second budget.
-        consumed = {"s": 0.0}
-
         class _SlowFillLocator(_FakeLocator):
             def __init__(self):
                 super().__init__(count_value=1)
 
             def fill(self, value, **kwargs):
-                # Simulate fill consuming 9.5 seconds of the 10s budget.
+                # Consume 9.5s of a 10s budget.
                 clock.advance(9.5)
-                consumed["s"] += 9.5
 
         from apps.ingestion.extractors.persistent_evolution_pdf import (
             _DATE_START_SELECTOR,
@@ -817,27 +924,23 @@ class TestEvolutionPdfFlowStrictDeadline:
 
         page = _FakePdfPage(
             html=_object_html("https://legacy.example/r.pdf"),
-            response=_FakeResponse(ok=True, body=b"%PDF-1.4 truncated"),
+            response=_FakeResponse(ok=True, body=_build_pdf_bytes("ok")),
             locators={_DATE_START_SELECTOR: _SlowFillLocator()},
         )
         flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=120_000)
 
         with patch.object(time_mod, "monotonic", clock.monotonic):
-            try:
-                flow.extract(
-                    start_date="2024-01-01",
-                    end_date="2024-01-02",
-                    timeout=10,
-                )
-            except Exception:
-                pass
+            flow.extract(
+                start_date="2024-01-01",
+                end_date="2024-01-02",
+                timeout=10,
+            )
 
-        # The download timeout passed to request.get must be ≤ remaining
-        # budget (10s - 9.5s consumed = 0.5s = 500ms), not 120000ms.
-        if page.request.get_calls:
-            _, kwargs = page.request.get_calls[0]
-            assert kwargs["timeout"] <= 500
-            assert kwargs["timeout"] >= 1
+        # Unconditional assertion: the download was reached and received
+        # only the remaining budget (10s - 9.5s = 0.5s = 500ms), not 120000ms.
+        assert len(page.request.get_calls) == 1
+        _, kwargs = page.request.get_calls[0]
+        assert 1 <= kwargs["timeout"] <= 500
 
     def test_deadline_expiry_before_download_raises_typed(self) -> None:
         """When the budget is fully consumed before the download, a typed
@@ -887,11 +990,116 @@ class TestEvolutionPdfFlowStrictDeadline:
                     timeout=5,
                 )
 
-    def test_no_phase_receives_zero_timeout(self) -> None:
-        """No passed timeout is ever zero."""
-        page = _FakePdfPage(html="<html></html>")
+    def test_deadline_expiry_before_report_wait_raises_typed_and_skips_later(
+        self,
+    ) -> None:
+        """Expiration before the report wait raises a typed timeout and does
+        not call later phases (download)."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _DATE_START_SELECTOR,
+            EvolutionPdfTimeoutError,
+        )
+
+        class _Clock:
+            def __init__(self):
+                self._t = 1000.0
+
+            def monotonic(self):
+                return self._t
+
+            def advance(self, seconds):
+                self._t += seconds
+
+        clock = _Clock()
+
+        class _ExhaustBudgetLocator(_FakeLocator):
+            def __init__(self):
+                super().__init__(count_value=1)
+
+            def fill(self, value, **kwargs):
+                clock.advance(10.0)
+
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            locators={_DATE_START_SELECTOR: _ExhaustBudgetLocator()},
+            # A generate button present so the report-wait phase is reached.
+            response=_FakeResponse(ok=True, body=b"%PDF-1.4"),
+        )
+        # Make the generate button present so _generate_report_if_present is
+        # attempted after the budget is exhausted.
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _GENERATE_BUTTON_SELECTOR,
+        )
+
+        page._locators[_GENERATE_BUTTON_SELECTOR] = _FakeLocator(count_value=1)
         flow = EvolutionPdfFlow(page)
 
-        # Even with a tiny caller hint, every derived timeout is ≥ 1.
-        derived = flow._derive_download_timeout_ms(timeout_seconds=1)
-        assert derived >= 1
+        with patch.object(time_mod, "monotonic", clock.monotonic):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                flow.extract(
+                    start_date="2024-01-01",
+                    end_date="2024-01-02",
+                    timeout=5,
+                )
+
+        # Later phases were skipped: the download was never attempted.
+        assert page.request.get_calls == []
+
+    def test_fake_operation_overrun_raises_typed_not_invalid_payload(self) -> None:
+        """If a fake operation ignores its supplied timeout and advances the
+        controlled clock beyond the deadline, the next boundary raises a
+        typed timeout rather than invalid_payload / another generic category."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+            EvolutionPdfTimeoutError,
+        )
+
+        class _Clock:
+            def __init__(self):
+                self._t = 1000.0
+
+            def monotonic(self):
+                return self._t
+
+            def advance(self, seconds):
+                self._t += seconds
+
+        clock = _Clock()
+
+        # A locator that ignores its timeout and advances the clock past the
+        # deadline during a bounded attribute read.
+        class _OverrunLocator(_FakeLocator):
+            def __init__(self):
+                super().__init__(count_value=1)
+
+            def get_attribute(self, name, **kwargs):
+                clock.advance(20.0)  # ignore the supplied timeout
+                return "https://legacy.example/r.pdf"
+
+        page = _FakePdfPage(
+            html="",
+            locators={_PDF_OBJECT_SELECTOR: _OverrunLocator()},
+        )
+        flow = EvolutionPdfFlow(page)
+
+        with patch.object(time_mod, "monotonic", clock.monotonic):
+            with pytest.raises(EvolutionPdfError) as exc_info:
+                flow.extract(
+                    start_date="2024-01-01",
+                    end_date="2024-01-02",
+                    timeout=5,
+                )
+
+        # The overrun is caught at the next deadline check and raises a
+        # typed timeout, never invalid_payload / a generic category.
+        assert isinstance(exc_info.value, EvolutionPdfTimeoutError)

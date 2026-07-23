@@ -523,6 +523,140 @@ def _resolve_pdf_url_from_viewer(frame_urls: list[str], base_url: str) -> str | 
     return None
 
 
+def _safe_page_url(page: Any) -> str:
+    """Best-effort page URL accessor (never leaks payloads; never raises)."""
+    try:
+        return str(getattr(page, "url", "") or "")
+    except Exception:  # noqa: BLE001 - sanitized
+        return ""
+
+
+def _safe_page_frame_urls(page: Any) -> list[str]:
+    """Best-effort frame URL accessor (never leaks payloads; never raises)."""
+    try:
+        frames = getattr(page, "frames", None) or []
+    except Exception:  # noqa: BLE001 - sanitized
+        return []
+    urls: list[str] = []
+    for frame in frames:
+        try:
+            urls.append(str(getattr(frame, "url", "") or ""))
+        except Exception:  # noqa: BLE001 - sanitized
+            continue
+    return urls
+
+
+def _bounded_locator_count(locator: Any) -> int:
+    """Return a locator's presence count, treating access errors as absent."""
+    if locator is None:
+        return 0
+    try:
+        return int(locator.count())
+    except Exception:  # noqa: BLE001 - treat as absent
+        return 0
+
+
+def _bounded_object_data_attribute(
+    locator: Any, deadline_s: float, cap_ms: int
+) -> str | None:
+    """Read the PDF object ``data`` attribute with a bounded Playwright timeout.
+
+    Raises :class:`EvolutionPdfTimeoutError` on a real Playwright timeout so
+    the failure records the timeout category. Returns ``None`` on a
+    non-timeout read failure or an empty attribute.
+    """
+    try:
+        attr = locator.first.get_attribute(
+            "data", timeout=_bound_ms(deadline_s, cap_ms)
+        )
+    except Exception as exc:  # noqa: BLE001 - sanitized below
+        if is_playwright_timeout_error(exc):
+            raise EvolutionPdfTimeoutError(
+                _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
+            ) from None
+        logger.warning(
+            "Persistent evolution PDF: object data attribute unavailable "
+            "(sanitized, non-timeout)"
+        )
+        return None
+    return attr if attr else None
+
+
+def resolve_pdf_url_from_page(
+    page: Any,
+    *,
+    deadline_s: float,
+    base_url: str = "",
+    action_timeout_ms: int = _DEFAULT_ACTION_TIMEOUT_MS,
+) -> str | None:
+    """Resolve a PDF URL through bounded locator/frame operations.
+
+    PSW-S17 post-cbf50c1 (D17/R1): this is the SINGLE shared PDF URL
+    resolver used by both :class:`EvolutionPdfFlow` and
+    :class:`~apps.ingestion.extractors.real_handle_bridge.RealHandleBridge`.
+    It MUST NOT call the unbounded ``page.content()``. It:
+
+    - checks the deadline before any operation;
+    - probes the ``<object type="application/pdf">`` presence with a
+      non-blocking ``count()`` and deadline checks before/after;
+    - once positively present, reads the ``data`` attribute with a bounded
+      Playwright timeout (no greater than the remaining budget); a timeout
+      raises :class:`EvolutionPdfTimeoutError`;
+    - falls back to viewer frame URLs (a non-blocking accessor), checking
+      the deadline before and after;
+    - returns ``None`` only for a genuine absence with the deadline still
+      active (the caller is responsible for checking the deadline before
+      converting absence into a generic missing-PDF error).
+
+    Args:
+        page: A Playwright-like ``Page`` exposing ``locator()``, ``frames``
+            and ``url``.
+        deadline_s: Monotonic deadline (seconds) shared across phases.
+        base_url: Optional explicit base URL; defaults to ``page.url``.
+        action_timeout_ms: Conservative per-action cap (ms).
+
+    Returns:
+        The resolved PDF URL, or ``None`` on genuine absence.
+
+    Raises:
+        EvolutionPdfTimeoutError: On deadline expiry or a bounded
+            Playwright timeout during the attribute read.
+    """
+    # Deadline check before any operation.
+    _remaining_ms(deadline_s)
+    resolved_base = base_url or _safe_page_url(page)
+
+    # Strategy 1: bounded <object type="application/pdf" data="..."> attribute.
+    try:
+        obj_locator = page.locator(_PDF_OBJECT_SELECTOR)
+    except Exception:  # noqa: BLE001 - sanitized
+        obj_locator = None
+    # Non-blocking presence probe; check deadline before and after a
+    # non-timeout-capable operation.
+    _remaining_ms(deadline_s)
+    obj_count = _bounded_locator_count(obj_locator)
+    _remaining_ms(deadline_s)
+    if obj_count > 0:
+        data_attr = _bounded_object_data_attribute(
+            obj_locator, deadline_s, action_timeout_ms
+        )
+        if data_attr:
+            return urljoin(resolved_base, data_attr)
+
+    # Strategy 2: viewer frame URLs (a non-blocking accessor). Check the
+    # deadline before and after accessing frames.
+    _remaining_ms(deadline_s)
+    frame_urls = _safe_page_frame_urls(page)
+    _remaining_ms(deadline_s)
+    viewer_url = _resolve_pdf_url_from_viewer(frame_urls, resolved_base)
+    if viewer_url:
+        return viewer_url
+
+    # Genuine absence; the caller checks the deadline before converting this
+    # to a generic missing-PDF error.
+    return None
+
+
 def _format_br_date(iso_date: str) -> str:
     """Convert a ``YYYY-MM-DD`` date string to the legacy ``DD/MM/YYYY`` format.
 
@@ -632,6 +766,10 @@ class EvolutionPdfFlow:
         # Step 3: resolve the PDF URL from the rendered report.
         pdf_url = self._resolve_pdf_url(deadline_s)
         if not pdf_url:
+            # An optional PDF object/embed that is genuinely absent remains
+            # an absence, but deadline expiry must be checked before
+            # converting it to a generic missing-PDF error (D17/R1).
+            _remaining_ms(deadline_s)
             raise EvolutionPdfError(
                 "Evolution report PDF could not be located on the page"
             )
@@ -647,16 +785,6 @@ class EvolutionPdfFlow:
     # ------------------------------------------------------------------
     # Steps
     # ------------------------------------------------------------------
-
-    def _derive_download_timeout_ms(self, timeout_seconds: int) -> int:
-        """Return a download timeout bounded by the caller hint (D14).
-
-        PSW-S17 post-ce2c494: the caller hint is an UPPER BOUND, not a lower
-        bound. The configured ``_pdf_download_timeout_ms`` remains a
-        conservative cap when the caller budget is larger.
-        """
-        caller_ms = max(1, int(timeout_seconds)) * 1000
-        return min(self._pdf_download_timeout_ms, caller_ms)
 
     def _apply_dates_if_present(
         self, br_start_date: str, br_end_date: str, deadline_s: float
@@ -731,31 +859,22 @@ class EvolutionPdfFlow:
             )
 
     def _resolve_pdf_url(self, deadline_s: float) -> str | None:
-        """Resolve the PDF URL from the page content and viewer frames.
+        """Resolve the PDF URL via bounded locator/frame operations.
 
-        PSW-S17 post-ce2c494 (D12): a real Playwright timeout from
-        ``page.content()`` raises ``EvolutionPdfTimeoutError`` instead of
-        being swallowed into an empty-HTML missing-URL path.
+        PSW-S17 post-cbf50c1 (D17/R1): the URL-resolution path MUST NOT call
+        the unbounded ``page.content()``. It resolves the PDF URL through
+        bounded locator attribute reads and viewer frame URLs governed by
+        the shared caller deadline. A positively present PDF object/embed
+        whose bounded read times out raises
+        :class:`EvolutionPdfTimeoutError` with a constant sanitized message.
+        A genuinely absent object remains an absence (``None``) as long as
+        the deadline is still active.
         """
-        # Deadline expiry before the content read must raise.
-        _remaining_ms(deadline_s)
-        base_url = self._safe_url()
-        try:
-            html = self._page.content()
-        except Exception as exc:  # noqa: BLE001 - sanitized below
-            if is_playwright_timeout_error(exc):
-                raise EvolutionPdfTimeoutError(
-                    _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
-                ) from None
-            logger.warning("Persistent evolution PDF: page content unavailable (sanitized)")
-            html = ""
-
-        url = _resolve_pdf_url_from_object(html, base_url)
-        if url:
-            return url
-
-        frame_urls = self._safe_frame_urls()
-        return _resolve_pdf_url_from_viewer(frame_urls, base_url)
+        return resolve_pdf_url_from_page(
+            self._page,
+            deadline_s=deadline_s,
+            base_url=self._safe_url(),
+        )
 
     def _download(self, pdf_url: str, timeout_ms: int) -> bytes:
         """Download the PDF bytes through the existing browser context.
@@ -810,16 +929,3 @@ class EvolutionPdfFlow:
             return str(self._page.url or "")
         except Exception:  # noqa: BLE001 - sanitized
             return ""
-
-    def _safe_frame_urls(self) -> list[str]:
-        try:
-            frames = self._page.frames or []
-        except Exception:  # noqa: BLE001 - sanitized
-            return []
-        urls: list[str] = []
-        for frame in frames:
-            try:
-                urls.append(str(getattr(frame, "url", "") or ""))
-            except Exception:  # noqa: BLE001 - sanitized
-                continue
-        return urls

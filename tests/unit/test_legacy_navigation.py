@@ -673,6 +673,46 @@ class TestEnsureSearchScreen:
         finally:
             FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
 
+    def test_dashboard_present_readiness_wait_timeout_raises_typed(self) -> None:
+        """D19/R3: dashboard present, click ok, but the post-click prontuario
+        readiness wait raises a Playwright timeout → typed
+        NavigationTimeoutError (direct regression coverage for the dashboard
+        post-click readiness path)."""
+        import re
+
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+            ensure_search_screen,
+        )
+
+        page = FakeNavigationPage()
+        name_re = re.compile(r"Clique aqui para acessar o", re.IGNORECASE)
+        page.make_selector_visible(f"role:button:{name_re}")
+        page.on_click_make_visible(f"role:button:{name_re}", "#prontuarioInput")
+
+        call_count = {"n": 0}
+        original_wait_for = FakeNavigationLocator.wait_for
+
+        def _conditional_timeout(self, *, state="visible", timeout=None):
+            call_count["n"] += 1
+            # Call 1: Strategy 1 prontuario (not visible → generic Exception).
+            # Call 2: Strategy 3 dashboard post-click readiness prontuario →
+            # Playwright timeout (must not be swallowed).
+            if call_count["n"] >= 2:
+                raise PlaywrightTimeoutError("Timeout 6000ms")
+            if state == "visible" and not self._visible_getter():
+                raise Exception(f"not visible: {self._selector}")
+
+        FakeNavigationLocator.wait_for = _conditional_timeout  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                ensure_search_screen(page)
+        finally:
+            FakeNavigationLocator.wait_for = original_wait_for  # type: ignore[method-assign]
+
     def test_both_fallbacks_absent_raises_navigation_error(self) -> None:
         """D11: both POL menu and dashboard absent → ordinary NavigationError."""
         import pytest

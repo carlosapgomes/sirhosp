@@ -323,6 +323,23 @@ command-level persistent PDF download timeout test proves the full chain
 closure parity is tested through both worker commands for all five
 categories.
 
+Post-cbf50c1 final truthful closure (D17-D20): the PDF URL-resolution
+path no longer calls the unbounded ``page.content()``; both the flow
+and the bridge delegate to ONE shared resolver
+(``resolve_pdf_url_from_page``) that reads the PDF object ``data``
+attribute through a bounded ``locator.get_attribute(timeout=...)`` call
+governed by a single monotonic deadline. The dead
+``_derive_download_timeout_ms`` helper and the ``max(120_000, ...)``
+bridge download calculation are removed. Teardown, startup DB retry,
+credential, and bootstrap command surfaces emit constant sanitized
+messages with NO cause/context chain (``__cause__`` and ``__context__``
+both ``None``); the bridge overlaps-failure wrap uses ``from None``.
+Full command-level URL-resolution and download timeout tests, the
+dashboard post-click readiness timeout test, unconditional adversarial
+dealine tests, and independent cross-worker attempt/stage assertions
+were added. Tasks 17.3-17.5 are complete only because their literal
+contracts now pass; PSW-S18 remains untouched.
+
 ## 18. PSW-S18: Internal legacy-tab cleanup and recovery
 
 - [ ] 18.1 Add failing tests reproducing multiple legacy DOM tabs inside one

@@ -18,6 +18,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from apps.ingestion.extractors.persistent_extraction_adapter import (
     _ADMISSION_DATA_DIV_ID,
@@ -1095,11 +1096,19 @@ class TestBridgeExtractEvolutionsViaLegacyActions:
 
         page = MagicMock()
         page.frame.side_effect = frame_side_effect
-        page.content.return_value = (
-            '<html><body>'
-            '<object type="application/pdf" '
-            'data="https://example.com/report.pdf"></object>'
-            '</body></html>'
+        from apps.ingestion.extractors.persistent_evolution_pdf import (  # noqa: PLC0415
+            _PDF_OBJECT_SELECTOR,
+        )
+
+        pdf_object_locator = MagicMock()
+        pdf_object_locator.count.return_value = 1
+        pdf_object_locator.first.get_attribute.return_value = (
+            "https://example.com/report.pdf"
+        )
+        page.locator.side_effect = (
+            lambda selector, *a, **k: pdf_object_locator
+            if selector == _PDF_OBJECT_SELECTOR
+            else MagicMock()
         )
         page.url = "https://legacy.example.com/"
         page.context.request.get.return_value.ok = True
@@ -1218,11 +1227,19 @@ class TestBridgeExtractEvolutionsViaLegacyActions:
 
         page = MagicMock()
         page.frame.return_value = frame
-        page.content.return_value = (
-            "<html><body>"
-            '<object type="application/pdf" '
-            'data="https://example.com/report.pdf"></object>'
-            "</body></html>"
+        from apps.ingestion.extractors.persistent_evolution_pdf import (  # noqa: PLC0415
+            _PDF_OBJECT_SELECTOR,
+        )
+
+        pdf_object_locator = MagicMock()
+        pdf_object_locator.count.return_value = 1
+        pdf_object_locator.first.get_attribute.return_value = (
+            "https://example.com/report.pdf"
+        )
+        page.locator.side_effect = (
+            lambda selector, *a, **k: pdf_object_locator
+            if selector == _PDF_OBJECT_SELECTOR
+            else MagicMock()
         )
         page.url = "https://legacy.example.com/"
         page.context.request.get.return_value.ok = True
@@ -1731,35 +1748,57 @@ class TestDemographicsTimeoutFidelity:
 # ===========================================================================
 
 
-class TestBridgePdfContentReadTimeout:
-    """D12: a real Playwright timeout from page.content() during PDF URL
-    resolution must surface as EvolutionPdfTimeoutError at the bridge
-    boundary and must NOT be swallowed by the action-flow caller."""
+class TestBridgePdfBoundedUrlResolution:
+    """PSW-S17 post-cbf50c1 (D17): the bridge PDF URL resolution must NOT
+    call the unbounded ``page.content()``. It resolves the PDF URL through
+    bounded locator operations governed by the caller deadline, and a real
+    Playwright timeout from the bounded attribute read surfaces as
+    EvolutionPdfTimeoutError."""
 
-    def test_resolve_pdf_url_content_timeout_raises_typed(self) -> None:
-        """_resolve_pdf_url_from_report_page: page.content() raises real
-        Playwright timeout → EvolutionPdfTimeoutError."""
+    def test_resolve_pdf_url_locator_timeout_raises_typed(self) -> None:
+        """_resolve_pdf_url_from_report_page: object present but a bounded
+        attribute read raises a real Playwright timeout →
+        EvolutionPdfTimeoutError (not swallowed into empty HTML)."""
         import pytest
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
         from apps.ingestion.extractors.persistent_evolution_pdf import (
             EvolutionPdfTimeoutError,
         )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
         from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
 
-        bridge = RealHandleBridge.__new__(RealHandleBridge)
+        class _TimeoutAttrLocator:
+            first = property(lambda self: self)
 
-        class _TimeoutContentPage:
-            url = "https://legacy/relatorio.xhtml"
-            frames: list = []
+            def count(self) -> int:
+                return 1
 
-            def content(self):
+            def get_attribute(self, name, **kwargs):  # noqa: ARG002
                 raise PlaywrightTimeoutError("Timeout 30000ms")
 
-        with pytest.raises(EvolutionPdfTimeoutError):
-            bridge._resolve_pdf_url_from_report_page(_TimeoutContentPage())
+        class _TimeoutAttrPage:
+            url = "https://legacy/relatorio.xhtml"
+            frames: list = []
+            content_calls = 0
 
-    def test_action_flow_does_not_swallow_content_timeout(self) -> None:
+            def locator(self, selector):  # noqa: ARG002
+                return _TimeoutAttrLocator()
+
+            def content(self):  # type: ignore[no-untyped-def]
+                _TimeoutAttrPage.content_calls += 1
+                raise AssertionError("page.content() must not be called")
+
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+        with pytest.raises(EvolutionPdfTimeoutError):
+            bridge._resolve_pdf_url_from_report_page(
+                _TimeoutAttrPage(), _pdf_deadline_s(120)
+            )
+        assert _TimeoutAttrPage.content_calls == 0
+
+    def test_action_flow_does_not_swallow_locator_timeout(self) -> None:
         """The extract_evolutions_via_legacy_actions caller around PDF URL
         resolution re-raises EvolutionPdfTimeoutError instead of catching
         generic Exception and continuing."""
@@ -1774,15 +1813,24 @@ class TestBridgePdfContentReadTimeout:
         handle = FakePlaywrightHandle()
         bridge = RealHandleBridge(handle)
 
+        class _TimeoutAttrLocator:
+            first = property(lambda self: self)
+
+            def count(self) -> int:
+                return 1
+
+            def get_attribute(self, name, **kwargs):  # noqa: ARG002
+                raise PlaywrightTimeoutError("Timeout 30000ms")
+
         class _TimeoutPage:
             url = "https://legacy/relatorioAnaEvoInternacaoPdf.xhtml"
             frames: list = []
 
-            def content(self):
-                raise PlaywrightTimeoutError("Timeout 30000ms")
+            def locator(self, selector):  # noqa: ARG002
+                return _TimeoutAttrLocator()
 
         # Patch the full action flow so the report is "ready" and the
-        # content-read path is reached directly.
+        # bounded URL-resolution path is reached directly.
         with patch(
             "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen"
         ), patch(
@@ -1814,4 +1862,134 @@ class TestBridgePdfContentReadTimeout:
                     patient_record="123",
                     start_date="2026-01-01",
                     end_date="2026-01-15",
+                    timeout=5,
                 )
+
+    def test_small_caller_budget_never_sends_large_download_timeout(
+        self,
+    ) -> None:
+        """A 5-second caller budget never yields a 120-second download on the
+        bridge action flow."""
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        class _UrlLocator:
+            first = property(lambda self: self)
+
+            def count(self) -> int:
+                return 1
+
+            def get_attribute(self, name, **kwargs):  # noqa: ARG002
+                return "https://legacy.example/report.pdf"
+
+        class _FakeRequest:
+            def __init__(self):
+                self.calls: list[tuple[str, dict]] = []
+
+            def get(self, url, **kwargs):
+                self.calls.append((url, kwargs))
+                raise PlaywrightTimeoutError("Timeout")
+
+        class _FakeContext:
+            def __init__(self):
+                self.request = _FakeRequest()
+
+        class _DownloadPage:
+            url = "https://legacy/relatorioAnaEvoInternacaoPdf.xhtml"
+            frames: list = []
+            context = _FakeContext()
+
+            def locator(self, selector):  # noqa: ARG002
+                return _UrlLocator()
+
+        with patch(
+            "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.search_patient"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.click_internacoes"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge._read_and_build_snapshot",
+            return_value=[{"admissionKey": "K1", "admissionStart": "2026-01-01",
+                           "admissionEnd": "", "ward": "", "bed": ""}],
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.open_internacao_detail"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.click_evolucao"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.fill_evolution_dates"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.select_ascending_order"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.click_visualizar_report"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.wait_for_report_or_no_evolutions",
+            return_value=True,
+        ), patch.object(
+            bridge, "_resolve_active_page", return_value=_DownloadPage()
+        ):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="123",
+                    start_date="2026-01-01",
+                    end_date="2026-01-15",
+                    timeout=5,
+                )
+
+        # The download timeout passed to request.get must be bounded by the
+        # 5-second caller budget (never 120000 ms).
+        assert _DownloadPage.context.request.calls
+        _, kwargs = _DownloadPage.context.request.calls[0]
+        assert 1 <= kwargs["timeout"] <= 5_000
+
+
+class TestBridgeOverlapFailureSanitization:
+    """PSW-S17 post-cbf50c1 (D18): the bridge must NOT retain a ``from exc``
+    source chain when wrapping a navigation failure into EvolutionPdfError."""
+
+    def test_overlap_navigation_error_wrapped_from_none(self) -> None:
+        """choose_overlapping_admissions NavigationError surfaces as
+        EvolutionPdfError raised ``from None`` (no cause chain)."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import NavigationError
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        sentinel = "SENSITIVE_OVERLAP_DETAIL"
+        with patch(
+            "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.search_patient"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.click_internacoes"
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge._read_and_build_snapshot",
+            return_value=[],
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.choose_overlapping_admissions",
+            side_effect=NavigationError(sentinel),
+        ), patch.object(
+            bridge, "_resolve_active_page", return_value=MagicMock()
+        ):
+            with pytest.raises(EvolutionPdfError) as exc_info:
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="123",
+                    start_date="2026-01-01",
+                    end_date="2026-01-15",
+                )
+
+        msg = str(exc_info.value)
+        assert sentinel not in msg
+        # No cause/context chain carrying the raw navigation error.
+        assert exc_info.value.__cause__ is None

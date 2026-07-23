@@ -1588,7 +1588,7 @@ class TestRealHandleGuards:
                     max_runs=1,
                 )
 
-        assert "SOURCE_SYSTEM_URL" in str(exc_info.value)
+        assert "credential" in str(exc_info.value).lower()
         run.refresh_from_db()
         assert run.status == "queued"
 
@@ -1736,6 +1736,140 @@ class TestRealHandleGuards:
                 cmd._create_session_handle()
 
         mock_handle.shutdown.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestPersistentCommandRawExceptionSanitization:
+    """PSW-S17 post-cbf50c1 (D18/R2): no arbitrary ``str(exc)``, dynamic
+    exception class, or cause/context chain may reach command stdout/stderr,
+    ``CommandError`` text, or ``__cause__``/``__context__`` at sanitized
+    boundaries."""
+
+    _TEARDOWN_SENTINEL = "SENSITIVE_COOKIE_FROM_TEARDOWN"
+    _CRED_SENTINEL = "SENSITIVE_CRED_VALUE_xyz"
+    _BOOTSTRAP_SENTINEL = "SENSITIVE_BOOTSTRAP_detail"
+    _DB_SENTINEL = "SENSITIVE_DB_MSG_xyz"
+
+    def test_teardown_failure_does_not_leak_raw_exception_to_stderr(
+        self, capsys
+    ) -> None:
+        """_shutdown_adapter must emit a constant sanitized warning; the raw
+        exception (e.g. a leaked cookie) must NOT reach stderr."""
+        cmd = PersistentWorkerCommand()
+        adapter = MagicMock()
+        adapter.session.shutdown.side_effect = RuntimeError(self._TEARDOWN_SENTINEL)
+
+        cmd._shutdown_adapter(adapter)
+
+        captured = capsys.readouterr()
+        assert self._TEARDOWN_SENTINEL not in captured.err
+        assert self._TEARDOWN_SENTINEL not in captured.out
+
+    def test_credential_failure_command_error_is_constant_and_no_cause_chain(
+        self, monkeypatch
+    ) -> None:
+        """resolve_source_credentials failure surfaces as a CONSTANT
+        CommandError raised ``from None``; no sentinel or cause chain."""
+        _clear_source_credentials_env(monkeypatch)
+
+        with override_settings(**_REAL_URL_OVERRIDES), patch(
+            "apps.ingestion.historical_extraction.resolve_source_credentials",
+            side_effect=ValueError(self._CRED_SENTINEL),
+        ), patch(
+            "apps.ingestion.extractors.browser_profile.ExclusiveBrowserProfile"
+        ) as mock_profile_cls:
+            cmd = PersistentWorkerCommand()
+            cmd._use_real_handle = True
+            with pytest.raises(CommandError) as exc_info:
+                cmd._create_session_handle()
+
+        msg = str(exc_info.value)
+        assert self._CRED_SENTINEL not in msg
+        # No cause chain at the sanitized boundary.
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None or not str(
+            exc_info.value.__context__
+        ).strip()
+        # Browser profile must NOT be created when credential resolution
+        # fails first (fail fast before launching Chromium).
+        mock_profile_cls.assert_not_called()
+
+    def test_bootstrap_failure_command_error_is_constant_and_no_cause_chain(
+        self, monkeypatch
+    ) -> None:
+        """A LegacyBootstrapError surfaces as a CONSTANT CommandError raised
+        ``from None``; no sentinel or cause chain leaks."""
+        from apps.ingestion.extractors.legacy_session_bootstrap import (
+            LegacyBootstrapError,
+        )
+
+        _clear_source_credentials_env(monkeypatch)
+        mock_handle = MagicMock()
+
+        with override_settings(**_REAL_URL_OVERRIDES), override_settings(
+            SOURCE_SYSTEM_URL="https://legacy.test/login",
+            SOURCE_SYSTEM_USERNAME="operador",
+            SOURCE_SYSTEM_PASSWORD="super-secret",
+        ), patch(
+            "apps.ingestion.extractors.playwright_session_handle"
+            ".PlaywrightSessionHandle",
+            return_value=mock_handle,
+        ), patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".bootstrap_legacy_session",
+            side_effect=LegacyBootstrapError(self._BOOTSTRAP_SENTINEL),
+        ) as mock_bootstrap:
+            cmd = PersistentWorkerCommand()
+            cmd._use_real_handle = True
+            with pytest.raises(CommandError) as exc_info:
+                cmd._create_session_handle()
+
+        msg = str(exc_info.value)
+        assert self._BOOTSTRAP_SENTINEL not in msg
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__context__ is None or not str(
+            exc_info.value.__context__
+        ).strip()
+        # Bootstrap was reached (browser started) then torn down on failure.
+        mock_handle.start.assert_called_once()
+        mock_handle.shutdown.assert_called_once()
+        mock_bootstrap.assert_called_once()
+
+    def test_startup_db_retry_warning_is_constant_and_no_raw_exception(
+        self, capsys
+    ) -> None:
+        """The startup DB retry warning must be constant; the raw DB exception
+        (class name + message) must NOT reach stderr."""
+        from django.db.utils import OperationalError
+
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        cmd_path = (
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session"
+        )
+
+        failing_qs = MagicMock()
+        failing_qs.count.side_effect = OperationalError(self._DB_SENTINEL)
+
+        with (
+            patch(f"{cmd_path}.IngestionRun.objects.filter", return_value=failing_qs),
+            patch.object(
+                PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+            ),
+            patch(f"{cmd_path}.time.sleep", side_effect=[None, KeyboardInterrupt]),
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    loop=True,
+                    sleep_seconds=1,
+                )
+
+        captured = capsys.readouterr()
+        assert self._DB_SENTINEL not in captured.err
+        assert self._DB_SENTINEL not in captured.out
+        # The dynamic exception class name must not be echoed either.
+        assert "OperationalError" not in captured.err
 
 
 @pytest.mark.django_db

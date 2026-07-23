@@ -64,9 +64,17 @@ from apps.ingestion.extractors.legacy_navigation import (
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
     _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE,
+    DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS,
     EvolutionPdfError,
     EvolutionPdfFlow,
     EvolutionPdfTimeoutError,
+    resolve_pdf_url_from_page,
+)
+from apps.ingestion.extractors.persistent_evolution_pdf import (
+    _bound_ms as _pdf_bound_ms,
+)
+from apps.ingestion.extractors.persistent_evolution_pdf import (
+    _deadline_s as _pdf_deadline_s,
 )
 from apps.ingestion.extractors.session_controller import SessionHandle
 
@@ -696,19 +704,24 @@ class RealHandleBridge:
                 start_date=start_date,
                 end_date=end_date,
             )
-        except NavigationError as exc:
+        except NavigationError:
+            # PSW-S17 post-cbf50c1 (D18): wrap with a constant sanitized
+            # message and suppress the raw chain (``from None``) so no
+            # source exception text can leak.
             raise EvolutionPdfError(
                 "Nenhuma interna\u00e7\u00e3o com interse\u00e7\u00e3o "
                 "foi encontrada para o intervalo solicitado."
-            ) from exc
+            ) from None
 
         if not overlapping:
             return []
 
         # Step 5: For each overlapping admission, open details and
-        # generate the evolution report
+        # generate the evolution report.
+        # PSW-S17 post-cbf50c1 (D17/R1): the caller ``timeout`` is an UPPER
+        # BOUND shared by the report wait, URL resolution, and download.
         all_events: list[dict[str, Any]] = []
-        download_timeout_ms = max(120_000, timeout * 1000)
+        deadline_s = _pdf_deadline_s(timeout)
 
         for idx, admission in enumerate(overlapping):
             if idx > 0:
@@ -796,11 +809,12 @@ class RealHandleBridge:
             # Step 5f: Wait for report or detect no-evolutions.
             # PSW-S17 R2/R3: polling-budget expiry raises a typed
             # NavigationTimeoutError; only an explicit no-evolutions dialog
-            # may yield the False (skip) result.
+            # may yield the False (skip) result. The wait is bounded by the
+            # remaining caller budget (never a flat 120s that exceeds it).
             try:
                 report_ready = wait_for_report_or_no_evolutions(
                     page,
-                    timeout_ms=min(120_000, download_timeout_ms),
+                    timeout_ms=_pdf_bound_ms(deadline_s, 120_000),
                 )
             except NavigationTimeoutError:
                 raise
@@ -811,11 +825,14 @@ class RealHandleBridge:
                 )
                 continue
 
-            # Step 5g: Download PDF through existing context
+            # Step 5g: Download PDF through existing context. URL resolution
+            # and download share the remaining caller budget (D17/R1).
             try:
-                pdf_url = self._resolve_pdf_url_from_report_page(page)
+                pdf_url = self._resolve_pdf_url_from_report_page(
+                    page, deadline_s
+                )
             except EvolutionPdfTimeoutError:
-                # PSW-S17 post-ce2c494 (D12): typed content-read timeout
+                # PSW-S17 post-cbf50c1 (D17): typed bounded-locator timeout
                 # MUST propagate; it must not be swallowed as a generic
                 # URL-resolution failure.
                 raise
@@ -830,7 +847,9 @@ class RealHandleBridge:
 
             try:
                 pdf_bytes = self._download_pdf(
-                    page, pdf_url, download_timeout_ms
+                    page,
+                    pdf_url,
+                    _pdf_bound_ms(deadline_s, DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS),
                 )
             except EvolutionPdfTimeoutError:
                 raise
@@ -862,77 +881,36 @@ class RealHandleBridge:
 
         return all_events
 
-    def _resolve_pdf_url_from_report_page(self, page: Any) -> str | None:
-        """Resolve a PDF URL from the report page content or viewer frames.
+    def _resolve_pdf_url_from_report_page(
+        self, page: Any, deadline_s: float | None = None
+    ) -> str | None:
+        """Resolve a PDF URL from the report page via bounded locator ops.
 
-        PSW-S17 post-ce2c494 (D12): a real Playwright timeout from
-        ``page.content()`` raises ``EvolutionPdfTimeoutError`` instead of
-        being swallowed into empty HTML.
-
-        Checks:
-        1. ``<object type="application/pdf" data="...">``
-        2. Viewer frame URL (``.pdf`` path or ``file=`` param).
+        PSW-S17 post-cbf50c1 (D17/R1): this MUST NOT call the unbounded
+        ``page.content()``. It delegates to the single shared resolver
+        (:func:`resolve_pdf_url_from_page`) which reads the PDF object
+        ``data`` attribute with a bounded Playwright timeout and falls back
+        to viewer frame URLs. A bounded timeout raises
+        :class:`EvolutionPdfTimeoutError`.
 
         Args:
             page: A Playwright ``Page`` object with a rendered report.
+            deadline_s: Shared monotonic deadline (seconds). Defaults to a
+                conservative 120-second budget when the caller has none.
 
         Returns:
             The PDF URL string, or ``None`` if unresolvable.
 
         Raises:
-            EvolutionPdfTimeoutError: on a Playwright content-read timeout.
+            EvolutionPdfTimeoutError: on a bounded locator timeout or
+                deadline expiry.
         """
-        from urllib.parse import parse_qs, urljoin, urlparse  # noqa: PLC0415
-
+        if deadline_s is None:
+            deadline_s = _pdf_deadline_s(120)
         base_url = self._safe_page_url(page)
-
-        # Strategy 1: <object> tag
-        try:
-            html = page.content()
-        except Exception as exc:
-            if is_playwright_timeout_error(exc):
-                raise EvolutionPdfTimeoutError(
-                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
-                ) from None
-            html = ""
-
-        import re  # noqa: PLC0415
-
-        obj_match = re.search(
-            r'<object[^>]*\btype\s*=\s*["\']application/pdf["\'][^>]*>',
-            html,
-            re.IGNORECASE,
+        return resolve_pdf_url_from_page(
+            page, deadline_s=deadline_s, base_url=base_url
         )
-        if obj_match:
-            data_match = re.search(
-                r'\bdata\s*=\s*["\']([^"\']+)["\']',
-                obj_match.group(0),
-                re.IGNORECASE,
-            )
-            if data_match:
-                return urljoin(base_url, data_match.group(1))
-
-        # Strategy 2: Viewer frame URL
-        try:
-            frames = page.frames or []
-        except Exception:
-            frames = []
-
-        for frame in frames:
-            try:
-                f_url = frame.url or ""
-            except Exception:
-                continue
-            if not f_url:
-                continue
-            parsed = urlparse(f_url)
-            if parsed.path.lower().endswith(".pdf"):
-                return urljoin(f_url, f_url)
-            file_params = parse_qs(parsed.query).get("file", [])
-            for candidate in file_params:
-                return urljoin(f_url, candidate)
-
-        return None
 
     def _download_pdf(
         self,

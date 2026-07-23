@@ -596,6 +596,26 @@ class TestCrossWorkerFailureParityMatrix:
         assert run_current.error_message == expected_msg
         assert run_persistent.error_message == expected_msg
 
+        # PSW-S17 post-cbf50c1 (D15/R5): INDEPENDENT assertions on BOTH
+        # workers for attempt and stage fields — not only worker-to-worker
+        # equality (both could otherwise share the same wrong value).
+        for run in (run_current, run_persistent):
+            latest = (
+                IngestionRunAttempt.objects.filter(run=run)
+                .order_by("-attempt_number")
+                .first()
+            )
+            assert latest is not None
+            assert latest.error_message == expected_msg
+            stage = IngestionRunStageMetric.objects.filter(
+                run=run, stage_name="admissions_capture"
+            ).first()
+            assert stage is not None
+            assert (stage.details_json or {}).get("error_type") == expected_reason
+            assert (
+                (stage.details_json or {}).get("error_message") == expected_msg
+            )
+
         # Idempotency: re-finalizing the persistent run does not duplicate.
         if mode == "terminal":
             # D15: explicit FinalRunFailure field snapshot.
@@ -1347,17 +1367,25 @@ class TestCommandLevelPersistentPdfTimeout:
             context = _FakeContext()
             url = "https://legacy/relatorioAnaEvoInternacaoPdf.xhtml"
             frames: list = []
+            content_calls = 0
 
             def content(self):
-                return (
-                    '<html><body>'
-                    f'<object type="application/pdf" data="{SENSITIVE_URL_SENTINEL}/report.pdf">'
-                    '</object></body></html>'
-                )
+                _FakePdfPage.content_calls += 1
+                raise AssertionError("page.content() must not be called")
 
             def locator(self, selector):  # noqa: ARG002
-                # Return a locator whose count() is 0 so date/generate
-                # probes are skipped.
+                from apps.ingestion.extractors.persistent_evolution_pdf import (
+                    _PDF_OBJECT_SELECTOR,
+                )
+
+                if selector == _PDF_OBJECT_SELECTOR:
+                    obj = MagicMock()
+                    obj.count.return_value = 1
+                    obj.first.get_attribute.return_value = (
+                        f"{SENSITIVE_URL_SENTINEL}/report.pdf"
+                    )
+                    return obj
+                # Other selectors (date/generate probes) are absent.
                 loc = MagicMock()
                 loc.count.return_value = 0
                 return loc
@@ -1451,6 +1479,156 @@ class TestCommandLevelPersistentPdfTimeout:
 
         # Sentinel assertions: no sensitive URL, cookie, patient, stdout, or
         # stderr text reaches run/attempt/stage/stdout/stderr/logs.
+        for blob in [
+            run.error_message or "",
+            latest.error_message or "",
+            str(ev_stage.details_json or {}),
+        ]:
+            assert SENSITIVE_URL_SENTINEL not in blob
+            assert SENSITIVE_COOKIE_SENTINEL not in blob
+            assert SENSITIVE_PATIENT_SENTINEL not in blob
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            assert SENSITIVE_URL_SENTINEL not in stream
+            assert SENSITIVE_COOKIE_SENTINEL not in stream
+            assert SENSITIVE_PATIENT_SENTINEL not in stream
+        for record in caplog.records:
+            text = record.getMessage()
+            assert SENSITIVE_URL_SENTINEL not in text
+            assert SENSITIVE_COOKIE_SENTINEL not in text
+            assert SENSITIVE_PATIENT_SENTINEL not in text
+
+    def test_pdf_url_resolution_timeout_records_timeout_category(
+        self, caplog, capsys
+    ):
+        """D19/R3: a full command -> adapter -> bridge -> EvolutionPdfFlow
+        chain whose PDF URL-resolution (bounded object attribute read) times
+        out records failure_reason=timeout, timed_out=True. The timeout
+        originates as the public real ``playwright.sync_api.TimeoutError``
+        from a synthetic locator fake. No Chromium is launched."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (  # noqa: E501
+            Command as PersistentWorkerCommand,
+        )
+
+        class _TimeoutAttrLocator:
+            first = property(lambda self: self)
+
+            def count(self) -> int:
+                return 1
+
+            def get_attribute(self, name, **kwargs):  # noqa: ARG002
+                raise PlaywrightTimeoutError(
+                    f"Timeout at {SENSITIVE_URL_SENTINEL} "
+                    f"cookie={SENSITIVE_COOKIE_SENTINEL}"
+                )
+
+        class _FakePdfPage:
+            context = MagicMock()
+            url = "https://legacy/relatorioAnaEvoInternacaoPdf.xhtml"
+            frames: list = []
+            content_calls = 0
+
+            def locator(self, selector):  # noqa: ARG002
+                return _TimeoutAttrLocator()
+
+            def content(self):  # type: ignore[no-untyped-def]
+                _FakePdfPage.content_calls += 1
+                raise AssertionError("page.content() must not be called")
+
+        class _FakeHandle:
+            def __init__(self):
+                self._html = _build_admissions_html()
+
+            def ensure_current_page(self):
+                return _FakePdfPage()
+
+            def is_connected(self):
+                return True
+
+            def get_page_html(self):
+                return self._html
+
+            def set_html(self, html):
+                self._html = html
+
+            def open_tab(self, url, *, timeout=120):  # noqa: ARG002
+                return True
+
+            def click_selector(self, selector):  # noqa: ARG002
+                pass
+
+            def get_tab_classes(self):
+                return []
+
+            def close_last_non_root_tab(self):
+                pass
+
+            def restart_browser(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+        handle = _FakeHandle()
+        bridge = RealHandleBridge(handle)
+        adapter = PersistentExtractionAdapter(session=bridge)
+
+        batch = CensusExecutionBatch.objects.create(status="running")
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="full_sync",
+            batch=batch,
+            attempt_count=0,
+            max_attempts=1,
+            parameters_json={
+                "patient_record": SENSITIVE_PATIENT_SENTINEL,
+                "intent": "full_sync",
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-15",
+            },
+        )
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ), patch.object(
+            RealHandleBridge, "navigate_to_admissions", return_value=True
+        ), patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session.persist_admissions_snapshot",
+            return_value=(MagicMock(), {"seen": 1, "created": 1, "updated": 0}),
+        ), caplog.at_level("WARNING"):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "failed"
+        assert run.failure_reason == "timeout"
+        assert run.timed_out is True
+        # The bounded locator path was used; the unbounded content() trap was
+        # never tripped.
+        assert _FakePdfPage.content_calls == 0
+
+        latest = (
+            IngestionRunAttempt.objects.filter(run=run)
+            .order_by("-attempt_number")
+            .first()
+        )
+        assert latest is not None
+        assert latest.failure_reason == "timeout"
+        assert latest.timed_out is True
+        assert latest.error_message == safe_failure_text("timeout")
+
+        ev_stage = IngestionRunStageMetric.objects.get(
+            run=run, stage_name="evolution_extraction"
+        )
+        assert ev_stage.details_json["error_type"] == "timeout"
+        assert ev_stage.details_json["error_message"] == safe_failure_text("timeout")
+
         for blob in [
             run.error_message or "",
             latest.error_message or "",

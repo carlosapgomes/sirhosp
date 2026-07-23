@@ -396,3 +396,94 @@ stdout, command stderr, and every captured log record. The
 current-worker subprocess test now checks stderr sentinel against
 command stderr (not just stdout). The persistent and integration tests
 capture stdout, stderr, and logs.
+
+## Post-cbf50c1 Final Truthful Closure Appendix
+
+The `cbf50c1` commit was pushed while two confirmed defects (D17, D18)
+remained open and required test evidence (D19) and OpenSpec/report
+truthfulness (D20) were incomplete. This appendix records the exact
+implemented semantics after the post-cbf50c1 closure and supersedes the
+stronger-than-evidence wording of the D12/D14 entries above.
+
+### D17: bounded PDF source interactions (corrects D12/D14)
+
+The PDF URL-resolution path MUST NOT call the unbounded `page.content()`
+(this corrects the D12/D14 entries above, which only detected a
+`page.content()` timeout after the fact instead of bounding the read).
+
+- `EvolutionPdfFlow._resolve_pdf_url()` and
+  `RealHandleBridge._resolve_pdf_url_from_report_page()` both delegate to
+  ONE shared resolver, `resolve_pdf_url_from_page()`, in
+  `persistent_evolution_pdf.py`.
+- The resolver reads the `<object type="application/pdf">` `data`
+  attribute through a bounded `locator.get_attribute("data",
+  timeout=...)` call, never through `page.content()`.
+- One monotonic deadline (`_deadline_s` / `_remaining_ms` / `_bound_ms`)
+  governs every phase of `extract()` and the bridge action flow. The
+  caller `timeout` is an UPPER BOUND: a 5-second budget never yields a
+  120000 ms download or report wait. Every phase receives a
+  strictly-positive bounded timeout no greater than the remaining budget.
+- Deadline expiry before/after any non-timeout-capable operation raises
+  `EvolutionPdfTimeoutError`. A positively present PDF object whose
+  bounded read times out raises `EvolutionPdfTimeoutError` with a constant
+  sanitized message. A genuinely absent object remains an absence, but
+  the deadline is checked before converting absence to a generic
+  missing-PDF error.
+- The dead `_derive_download_timeout_ms()` helper is removed; the legacy
+  `download_timeout_ms = max(120_000, timeout*1000)` bridge calculation is
+  replaced with the shared bounded deadline.
+- The shared deadline is enforced only at the source boundary via typed
+  outer exceptions; no threads, signals, subprocesses, second Playwright
+  instance/browser/context, or second login are introduced.
+
+### D18: strict sanitization of all persistent-worker surfaces
+
+No arbitrary `str(exc)`, dynamic exception class, URL, selector,
+credential, cookie, patient record, admission key, raw HTML, subprocess
+preview, stdout, or stderr reaches run/attempt/stage error text, command
+stdout/stderr, logger messages, `CommandError` text, or
+`__cause__`/`__context__` at sanitized boundaries:
+
+- persistent command teardown emits a constant sanitized warning
+  (`_TEARDOWN_FAILURE_MESSAGE`), never `{exc}`;
+- startup database retry emits a constant sanitized warning
+  (`_STARTUP_DB_RETRY_MESSAGE`) plus the safe retry-delay value, never
+  `exc.__class__.__name__` or `{exc}`;
+- credential and bootstrap failures raise a constant `CommandError`
+  (`_CREDENTIAL_RESOLUTION_MESSAGE` / `_BOOTSTRAP_FAILURE_MESSAGE`)
+  raised OUTSIDE the `except` handler so Python does not auto-link the
+  raw exception as `__context__` (both `__cause__` and `__context__` are
+  `None`);
+- the bridge wraps `choose_overlapping_admissions` navigation failures
+  with `EvolutionPdfError(...) from None` (the previous `from exc` chain
+  is removed);
+- the five-category normalized taxonomy and current-worker behavior are
+  preserved.
+
+### D19: complete typed-timeout and adversarial evidence
+
+Added deterministic tests using the public real
+`playwright.sync_api.TimeoutError`: dashboard post-click readiness
+timeout; PDF object bounded attribute-read timeout (flow + bridge);
+full command -> adapter -> bridge -> `EvolutionPdfFlow` chain for both
+URL-resolution and download timeouts. Added unconditional adversarial
+dealine tests (trap page proves `page.content()` is not called; a
+5-second budget never sends 120000 ms; elapsed work reduces later
+timeouts; expiry before report wait/download raises typed timeout and
+skips later phases; a fake operation that overruns the clock raises
+typed timeout rather than `invalid_payload`). The cross-worker matrix
+now INDEPENDENTLY asserts exact attempt/stage `error_type` and
+`error_message` against `safe_failure_text(expected_reason)` on BOTH
+workers (not only worker-to-worker equality).
+
+### D20: truthful OpenSpec and report
+
+Tasks 17.3 through 17.5 are complete only because their literal
+contracts now pass: every persistent source timeout records
+`failure_reason=timeout` and `timed_out=True`; sanitized errors and
+current-worker behavior are preserved; official validation and the
+report are green. The earlier D12/D14 wording that claimed a bounded
+"content read" is corrected above to the implemented bounded object
+attribute read. Sentinel coverage is now complete for URL, cookie,
+credential, patient record, admission key, selector, stdout, and stderr
+across all applicable surfaces. PSW-S18 remains untouched.

@@ -170,6 +170,22 @@ _DEMOGRAPHICS_FIELD_COUNT_FIELDS: tuple[str, ...] = (
 _LOGIN_TIMEOUT_SECONDS = 60
 """Default timeout (seconds) for each legacy bootstrap navigation/wait step."""
 
+# PSW-S17 post-cbf50c1 (D18/R2): constant sanitized messages for command
+# surfaces. No arbitrary ``str(exc)``, dynamic exception class, URL,
+# selector, credential, cookie, patient record, admission key, raw HTML,
+# subprocess preview, stdout, or stderr may reach stdout/stderr, CommandError
+# text, logs, or cause/context chains.
+_TEARDOWN_FAILURE_MESSAGE = (
+    "Persistent session teardown encountered an error (sanitized)."
+)
+_CREDENTIAL_RESOLUTION_MESSAGE = (
+    "Source system credentials are not configured."
+)
+_BOOTSTRAP_FAILURE_MESSAGE = "Persistent session bootstrap failed."
+_STARTUP_DB_RETRY_MESSAGE = (
+    "Worker startup check failed; retrying."
+)
+
 _PERSISTENT_LABEL_PREFIX = "persistent-worker"
 """Default worker label prefix when SIRHOSP_WORKER_LABEL is not set."""
 
@@ -362,11 +378,9 @@ class Command(BaseCommand):
             else:
                 # Stub handle has no shutdown — nothing to tear down.
                 pass
-        except Exception as exc:  # noqa: BLE001 - best-effort teardown logging
+        except Exception:  # noqa: BLE001 - best-effort teardown logging
             self.stderr.write(
-                self.style.WARNING(
-                    f"Error during persistent session teardown: {exc}"
-                )
+                self.style.WARNING(_TEARDOWN_FAILURE_MESSAGE)
             )
 
     # ------------------------------------------------------------------
@@ -461,16 +475,25 @@ class Command(BaseCommand):
         # Validate configuration BEFORE launching the browser (fail fast).
         self._real_url_templates = resolve_legacy_url_templates()
         self._require_real_handle_config()
+        # PSW-S17 post-cbf50c1 (D18/R2): surface a CONSTANT CommandError
+        # with NO cause/context chain. The raise happens OUTSIDE the
+        # ``except`` handler so Python does not auto-link the raw exception
+        # as ``__context__`` (``from None`` only suppresses the *display* of
+        # ``__context__``; it does not clear the reference, which would still
+        # carry the raw exception text).
+        credential_resolution_failed = False
         try:
             credentials = resolve_source_credentials()
-        except ValueError as exc:
-            # resolve_source_credentials raises sanitized ValueErrors listing
-            # the missing setting NAMES (never values). Surface as CommandError.
-            raise CommandError(str(exc)) from exc
+        except ValueError:
+            credential_resolution_failed = True
+        if credential_resolution_failed:
+            raise CommandError(_CREDENTIAL_RESOLUTION_MESSAGE)
 
         profile = ExclusiveBrowserProfile(label="persistent-worker")
         handle = PlaywrightSessionHandle(profile=profile, headless=True)
         handle.start()
+        # Same no-context-chain pattern for bootstrap failures (see above).
+        bootstrap_failed = False
         try:
             # Bootstrap the authenticated legacy session on the root page.
             page = handle.ensure_current_page()
@@ -479,19 +502,22 @@ class Command(BaseCommand):
                 credentials=credentials,
                 login_timeout=_LOGIN_TIMEOUT_SECONDS,
             )
-        except LegacyBootstrapError as exc:
-            # Best-effort teardown, then surface a sanitized error.
+        except LegacyBootstrapError:
+            # Best-effort teardown; the sanitized CommandError is raised
+            # outside this handler to avoid linking the raw chain.
             try:
                 handle.shutdown()
             except Exception:  # noqa: BLE001 - best-effort teardown
                 pass
-            raise CommandError(str(exc)) from exc
+            bootstrap_failed = True
         except CommandError:
             try:
                 handle.shutdown()
             except Exception:  # noqa: BLE001 - best-effort teardown
                 pass
             raise
+        if bootstrap_failed:
+            raise CommandError(_BOOTSTRAP_FAILURE_MESSAGE)
 
         return RealHandleBridge(handle)
 
@@ -633,11 +659,10 @@ class Command(BaseCommand):
                 count = IngestionRun.objects.filter(
                     self._eligible_work_filter()
                 ).count()
-            except (OperationalError, ProgrammingError) as exc:
+            except (OperationalError, ProgrammingError):
                 self.stderr.write(
                     self.style.WARNING(
-                        f"[{timezone.now():%H:%M:%S}] Worker startup check failed "
-                        f"({exc.__class__.__name__}): {exc}. "
+                        f"[{timezone.now():%H:%M:%S}] {_STARTUP_DB_RETRY_MESSAGE} "
                         f"Retrying in {sleep_seconds}s..."
                     )
                 )
