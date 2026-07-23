@@ -1110,7 +1110,7 @@ class Command(BaseCommand):
             )
             self.stdout.write(
                 f"  Auto-enqueued demographics_only run #{demo_run.pk} "
-                f"for patient {patient.patient_source_key}"
+                f"for the captured patient."
             )
             full_sync_run = enqueue_most_recent_admission_full_sync(
                 patient, batch=run.batch,

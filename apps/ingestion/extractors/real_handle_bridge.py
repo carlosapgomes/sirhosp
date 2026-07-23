@@ -68,6 +68,8 @@ from apps.ingestion.extractors.persistent_evolution_pdf import (
     EvolutionPdfError,
     EvolutionPdfFlow,
     EvolutionPdfTimeoutError,
+    extract_pdf_text,
+    normalize_pdf_report_text,
     resolve_pdf_url_from_page,
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
@@ -75,6 +77,9 @@ from apps.ingestion.extractors.persistent_evolution_pdf import (
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
     _deadline_s as _pdf_deadline_s,
+)
+from apps.ingestion.extractors.persistent_evolution_pdf import (
+    _remaining_ms as _pdf_remaining_ms,
 )
 from apps.ingestion.extractors.session_controller import SessionHandle
 
@@ -698,6 +703,7 @@ class RealHandleBridge:
             )
             return []
 
+        overlap_failed = False
         try:
             overlapping = choose_overlapping_admissions(
                 admissions,
@@ -705,13 +711,17 @@ class RealHandleBridge:
                 end_date=end_date,
             )
         except NavigationError:
-            # PSW-S17 post-cbf50c1 (D18): wrap with a constant sanitized
-            # message and suppress the raw chain (``from None``) so no
-            # source exception text can leak.
+            # PSW-S17 post-31dd3c0 (D22): a constant sanitized wrapper raised
+            # OUTSIDE the handler so neither ``__cause__`` nor ``__context__``
+            # carries the raw NavigationError. Raising ``from None`` inside
+            # the handler only suppresses *display* of the context; the raw
+            # reference would still be attached.
+            overlap_failed = True
+        if overlap_failed:
             raise EvolutionPdfError(
                 "Nenhuma interna\u00e7\u00e3o com interse\u00e7\u00e3o "
                 "foi encontrada para o intervalo solicitado."
-            ) from None
+            )
 
         if not overlapping:
             return []
@@ -849,7 +859,7 @@ class RealHandleBridge:
                 pdf_bytes = self._download_pdf(
                     page,
                     pdf_url,
-                    _pdf_bound_ms(deadline_s, DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS),
+                    deadline_s,
                 )
             except EvolutionPdfTimeoutError:
                 raise
@@ -859,25 +869,37 @@ class RealHandleBridge:
                 )
                 continue
 
-            # Step 5h: Extract text and normalise
-            from apps.ingestion.extractors.persistent_evolution_pdf import (  # noqa: PLC0415
-                extract_pdf_text,
-                normalize_pdf_report_text,
-            )
-
+            # Step 5h: Extract text and normalise (D21: deadline-checked
+            # boundaries; typed timeouts propagate, non-timeout
+            # EvolutionPdfError skips this admission).
             try:
                 raw_text = extract_pdf_text(pdf_bytes)
+            except EvolutionPdfTimeoutError:
+                raise
+            except EvolutionPdfError:
+                logger.warning(
+                    "Evolution action flow: PDF text extraction "
+                    "failed (sanitized)"
+                )
+                continue
+            # After extraction / before normalization.
+            _pdf_remaining_ms(deadline_s)
+            try:
                 events = normalize_pdf_report_text(
                     raw_text,
                     admission_key=admission_key,
                 )
-                all_events.extend(events)
+            except EvolutionPdfTimeoutError:
+                raise
             except EvolutionPdfError:
                 logger.warning(
-                    "Evolution action flow: PDF text extraction/normalization "
+                    "Evolution action flow: PDF text normalization "
                     "failed (sanitized)"
                 )
                 continue
+            # After normalization.
+            _pdf_remaining_ms(deadline_s)
+            all_events.extend(events)
 
         return all_events
 
@@ -916,22 +938,31 @@ class RealHandleBridge:
         self,
         page: Any,
         pdf_url: str,
-        timeout_ms: int,
+        deadline_s: float,
     ) -> bytes:
         """Download PDF bytes through the existing browser context.
+
+        PSW-S17 post-31dd3c0 (D21): the shared monotonic ``deadline_s`` is
+        observed around ``request.get()`` and ``response.body()``. A fake or
+        implementation that ignores its supplied timeout and overruns the
+        deadline is caught at the next boundary as
+        ``EvolutionPdfTimeoutError``; a public real Playwright timeout is
+        classified to the same typed error with a constant sanitized
+        message. Boundary checks detect/ classify an overrun after a
+        non-timeout-capable operation returns; they do not interrupt it.
 
         Args:
             page: A Playwright ``Page`` object.
             pdf_url: The PDF URL to download (used only for the request;
                 never logged or surfaced).
-            timeout_ms: Timeout in milliseconds.
+            deadline_s: Shared monotonic deadline (seconds).
 
         Returns:
             Raw PDF bytes.
 
         Raises:
-            EvolutionPdfTimeoutError: on a Playwright/request timeout, so
-                the run records ("timeout", True) (PSW-S17 R2/R3).
+            EvolutionPdfTimeoutError: on a Playwright/request timeout or
+                deadline expiry.
             EvolutionPdfError: any other download failure.
         """
         context = getattr(page, "context", None)
@@ -941,36 +972,54 @@ class RealHandleBridge:
                 "Browser context unavailable for PDF download"
             )
 
+        # Pre-get boundary: _pdf_bound_ms checks the deadline and bounds it.
+        timeout_ms = _pdf_bound_ms(deadline_s, DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS)
+        get_outcome = "ok"
+        response = None
         try:
             response = request.get(pdf_url, timeout=timeout_ms)
-        except Exception as exc:
-            if is_playwright_timeout_error(exc):
-                raise EvolutionPdfTimeoutError(
-                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
-                ) from None
-            logger.warning(
-                "Evolution action flow: PDF download request failed "
-                "(sanitized, non-timeout)"
+        except Exception as exc:  # noqa: BLE001 - classified below
+            get_outcome = (
+                "timeout" if is_playwright_timeout_error(exc) else "failed"
             )
+            if get_outcome == "failed":
+                logger.warning(
+                    "Evolution action flow: PDF download request failed "
+                    "(sanitized, non-timeout)"
+                )
+        if get_outcome == "timeout":
+            raise EvolutionPdfTimeoutError(_EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE)
+        if get_outcome == "failed":
             raise EvolutionPdfError(
                 "Falha ao baixar o PDF do relatório de evolução"
-            ) from None
+            )
+        assert response is not None  # get_outcome == "ok" implies a response
+
+        # After request.get(): catch a fake that ignored its timeout.
+        _pdf_remaining_ms(deadline_s)
 
         if not getattr(response, "ok", False):
             raise EvolutionPdfError(
                 "Falha ao baixar o PDF do relatório de evolução"
             )
-
+        # Immediately before response.body().
+        _pdf_remaining_ms(deadline_s)
+        body_outcome = "ok"
+        body = b""
         try:
             body = response.body()
-        except Exception as exc:
-            if is_playwright_timeout_error(exc):
-                raise EvolutionPdfTimeoutError(
-                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
-                ) from None
+        except Exception as exc:  # noqa: BLE001 - classified below
+            body_outcome = (
+                "timeout" if is_playwright_timeout_error(exc) else "failed"
+            )
+        if body_outcome == "timeout":
+            raise EvolutionPdfTimeoutError(_EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE)
+        if body_outcome == "failed":
             raise EvolutionPdfError(
                 "Falha ao ler o corpo do PDF do relatório de evolução"
-            ) from None
+            )
+        # Immediately after response.body().
+        _pdf_remaining_ms(deadline_s)
 
         return bytes(body or b"")
 

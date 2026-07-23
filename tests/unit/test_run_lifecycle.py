@@ -206,6 +206,12 @@ class TestSafeFailureText:
 SENSITIVE_PATIENT_SENTINEL = "SENSITIVE-PATIENT-0001"
 SENSITIVE_URL_SENTINEL = "https://sensitive.example.test/SENSITIVE_URL"
 SENSITIVE_COOKIE_SENTINEL = "SENSITIVE_COOKIE_VALUE"
+# PSW-S17 post-31dd3c0 (R5): distinct sentinels injected at realistic
+# boundaries (admission snapshot admissionKey; selector carried by a
+# Playwright locator/wait error) and asserted absent from every error/
+# output/log/cause/context surface.
+SENSITIVE_ADMISSION_KEY_SENTINEL = "SENSITIVE-ADM-KEY-0001"
+SENSITIVE_SELECTOR_SENTINEL = '[data-rk="SENSITIVE_SELECTOR_X"]'
 SENSITIVE_STDOUT_SENTINEL = "SENSITIVE_STDOUT_LEAK"
 SENSITIVE_STDERR_SENTINEL = "SENSITIVE_STDERR_LEAK"
 
@@ -611,10 +617,14 @@ class TestCrossWorkerFailureParityMatrix:
                 run=run, stage_name="admissions_capture"
             ).first()
             assert stage is not None
+            assert stage.status == "failed"
             assert (stage.details_json or {}).get("error_type") == expected_reason
             assert (
                 (stage.details_json or {}).get("error_message") == expected_msg
             )
+            # R4: independent stage timing semantics on BOTH workers.
+            assert stage.started_at is not None
+            assert stage.finished_at is not None
 
         # Idempotency: re-finalizing the persistent run does not duplicate.
         if mode == "terminal":
@@ -872,6 +882,9 @@ class TestSentinelSanitizationPersistent:
             EvolutionPdfFlow,
             EvolutionPdfTimeoutError,
         )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
 
         # Sanity: detection helper recognises the duck-typed class.
         assert is_playwright_timeout_error(PlaywrightTimeoutError("x"))
@@ -904,7 +917,7 @@ class TestSentinelSanitizationPersistent:
         with pytest.raises(EvolutionPdfTimeoutError) as exc_info, caplog.at_level(
             "WARNING"
         ):
-            flow._download(SENSITIVE_URL_SENTINEL, timeout_ms=1000)
+            flow._download(SENSITIVE_URL_SENTINEL, _pdf_deadline_s(30))
 
         # The typed exception message is a constant; the sentinel never
         # appears in str(exc) or in logs.
@@ -1498,6 +1511,155 @@ class TestCommandLevelPersistentPdfTimeout:
             assert SENSITIVE_COOKIE_SENTINEL not in text
             assert SENSITIVE_PATIENT_SENTINEL not in text
 
+    def test_command_pdf_timeout_sentinels_admission_key_and_selector_absent(
+        self, caplog, capsys
+    ):
+        """R5: distinct admission-key and selector sentinels injected at
+        realistic boundaries (admission snapshot admissionKey; selector
+        carried by a Playwright locator-timeout error) never reach any
+        run/attempt/stage error field, stdout, stderr, or log."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+        from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (  # noqa: E501
+            Command as PersistentWorkerCommand,
+        )
+
+        class _TimeoutAttrLocator:
+            first = property(lambda self: self)
+
+            def count(self) -> int:
+                return 1
+
+            def get_attribute(self, name, **kwargs):  # noqa: ARG002
+                # Realistic: the raw Playwright locator error carries the
+                # CSS selector and the URL/cookie; the typed wrapper must
+                # strip all of it.
+                raise PlaywrightTimeoutError(
+                    f"Timeout {SENSITIVE_SELECTOR_SENTINEL} at "
+                    f"{SENSITIVE_URL_SENTINEL} "
+                    f"cookie={SENSITIVE_COOKIE_SENTINEL}"
+                )
+
+        class _FakePdfPage:
+            context = MagicMock()
+            url = "https://legacy/relatorioAnaEvoInternacaoPdf.xhtml"
+            frames: list = []
+            content_calls = 0
+
+            def locator(self, selector):  # noqa: ARG002
+                return _TimeoutAttrLocator()
+
+            def content(self):  # type: ignore[no-untyped-def]
+                _FakePdfPage.content_calls += 1
+                raise AssertionError("page.content() must not be called")
+
+        class _FakeHandle:
+            def __init__(self):
+                self._html = _build_admissions_html(
+                    SENSITIVE_ADMISSION_KEY_SENTINEL
+                )
+
+            def ensure_current_page(self):
+                return _FakePdfPage()
+
+            def is_connected(self):
+                return True
+
+            def get_page_html(self):
+                return self._html
+
+            def set_html(self, html):
+                self._html = html
+
+            def open_tab(self, url, *, timeout=120):  # noqa: ARG002
+                return True
+
+            def click_selector(self, selector):  # noqa: ARG002
+                pass
+
+            def get_tab_classes(self):
+                return []
+
+            def close_last_non_root_tab(self):
+                pass
+
+            def restart_browser(self):
+                pass
+
+            def shutdown(self):
+                pass
+
+        handle = _FakeHandle()
+        bridge = RealHandleBridge(handle)
+        adapter = PersistentExtractionAdapter(session=bridge)
+
+        batch = CensusExecutionBatch.objects.create(status="running")
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="full_sync",
+            batch=batch,
+            attempt_count=0,
+            max_attempts=1,
+            parameters_json={
+                "patient_record": SENSITIVE_PATIENT_SENTINEL,
+                "intent": "full_sync",
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-15",
+            },
+        )
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ), patch.object(
+            RealHandleBridge, "navigate_to_admissions", return_value=True
+        ), patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session.persist_admissions_snapshot",
+            return_value=(MagicMock(), {"seen": 1, "created": 1, "updated": 0}),
+        ), caplog.at_level("WARNING"):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.failure_reason == "timeout"
+        assert _FakePdfPage.content_calls == 0
+
+        latest = (
+            IngestionRunAttempt.objects.filter(run=run)
+            .order_by("-attempt_number")
+            .first()
+        )
+        assert latest is not None
+        ev_stage = IngestionRunStageMetric.objects.get(
+            run=run, stage_name="evolution_extraction"
+        )
+
+        sentinels = [
+            SENSITIVE_URL_SENTINEL,
+            SENSITIVE_COOKIE_SENTINEL,
+            SENSITIVE_PATIENT_SENTINEL,
+            SENSITIVE_ADMISSION_KEY_SENTINEL,
+            SENSITIVE_SELECTOR_SENTINEL,
+        ]
+        for blob in [
+            run.error_message or "",
+            latest.error_message or "",
+            str(ev_stage.details_json or {}),
+        ]:
+            for s in sentinels:
+                assert s not in blob
+        captured = capsys.readouterr()
+        for stream in (captured.out, captured.err):
+            for s in sentinels:
+                assert s not in stream
+        for record in caplog.records:
+            text = record.getMessage()
+            for s in sentinels:
+                assert s not in text
+
     def test_pdf_url_resolution_timeout_records_timeout_category(
         self, caplog, capsys
     ):
@@ -1649,7 +1811,7 @@ class TestCommandLevelPersistentPdfTimeout:
             assert SENSITIVE_PATIENT_SENTINEL not in text
 
 
-def _build_admissions_html() -> str:
+def _build_admissions_html(admission_key: str = "ADM1") -> str:
     """Synthetic legacy page HTML with a valid session counter and an
     admission snapshot container (used by D8 command-level test)."""
     return (
@@ -1658,7 +1820,8 @@ def _build_admissions_html() -> str:
         "Tempo: <span>00</span>:<span>29</span>:<span>01</span>"
         "</div>\n"
         '<div id="admission-snapshot-data">\n'
-        '[{"admissionKey":"ADM1","admissionStart":"2026-01-01",'
+        f'[{{"admissionKey":"{admission_key}",'
+        '"admissionStart":"2026-01-01",'
         '"admissionEnd":"","ward":"UTI","bed":"1"}]\n'
         "</div>\n"
         "</body></html>"

@@ -487,3 +487,78 @@ report are green. The earlier D12/D14 wording that claimed a bounded
 attribute read. Sentinel coverage is now complete for URL, cookie,
 credential, patient record, admission key, selector, stdout, and stderr
 across all applicable surfaces. PSW-S18 remains untouched.
+
+## Post-31dd3c0 Verification Closure Appendix (D21-D25)
+
+This appendix supersedes earlier wording in D17/D18/D20 that overstated the
+implementation. The implemented guarantee is stated exactly below; nothing
+stronger is claimed.
+
+### D21: one deadline through response handling and PDF processing
+
+`EvolutionPdfFlow.extract()` and the bridge action flow share ONE monotonic
+deadline. It is now observed (not only computed) at every later boundary:
+
+- the shared `deadline_s` (not only a derived timeout integer) is passed into
+  the download helpers (`_download`, `_download_pdf`);
+- the deadline is checked immediately after `request.get()` returns, and
+  immediately before and after `response.body()`;
+- the deadline is checked after PDF text extraction and after normalization
+  (the post-body check also serves as the pre-extraction boundary, so no
+  duplicate adjacent check is added);
+- a fake/implementation that ignores its supplied timeout and overruns the
+  deadline is caught at the next boundary and raises
+  `EvolutionPdfTimeoutError` (a typed timeout) with a constant sanitized
+  message; it never returns success and never becomes `invalid_payload`,
+  `source_unavailable`, or a generic `EvolutionPdfError`;
+- a public real `playwright.sync_api.TimeoutError` from `request.get()` or
+  `response.body()` becomes `EvolutionPdfTimeoutError` with no raw
+  URL/cookie/cause/context text.
+
+Boundary checks detect and classify an overrun AFTER a non-timeout-capable
+local/cached operation (body read, PyMuPDF parse, normalization) returns;
+they do NOT interrupt that operation mid-call. This is therefore NOT a
+literal hard wall-clock bound. The timeout-capable Playwright calls
+(`request.get`, `response.body`, locator attribute reads) receive a strictly
+positive bounded timeout no greater than the remaining budget; no operation
+receives `timeout=0`; elapsed work reduces every later timeout.
+
+### D22: bridge overlap wrapper has no raw cause/context
+
+The earlier `from None` inside the `except NavigationError` handler only
+suppressed *display* of the context; the raw `NavigationError` reference was
+still attached as `__context__`. The wrapper is now raised OUTSIDE the
+handler (flag-then-raise), so BOTH `__cause__` and `__context__` are `None`,
+and the constant message contains no admission, date, patient, selector,
+URL, or raw exception text. The flow/bridge download wrappers are likewise
+raised outside their handlers.
+
+### D23: no patient identifier in command stdout
+
+The successful admissions-only auto-enqueue message no longer prints
+`patient.patient_source_key`. Safe operational run IDs (`demo_run.pk`,
+`full_sync_run.pk`) and constant text remain. No patient/admission value
+reaches stdout/stderr.
+
+### D24: complete evidence
+
+Added tests using a controlled monotonic clock against the real `extract()`
+and bridge methods: request-receives-bounded-timeout; request-ignores-timeout
+overrun caught before body; response-body overrun caught after body; PDF-text
+extraction and normalization overruns caught at the next boundary (and later
+phases skipped); public real Playwright body timeout -> typed timeout with no
+sentinel/cause/context. The cross-worker matrix now INDEPENDENTLY asserts
+stage `started_at`/`finished_at` on BOTH workers. Distinct admission-key and
+selector sentinels are injected at realistic boundaries (snapshot
+`admissionKey`; selector carried by a Playwright locator-timeout error) and
+asserted absent from every run/attempt/stage/stdout/stderr/log surface.
+
+### D25: truthful OpenSpec and report
+
+Earlier claims that "every PDF phase is governed by the deadline", that a
+"literal wall-clock hard bound" is enforced, and that `response.body()` was
+"guarded before and after" are corrected above to the implemented
+bounded-call + before/after boundary-check semantics. The report now
+contains actual before/after code fragments for every changed versioned file.
+Tasks 17.3-17.5 remain checked only because their literal contracts now pass.
+PSW-S18 remains untouched.

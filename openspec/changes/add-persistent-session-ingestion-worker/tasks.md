@@ -340,6 +340,28 @@ dealine tests, and independent cross-worker attempt/stage assertions
 were added. Tasks 17.3-17.5 are complete only because their literal
 contracts now pass; PSW-S18 remains untouched.
 
+Post-31dd3c0 verification closure (D21-D25): the shared monotonic
+deadline now reaches ``request.get()``, ``response.body()``, PDF text
+extraction, and normalization in BOTH the flow and the bridge (checked
+after ``request.get`` returns, immediately before and after
+``response.body``, and after extraction/normalization). A fake that
+ignores its timeout and overruns the deadline is caught at the next
+boundary as ``EvolutionPdfTimeoutError`` (never success, never
+``invalid_payload``/another category); a public real Playwright body
+timeout becomes a constant sanitized typed timeout with no raw
+cause/context. This is a bounded-call + before/after boundary-check
+guarantee, NOT a literal hard wall-clock bound (mid-call interruption is
+not enforced). The bridge overlap wrapper is now raised OUTSIDE the
+``except`` handler so ``__cause__`` and ``__context__`` are both ``None``
+(the previous ``from None`` inside the handler still attached the raw
+reference as ``__context__``). The admissions-only auto-enqueue message
+no longer prints ``patient.patient_source_key`` (safe run IDs remain).
+Distinct admission-key and selector sentinels are injected and asserted
+absent from every error/output/log/cause/context surface, and the
+cross-worker matrix now independently asserts stage timing on both
+workers. Tasks 17.3-17.5 remain checked only because their literal
+contracts now pass; PSW-S18 remains untouched.
+
 ## 18. PSW-S18: Internal legacy-tab cleanup and recovery
 
 - [ ] 18.1 Add failing tests reproducing multiple legacy DOM tabs inside one

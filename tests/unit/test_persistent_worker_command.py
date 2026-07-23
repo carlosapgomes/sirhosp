@@ -1873,6 +1873,63 @@ class TestPersistentCommandRawExceptionSanitization:
 
 
 @pytest.mark.django_db
+class TestPersistentCommandPatientStdoutSanitization:
+    """PSW-S17 post-31dd3c0 (D23/R2): a successful admissions-only run must
+    NOT print the patient source key (or any patient/admission identifier)
+    to command stdout/stderr. Safe operational run IDs may remain."""
+
+    def test_admissions_success_does_not_print_patient_source_key(
+        self, capsys
+    ) -> None:
+        cmd_path = (
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session"
+        )
+        sentinel = "SENSITIVE-PSK-STDOUT-0001"
+        run = _queue_admissions_run(
+            parameters_json={
+                "patient_record": sentinel,
+                "intent": "admissions_only",
+            }
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        fake_patient = MagicMock()
+        fake_patient.patient_source_key = sentinel
+
+        with (
+            patch.object(
+                PersistentWorkerCommand,
+                "_create_adapter",
+                return_value=mock_adapter,
+            ),
+            patch(
+                f"{cmd_path}.persist_admissions_snapshot",
+                return_value=(
+                    fake_patient,
+                    {"seen": 1, "created": 1, "updated": 0},
+                ),
+            ),
+            patch(
+                f"{cmd_path}.queue_demographics_only_run",
+                return_value=MagicMock(pk=4242),
+            ),
+            patch(
+                f"{cmd_path}.enqueue_most_recent_admission_full_sync",
+                return_value=None,
+            ),
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+        captured = capsys.readouterr()
+        # The patient source key must not reach stdout or stderr. Safe run
+        # IDs (e.g. #4242) may be present.
+        assert sentinel not in captured.out
+        assert sentinel not in captured.err
+
+
+@pytest.mark.django_db
 class TestDefaultStubBackwardCompat:
     """Default stub behavior remains backward compatible (PSW-S10)."""
 

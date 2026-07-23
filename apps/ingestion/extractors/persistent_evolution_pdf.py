@@ -774,13 +774,18 @@ class EvolutionPdfFlow:
                 "Evolution report PDF could not be located on the page"
             )
 
-        # Step 4: download bounded by the remaining budget.
-        download_timeout_ms = _bound_ms(deadline_s, self._pdf_download_timeout_ms)
-        pdf_bytes = self._download(pdf_url, download_timeout_ms)
+        # Step 4: download bounded by the remaining budget; _download checks
+        # the deadline before (via _bound_ms) and after request.get/body.
+        pdf_bytes = self._download(pdf_url, deadline_s)
 
-        # Step 5: extract + normalise.
+        # Step 5: extract + normalise. Each non-timeout-capable operation is
+        # checked against the shared deadline on return (the post-body check
+        # in _download also serves as the pre-extraction boundary).
         raw_text = extract_pdf_text(pdf_bytes)
-        return normalize_pdf_report_text(raw_text, admission_key=admission_key)
+        _remaining_ms(deadline_s)
+        events = normalize_pdf_report_text(raw_text, admission_key=admission_key)
+        _remaining_ms(deadline_s)
+        return events
 
     # ------------------------------------------------------------------
     # Steps
@@ -876,41 +881,68 @@ class EvolutionPdfFlow:
             base_url=self._safe_url(),
         )
 
-    def _download(self, pdf_url: str, timeout_ms: int) -> bytes:
+    def _download(self, pdf_url: str, deadline_s: float) -> bytes:
         """Download the PDF bytes through the existing browser context.
 
-        PSW-S17 R2/R3: a Playwright/playwright-request timeout MUST surface
-        as :class:`EvolutionPdfTimeoutError` so the run/attempt records
-        ``failure_reason=timeout``. Other download failures remain
-        :class:`EvolutionPdfError`.
+        PSW-S17 post-31dd3c0 (D21): the shared monotonic ``deadline_s`` is
+        observed around ``request.get()`` and ``response.body()``. A fake or
+        implementation that ignores its supplied timeout and overruns the
+        deadline is caught at the next boundary as
+        ``EvolutionPdfTimeoutError``; a public real Playwright timeout from
+        either call is classified to the same typed error with a constant
+        sanitized message. All typed wrappers are raised OUTSIDE the
+        ``except`` handlers so neither ``__cause__`` nor ``__context__``
+        carries a raw exception (raising ``from None`` inside a handler only
+        suppresses *display* of the context). Boundary checks detect and
+        classify an overrun AFTER a non-timeout-capable local/cached
+        operation returns; they do not interrupt it mid-call.
         """
         context = getattr(self._page, "context", None)
         request = getattr(context, "request", None) if context is not None else None
         if request is None:
             raise EvolutionPdfError("Browser context unavailable for PDF download")
+        # Pre-get boundary: _bound_ms checks the deadline and bounds the timeout.
+        timeout_ms = _bound_ms(deadline_s, self._pdf_download_timeout_ms)
+        get_outcome = "ok"
+        response = None
         try:
             response = request.get(pdf_url, timeout=timeout_ms)
-        except Exception as exc:  # noqa: BLE001 - sanitized below
-            if is_playwright_timeout_error(exc):
-                raise EvolutionPdfTimeoutError(
-                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
-                ) from None
-            logger.warning(
-                "Persistent evolution PDF: download request failed "
-                "(sanitized, non-timeout)"
+        except Exception as exc:  # noqa: BLE001 - classified below
+            get_outcome = (
+                "timeout" if is_playwright_timeout_error(exc) else "failed"
             )
-            raise EvolutionPdfError("Failed to download the evolution report PDF") from None
+            if get_outcome == "failed":
+                logger.warning(
+                    "Persistent evolution PDF: download request failed "
+                    "(sanitized, non-timeout)"
+                )
+        if get_outcome == "timeout":
+            raise EvolutionPdfTimeoutError(_EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE)
+        if get_outcome == "failed":
+            raise EvolutionPdfError("Failed to download the evolution report PDF")
+        assert response is not None  # get_outcome == "ok" implies a response
+
+        # After request.get(): catch a fake that ignored its timeout.
+        _remaining_ms(deadline_s)
 
         if not getattr(response, "ok", False):
             raise EvolutionPdfError("Failed to download the evolution report PDF")
+        # Immediately before response.body().
+        _remaining_ms(deadline_s)
+        body_outcome = "ok"
+        body = b""
         try:
             body = response.body()
-        except Exception as exc:  # noqa: BLE001 - sanitized below
-            if is_playwright_timeout_error(exc):
-                raise EvolutionPdfTimeoutError(
-                    _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE
-                ) from None
-            raise EvolutionPdfError("Failed to read the evolution report PDF body") from None
+        except Exception as exc:  # noqa: BLE001 - classified below
+            body_outcome = (
+                "timeout" if is_playwright_timeout_error(exc) else "failed"
+            )
+        if body_outcome == "timeout":
+            raise EvolutionPdfTimeoutError(_EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE)
+        if body_outcome == "failed":
+            raise EvolutionPdfError("Failed to read the evolution report PDF body")
+        # Immediately after response.body() (= before PDF text extraction).
+        _remaining_ms(deadline_s)
         return bytes(body or b"")
 
     # ------------------------------------------------------------------

@@ -1948,13 +1948,255 @@ class TestBridgePdfBoundedUrlResolution:
         assert 1 <= kwargs["timeout"] <= 5_000
 
 
-class TestBridgeOverlapFailureSanitization:
-    """PSW-S17 post-cbf50c1 (D18): the bridge must NOT retain a ``from exc``
-    source chain when wrapping a navigation failure into EvolutionPdfError."""
+class TestBridgeDeadlineThroughBodyAndParsing:
+    """PSW-S17 post-31dd3c0 (D21): the bridge's shared deadline must reach
+    ``request.get()``, ``response.body()`` and the PDF text-extraction /
+    normalization boundaries. A fake that ignores its timeout and advances
+    the controlled clock past the deadline is caught at the next boundary as
+    ``EvolutionPdfTimeoutError``."""
 
-    def test_overlap_navigation_error_wrapped_from_none(self) -> None:
+    def test_download_pdf_body_overrun_raises_typed_timeout(self) -> None:
+        """R3.3: a response-body fake that advances the clock past the
+        deadline produces a typed timeout in the bridge download path."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+        from tests.unit.test_persistent_evolution_pdf import _MonotonicClock
+
+        clock = _MonotonicClock()
+
+        class _Resp:
+            ok = True
+            status = 200
+
+            def body(self) -> bytes:
+                clock.advance(20.0)
+                return b"%PDF-1.4 body"
+
+        class _Req:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+
+            def get(self, url: str, **kwargs):
+                self.calls.append((url, kwargs))
+                return _Resp()
+
+        class _Ctx:
+            def __init__(self) -> None:
+                self.request = _Req()
+
+        class _Page:
+            def __init__(self) -> None:
+                self.context = _Ctx()
+
+        page = _Page()
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with patch.object(time_mod, "monotonic", clock.monotonic):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                bridge._download_pdf(
+                    page, "https://legacy.example/r.pdf", _pdf_deadline_s(5)
+                )
+
+        # The request received a bounded timeout (<= 5s budget).
+        assert page.context.request.calls
+        _, kwargs = page.context.request.calls[0]
+        assert 1 <= kwargs["timeout"] <= 5_000
+
+    def test_download_pdf_real_playwright_body_timeout_is_typed_no_sentinel(
+        self,
+    ) -> None:
+        """R3.5/R3.6: a public real playwright TimeoutError from
+        ``response.body()`` becomes a constant sanitized
+        ``EvolutionPdfTimeoutError`` carrying no URL/cookie sentinel and no
+        raw cause/context chain."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+        from tests.unit.test_persistent_evolution_pdf import (
+            SENSITIVE_COOKIE_SENTINEL,
+            SENSITIVE_URL_SENTINEL,
+        )
+
+        sentinel_msg = (
+            f"Timeout at {SENSITIVE_URL_SENTINEL} "
+            f"cookie={SENSITIVE_COOKIE_SENTINEL}"
+        )
+
+        class _Resp:
+            ok = True
+            status = 200
+
+            def body(self) -> bytes:
+                raise PlaywrightTimeoutError(sentinel_msg)
+
+        class _Req:
+            def get(self, url, **kwargs):  # noqa: ARG002
+                return _Resp()
+
+        class _Ctx:
+            def __init__(self) -> None:
+                self.request = _Req()
+
+        class _Page:
+            def __init__(self) -> None:
+                self.context = _Ctx()
+
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
+            bridge._download_pdf(
+                _Page(), "https://legacy.example/r.pdf", _pdf_deadline_s(30)
+            )
+
+        outer = exc_info.value
+        assert SENSITIVE_URL_SENTINEL not in str(outer)
+        assert SENSITIVE_COOKIE_SENTINEL not in str(outer)
+        assert outer.__cause__ is None
+        assert outer.__context__ is None
+
+    def test_action_flow_extraction_overrun_raises_typed_timeout(self) -> None:
+        """R3.4: a PDF-text-extraction overrun inside the bridge action flow is
+        caught at the next boundary as a typed timeout that propagates (it is
+        NOT swallowed as a per-admission skip)."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+        from tests.unit.test_persistent_evolution_pdf import (
+            REPRESENTATIVE_REPORT_TEXT,
+            _MonotonicClock,
+        )
+
+        clock = _MonotonicClock()
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        class _UrlLocator:
+            first = property(lambda self: self)
+
+            def count(self) -> int:
+                return 1
+
+            def get_attribute(self, name, **kwargs):  # noqa: ARG002
+                return "https://legacy.example/report.pdf"
+
+        class _Req:
+            def get(self, url, **kwargs):  # noqa: ARG002
+                class _Resp:
+                    ok = True
+
+                    def body(self):
+                        return b"%PDF-1.4 bytes"
+
+                return _Resp()
+
+        class _Ctx:
+            def __init__(self) -> None:
+                self.request = _Req()
+
+        class _ReportPage:
+            url = "https://legacy/relatorioAnaEvoInternacaoPdf.xhtml"
+            frames: list = []
+            context = _Ctx()
+
+            def locator(self, selector):  # noqa: ARG002
+                return _UrlLocator()
+
+        def _slow_extract(_bytes):
+            clock.advance(20.0)  # overrun the 5s budget
+            return REPRESENTATIVE_REPORT_TEXT
+
+        with (
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.search_patient"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_internacoes"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge._read_and_build_snapshot",
+                return_value=[{
+                    "admissionKey": "K1",
+                    "admissionStart": "2026-01-01",
+                    "admissionEnd": "",
+                    "ward": "",
+                    "bed": "",
+                }],
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.open_internacao_detail"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_evolucao"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.fill_evolution_dates"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.select_ascending_order"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_visualizar_report"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.wait_for_report_or_no_evolutions",
+                return_value=True,
+            ),
+            patch.object(
+                bridge, "_resolve_active_page", return_value=_ReportPage()
+            ),
+            patch.object(time_mod, "monotonic", clock.monotonic),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.extract_pdf_text",
+                _slow_extract,
+            ),
+        ):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="123",
+                    start_date="2026-01-01",
+                    end_date="2026-01-15",
+                    timeout=5,
+                )
+
+
+class TestBridgeOverlapFailureSanitization:
+    """PSW-S17 post-31dd3c0 (D22): the bridge must NOT retain the raw
+    ``NavigationError`` in EITHER ``__cause__`` or ``__context__`` when
+    wrapping a navigation failure into EvolutionPdfError. Raising ``from None``
+    inside the ``except`` handler only suppresses *display* of the context;
+    the reference is still attached. The wrapper must be raised OUTSIDE the
+    handler."""
+
+    def test_overlap_navigation_error_wrapped_no_cause_no_context(self) -> None:
         """choose_overlapping_admissions NavigationError surfaces as
-        EvolutionPdfError raised ``from None`` (no cause chain)."""
+        EvolutionPdfError with BOTH ``__cause__`` and ``__context__`` None
+        (raised outside the handler), and the raw sentinel never leaks."""
         import pytest
 
         from apps.ingestion.extractors.legacy_navigation import NavigationError
@@ -1989,7 +2231,11 @@ class TestBridgeOverlapFailureSanitization:
                     end_date="2026-01-15",
                 )
 
-        msg = str(exc_info.value)
+        outer = exc_info.value
+        msg = str(outer)
         assert sentinel not in msg
-        # No cause/context chain carrying the raw navigation error.
-        assert exc_info.value.__cause__ is None
+        # D22: no cause AND no context chain carrying the raw navigation
+        # error (``from None`` inside the handler would still leave
+        # ``__context__`` set to the raw NavigationError).
+        assert outer.__cause__ is None
+        assert outer.__context__ is None

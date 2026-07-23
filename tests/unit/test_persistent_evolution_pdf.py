@@ -200,23 +200,47 @@ class _FakeLocator:
 
 
 class _FakeResponse:
-    def __init__(self, *, ok: bool = True, body: bytes = b"", status: int = 200):
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        body: bytes = b"",
+        status: int = 200,
+        on_body: Any = None,
+        body_error: Exception | None = None,
+    ):
         self.ok = ok
         self._body = body
         self.status = status
         self.headers: dict[str, str] = {}
+        self._on_body = on_body
+        self._body_error = body_error
+        self.body_calls: int = 0
 
     def body(self) -> bytes:
+        self.body_calls += 1
+        if self._on_body is not None:
+            self._on_body()
+        if self._body_error is not None:
+            raise self._body_error
         return self._body
 
 
 class _FakeRequest:
-    def __init__(self, response: _FakeResponse | None = None):
+    def __init__(
+        self,
+        response: _FakeResponse | None = None,
+        *,
+        on_get: Any = None,
+    ):
         self._response = response
+        self._on_get = on_get
         self.get_calls: list[tuple[str, dict[str, Any]]] = []
 
     def get(self, url: str, **kwargs: Any) -> _FakeResponse:
         self.get_calls.append((url, kwargs))
+        if self._on_get is not None:
+            self._on_get()
         if self._response is None:
             raise RuntimeError("no response configured")
         return self._response
@@ -237,6 +261,7 @@ class _FakePdfPage:
         url: str = "https://legacy.example/relatorioAnaEvoInternacaoPdf.xhtml",
         locators: dict[str, _FakeLocator] | None = None,
         response: _FakeResponse | None = None,
+        request_obj: _FakeRequest | None = None,
         frames: list[dict[str, str]] | None = None,
         wait_raises: bool = False,
         content_raises: bool = False,
@@ -244,7 +269,7 @@ class _FakePdfPage:
         self._html = html
         self.url = url
         self._locators = locators or {}
-        self._request = _FakeRequest(response)
+        self._request = request_obj if request_obj is not None else _FakeRequest(response)
         self.context = _FakeContext(self._request)
         self._frames = frames or []
         self._wait_raises = wait_raises
@@ -1103,3 +1128,250 @@ class TestEvolutionPdfFlowStrictDeadline:
         # The overrun is caught at the next deadline check and raises a
         # typed timeout, never invalid_payload / a generic category.
         assert isinstance(exc_info.value, EvolutionPdfTimeoutError)
+
+
+# ===========================================================================
+# PSW-S17 post-31dd3c0 (D21): one deadline through request / response.body
+# / parsing / normalization
+# ===========================================================================
+
+
+class _MonotonicClock:
+    """Controlled monotonic clock for deadline-boundary tests."""
+
+    def __init__(self, start: float = 1000.0):
+        self._t = start
+        self.calls = 0
+
+    def monotonic(self) -> float:
+        self.calls += 1
+        return self._t
+
+    def advance(self, seconds: float) -> None:
+        self._t += seconds
+
+
+class TestEvolutionPdfFlowDeadlineThroughBodyAndParsing:
+    """D21/R1/R3: the single monotonic deadline must reach
+    ``request.get()``, ``response.body()``, ``extract_pdf_text()`` and
+    ``normalize_pdf_report_text()``. A fake that ignores its supplied timeout
+    and advances the controlled clock past the deadline is caught at the next
+    boundary as ``EvolutionPdfTimeoutError`` — never success, never
+    ``invalid_payload``, never a generic ``EvolutionPdfError``.
+
+    All assertions are unconditional and drive the real ``extract()`` method.
+    """
+
+    def test_request_get_receives_positive_timeout_no_greater_than_budget(
+        self,
+    ) -> None:
+        """R3.1: the download request receives a strictly positive timeout
+        bounded by the 5-second caller budget (never 120000 ms, never 0)."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        valid_pdf = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+        clock = _MonotonicClock()
+        response = _FakeResponse(ok=True, body=valid_pdf)
+        request = _FakeRequest(response)
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            request_obj=request,
+        )
+        flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=120_000)
+
+        with patch.object(time_mod, "monotonic", clock.monotonic):
+            flow.extract(start_date="2024-01-01", end_date="2024-01-02", timeout=5)
+
+        assert len(request.get_calls) == 1
+        _, kwargs = request.get_calls[0]
+        assert 1 <= kwargs["timeout"] <= 5_000
+
+    def test_request_ignoring_timeout_advances_clock_then_typed_before_body(
+        self,
+    ) -> None:
+        """R3.2/R3.7: a request fake that ignores its supplied timeout and
+        advances the controlled clock past the deadline is followed by a typed
+        timeout BEFORE body processing; ``response.body()`` is never called."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+
+        valid_pdf = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+        clock = _MonotonicClock()
+        response = _FakeResponse(ok=True, body=valid_pdf)
+        request = _FakeRequest(
+            response, on_get=lambda: clock.advance(20.0)
+        )
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            request_obj=request,
+        )
+        flow = EvolutionPdfFlow(page, pdf_download_timeout_ms=120_000)
+
+        with patch.object(time_mod, "monotonic", clock.monotonic):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                flow.extract(
+                    start_date="2024-01-01", end_date="2024-01-02", timeout=5
+                )
+
+        # Body work never ran (deadline expired right after request.get).
+        assert response.body_calls == 0
+
+    def test_response_body_overrun_raises_typed_not_success(self) -> None:
+        """R3.3: a response-body fake that advances the clock past the
+        deadline produces a typed timeout, not a success result."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+
+        valid_pdf = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+        clock = _MonotonicClock()
+        response = _FakeResponse(
+            ok=True, body=valid_pdf, on_body=lambda: clock.advance(20.0)
+        )
+        request = _FakeRequest(response)
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            request_obj=request,
+        )
+        flow = EvolutionPdfFlow(page)
+
+        with patch.object(time_mod, "monotonic", clock.monotonic):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                flow.extract(
+                    start_date="2024-01-01", end_date="2024-01-02", timeout=5
+                )
+
+        # The body was read once, then the next boundary caught the overrun.
+        assert response.body_calls == 1
+
+    def test_extraction_overrun_raises_typed_and_skips_normalize(self) -> None:
+        """R3.4/R3.7: a PDF-text-extraction overrun is caught at the next
+        boundary as a typed timeout, and normalization never runs."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors import persistent_evolution_pdf as pdfmod
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+
+        valid_pdf = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+        clock = _MonotonicClock()
+        response = _FakeResponse(ok=True, body=valid_pdf)
+        request = _FakeRequest(response)
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            request_obj=request,
+        )
+        flow = EvolutionPdfFlow(page)
+        normalize_calls: list[int] = []
+
+        def _slow_extract(_bytes):
+            clock.advance(20.0)  # overrun the 5s budget
+            return REPRESENTATIVE_REPORT_TEXT
+
+        def _normalize(*a, **k):
+            normalize_calls.append(1)
+            return []
+
+        with (
+            patch.object(time_mod, "monotonic", clock.monotonic),
+            patch.object(pdfmod, "extract_pdf_text", _slow_extract),
+            patch.object(pdfmod, "normalize_pdf_report_text", _normalize),
+        ):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                flow.extract(
+                    start_date="2024-01-01", end_date="2024-01-02", timeout=5
+                )
+
+        assert normalize_calls == []
+
+    def test_normalize_overrun_raises_typed(self) -> None:
+        """R3.4: a normalization overrun is caught at the next boundary as a
+        typed timeout."""
+        import time as time_mod
+        from unittest.mock import patch
+
+        import pytest
+
+        from apps.ingestion.extractors import persistent_evolution_pdf as pdfmod
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+
+        valid_pdf = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
+        clock = _MonotonicClock()
+        response = _FakeResponse(ok=True, body=valid_pdf)
+        request = _FakeRequest(response)
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            request_obj=request,
+        )
+        flow = EvolutionPdfFlow(page)
+
+        def _slow_normalize(*a, **k):
+            clock.advance(20.0)
+            return []
+
+        with (
+            patch.object(time_mod, "monotonic", clock.monotonic),
+            patch.object(pdfmod, "normalize_pdf_report_text", _slow_normalize),
+        ):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                flow.extract(
+                    start_date="2024-01-01", end_date="2024-01-02", timeout=5
+                )
+
+    def test_real_playwright_body_timeout_becomes_evolution_pdf_timeout(
+        self,
+    ) -> None:
+        """R3.5/R3.6: a public real ``playwright.sync_api.TimeoutError``
+        raised by ``response.body()`` becomes a constant sanitized
+        ``EvolutionPdfTimeoutError`` carrying no URL/cookie sentinel and no
+        raw cause/context chain."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+
+        sentinel_msg = (
+            f"Timeout at {SENSITIVE_URL_SENTINEL} cookie="
+            f"{SENSITIVE_COOKIE_SENTINEL}"
+        )
+        response = _FakeResponse(
+            ok=True, body=b"", body_error=PlaywrightTimeoutError(sentinel_msg)
+        )
+        request = _FakeRequest(response)
+        page = _FakePdfPage(
+            html=_object_html("https://legacy.example/r.pdf"),
+            request_obj=request,
+        )
+        flow = EvolutionPdfFlow(page)
+
+        with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
+            flow.extract(start_date="2024-01-01", end_date="2024-01-02")
+
+        outer = exc_info.value
+        assert SENSITIVE_URL_SENTINEL not in str(outer)
+        assert SENSITIVE_COOKIE_SENTINEL not in str(outer)
+        assert outer.__cause__ is None
+        assert outer.__context__ is None
+
+
+SENSITIVE_URL_SENTINEL = "https://sensitive.example.test/SENSITIVE_URL"
+SENSITIVE_COOKIE_SENTINEL = "SENSITIVE_COOKIE_VALUE"
