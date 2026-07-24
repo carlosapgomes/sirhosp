@@ -506,6 +506,10 @@ class TestCrossWorkerFailureParityMatrix:
         assert run_persistent.timed_out is expected_timed_out
 
         # Attempt taxonomy parity.
+        # PSW-S17 contract freeze (R1): independently assert attempt
+        # lifecycle values for BOTH workers and BOTH modes, not only via
+        # worker-to-worker equality.
+        expected_attempt_number = 1 if mode == "retryable" else 3
         for run in (run_current, run_persistent):
             latest = (
                 IngestionRunAttempt.objects.filter(run=run)
@@ -517,6 +521,8 @@ class TestCrossWorkerFailureParityMatrix:
             assert latest.failure_reason == expected_reason
             assert latest.timed_out is expected_timed_out
             assert latest.finished_at is not None
+            assert latest.started_at is not None
+            assert latest.attempt_number == expected_attempt_number
 
         # Mode-specific parity.
         if mode == "retryable":
@@ -540,6 +546,11 @@ class TestCrossWorkerFailureParityMatrix:
                 assert run.status == "failed"
                 assert run.finished_at is not None
                 assert run.next_retry_at is None
+                # PSW-S17 contract freeze (R1): terminal drained batch
+                # closes as failed for BOTH workers, independently.
+                run.batch.refresh_from_db()
+                assert run.batch.status == "failed"
+                assert run.batch.finished_at is not None
                 # Exactly one FinalRunFailure with correct fields.
                 failures = list(FinalRunFailure.objects.filter(run=run))
                 assert len(failures) == 1

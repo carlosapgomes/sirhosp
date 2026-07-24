@@ -288,79 +288,27 @@
 - [x] 17.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S17-report.md`.
 
-PSW-S17 corrective closure owns the typed persistent timeout invariant:
-`NavigationTimeoutError`, `EvolutionPdfTimeoutError`, and the typed timeout
-raised by `PlaywrightSessionHandle.open_tab` cross the adapter/command
-boundary so the shared classifier maps them to `("timeout", True)` without
-any cause/context chain walk. PSW-S20 and PSW-S22 preserve and deepen this
-invariant (selectors, required actions, HTTP/PDF validation, live flow
-behavior) but must not regress the typed outer-exception contract delivered
-here.
-
-Second corrective closure rule (R2): an optional UI element that is absent
-is detected with a non-blocking presence probe (``count()``) and remains a
-documented no-op; an internal short polling wait may continue only while a
-separate whole-operation budget is still active; expiration of that budget
-raises a typed timeout; once a required element is positively present, a
-Playwright timeout from its ``wait_for``/``click``/``fill``/``goto``/report
-wait/download action raises a typed domain timeout. Lifecycle DB text is
-normalized by category via ``safe_error_message``/``safe_error_type``:
-typed domain exceptions carry sanitized constant messages from source
-boundaries; unexpected exceptions are replaced with stable category-specific
-text and label so no arbitrary ``str(exc)`` reaches run/attempt/stage error
-fields.
-
-Final corrective closure (D1-D10): strict normalized sanitization replaces
-the hybrid policy — no ``str(exc)`` is persisted for ANY exception class, not
-even typed ``ExtractionError`` subclasses; ``error_type`` is always the
-normalized category, never a dynamic class name. Every required source
-operation (``click_evolucao`` wait/click, ``select_ascending_order`` when
-present, ``get_page_html``, ``click_selector``, ``get_tab_classes``) raises
-a typed ``ExtractionTimeoutError`` on a real Playwright timeout. A
-command-level persistent PDF download timeout test proves the full chain
-(command -> adapter -> bridge -> EvolutionPdfFlow -> typed timeout) records
-``failure_reason=timeout`` end to end. Cross-worker stage metric and batch
-closure parity is tested through both worker commands for all five
-categories.
-
-Post-cbf50c1 final truthful closure (D17-D20): the PDF URL-resolution
-path no longer calls the unbounded ``page.content()``; both the flow
-and the bridge delegate to ONE shared resolver
-(``resolve_pdf_url_from_page``) that reads the PDF object ``data``
-attribute through a bounded ``locator.get_attribute(timeout=...)`` call
-governed by a single monotonic deadline. The dead
-``_derive_download_timeout_ms`` helper and the ``max(120_000, ...)``
-bridge download calculation are removed. Teardown, startup DB retry,
-credential, and bootstrap command surfaces emit constant sanitized
-messages with NO cause/context chain (``__cause__`` and ``__context__``
-both ``None``); the bridge overlaps-failure wrap uses ``from None``.
-Full command-level URL-resolution and download timeout tests, the
-dashboard post-click readiness timeout test, unconditional adversarial
-dealine tests, and independent cross-worker attempt/stage assertions
-were added. Tasks 17.3-17.5 are complete only because their literal
-contracts now pass; PSW-S18 remains untouched.
-
-Post-31dd3c0 verification closure (D21-D25): the shared monotonic
-deadline now reaches ``request.get()``, ``response.body()``, PDF text
-extraction, and normalization in BOTH the flow and the bridge (checked
-after ``request.get`` returns, immediately before and after
-``response.body``, and after extraction/normalization). A fake that
-ignores its timeout and overruns the deadline is caught at the next
-boundary as ``EvolutionPdfTimeoutError`` (never success, never
-``invalid_payload``/another category); a public real Playwright body
-timeout becomes a constant sanitized typed timeout with no raw
-cause/context. This is a bounded-call + before/after boundary-check
-guarantee, NOT a literal hard wall-clock bound (mid-call interruption is
-not enforced). The bridge overlap wrapper is now raised OUTSIDE the
-``except`` handler so ``__cause__`` and ``__context__`` are both ``None``
-(the previous ``from None`` inside the handler still attached the raw
-reference as ``__context__``). The admissions-only auto-enqueue message
-no longer prints ``patient.patient_source_key`` (safe run IDs remain).
-Distinct admission-key and selector sentinels are injected and asserted
-absent from every error/output/log/cause/context surface, and the
-cross-worker matrix now independently asserts stage timing on both
-workers. Tasks 17.3-17.5 remain checked only because their literal
-contracts now pass; PSW-S18 remains untouched.
+PSW-S17 closure (authoritative): failures normalize to the five categories
+(`source_unavailable`, `invalid_payload`, `timeout`, `validation_error`,
+`unexpected_exception`); typed source timeouts
+(`NavigationTimeoutError`, `EvolutionPdfTimeoutError`,
+`ExtractionTimeoutError`) record `failure_reason=timeout` and
+`timed_out=True`. The current and persistent workers share observable
+retry/terminal lifecycle semantics (attempts, retry scheduling,
+`FinalRunFailure`, and batch closure), verified through both worker
+commands for all categories and modes with independent expected-value
+assertions. Sanitization applies only to observable/persisted surfaces
+(run/attempt/stage error fields, logs, stdout/stderr, `CommandError`
+text, rendered tracebacks); `raise ... from None` is accepted and a
+suppressed internal `__context__` is not a failure unless re-emitted; no
+universal `__context__ is None` is required. The deadline is cooperative:
+bounded timeout-capable Playwright calls plus monotonic boundary checks
+(`response.body()` takes no explicit timeout); overruns are detected
+after return at the next boundary — no literal hard wall-clock bound, no
+thread/signal/subprocess/second browser. Runtime PDF URL resolution does
+not call `page.content()`, and the persistent auto-enqueue output prints
+no patient identifier. Tasks 17.3-17.5 are checked only because their
+literal contracts pass. PSW-S18 remains untouched.
 
 ## 18. PSW-S18: Internal legacy-tab cleanup and recovery
 
