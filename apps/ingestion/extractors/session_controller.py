@@ -14,6 +14,7 @@ from typing import Protocol, runtime_checkable
 from apps.ingestion.extractors.session_policy import (
     SEL_RENEWAL_BUTTON,
     TabCleanupAction,
+    TabCleanupOutcome,
     decide_tab_cleanup,
     is_renewal_popup_visible,
     parse_session_countdown,
@@ -99,8 +100,22 @@ class SessionHandle(Protocol):
         """Return class strings for each tab ``<li>`` in DOM order."""
         ...
 
-    def close_last_non_root_tab(self) -> None:
-        """Close the last non-root operational tab."""
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
+        """Close the last non-root legacy DOM tab and report the outcome.
+
+        A PrimeFaces legacy tab is a DOM element inside ONE Playwright Page;
+        implementations MUST click the centralized DOM close control on the
+        active page (never close a Playwright Page) and verify the safe state
+        within a bounded timeout (PSW-S18 R2/R3/R4).
+
+        Returns:
+            :attr:`~session_policy.TabCleanupOutcome.ROOT_ONLY` when only the
+            root tab exists (no click);
+            :attr:`~session_policy.TabCleanupOutcome.CLOSED_AND_VERIFIED` when
+            a tab was closed and the safe state was observed;
+            :attr:`~session_policy.TabCleanupOutcome.UNSAFE` when close/verify
+            could not be completed.
+        """
         ...
 
     def restart_browser(self) -> None:
@@ -135,6 +150,11 @@ class PersistentSessionController:
         self.jobs_processed: int = 0
         self.consecutive_failures: int = 0
         self._session_start_time: float = time.monotonic()
+        # PSW-S18 R6: an unsafe cleanup forces recovery (restart) before the
+        # next claim. This flag is set on UNSAFE, preserved by
+        # ``mark_job_processed`` (R7), surfaced by ``restart_required``, and
+        # cleared only by ``reset_after_restart`` (actual recovery).
+        self._recovery_required: bool = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -234,30 +254,56 @@ class PersistentSessionController:
         self.consecutive_failures = 0
         return True
 
-    def close_job_tab_if_present(self) -> None:
-        """Close the last non-root operational tab after job completion.
+    def close_job_tab_if_present(self) -> TabCleanupOutcome:
+        """Close the last non-root legacy DOM tab after job completion.
 
-        Uses the PSW-S1 tab cleanup policy to decide the safe action.
-        Tab close is cleanup only — it never resets the failure counter
-        or acts as renewal evidence.
+        PSW-S18: reports exactly one of three cleanup outcomes and drives
+        controller recovery state. Tab close is cleanup only — it never
+        resets the failure counter or acts as renewal evidence (R5).
+
+        Returns:
+            :attr:`~session_policy.TabCleanupOutcome.ROOT_ONLY` when only the
+            root tab exists (no close attempted);
+            :attr:`~session_policy.TabCleanupOutcome.CLOSED_AND_VERIFIED` when
+            a tab was closed and verified;
+            :attr:`~session_policy.TabCleanupOutcome.UNSAFE` when the state is
+            ambiguous or close/verify failed (recovery is forced before the
+            next claim).
         """
         tab_classes = self._session.get_tab_classes()
         action = decide_tab_cleanup(tab_classes)
 
-        if action == TabCleanupAction.CLOSE_LAST_NON_ROOT:
-            self._session.close_last_non_root_tab()
-        elif action == TabCleanupAction.RECOVERY_REQUIRED:
-            self._increment_failure()
-        # PRESERVE_ROOT: no action needed.
+        if action == TabCleanupAction.PRESERVE_ROOT:
+            return TabCleanupOutcome.ROOT_ONLY
+
+        if action == TabCleanupAction.RECOVERY_REQUIRED:
+            self._mark_unsafe_cleanup()
+            return TabCleanupOutcome.UNSAFE
+
+        # CLOSE_LAST_NON_ROOT: perform the concrete close + verify on the
+        # active page and react to the reported outcome.
+        outcome = self._session.close_last_non_root_tab()
+        if outcome == TabCleanupOutcome.CLOSED_AND_VERIFIED:
+            return TabCleanupOutcome.CLOSED_AND_VERIFIED
+        if outcome == TabCleanupOutcome.ROOT_ONLY:
+            # Race: the tab already disappeared and root-only was observed —
+            # the safe state holds, no recovery needed.
+            return TabCleanupOutcome.ROOT_ONLY
+        # UNSAFE (or any unexpected value): force recovery before next claim.
+        self._mark_unsafe_cleanup()
+        return TabCleanupOutcome.UNSAFE
 
     def mark_job_processed(self) -> None:
         """Record a successfully processed job.
 
         Increments the job counter and resets the consecutive failure
-        counter.
+        counter — EXCEPT when an unsafe cleanup forced recovery (PSW-S18 R7):
+        in that case the cleanup failure must survive job accounting so the
+        next claim stays blocked until an actual restart.
         """
         self.jobs_processed += 1
-        self.consecutive_failures = 0
+        if not self._recovery_required:
+            self.consecutive_failures = 0
 
     def restart_required(self) -> bool:
         """Determine whether the browser session should be restarted.
@@ -271,6 +317,10 @@ class PersistentSessionController:
         Returns:
             True if a restart is needed at the next safe point.
         """
+        # PSW-S18 R6: an unsafe cleanup forces recovery before the next claim.
+        if self._recovery_required:
+            return True
+
         if not self._session.is_connected():
             return True
 
@@ -294,6 +344,7 @@ class PersistentSessionController:
         """
         self.jobs_processed = 0
         self.consecutive_failures = 0
+        self._recovery_required = False
         self._session_start_time = time.monotonic()
 
     # ------------------------------------------------------------------
@@ -303,3 +354,12 @@ class PersistentSessionController:
     def _increment_failure(self) -> None:
         """Increment the consecutive failure counter."""
         self.consecutive_failures += 1
+
+    def _mark_unsafe_cleanup(self) -> None:
+        """Record an unsafe tab cleanup (PSW-S18 R6).
+
+        Increments/preserves controller failure state and flags that
+        recovery (restart) is required before the next claim.
+        """
+        self._increment_failure()
+        self._recovery_required = True

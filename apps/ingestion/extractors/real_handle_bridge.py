@@ -82,6 +82,7 @@ from apps.ingestion.extractors.persistent_evolution_pdf import (
     _remaining_ms as _pdf_remaining_ms,
 )
 from apps.ingestion.extractors.session_controller import SessionHandle
+from apps.ingestion.extractors.session_policy import TabCleanupOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -406,9 +407,9 @@ class RealHandleBridge:
         """Delegate to wrapped handle."""
         return self._handle.get_tab_classes()
 
-    def close_last_non_root_tab(self) -> None:
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
         """Delegate to wrapped handle."""
-        self._handle.close_last_non_root_tab()
+        return self._handle.close_last_non_root_tab()
 
     def restart_browser(self) -> None:
         """Delegate to wrapped handle."""

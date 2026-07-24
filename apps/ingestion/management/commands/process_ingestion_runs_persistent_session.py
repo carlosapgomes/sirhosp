@@ -124,6 +124,7 @@ from apps.ingestion.extractors.persistent_evolution_pdf import (
 from apps.ingestion.extractors.persistent_extraction_adapter import (
     PersistentExtractionAdapter,
 )
+from apps.ingestion.extractors.session_policy import TabCleanupOutcome
 from apps.ingestion.gap_planner import plan_extraction_windows
 
 # ---------------------------------------------------------------------------
@@ -247,8 +248,8 @@ class _StubSessionHandle:
     def get_tab_classes(self) -> list[str]:
         return []
 
-    def close_last_non_root_tab(self) -> None:
-        pass
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
+        return TabCleanupOutcome.ROOT_ONLY
 
     def restart_browser(self) -> None:
         pass

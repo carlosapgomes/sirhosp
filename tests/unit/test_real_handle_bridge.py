@@ -26,6 +26,7 @@ from apps.ingestion.extractors.persistent_extraction_adapter import (
     _EVOLUTION_DATA_CONTAINER_RE,
     _EVOLUTION_DATA_DIV_ID,
 )
+from apps.ingestion.extractors.session_policy import TabCleanupOutcome
 from tests.unit.test_legacy_navigation import (  # noqa: PLC0415
     FakeClock,
     FakeNavigationFrame,
@@ -207,8 +208,9 @@ class FakePlaywrightHandle:
     def get_tab_classes(self) -> list[str]:
         return list(self._tab_classes)
 
-    def close_last_non_root_tab(self) -> None:
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
         self._closed_tab_calls += 1
+        return TabCleanupOutcome.CLOSED_AND_VERIFIED
 
     def restart_browser(self) -> None:
         self._restart_calls += 1
@@ -851,8 +853,9 @@ class TestBridgeWithoutJSEvaluation:
             def get_tab_classes(self) -> list[str]:
                 return list(self._tab_classes)
 
-            def close_last_non_root_tab(self) -> None:
+            def close_last_non_root_tab(self) -> TabCleanupOutcome:
                 self._closed += 1
+                return TabCleanupOutcome.CLOSED_AND_VERIFIED
 
             def restart_browser(self) -> None:
                 self._restart += 1

@@ -29,6 +29,7 @@ from apps.ingestion.extractors.persistent_extraction_adapter import (
     PersistentExtractionAdapter,
     _build_admissions_url,
 )
+from apps.ingestion.extractors.session_policy import TabCleanupOutcome
 from apps.ingestion.management.commands.process_ingestion_runs_persistent_session import (
     Command as PersistentWorkerCommand,
 )
@@ -2104,8 +2105,9 @@ class _PdfBridgeSession:
     def get_tab_classes(self) -> list[str]:
         return ["tabs-first tabs-last tabs-selected", "tabs-last"]
 
-    def close_last_non_root_tab(self) -> None:
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
         self._closed += 1
+        return TabCleanupOutcome.CLOSED_AND_VERIFIED
 
     def restart_browser(self) -> None:
         pass
@@ -4049,8 +4051,8 @@ class _ReadyFailingStubSession:
     def get_tab_classes(self) -> list[str]:
         return ["tabs-first tabs-last tabs-selected"]
 
-    def close_last_non_root_tab(self) -> None:
-        pass
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
+        return TabCleanupOutcome.ROOT_ONLY
 
     def restart_browser(self) -> None:
         pass

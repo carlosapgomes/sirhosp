@@ -19,6 +19,7 @@ Design (per ``design.md`` Decision 6):
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from apps.ingestion.extractors.browser_profile import ExclusiveBrowserProfile
@@ -26,11 +27,22 @@ from apps.ingestion.extractors.errors import (
     ExtractionTimeoutError,
     is_playwright_timeout_error,
 )
+from apps.ingestion.extractors.session_policy import (
+    SEL_TAB_LAST_CLOSE,
+    TabCleanupAction,
+    TabCleanupOutcome,
+    decide_tab_cleanup,
+)
 
 logger = logging.getLogger(__name__)
 
 # Default timeout in seconds for navigation if none is provided
 _DEFAULT_NAVIGATION_TIMEOUT_SECONDS = 120
+
+# PSW-S18 R4: bounded budget (seconds) to click the DOM close control and
+# verify the tab count decreased / root-only state was restored. Cleanup is
+# post-run housekeeping, so this stays short and bounded.
+_DEFAULT_TAB_CLOSE_VERIFY_TIMEOUT_SECONDS = 5
 
 
 class PlaywrightSessionHandle:
@@ -251,23 +263,83 @@ class PlaywrightSessionHandle:
             )
             return []
 
-    def close_last_non_root_tab(self) -> None:
-        """Close the last non-root operational tab.
+    def close_last_non_root_tab(
+        self, *, timeout: int = _DEFAULT_TAB_CLOSE_VERIFY_TIMEOUT_SECONDS
+    ) -> TabCleanupOutcome:
+        """Close the last non-root legacy DOM tab and verify the safe state.
 
-        Closes the last page in the context if there are at least 2 pages,
-        preserving the root tab (the first page opened).
+        PSW-S18 R2/R3/R4: a PrimeFaces legacy tab is a DOM ``<li>`` element
+        inside ONE Playwright Page — it is NOT a ``BrowserContext.pages``
+        entry. This clicks the centralized DOM close control
+        (``SEL_TAB_LAST_CLOSE``) on the active page and verifies the DOM tab
+        count decreased or the root-only state was restored within a bounded
+        timeout. It NEVER closes a Playwright Page.
+
+        PSW-S18 R9: cleanup failures are sanitized (constant log messages)
+        and mapped to :attr:`~session_policy.TabCleanupOutcome.UNSAFE`; they
+        are never re-raised and never classify the run as a source timeout
+        (cleanup is post-run housekeeping, not extraction).
+
+        Args:
+            timeout: Bounded budget (seconds) shared by the click and the
+                verification poll.
+
+        Returns:
+            :attr:`~session_policy.TabCleanupOutcome.ROOT_ONLY` when only the
+            root tab exists (no click);
+            :attr:`~session_policy.TabCleanupOutcome.CLOSED_AND_VERIFIED`
+            when a tab was closed and the safe state was observed;
+            :attr:`~session_policy.TabCleanupOutcome.UNSAFE` when close/verify
+            could not be completed.
         """
-        if self._context is None:
-            return
-        pages = self._context.pages
-        if len(pages) >= 2:
-            last_page = pages[-1]
+        page = self._current_page()
+        if page is None:
+            logger.warning(
+                "Persistent session tab cleanup: no active page (sanitized)"
+            )
+            return TabCleanupOutcome.UNSAFE
+
+        try:
+            classes_before = self.get_tab_classes()
+        except Exception:  # noqa: BLE001 - sanitized cleanup failure
+            logger.warning(
+                "Persistent session tab cleanup: tab read failed (sanitized)"
+            )
+            return TabCleanupOutcome.UNSAFE
+
+        action = decide_tab_cleanup(classes_before)
+        if action == TabCleanupAction.PRESERVE_ROOT:
+            return TabCleanupOutcome.ROOT_ONLY
+        if action == TabCleanupAction.RECOVERY_REQUIRED:
+            return TabCleanupOutcome.UNSAFE
+
+        # CLOSE_LAST_NON_ROOT: click the centralized DOM close control.
+        try:
+            page.locator(SEL_TAB_LAST_CLOSE).click(timeout=timeout * 1000)
+        except Exception:  # noqa: BLE001 - sanitized cleanup failure
+            logger.warning(
+                "Persistent session tab cleanup: close click failed (sanitized)"
+            )
+            return TabCleanupOutcome.UNSAFE
+
+        # Verify the tab count decreased or root-only state was restored
+        # within the bounded timeout.
+        deadline = time.monotonic() + timeout
+        while True:
             try:
-                last_page.close()
-            except Exception:
+                classes_after = self.get_tab_classes()
+            except Exception:  # noqa: BLE001 - sanitized cleanup failure
                 logger.warning(
-                    "Failed to close last non-root tab (sanitized)"
+                    "Persistent session tab cleanup: verify read failed (sanitized)"
                 )
+                return TabCleanupOutcome.UNSAFE
+            if len(classes_after) < len(classes_before):
+                return TabCleanupOutcome.CLOSED_AND_VERIFIED
+            if decide_tab_cleanup(classes_after) == TabCleanupAction.PRESERVE_ROOT:
+                return TabCleanupOutcome.CLOSED_AND_VERIFIED
+            if time.monotonic() >= deadline:
+                return TabCleanupOutcome.UNSAFE
+            time.sleep(0.05)
 
     def restart_browser(self) -> None:
         """Restart the browser and session completely.

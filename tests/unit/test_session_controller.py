@@ -15,6 +15,7 @@ from apps.ingestion.extractors.session_controller import (
 )
 from apps.ingestion.extractors.session_policy import (
     SEL_RENEWAL_BUTTON,
+    TabCleanupOutcome,
 )
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,7 @@ class FakeSessionHandle:
         self._restart_calls: int = 0
         self._on_open_tab: Callable[[], None] | None = None
         self._open_tab_fail: bool = False
+        self._close_outcome: TabCleanupOutcome = TabCleanupOutcome.CLOSED_AND_VERIFIED
 
     # --- Fake state mutators (test helpers) ---
 
@@ -63,6 +65,10 @@ class FakeSessionHandle:
         """Make the next ``open_tab`` call return False."""
         self._open_tab_fail = True
 
+    def set_close_outcome(self, outcome: TabCleanupOutcome) -> None:
+        """Configure the outcome returned by ``close_last_non_root_tab``."""
+        self._close_outcome = outcome
+
     # --- Interface implementation ---
 
     def get_page_html(self) -> str:
@@ -83,8 +89,9 @@ class FakeSessionHandle:
     def get_tab_classes(self) -> list[str]:
         return list(self._tab_classes)
 
-    def close_last_non_root_tab(self) -> None:
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
         self._closed_tab_calls += 1
+        return self._close_outcome
 
     def restart_browser(self) -> None:
         self._restart_calls += 1
@@ -466,6 +473,127 @@ class TestCloseJobTabIfPresent:
         controller.close_job_tab_if_present()
         # Close is cleanup — does not reset failures or session expiry
         assert controller.consecutive_failures == 2
+
+
+# ===========================================================================
+# PSW-S18: cleanup outcome contract and unsafe-cleanup recovery
+# ===========================================================================
+
+
+class TestCloseJobTabOutcomeContract:
+    """PSW-S18: ``close_job_tab_if_present`` reports exactly one of three
+    observable outcomes and drives controller recovery state."""
+
+    def test_root_only_state_reports_root_only_outcome(self) -> None:
+        """Single root tab -> ROOT_ONLY; no close attempted."""
+        session = FakeSessionHandle()
+        session.set_tab_classes(["tabs-first tabs-last tabs-selected"])
+        controller = PersistentSessionController(session)
+
+        outcome = controller.close_job_tab_if_present()
+
+        assert outcome is TabCleanupOutcome.ROOT_ONLY
+        assert session.closed_tab_calls == 0
+        assert controller.consecutive_failures == 0
+
+    def test_verified_close_reports_closed_and_verified(self) -> None:
+        """Two tabs + verified close -> CLOSED_AND_VERIFIED; cleanup is not
+        renewal, so it must not reset the failure counter."""
+        session = FakeSessionHandle()
+        session.set_tab_classes([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        controller = PersistentSessionController(session)
+        controller.consecutive_failures = 2
+
+        outcome = controller.close_job_tab_if_present()
+
+        assert outcome is TabCleanupOutcome.CLOSED_AND_VERIFIED
+        assert session.closed_tab_calls == 1
+        # R5: close never changes renewal evidence / failure counter.
+        assert controller.consecutive_failures == 2
+
+    def test_unsafe_close_increments_failure_state(self) -> None:
+        """Handle reports UNSAFE -> outcome UNSAFE, failures incremented."""
+        session = FakeSessionHandle()
+        session.set_tab_classes([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        session.set_close_outcome(TabCleanupOutcome.UNSAFE)
+        controller = PersistentSessionController(session)
+
+        outcome = controller.close_job_tab_if_present()
+
+        assert outcome is TabCleanupOutcome.UNSAFE
+        assert controller.consecutive_failures == 1
+
+    def test_ambiguous_state_reports_unsafe_without_click(self) -> None:
+        """Ambiguous DOM state (empty) -> UNSAFE; no close attempted."""
+        session = FakeSessionHandle()
+        session.set_tab_classes([])
+        controller = PersistentSessionController(session)
+
+        outcome = controller.close_job_tab_if_present()
+
+        assert outcome is TabCleanupOutcome.UNSAFE
+        assert session.closed_tab_calls == 0
+        assert controller.consecutive_failures == 1
+
+    def test_mark_job_processed_does_not_erase_unsafe_cleanup(self) -> None:
+        """R7: job accounting must not zero an unsafe-cleanup failure."""
+        session = FakeSessionHandle()
+        session.set_tab_classes([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        session.set_close_outcome(TabCleanupOutcome.UNSAFE)
+        controller = PersistentSessionController(session)
+
+        controller.close_job_tab_if_present()
+        # Job accounting runs after the recoverable failure / success path.
+        controller.mark_job_processed()
+
+        # The unsafe-cleanup failure survives job accounting.
+        assert controller.consecutive_failures >= 1
+        assert controller.restart_required() is True
+
+    def test_no_next_claim_before_recovery_after_unsafe(self) -> None:
+        """R6: UNSAFE forces recovery (restart_required) before next claim,
+        and a verified cleanup alone never sets recovery."""
+        session = FakeSessionHandle()
+        session.set_tab_classes([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        controller = PersistentSessionController(session)
+
+        # A verified close must NOT force recovery.
+        assert controller.close_job_tab_if_present() is TabCleanupOutcome.CLOSED_AND_VERIFIED
+        assert controller.restart_required() is False
+
+        # An unsafe close MUST force recovery.
+        session.set_close_outcome(TabCleanupOutcome.UNSAFE)
+        controller.close_job_tab_if_present()
+        controller.mark_job_processed()
+        assert controller.restart_required() is True
+
+    def test_reset_after_restart_clears_unsafe_recovery(self) -> None:
+        """Recovery (restart) clears the unsafe-cleanup recovery state."""
+        session = FakeSessionHandle()
+        session.set_tab_classes([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        session.set_close_outcome(TabCleanupOutcome.UNSAFE)
+        controller = PersistentSessionController(session)
+        controller.close_job_tab_if_present()
+        assert controller.restart_required() is True
+
+        controller.reset_after_restart()
+
+        assert controller.restart_required() is False
 
 
 # ===========================================================================

@@ -312,15 +312,35 @@ literal contracts pass. PSW-S18 remains untouched.
 
 ## 18. PSW-S18: Internal legacy-tab cleanup and recovery
 
-- [ ] 18.1 Add failing tests reproducing multiple legacy DOM tabs inside one
+- [x] 18.1 Add failing tests reproducing multiple legacy DOM tabs inside one
   Playwright Page and unsafe/ambiguous cleanup states.
-- [ ] 18.2 Close the last non-root PrimeFaces tab through its DOM close control,
+- [x] 18.2 Close the last non-root PrimeFaces tab through its DOM close control,
   preserve root, and verify tab-count decrease or root restoration.
-- [ ] 18.3 Ensure unsafe cleanup failures are not erased by job accounting and
+- [x] 18.3 Ensure unsafe cleanup failures are not erased by job accounting and
   force recovery before the next claim.
-- [ ] 18.4 Prove tab close is cleanup only and never renewal evidence.
-- [ ] 18.5 Run official validation and create
+- [x] 18.4 Prove tab close is cleanup only and never renewal evidence.
+- [x] 18.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S18-report.md`.
+
+PSW-S18 closure (authoritative): cleanup reports exactly three observable
+outcomes via `TabCleanupOutcome` (`ROOT_ONLY`, `CLOSED_AND_VERIFIED`,
+`UNSAFE`) in `session_policy.py`. The concrete
+`PlaywrightSessionHandle.close_last_non_root_tab()` now clicks the
+centralized DOM close control (`SEL_TAB_LAST_CLOSE` =
+`li.tabs-last:not(.tabs-first) a.tabs-close`) on the active page and
+verifies the DOM tab count decreased or root-only state was restored within
+a bounded timeout; it NEVER closes a Playwright Page (the previous
+`context.pages[-1].close()` mismatch is removed). The controller's
+`close_job_tab_if_present()` returns the outcome; `UNSAFE` sets a
+`_recovery_required` flag and increments failure state, `mark_job_processed`
+preserves it (R7), `restart_required()` surfaces it so the worker restarts
+before the next claim (R6), and `reset_after_restart()` clears it. A verified
+close never changes renewal evidence (R5). Cleanup is applied after success
+and recoverable extraction failures for `admissions_only`,
+`demographics_only`, `full_sync`, and `full_admission_sync` (R8). Cleanup
+failures are sanitized (constant log messages) and never re-raised or
+classified as a run timeout (R9). Inherited PSW-S17 contracts are preserved
+and not re-audited.
 
 ## 19. PSW-S19: Restart, rebootstrap, and lifecycle configuration
 

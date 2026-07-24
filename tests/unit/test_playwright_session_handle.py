@@ -397,6 +397,56 @@ class TestIsConnected:
 # ===========================================================================
 
 
+class _DomTabLocator:
+    """Fake Playwright locator modeling a PrimeFaces DOM tab close button."""
+
+    def __init__(self, page: "_DomTabPage", selector: str) -> None:
+        self._page = page
+        self._selector = selector
+
+    def click(self, timeout: float | int | None = None) -> None:  # noqa: ARG002
+        self._page.clicked_selectors.append(self._selector)
+        if self._page.click_fails:
+            raise RuntimeError("click failed (sanitized)")
+        self._page.remove_last_dom_tab()
+
+
+class _DomTabPage:
+    """Fake Playwright Page carrying legacy PrimeFaces DOM ``<li>`` tabs.
+
+    Models ONE Playwright Page whose DOM contains multiple legacy tab
+    elements. ``locator(...).click()`` on the close control removes the last
+    non-root DOM tab; the Page itself is never removed (R3). Mirrors the
+    JS used by ``PlaywrightSessionHandle.get_tab_classes``.
+    """
+
+    def __init__(self, tab_classes: list[str]) -> None:
+        self._tabs: list[str] = list(tab_classes)
+        self.clicked_selectors: list[str] = []
+        self.page_close_calls: int = 0
+        self.click_fails: bool = False
+        self.no_decrease: bool = False
+
+    def locator(self, selector: str) -> _DomTabLocator:
+        return _DomTabLocator(self, selector)
+
+    def evaluate(self, _expression: str) -> list[str]:
+        return list(self._tabs)
+
+    def close(self) -> None:
+        self.page_close_calls += 1
+
+    def remove_last_dom_tab(self) -> None:
+        if self.no_decrease:
+            return
+        if len(self._tabs) >= 2:
+            self._tabs.pop()
+
+    @property
+    def tab_classes(self) -> list[str]:
+        return list(self._tabs)
+
+
 class TestTabOperations:
     """Tests for tab-related operations."""
 
@@ -463,33 +513,170 @@ class TestTabOperations:
         ]
         page2.evaluate.assert_called_once()
 
-    def test_close_last_non_root_tab(
+    def test_close_last_non_root_tab_clicks_dom_control(
         self,
         mock_browser_profile: MagicMock,
         mock_persistent_context: MagicMock,
         sync_playwright_mock: MagicMock,
     ) -> None:
-        """close_last_non_root_tab closes the last non-root tab page."""
+        """PSW-S18 R2/R3: close_last_non_root_tab clicks the centralized DOM
+        close control on the active page; it never closes a Playwright Page."""
         from apps.ingestion.extractors.playwright_session_handle import (
             PlaywrightSessionHandle,
         )
+        from apps.ingestion.extractors.session_policy import (
+            SEL_TAB_LAST_CLOSE,
+            TabCleanupOutcome,
+        )
 
-        root_page = MagicMock()
-        job_page = MagicMock()
-        mock_persistent_context.pages = [root_page, job_page]
+        # One Playwright Page carrying two legacy DOM <li> tabs.
+        page = _DomTabPage([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        mock_persistent_context.pages = [page]
 
         with patch(
             "playwright.sync_api.sync_playwright",
             return_value=sync_playwright_mock,
         ):
-            handle = PlaywrightSessionHandle(
-                profile=mock_browser_profile,
-            )
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
             handle.start()
-            handle.close_last_non_root_tab()
+            outcome = handle.close_last_non_root_tab(timeout=1)
 
-        job_page.close.assert_called_once()
-        root_page.close.assert_not_called()
+        assert outcome is TabCleanupOutcome.CLOSED_AND_VERIFIED
+        # The DOM close control was clicked.
+        assert SEL_TAB_LAST_CLOSE in page.clicked_selectors
+        # No Playwright Page was closed (DOM tab, not a Page).
+        assert page.page_close_calls == 0
+        # DOM tab count decreased to the root-only safe state.
+        assert page.tab_classes == ["tabs-first tabs-selected"]
+
+    def test_close_last_non_root_tab_root_only_no_click(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """Root-only DOM state -> ROOT_ONLY; no DOM click, no Page close."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+        from apps.ingestion.extractors.session_policy import TabCleanupOutcome
+
+        page = _DomTabPage(["tabs-first tabs-last tabs-selected"])
+        mock_persistent_context.pages = [page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            outcome = handle.close_last_non_root_tab(timeout=1)
+
+        assert outcome is TabCleanupOutcome.ROOT_ONLY
+        assert page.clicked_selectors == []
+        assert page.page_close_calls == 0
+
+    def test_close_last_non_root_tab_missing_control_is_unsafe(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """Click failure (missing/broken close control) -> UNSAFE; no Page close."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+        from apps.ingestion.extractors.session_policy import TabCleanupOutcome
+
+        page = _DomTabPage([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        page.click_fails = True
+        mock_persistent_context.pages = [page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            outcome = handle.close_last_non_root_tab(timeout=1)
+
+        assert outcome is TabCleanupOutcome.UNSAFE
+        assert page.page_close_calls == 0
+        # Tab count unchanged (click failed).
+        assert len(page.tab_classes) == 2
+
+    def test_close_last_non_root_tab_no_count_decrease_is_unsafe(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """Click succeeds but tab count never decreases within the bounded
+        timeout -> UNSAFE (R4 verification gate)."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+        from apps.ingestion.extractors.session_policy import (
+            SEL_TAB_LAST_CLOSE,
+            TabCleanupOutcome,
+        )
+
+        page = _DomTabPage([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        page.no_decrease = True
+        mock_persistent_context.pages = [page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            outcome = handle.close_last_non_root_tab(timeout=1)
+
+        assert outcome is TabCleanupOutcome.UNSAFE
+        # The DOM control WAS clicked, but verification failed.
+        assert SEL_TAB_LAST_CLOSE in page.clicked_selectors
+        assert page.page_close_calls == 0
+
+    def test_close_last_non_root_tab_ambiguous_state_is_unsafe(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """Ambiguous DOM state -> UNSAFE without clicking."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+        from apps.ingestion.extractors.session_policy import TabCleanupOutcome
+
+        # Last tab also carries tabs-first -> ambiguous/merged state.
+        page = _DomTabPage([
+            "tabs-first tabs-last tabs-selected",
+            "tabs-first tabs-last tabs-selected",
+        ])
+        mock_persistent_context.pages = [page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            outcome = handle.close_last_non_root_tab(timeout=1)
+
+        assert outcome is TabCleanupOutcome.UNSAFE
+        assert page.clicked_selectors == []
+        assert page.page_close_calls == 0
 
     def test_restart_browser_releases_and_reacquires(
         self,

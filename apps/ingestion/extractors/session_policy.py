@@ -135,6 +135,27 @@ class TabCleanupAction(Enum):
     """Tab state is unsafe, empty, or ambiguous — fall back to recovery."""
 
 
+class TabCleanupOutcome(Enum):
+    """Observable outcome of a legacy DOM-tab cleanup attempt (PSW-S18).
+
+    A PrimeFaces legacy tab is a DOM ``<li>`` element inside ONE Playwright
+    Page; it is never a ``BrowserContext.pages`` entry. Cleanup therefore
+    clicks the centralized DOM close control on the active page and reports
+    exactly one of these observable outcomes. Representation is an enum so
+    callers (controller/command) cannot mistake it for a renewal signal.
+    """
+
+    ROOT_ONLY = auto()
+    """No non-root DOM tab exists; no click occurred."""
+
+    CLOSED_AND_VERIFIED = auto()
+    """One non-root tab was closed and the safe state was observed."""
+
+    UNSAFE = auto()
+    """Close could not be performed or verified; recovery is required before
+    the next claim."""
+
+
 # Human-readable class strings for tab classification.
 # A root-only tab carries all three classes simultaneously.
 _CLASS_ROOT_ONLY = "tabs-first tabs-last tabs-selected"

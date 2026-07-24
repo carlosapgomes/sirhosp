@@ -18,6 +18,7 @@ from apps.ingestion.extractors.persistent_extraction_adapter import (
 from apps.ingestion.extractors.session_controller import (
     SessionControllerConfig,
 )
+from apps.ingestion.extractors.session_policy import TabCleanupOutcome
 
 # ---------------------------------------------------------------------------
 # Synthetic HTML fixtures for admission snapshot data
@@ -137,6 +138,7 @@ class FakeExtractionSession:
         self._tab_classes: list[str] = ["tabs-first tabs-last tabs-selected"]
         self._on_open_tab_cb = None
         self._last_open_timeout: int | None = None
+        self._close_outcome: TabCleanupOutcome = TabCleanupOutcome.CLOSED_AND_VERIFIED
 
     # --- Fake state mutators (test helpers) ---
 
@@ -165,6 +167,10 @@ class FakeExtractionSession:
     def set_tab_classes(self, classes: list[str]) -> None:
         self._tab_classes = list(classes)
 
+    def set_close_outcome(self, outcome: TabCleanupOutcome) -> None:
+        """Configure the outcome returned by ``close_last_non_root_tab``."""
+        self._close_outcome = outcome
+
     # --- Interface implementation (SessionHandle protocol) ---
 
     def get_page_html(self) -> str:
@@ -191,8 +197,9 @@ class FakeExtractionSession:
     def get_tab_classes(self) -> list[str]:
         return list(self._tab_classes)
 
-    def close_last_non_root_tab(self) -> None:
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
         self._closed_tab_calls += 1
+        return self._close_outcome
 
     def restart_browser(self) -> None:
         self._restart_calls += 1
@@ -556,6 +563,53 @@ class TestFailureModes:
         # No real browser objects involved
         assert len(result) == 2
         assert session.restart_calls == 0
+
+
+# ===========================================================================
+# PSW-S18: cleanup outcome recovery at the adapter boundary
+# ===========================================================================
+
+
+class TestCleanupOutcomeRecovery:
+    """PSW-S18 R6/R7/R8: cleanup is applied on success and recoverable
+    failures for the supported intents, and an UNSAFE cleanup survives job
+    accounting so recovery is forced before the next claim."""
+
+    def test_unsafe_cleanup_after_failure_forces_recovery(self) -> None:
+        """cleanup_after_failure with an UNSAFE close leaves the controller in
+        recovery (restart_required) and job accounting does not erase it."""
+        session = FakeExtractionSession()
+        session.set_tab_classes([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        session.set_close_outcome(TabCleanupOutcome.UNSAFE)
+        adapter = PersistentExtractionAdapter(session)
+
+        adapter.cleanup_after_failure()
+
+        # The unsafe-cleanup failure survived the internal mark_job_processed.
+        assert adapter._controller.restart_required() is True
+        assert adapter._controller.consecutive_failures >= 1
+
+    def test_verified_cleanup_does_not_force_recovery(self) -> None:
+        """A verified close is cleanup only and must not force recovery."""
+        session = FakeExtractionSession()
+        session.set_html(VALID_FULL_PAGE_HTML)
+        session.set_tab_classes([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        adapter = PersistentExtractionAdapter(session)
+
+        adapter.get_admission_snapshot(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+        )
+
+        assert session.closed_tab_calls == 1
+        assert adapter._controller.restart_required() is False
 
 
 # ===========================================================================
