@@ -339,6 +339,8 @@ class PlaywrightSessionHandle:
                 classes_after
                 and len(classes_after) == len(classes_before) - 1
                 and decide_tab_cleanup(classes_after) != TabCleanupAction.RECOVERY_REQUIRED
+                # PSW-S18-C2 R1: the root tab must survive in first position.
+                and "tabs-first" in classes_after[0].split()
             ):
                 return TabCleanupOutcome.CLOSED_AND_VERIFIED
             if time.monotonic() >= deadline:

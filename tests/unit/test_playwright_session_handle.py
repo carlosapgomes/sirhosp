@@ -433,6 +433,10 @@ class _DomTabPage:
         self.no_decrease: bool = False
         self.verify_raises: bool = False
         self.verify_empty: bool = False
+        # PSW-S18-C2 R1: when set, verification reads (2nd+ evaluate calls)
+        # return this exact post-click DOM state instead of the re-rendered
+        # ``_tabs``. Models a PrimeFaces report that lost the root tab.
+        self.verify_classes: list[str] | None = None
         self._evaluate_calls: int = 0
 
     def locator(self, selector: str) -> _DomTabLocator:
@@ -445,6 +449,8 @@ class _DomTabPage:
             raise RuntimeError("evaluate failed (sanitized)")
         if self.verify_empty and self._evaluate_calls >= 2:
             return []
+        if self.verify_classes is not None and self._evaluate_calls >= 2:
+            return list(self.verify_classes)
         return list(self._tabs)
 
     def close(self) -> None:
@@ -606,6 +612,47 @@ class TestTabOperations:
         assert page.page_close_calls == 0
         # Exactly one tab removed; new last re-rendered with tabs-last.
         assert len(page.tab_classes) == 2
+
+    def test_close_verify_lost_root_tab_is_unsafe(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """R1 (root preservation within A3): after the click the verified
+        state lost the root tab (no ``tabs-first`` on any remaining tab) ->
+        UNSAFE; never CLOSED_AND_VERIFIED. The Playwright Page stays alive."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+        from apps.ingestion.extractors.session_policy import (
+            SEL_TAB_LAST_CLOSE,
+            TabCleanupOutcome,
+        )
+
+        # Three valid tabs before the click; tabs-first present on the first.
+        page = _DomTabPage([
+            "tabs-first tabs-selected",
+            "tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        # The post-click verify read reports a state that lost the root tab.
+        page.verify_classes = ["tabs-selected", "tabs-last tabs-selected"]
+        mock_persistent_context.pages = [page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            outcome = handle.close_last_non_root_tab(timeout=1)
+
+        assert outcome is TabCleanupOutcome.UNSAFE
+        # The DOM close control was clicked.
+        assert SEL_TAB_LAST_CLOSE in page.clicked_selectors
+        # No Playwright Page was closed (DOM tab, not a Page).
+        assert page.page_close_calls == 0
 
     def test_close_verify_read_exception_is_unsafe(
         self,

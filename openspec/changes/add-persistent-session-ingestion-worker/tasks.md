@@ -355,6 +355,11 @@ returns a valid `TabCleanupOutcome`. A command-level proof observes
 `UNSAFE -> restart_browser -> reset_after_restart -> next claim` for two
 synthetic runs.
 
+PSW-S18-C2 corrective closure: the verified state must also preserve the
+root tab (`tabs-first` on the first remaining tab) or the outcome is
+`UNSAFE`; the command-level proof D now asserts the full ordering
+`first action < restart < reset < second claim < second action`.
+
 ## 19. PSW-S19: Restart, rebootstrap, and lifecycle configuration
 
 - [ ] 19.1 Add failing tests for authenticated rebootstrap after browser restart

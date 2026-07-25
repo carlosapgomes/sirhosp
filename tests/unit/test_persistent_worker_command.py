@@ -719,7 +719,33 @@ class TestCleanupRecoveryClaimGate:
 
         adapter = PersistentExtractionAdapter(session=_Session())
 
+        # PSW-S18-C2 D: observe claim/restart/reset/claim ordering across the
+        # two runs. Instrument the real claim staticmethod and the real
+        # controller.reset_after_restart() without reimplementing selection,
+        # locking, or persistence. Production order is already correct; this
+        # is test-hardening of the evidence.
+        original_claim = PersistentWorkerCommand._claim_eligible_run
+
+        def claim_recorder(run_id=None):  # noqa: ARG001
+            run = original_claim(run_id)
+            if run is not None:
+                events.append("claim")
+            return run
+
+        controller = adapter.controller
+        original_reset = controller.reset_after_restart
+
+        def reset_recorder() -> None:
+            events.append("reset")
+            original_reset()
+
+        controller.reset_after_restart = reset_recorder
+
         with patch.object(
+            PersistentWorkerCommand,
+            "_claim_eligible_run",
+            staticmethod(claim_recorder),
+        ), patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=adapter
         ):
             call_command(
@@ -727,12 +753,18 @@ class TestCleanupRecoveryClaimGate:
             )
 
         restart_positions = [i for i, e in enumerate(events) if e == "restart"]
+        reset_positions = [i for i, e in enumerate(events) if e == "reset"]
+        claim_positions = [i for i, e in enumerate(events) if e == "claim"]
         open_positions = [i for i, e in enumerate(events) if e == "open_tab"]
-        # Two runs were processed (two source actions).
-        assert len(open_positions) >= 2
-        # Recovery fired before the second run's source action.
-        assert restart_positions, "expected a restart between the two runs"
-        assert restart_positions[0] < open_positions[1]
+        # Two runs were claimed and each opened a source tab.
+        assert len(claim_positions) >= 2, events
+        assert len(open_positions) >= 2, events
+        # D2: a reset occurred between the two claims.
+        assert reset_positions, events
+        # D1/D2/D3 ordering: first action < restart < reset < second claim
+        # < second action.
+        assert open_positions[0] < restart_positions[0] < reset_positions[0]
+        assert reset_positions[0] < claim_positions[1] < open_positions[1]
         # No Playwright Page was closed during cleanup.
         assert close_page.page_close_calls == 0
 
