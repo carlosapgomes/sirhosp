@@ -509,8 +509,9 @@ class TestTabCleanup:
         run.refresh_from_db()
         assert run.status == "failed"
 
-    def test_no_cleanup_on_session_failure(self):
-        """cleanup_after_failure is NOT called on session-level failure."""
+    def test_cleanup_after_session_level_failure(self):
+        """PSW-S18-C1 (gap 3): cleanup_after_failure is called on recoverable
+        ExtractionError paths too (safe: root-only does not click)."""
         run = _queue_admissions_run(max_attempts=1)
         mock_adapter = _make_adapter_mock(fail_mode="session_not_ready")
 
@@ -519,14 +520,222 @@ class TestTabCleanup:
         ):
             call_command("process_ingestion_runs_persistent_session")
 
-        mock_adapter.cleanup_after_failure.assert_not_called()
+        mock_adapter.cleanup_after_failure.assert_called_once()
         run.refresh_from_db()
         assert run.status == "failed"
 
 
 # =========================================================================
-# Timeout Propagation
+# PSW-S18-C1: recoverable ExtractionError cleanup per intent (matrix C1-C4)
 # =========================================================================
+
+
+@pytest.mark.django_db
+class TestRecoverableExtractionErrorCleanup:
+    """Each of the four supported intents must run ``cleanup_after_failure()``
+    exactly once on a recoverable ``ExtractionError`` before the run finishes."""
+
+    def test_c1_admissions_only_extraction_error_runs_cleanup(self):
+        """C1: admissions_only ExtractionError -> cleanup once."""
+        run = _queue_admissions_run(max_attempts=1)
+        mock_adapter = _make_adapter_mock(fail_mode="nav_fail")
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        mock_adapter.cleanup_after_failure.assert_called_once()
+        run.refresh_from_db()
+        assert run.status == "failed"
+
+    def test_c2_demographics_only_extraction_error_runs_cleanup(self):
+        """C2: demographics_only ExtractionError -> cleanup once."""
+        run = IngestionRun.objects.create(
+            status="queued",
+            intent="demographics_only",
+            max_attempts=1,
+            parameters_json={
+                "patient_record": "DEMO-C2",
+                "intent": "demographics_only",
+            },
+        )
+        mock_adapter = _make_adapter_mock(demographics_fail_mode="extraction_error")
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session", max_runs=1)
+
+        mock_adapter.cleanup_after_failure.assert_called_once()
+        run.refresh_from_db()
+        assert run.status == "failed"
+
+    def test_c3_full_sync_evolution_extraction_error_runs_cleanup(self):
+        """C3: full_sync ExtractionError in evolution extraction -> cleanup once."""
+        run = _queue_full_sync_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.side_effect = ExtractionError(
+            "Evolution extraction failed"
+        )
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        mock_adapter.cleanup_after_failure.assert_called_once()
+        run.refresh_from_db()
+        assert run.status == "failed"
+
+    def test_c4_full_admission_sync_extraction_error_runs_cleanup(self):
+        """C4: full_admission_sync (alias of full_sync) recoverable
+        ExtractionError -> cleanup once."""
+        run = _queue_full_sync_run(
+            intent="full_admission_sync",
+            parameters_json={
+                "patient_record": "FA-C4",
+                "intent": "full_admission_sync",
+                "start_date": "2024-01-01",
+                "end_date": "2024-12-31",
+            },
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=_ADMISSION_SNAPSHOT_DATA)
+        mock_adapter.extract_evolutions.side_effect = ExtractionError(
+            "Evolution extraction failed"
+        )
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command("process_ingestion_runs_persistent_session")
+
+        mock_adapter.cleanup_after_failure.assert_called_once()
+        run.refresh_from_db()
+        assert run.status == "failed"
+
+
+# =========================================================================
+# PSW-S18-C1: real claim gate between runs after UNSAFE cleanup (matrix D)
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestCleanupRecoveryClaimGate:
+    """D: after an UNSAFE cleanup the worker restarts+resets BEFORE processing
+    the next run. Proves the gap-1 fix end-to-end at the command level."""
+
+    def test_restart_happens_before_second_run_processing(self):
+        import json
+        import types
+        from unittest.mock import MagicMock
+
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        # Two admissions runs; cap processing at exactly two.
+        _queue_admissions_run(
+            parameters_json={"patient_record": "D1", "intent": "admissions_only"}
+        )
+        _queue_admissions_run(
+            parameters_json={"patient_record": "D2", "intent": "admissions_only"}
+        )
+
+        # Real close+verify logic on a fake page whose verification read is
+        # empty (gap-1 scenario): pre-fix this mis-reports CLOSED_AND_VERIFIED.
+        class _RecoveryDomPage:
+            def __init__(self, tabs, verify_empty):
+                self._tabs = list(tabs)
+                self._verify_empty = verify_empty
+                self._calls = 0
+                self.page_close_calls = 0
+
+            def locator(self, selector):  # noqa: ARG002
+                page = self
+
+                class _Loc:
+                    def click(self_t, timeout=None):  # noqa: ARG002
+                        if len(page._tabs) >= 2:
+                            page._tabs.pop()
+                return _Loc()
+
+            def evaluate(self, _js):
+                self._calls += 1
+                if self._verify_empty and self._calls >= 2:
+                    return []
+                return list(self._tabs)
+
+            def content(self):
+                return snapshot_html
+
+            def close(self):
+                self.page_close_calls += 1
+
+        close_page = _RecoveryDomPage(
+            ["tabs-first tabs-selected", "tabs-last tabs-selected"],
+            verify_empty=True,
+        )
+        close_ctx = types.SimpleNamespace(pages=[close_page])
+        close_handle = PlaywrightSessionHandle(profile=MagicMock())
+        close_handle._context = close_ctx
+        close_handle._browser = close_ctx
+
+        snapshot_html = (
+            "<html><body>"
+            '<div id="tempoSessao">T: <span>00</span>:<span>29</span>:<span>01</span></div>'
+            '<div id="admission-snapshot-data">'
+            + json.dumps(_ADMISSION_SNAPSHOT_DATA)
+            + "</div></body></html>"
+        )
+        events: list[str] = []
+
+        class _Session:
+            def get_page_html(self_inner) -> str:
+                return snapshot_html
+
+            def is_connected(self_inner) -> bool:
+                return True
+
+            def click_selector(self_inner, selector: str) -> None:  # noqa: ARG002
+                pass
+
+            def open_tab(self_inner, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+                events.append("open_tab")
+                return True
+
+            def get_tab_classes(self_inner) -> list[str]:
+                return ["tabs-first tabs-selected", "tabs-last tabs-selected"]
+
+            def close_last_non_root_tab(self_inner):
+                # Exercise the REAL close+verify path on the fake page.
+                return close_handle.close_last_non_root_tab(timeout=1)
+
+            def restart_browser(self_inner) -> None:
+                events.append("restart")
+
+        adapter = PersistentExtractionAdapter(session=_Session())
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session", max_runs=2
+            )
+
+        restart_positions = [i for i, e in enumerate(events) if e == "restart"]
+        open_positions = [i for i, e in enumerate(events) if e == "open_tab"]
+        # Two runs were processed (two source actions).
+        assert len(open_positions) >= 2
+        # Recovery fired before the second run's source action.
+        assert restart_positions, "expected a restart between the two runs"
+        assert restart_positions[0] < open_positions[1]
+        # No Playwright Page was closed during cleanup.
+        assert close_page.page_close_calls == 0
+
 
 
 @pytest.mark.django_db

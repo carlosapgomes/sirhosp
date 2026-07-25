@@ -139,6 +139,26 @@ class TestDecideTabCleanup:
         tab_classes = ["tabs-first tabs-last tabs-selected"]
         assert decide_tab_cleanup(tab_classes) == TabCleanupAction.PRESERVE_ROOT
 
+    def test_root_only_accepts_reordered_tokens(self) -> None:
+        """B2: same mandatory tokens in a different order → PRESERVE_ROOT."""
+        tab_classes = ["tabs-last tabs-first tabs-selected"]
+        assert decide_tab_cleanup(tab_classes) == TabCleanupAction.PRESERVE_ROOT
+
+    def test_root_only_accepts_extra_primefaces_classes(self) -> None:
+        """B3: mandatory tokens plus extra PrimeFaces classes → PRESERVE_ROOT."""
+        tab_classes = [
+            "ui-tab ui-state-active tabs-first tabs-last tabs-selected"
+        ]
+        assert decide_tab_cleanup(tab_classes) == TabCleanupAction.PRESERVE_ROOT
+
+    def test_root_only_missing_a_token_requires_recovery(self) -> None:
+        """B4: missing one mandatory token → RECOVERY_REQUIRED."""
+        tab_classes = ["tabs-first tabs-last"]
+        assert (
+            decide_tab_cleanup(tab_classes)
+            == TabCleanupAction.RECOVERY_REQUIRED
+        )
+
     def test_two_tabs_closes_last_non_root(self) -> None:
         """Two tabs, last is not root → CLOSE_LAST_NON_ROOT."""
         tab_classes = [

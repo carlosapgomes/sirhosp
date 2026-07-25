@@ -418,6 +418,11 @@ class _DomTabPage:
     elements. ``locator(...).click()`` on the close control removes the last
     non-root DOM tab; the Page itself is never removed (R3). Mirrors the
     JS used by ``PlaywrightSessionHandle.get_tab_classes``.
+
+    The close control click also models PrimeFaces' tab-strip re-render:
+    after closing one tab, the new last tab gains ``tabs-last`` and a single
+    remaining tab becomes root-only. The second (verification) read can be
+    scripted to raise or return ``[]`` to reproduce the gap-1 scenarios.
     """
 
     def __init__(self, tab_classes: list[str]) -> None:
@@ -426,11 +431,20 @@ class _DomTabPage:
         self.page_close_calls: int = 0
         self.click_fails: bool = False
         self.no_decrease: bool = False
+        self.verify_raises: bool = False
+        self.verify_empty: bool = False
+        self._evaluate_calls: int = 0
 
     def locator(self, selector: str) -> _DomTabLocator:
         return _DomTabLocator(self, selector)
 
     def evaluate(self, _expression: str) -> list[str]:
+        self._evaluate_calls += 1
+        # The first read is the pre-click state; subsequent reads verify.
+        if self.verify_raises and self._evaluate_calls >= 2:
+            raise RuntimeError("evaluate failed (sanitized)")
+        if self.verify_empty and self._evaluate_calls >= 2:
+            return []
         return list(self._tabs)
 
     def close(self) -> None:
@@ -441,6 +455,15 @@ class _DomTabPage:
             return
         if len(self._tabs) >= 2:
             self._tabs.pop()
+            # PrimeFaces re-renders the tab strip after a close: the new last
+            # tab gains 'tabs-last'; a single remaining tab becomes root-only.
+            if len(self._tabs) == 1:
+                self._tabs = ["tabs-first tabs-last tabs-selected"]
+            elif len(self._tabs) >= 2:
+                tokens = self._tabs[-1].split()
+                if "tabs-last" not in tokens:
+                    tokens.append("tabs-last")
+                self._tabs[-1] = " ".join(tokens)
 
     @property
     def tab_classes(self) -> list[str]:
@@ -549,8 +572,105 @@ class TestTabOperations:
         assert SEL_TAB_LAST_CLOSE in page.clicked_selectors
         # No Playwright Page was closed (DOM tab, not a Page).
         assert page.page_close_calls == 0
-        # DOM tab count decreased to the root-only safe state.
-        assert page.tab_classes == ["tabs-first tabs-selected"]
+        # A4: PrimeFaces re-renders the remaining tab to root-only.
+        assert page.tab_classes == ["tabs-first tabs-last tabs-selected"]
+
+    def test_close_verify_three_tabs_become_two_safe(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """A3: three tabs -> two safe tabs -> CLOSED_AND_VERIFIED; no Page close."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+        from apps.ingestion.extractors.session_policy import TabCleanupOutcome
+
+        page = _DomTabPage([
+            "tabs-first tabs-selected",
+            "tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        mock_persistent_context.pages = [page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            outcome = handle.close_last_non_root_tab(timeout=1)
+
+        assert outcome is TabCleanupOutcome.CLOSED_AND_VERIFIED
+        assert page.page_close_calls == 0
+        # Exactly one tab removed; new last re-rendered with tabs-last.
+        assert len(page.tab_classes) == 2
+
+    def test_close_verify_read_exception_is_unsafe(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """A1: a verification-read exception after the click -> UNSAFE; Page alive."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+        from apps.ingestion.extractors.session_policy import (
+            SEL_TAB_LAST_CLOSE,
+            TabCleanupOutcome,
+        )
+
+        page = _DomTabPage([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        page.verify_raises = True
+        mock_persistent_context.pages = [page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            outcome = handle.close_last_non_root_tab(timeout=1)
+
+        assert outcome is TabCleanupOutcome.UNSAFE
+        assert SEL_TAB_LAST_CLOSE in page.clicked_selectors
+        assert page.page_close_calls == 0
+
+    def test_close_verify_empty_read_is_unsafe(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_persistent_context: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """A2: a verification read returning [] after the click -> UNSAFE;
+        never CLOSED_AND_VERIFIED; Page alive."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+        from apps.ingestion.extractors.session_policy import TabCleanupOutcome
+
+        page = _DomTabPage([
+            "tabs-first tabs-selected",
+            "tabs-last tabs-selected",
+        ])
+        page.verify_empty = True
+        mock_persistent_context.pages = [page]
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            outcome = handle.close_last_non_root_tab(timeout=1)
+
+        assert outcome is TabCleanupOutcome.UNSAFE
+        assert page.page_close_calls == 0
 
     def test_close_last_non_root_tab_root_only_no_click(
         self,

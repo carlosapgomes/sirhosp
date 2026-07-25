@@ -157,10 +157,16 @@ class TabCleanupOutcome(Enum):
 
 
 # Human-readable class strings for tab classification.
-# A root-only tab carries all three classes simultaneously.
+# A root-only tab carries the three mandatory tokens ``tabs-first``,
+# ``tabs-last`` and ``tabs-selected`` simultaneously (CSS classes are an
+# unordered set and the element may carry extra PrimeFaces classes).
 _CLASS_ROOT_ONLY = "tabs-first tabs-last tabs-selected"
 _CLASS_TABS_FIRST = "tabs-first"
 _CLASS_TABS_LAST = "tabs-last"
+_CLASS_TABS_SELECTED = "tabs-selected"
+_ROOT_ONLY_TOKENS = frozenset(
+    {_CLASS_TABS_FIRST, _CLASS_TABS_LAST, _CLASS_TABS_SELECTED}
+)
 
 
 def decide_tab_cleanup(tab_class_list: list[str]) -> TabCleanupAction:
@@ -189,10 +195,10 @@ def decide_tab_cleanup(tab_class_list: list[str]) -> TabCleanupAction:
     if not tab_class_list:
         return TabCleanupAction.RECOVERY_REQUIRED
 
-    # Single root tab → preserve.
+    # Single root tab → preserve. Root-only is recognized by mandatory
+    # class tokens regardless of order or extra PrimeFaces classes.
     if len(tab_class_list) == 1:
-        root_only = tab_class_list[0].strip() == _CLASS_ROOT_ONLY
-        if root_only:
+        if _ROOT_ONLY_TOKENS.issubset(set(tab_class_list[0].split())):
             return TabCleanupAction.PRESERVE_ROOT
         return TabCleanupAction.RECOVERY_REQUIRED
 

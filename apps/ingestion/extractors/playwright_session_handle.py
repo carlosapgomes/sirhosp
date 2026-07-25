@@ -323,7 +323,9 @@ class PlaywrightSessionHandle:
             return TabCleanupOutcome.UNSAFE
 
         # Verify the tab count decreased or root-only state was restored
-        # within the bounded timeout.
+        # within the bounded timeout. PSW-S18-C1 (gap 1): a failed/empty read,
+        # a reduction to zero, a removal of more than one tab, or an ambiguous
+        # resulting state must never produce CLOSED_AND_VERIFIED.
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -333,9 +335,11 @@ class PlaywrightSessionHandle:
                     "Persistent session tab cleanup: verify read failed (sanitized)"
                 )
                 return TabCleanupOutcome.UNSAFE
-            if len(classes_after) < len(classes_before):
-                return TabCleanupOutcome.CLOSED_AND_VERIFIED
-            if decide_tab_cleanup(classes_after) == TabCleanupAction.PRESERVE_ROOT:
+            if (
+                classes_after
+                and len(classes_after) == len(classes_before) - 1
+                and decide_tab_cleanup(classes_after) != TabCleanupAction.RECOVERY_REQUIRED
+            ):
                 return TabCleanupOutcome.CLOSED_AND_VERIFIED
             if time.monotonic() >= deadline:
                 return TabCleanupOutcome.UNSAFE

@@ -342,6 +342,19 @@ failures are sanitized (constant log messages) and never re-raised or
 classified as a run timeout (R9). Inherited PSW-S17 contracts are preserved
 and not re-audited.
 
+PSW-S18-C1 corrective closure: four confirmed audit gaps closed. (1) The
+concrete post-click verification is strict: a failed/empty verify read, a
+reduction to zero, a removal of more than one tab, or an ambiguous resulting
+state never yields `CLOSED_AND_VERIFIED` (always `UNSAFE`, Page kept alive).
+(2) Root-only is recognized by class tokens (`tabs-first`, `tabs-last`,
+`tabs-selected`) regardless of order or extra PrimeFaces classes. (3) All
+recoverable `ExtractionError` branches for `admissions_only`,
+`demographics_only`, `full_sync`, and `full_admission_sync` now run
+`cleanup_after_failure()` before another claim. (4) Every protocol fake
+returns a valid `TabCleanupOutcome`. A command-level proof observes
+`UNSAFE -> restart_browser -> reset_after_restart -> next claim` for two
+synthetic runs.
+
 ## 19. PSW-S19: Restart, rebootstrap, and lifecycle configuration
 
 - [ ] 19.1 Add failing tests for authenticated rebootstrap after browser restart

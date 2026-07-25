@@ -41,6 +41,7 @@ from apps.ingestion.extractors.persistent_evolution_pdf import (
     EvolutionPdfError,
     EvolutionPdfTimeoutError,
 )
+from apps.ingestion.extractors.session_policy import TabCleanupOutcome
 from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
 from apps.ingestion.models import (
     CensusExecutionBatch,
@@ -1440,7 +1441,7 @@ class TestCommandLevelPersistentPdfTimeout:
                 return []
 
             def close_last_non_root_tab(self):
-                pass
+                return TabCleanupOutcome.UNSAFE
 
             def restart_browser(self):
                 pass
@@ -1596,7 +1597,7 @@ class TestCommandLevelPersistentPdfTimeout:
                 return []
 
             def close_last_non_root_tab(self):
-                pass
+                return TabCleanupOutcome.UNSAFE
 
             def restart_browser(self):
                 pass
@@ -1740,7 +1741,7 @@ class TestCommandLevelPersistentPdfTimeout:
                 return []
 
             def close_last_non_root_tab(self):
-                pass
+                return TabCleanupOutcome.UNSAFE
 
             def restart_browser(self):
                 pass

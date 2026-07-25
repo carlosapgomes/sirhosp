@@ -1036,12 +1036,14 @@ class Command(BaseCommand):
             )
             return
         except ExtractionError as exc:
-            # Session-level failure (not ready, renewal fail, nav fail): no job
-            # tab was opened, so tab cleanup is skipped.
+            # PSW-S18-C1 (gap 3): recoverable ExtractionError. Do not infer
+            # tab-open from the exception type; run safe cleanup (root-only
+            # does not click; ambiguous/unsafe cleanup forces recovery).
             self._record_stage(
                 run, "admissions_capture", "failed", stage_start,
                 details_json=self._stage_error_details(exc),
             )
+            adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             self.stderr.write(
                 f"  Run #{run.pk} failed during admissions capture "
@@ -1194,12 +1196,13 @@ class Command(BaseCommand):
             )
             return
         except ExtractionError as exc:
-            # Session-level failure (not ready, renewal fail, action
-            # navigation failure): no job tab was opened, cleanup skipped.
+            # PSW-S18-C1 (gap 3): recoverable ExtractionError. Do not infer
+            # tab-open from the exception type; run safe cleanup.
             self._record_stage(
                 run, "demographics_extraction", "failed", ext_stage_start,
                 details_json=self._stage_error_details(exc),
             )
+            adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             self.stderr.write(
                 f"  Run #{run.pk} failed during demographics capture "
@@ -1343,11 +1346,14 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             return
         except ExtractionError as exc:
-            # Session-level failure — no tab was opened
+            # PSW-S18-C1 (gap 3): recoverable ExtractionError in full-sync
+            # admissions capture. Do not infer tab-open from the exception
+            # type; run safe cleanup.
             self._record_stage(
                 run, "admissions_capture", "failed", adm_stage_start,
                 details_json=self._stage_error_details(exc),
             )
+            adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             return
         except Exception as exc:
@@ -1445,11 +1451,13 @@ class Command(BaseCommand):
             self._mark_run_failed(run, exc)
             return
         except ExtractionError as exc:
-            # Session-level failure
+            # PSW-S18-C1 (gap 3): recoverable ExtractionError in full-sync
+            # evolution extraction. Run safe cleanup before another claim.
             self._record_stage(
                 run, "evolution_extraction", "failed", ev_stage_start,
                 details_json=self._stage_error_details(exc),
             )
+            adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             return
         except Exception as exc:
