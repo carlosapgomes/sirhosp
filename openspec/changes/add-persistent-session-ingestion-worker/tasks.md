@@ -362,16 +362,39 @@ root tab (`tabs-first` on the first remaining tab) or the outcome is
 
 ## 19. PSW-S19: Restart, rebootstrap, and lifecycle configuration
 
-- [ ] 19.1 Add failing tests for authenticated rebootstrap after browser restart
+- [x] 19.1 Add failing tests for authenticated rebootstrap after browser restart
   and no claim while rebootstrap is incomplete.
-- [ ] 19.2 Implement restart plus login/bootstrap readiness through the same
+- [x] 19.2 Implement restart plus login/bootstrap readiness through the same
   persistent lifecycle boundary.
-- [ ] 19.3 Expose conservative max-jobs, max-lifetime, failure, renewal, and
+- [x] 19.3 Expose conservative max-jobs, max-lifetime, failure, renewal, and
   headless configuration without changing current-worker CLI behavior.
-- [ ] 19.4 Prove two jobs reuse one login/context and a later post-threshold job
+- [x] 19.4 Prove two jobs reuse one login/context and a later post-threshold job
   runs only after one controlled restart plus rebootstrap.
-- [ ] 19.5 Run official validation and create
+- [x] 19.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S19-report.md`.
+
+PSW-S19 closure (authoritative): the adapter is the single lifecycle
+boundary (`PersistentExtractionAdapter._restart_and_rebootstrap()` /
+`restart_and_rebootstrap()`); it restarts the browser AND re-runs the
+sanitized bootstrap/login through the `RealHandleBridge.bootstrap()` boundary
+(reusing `bootstrap_legacy_session`; no duplicated credentials/selectors, no
+background login thread), then requires `#tempoSessao` readiness via
+`ensure_ready()` before any claim. A connected-but-blank page after restart is
+NOT ready (self-eval gate 1). On rebootstrap failure (R5) recovery state is
+retained (no `reset_after_restart`) so `ensure_session_ready()` retries safely
+and no queued run is mutated (R4). The command's between-jobs restart now
+calls `adapter.restart_and_rebootstrap()` instead of touching
+session/controller directly (single lifecycle owner). The closed
+configuration set is exposed through one documented CLI path
+(`--max-jobs`, `--max-lifetime-seconds`, `--max-consecutive-failures`,
+`--renewal-threshold-seconds`, `--headless`/`--no-headless` via
+`BooleanOptionalAction`); positive ranges are validated in
+`SessionControllerConfig.validate()` and re-checked by
+`_validate_lifecycle_options()` before any claim (R6). The `--headless` CLI
+value reaches the concrete `PlaywrightSessionHandle` (R6 proof). Profile
+ownership is preserved across restart (`release_after_shutdown(remove=False)`
+then `acquire()`; destructive cleanup only on shutdown) (R7). The current
+worker (`process_ingestion_runs`) CLI and behavior are unchanged (R9).
 
 ## 20. PSW-S20: Action-first real evolution dispatch
 

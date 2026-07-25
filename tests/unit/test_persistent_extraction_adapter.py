@@ -1355,3 +1355,224 @@ class TestGetDemographicsStubSanitization:
         assert sentinel not in message
         assert "/demographics/" not in message
         assert "http" not in message.lower()
+
+
+# ===========================================================================
+# PSW-S19: restart + rebootstrap at the single lifecycle boundary
+# ===========================================================================
+
+
+class _RebootstrapSession:
+    """Fake session whose restart yields BLANK (unauthenticated) HTML.
+
+    A Chromium restart creates an unauthenticated session: ``restart_browser()``
+    replaces authenticated page HTML with a blank page that has no
+    ``#tempoSessao`` readiness marker. ``bootstrap()`` re-runs the sanitized
+    login flow and restores the authenticated page (the real path delegates
+    to ``bootstrap_legacy_session`` via ``RealHandleBridge.bootstrap``).
+    """
+
+    def __init__(self, *, authenticated: str, blank: str) -> None:
+        self._authenticated = authenticated
+        self._blank = blank
+        self._html = authenticated
+        self.restart_calls = 0
+        self.bootstrap_calls = 0
+        self.bootstrap_failures = 0
+        self.opened_urls: list[str] = []
+
+    def get_page_html(self) -> str:
+        return self._html
+
+    def is_connected(self) -> bool:
+        return True
+
+    def click_selector(self, selector: str) -> None:  # noqa: ARG002
+        pass
+
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+        self.opened_urls.append(url)
+        return True
+
+    def get_tab_classes(self) -> list[str]:
+        return ["tabs-first tabs-last tabs-selected"]
+
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
+        return TabCleanupOutcome.ROOT_ONLY
+
+    def restart_browser(self) -> None:
+        self.restart_calls += 1
+        # A fresh Chromium context is connected but UNAUTHENTICATED.
+        self._html = self._blank
+
+    def bootstrap(self) -> None:
+        self.bootstrap_calls += 1
+        if self.bootstrap_failures > 0:
+            self.bootstrap_failures -= 1
+            raise RuntimeError("sanitized bootstrap failure")
+        self._html = self._authenticated
+
+
+class TestRestartAndRebootstrap:
+    """PSW-S19 R2/R3/R4/R5/R8: the adapter is the single lifecycle boundary
+    that restarts the browser AND re-bootstraps authentication before another
+    claim. Connectivity after restart is never treated as readiness."""
+
+    def test_connected_blank_page_after_restart_is_not_ready(self) -> None:
+        """Self-eval gate 1: a connected blank page is NOT ready.
+
+        After ``restart_browser()`` blanks the page and NO bootstrap is
+        available, ``ensure_session_ready()`` must return False because
+        ``#tempoSessao`` is absent — restart alone never equals readiness.
+        """
+
+        class _BlankSession:
+            """Connected session that goes blank on restart, with no bootstrap."""
+
+            def __init__(self) -> None:
+                self._html = "<html><body></body></html>"
+                self.restart_calls = 0
+
+            def get_page_html(self) -> str:
+                return self._html
+
+            def is_connected(self) -> bool:
+                return True
+
+            def click_selector(self, selector: str) -> None:  # noqa: ARG002
+                pass
+
+            def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+                return True
+
+            def get_tab_classes(self) -> list[str]:
+                return ["tabs-first tabs-last tabs-selected"]
+
+            def close_last_non_root_tab(self) -> TabCleanupOutcome:
+                return TabCleanupOutcome.ROOT_ONLY
+
+            def restart_browser(self) -> None:
+                self.restart_calls += 1
+                self._html = "<html><body></body></html>"
+
+        session = _BlankSession()
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+        adapter.controller.jobs_processed = 999
+
+        assert adapter.ensure_session_ready() is False
+        # A restart was attempted but could not produce readiness.
+        assert session.restart_calls >= 1
+
+    def test_rebootstrap_restores_readiness_after_restart(self) -> None:
+        """R3: bootstrap re-runs login and restores #tempoSessao readiness."""
+        session = _RebootstrapSession(
+            authenticated=VALID_FULL_PAGE_HTML,
+            blank="<html><body></body></html>",
+        )
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+        assert adapter.ensure_session_ready() is True
+
+        adapter.controller.jobs_processed = 999
+        assert adapter.restart_and_rebootstrap() is True
+        assert session.restart_calls == 1
+        assert session.bootstrap_calls == 1
+        # After rebootstrap the authenticated readiness marker is back.
+        assert adapter.ensure_session_ready() is True
+
+    def test_rebootstrap_failure_retains_recovery_state(self) -> None:
+        """R5: a failed rebootstrap does NOT reset counters and raises nothing.
+
+        Recovery state is retained so the next ``ensure_session_ready()`` retry
+        can attempt rebootstrap again. No exception escapes the boundary.
+        """
+        session = _RebootstrapSession(
+            authenticated=VALID_FULL_PAGE_HTML,
+            blank="<html><body></body></html>",
+        )
+        session.bootstrap_failures = 99  # permanent failure
+        session._html = session._blank
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+        adapter.controller.jobs_processed = 999
+
+        result = adapter.restart_and_rebootstrap()
+
+        assert result is False
+        # Restart happened, bootstrap failed.
+        assert session.restart_calls == 1
+        assert session.bootstrap_calls == 1
+        # Counters NOT reset: still restart-required.
+        assert adapter.controller.jobs_processed == 999
+        assert adapter.controller.restart_required() is True
+        # ensure_session_ready retries safely and still cannot claim while
+        # rebootstrap keeps failing.
+        assert adapter.ensure_session_ready() is False
+        assert session.bootstrap_calls >= 2
+
+    def test_no_claim_while_rebootstrap_incomplete(self) -> None:
+        """R4: ensure_session_ready stays False until rebootstrap completes."""
+        session = _RebootstrapSession(
+            authenticated=VALID_FULL_PAGE_HTML,
+            blank="<html><body></body></html>",
+        )
+        session.bootstrap_failures = 2  # first two attempts fail
+        session._html = session._blank
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+        adapter.controller.jobs_processed = 999
+
+        # Two failed attempts: still not ready, recovery retained.
+        assert adapter.ensure_session_ready() is False
+        assert adapter.ensure_session_ready() is False
+        assert session.bootstrap_calls == 2
+        assert adapter.controller.restart_required() is True
+
+        # Third attempt succeeds → ready.
+        assert adapter.ensure_session_ready() is True
+        assert session.bootstrap_calls == 3
+
+    def test_two_jobs_one_login_then_threshold_rebootstrap(self) -> None:
+        """R8: two jobs reuse one login/context, then a threshold causes
+        exactly ONE restart plus ONE rebootstrap before a later job."""
+        session = _RebootstrapSession(
+            authenticated=VALID_FULL_PAGE_HTML,
+            blank="<html><body></body></html>",
+        )
+        adapter = PersistentExtractionAdapter(
+            session,
+            config=SessionControllerConfig(max_jobs_per_session=2),
+        )
+
+        # Job 1 and Job 2 reuse the SAME authenticated context: no restart,
+        # no rebootstrap between them.
+        adapter.get_admission_snapshot(
+            patient_record="P1", start_date="2024-01-01", end_date="2024-12-31"
+        )
+        adapter.get_admission_snapshot(
+            patient_record="P2", start_date="2024-01-01", end_date="2024-12-31"
+        )
+        assert session.restart_calls == 0
+        assert session.bootstrap_calls == 0
+        assert adapter.controller.jobs_processed == 2
+        assert adapter.controller.restart_required() is True
+
+        # Threshold reached: exactly one restart + one rebootstrap.
+        assert adapter.restart_and_rebootstrap() is True
+        assert session.restart_calls == 1
+        assert session.bootstrap_calls == 1
+        assert adapter.controller.jobs_processed == 0
+
+        # Later job runs on the re-bootstrapped authenticated context.
+        result = adapter.get_admission_snapshot(
+            patient_record="P3", start_date="2024-01-01", end_date="2024-12-31"
+        )
+        assert len(result) == 2
+        # No additional restart/rebootstrap for the post-threshold job.
+        assert session.restart_calls == 1
+        assert session.bootstrap_calls == 1

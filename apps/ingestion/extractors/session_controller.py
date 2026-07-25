@@ -57,6 +57,35 @@ class SessionControllerConfig:
     base_admissions_url: str = "/admissions/{patient_record}"
     base_evolutions_url: str = ""
 
+    def __post_init__(self) -> None:
+        """Validate lifecycle thresholds at construction (PSW-S19 R6).
+
+        The closed configuration set (max jobs, max lifetime, consecutive
+        failures, renewal threshold) must be positive integers so invalid
+        thresholds can never reach the processing loop. ``safe_renewal_tab_url``
+        and the URL templates are not lifecycle thresholds and are unchecked.
+        """
+        self.validate()
+
+    def validate(self) -> None:
+        """Raise ``ValueError`` if any lifecycle threshold is not a positive int.
+
+        PSW-S19 R6: invalid thresholds must fail before claim. The command
+        layer converts this into a sanitized ``CommandError``.
+        """
+        fields = (
+            ("max_jobs_per_session", self.max_jobs_per_session),
+            ("max_lifetime_seconds", self.max_lifetime_seconds),
+            ("max_consecutive_failures", self.max_consecutive_failures),
+            ("renewal_threshold_seconds", self.renewal_threshold_seconds),
+        )
+        for _name, value in fields:
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(
+                    "Invalid persistent-session lifecycle configuration "
+                    "(non-positive threshold)"
+                )
+
 
 # ---------------------------------------------------------------------------
 # Session handle protocol

@@ -344,9 +344,20 @@ class RealHandleBridge:
         handle: The real ``SessionHandle`` implementation to wrap.
     """
 
-    def __init__(self, handle: SessionHandle) -> None:
+    def __init__(
+        self,
+        handle: SessionHandle,
+        *,
+        credentials: Any = None,
+        login_timeout: int = 60,
+    ) -> None:
         self._handle = handle
         self._last_url: str = ""
+        # PSW-S19 R3: the bridge owns the sanitized bootstrap boundary so the
+        # adapter can re-run login + #tempoSessao readiness after every restart
+        # through one lifecycle owner. Credentials are held in memory only.
+        self._credentials = credentials
+        self._login_timeout = login_timeout
 
     # ------------------------------------------------------------------
     # SessionHandle protocol
@@ -420,6 +431,35 @@ class RealHandleBridge:
         shutdown_fn = getattr(self._handle, "shutdown", None)
         if callable(shutdown_fn):
             shutdown_fn()
+
+    def bootstrap(self) -> None:
+        """Re-run the sanitized legacy login on the already-open persistent page.
+
+        PSW-S19 R3: the handle/bridge bootstrap boundary. After a browser
+        restart the persistent context is connected but UNAUTHENTICATED; this
+        re-runs the canonical login flow (navigate + fill + submit + wait for
+        ``#tempoSessao``) through ``bootstrap_legacy_session`` and reuses the
+        existing credentials/login selectors — it never duplicates them.
+
+        Raises:
+            LegacyBootstrapError: sanitized bootstrap failure (no credential,
+                cookie, or raw payload in the message).
+        """
+        from apps.ingestion.extractors.legacy_session_bootstrap import (
+            bootstrap_legacy_session,
+        )
+
+        # ``ensure_current_page`` is the sanctioned Playwright escape hatch on
+        # the concrete handle; access it defensively since the SessionHandle
+        # protocol does not declare it. ``bootstrap_legacy_session`` raises a
+        # sanitized ``LegacyBootstrapError`` when no page is available.
+        ensure_current_page = getattr(self._handle, "ensure_current_page", None)
+        page = ensure_current_page() if callable(ensure_current_page) else None
+        bootstrap_legacy_session(
+            page,
+            credentials=self._credentials,
+            login_timeout=self._login_timeout,
+        )
 
     # ------------------------------------------------------------------
     # PSW-S12: real legacy UI action navigation for admissions

@@ -9,6 +9,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+import pytest
+
 from apps.ingestion.extractors.session_controller import (
     PersistentSessionController,
     SessionControllerConfig,
@@ -818,3 +820,58 @@ class TestDefaultConfig:
         assert config.max_consecutive_failures == 3
         assert config.renewal_threshold_seconds == 600
         assert config.safe_renewal_tab_url == ""
+
+
+# ===========================================================================
+# PSW-S19: lifecycle configuration validation
+# ===========================================================================
+
+
+class TestSessionControllerConfigValidation:
+    """PSW-S19 R6: lifecycle thresholds must be positive and validated.
+
+    The closed configuration set is max jobs, max lifetime, consecutive
+    failures, and renewal threshold. Each must be a positive integer; a
+    non-positive value fails construction so invalid thresholds can never
+    reach the processing loop.
+    """
+
+    @pytest.mark.parametrize("value", [0, -1, -50])
+    def test_non_positive_max_jobs_rejected(self, value: int) -> None:
+        with pytest.raises(ValueError):
+            SessionControllerConfig(max_jobs_per_session=value)
+
+    @pytest.mark.parametrize("value", [0, -1, -100])
+    def test_non_positive_max_lifetime_rejected(self, value: int) -> None:
+        with pytest.raises(ValueError):
+            SessionControllerConfig(max_lifetime_seconds=value)
+
+    @pytest.mark.parametrize("value", [0, -1, -3])
+    def test_non_positive_max_consecutive_failures_rejected(
+        self, value: int
+    ) -> None:
+        with pytest.raises(ValueError):
+            SessionControllerConfig(max_consecutive_failures=value)
+
+    @pytest.mark.parametrize("value", [0, -1, -10])
+    def test_non_positive_renewal_threshold_rejected(self, value: int) -> None:
+        with pytest.raises(ValueError):
+            SessionControllerConfig(renewal_threshold_seconds=value)
+
+    def test_positive_values_accepted(self) -> None:
+        """All-positive configuration constructs without error."""
+        config = SessionControllerConfig(
+            max_jobs_per_session=1,
+            max_lifetime_seconds=1,
+            max_consecutive_failures=1,
+            renewal_threshold_seconds=1,
+        )
+        assert config.max_jobs_per_session == 1
+
+    def test_defaults_are_positive(self) -> None:
+        """Default thresholds are all positive (valid)."""
+        config = SessionControllerConfig()
+        assert config.max_jobs_per_session > 0
+        assert config.max_lifetime_seconds > 0
+        assert config.max_consecutive_failures > 0
+        assert config.renewal_threshold_seconds > 0

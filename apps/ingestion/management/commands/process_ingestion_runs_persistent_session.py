@@ -98,6 +98,7 @@ Usage::
 
 from __future__ import annotations
 
+import argparse
 import os
 import time
 from datetime import timedelta
@@ -185,6 +186,20 @@ _CREDENTIAL_RESOLUTION_MESSAGE = (
 _BOOTSTRAP_FAILURE_MESSAGE = "Persistent session bootstrap failed."
 _STARTUP_DB_RETRY_MESSAGE = (
     "Worker startup check failed; retrying."
+)
+
+# PSW-S19 R6: default lifecycle configuration (closed set). These mirror the
+# conservative defaults of ``SessionControllerConfig`` and are exposed through
+# one documented CLI path on this command.
+_DEFAULT_MAX_JOBS = 50
+_DEFAULT_MAX_LIFETIME_SECONDS = 3600
+_DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
+_DEFAULT_RENEWAL_THRESHOLD_SECONDS = 600
+_DEFAULT_HEADLESS = True
+_INVALID_LIFELIFE_CONFIG_MESSAGE = (
+    "Persistent-session lifecycle configuration is invalid "
+    "(max jobs, max lifetime, consecutive failures, and renewal threshold "
+    "must all be positive integers)."
 )
 
 _PERSISTENT_LABEL_PREFIX = "persistent-worker"
@@ -314,6 +329,57 @@ class Command(BaseCommand):
                 "manual smoke tests (e.g. --max-runs 1)."
             ),
         )
+        # PSW-S19 R6: the closed lifecycle/headless configuration set, exposed
+        # through one documented CLI path. Positive ranges are validated before
+        # any run is claimed (see ``_validate_lifecycle_options``).
+        parser.add_argument(
+            "--max-jobs",
+            type=int,
+            default=_DEFAULT_MAX_JOBS,
+            help=(
+                "Maximum jobs processed before a controlled browser restart "
+                f"(default: {_DEFAULT_MAX_JOBS}). Must be positive."
+            ),
+        )
+        parser.add_argument(
+            "--max-lifetime-seconds",
+            type=int,
+            default=_DEFAULT_MAX_LIFETIME_SECONDS,
+            help=(
+                "Maximum browser lifetime in seconds before a controlled "
+                f"restart (default: {_DEFAULT_MAX_LIFETIME_SECONDS}). "
+                "Must be positive."
+            ),
+        )
+        parser.add_argument(
+            "--max-consecutive-failures",
+            type=int,
+            default=_DEFAULT_MAX_CONSECUTIVE_FAILURES,
+            help=(
+                "Maximum consecutive session/login/cleanup failures before a "
+                f"controlled restart (default: {_DEFAULT_MAX_CONSECUTIVE_FAILURES})."
+                " Must be positive."
+            ),
+        )
+        parser.add_argument(
+            "--renewal-threshold-seconds",
+            type=int,
+            default=_DEFAULT_RENEWAL_THRESHOLD_SECONDS,
+            help=(
+                "Proactively renew the legacy session when remaining time "
+                "falls below this many seconds "
+                f"(default: {_DEFAULT_RENEWAL_THRESHOLD_SECONDS}). Must be positive."
+            ),
+        )
+        parser.add_argument(
+            "--headless",
+            action=argparse.BooleanOptionalAction,
+            default=_DEFAULT_HEADLESS,
+            help=(
+                "Run Chromium headless (--headless) or headed (--no-headless). "
+                f"Default: {'headless' if _DEFAULT_HEADLESS else 'headed'}."
+            ),
+        )
 
     def handle(self, *args, **options):
         loop: bool = options["loop"]
@@ -322,6 +388,16 @@ class Command(BaseCommand):
         self._run_id: int | None = options.get("run_id")
         self._max_runs: int | None = options.get("max_runs")
         self._processed_count: int = 0
+        # PSW-S19 R6: lifecycle/headless configuration from the closed CLI set.
+        self._max_jobs: int = options["max_jobs"]
+        self._max_lifetime_seconds: int = options["max_lifetime_seconds"]
+        self._max_consecutive_failures: int = options["max_consecutive_failures"]
+        self._renewal_threshold_seconds: int = options["renewal_threshold_seconds"]
+        self._headless: bool = options["headless"]
+
+        # PSW-S19 R6: validate positive ranges before any claim (no browser,
+        # no adapter, no run mutated). Invalid thresholds fail fast here.
+        self._validate_lifecycle_options()
 
         # Safety guard: a real-legacy manual smoke must target exactly one
         # explicitly selected run so it cannot accidentally drain the
@@ -388,6 +464,25 @@ class Command(BaseCommand):
     # Adapter creation (overridable for tests)
     # ------------------------------------------------------------------
 
+    def _validate_lifecycle_options(self) -> None:
+        """Validate the closed lifecycle configuration set (PSW-S19 R6).
+
+        Raises a sanitized ``CommandError`` before any run is claimed when a
+        threshold is not a positive integer. The ``SessionControllerConfig``
+        constructor re-validates defensively, but this layer surfaces a clean
+        command-level error and guarantees no browser/adapter is created and no
+        run is mutated on invalid input.
+        """
+        thresholds = (
+            ("--max-jobs", self._max_jobs),
+            ("--max-lifetime-seconds", self._max_lifetime_seconds),
+            ("--max-consecutive-failures", self._max_consecutive_failures),
+            ("--renewal-threshold-seconds", self._renewal_threshold_seconds),
+        )
+        for _flag, value in thresholds:
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise CommandError(_INVALID_LIFELIFE_CONFIG_MESSAGE)
+
     def _create_adapter(self) -> PersistentExtractionAdapter:
         """Create a new PersistentExtractionAdapter.
 
@@ -415,11 +510,39 @@ class Command(BaseCommand):
                 base_admissions_url=self._real_url_templates.admissions_url_template,
                 base_evolutions_url=self._real_url_templates.evolutions_url_template,
                 safe_renewal_tab_url=self._real_url_templates.safe_renewal_url,
+                max_jobs_per_session=getattr(self, "_max_jobs", _DEFAULT_MAX_JOBS),
+                max_lifetime_seconds=getattr(
+                    self, "_max_lifetime_seconds", _DEFAULT_MAX_LIFETIME_SECONDS
+                ),
+                max_consecutive_failures=getattr(
+                    self,
+                    "_max_consecutive_failures",
+                    _DEFAULT_MAX_CONSECUTIVE_FAILURES,
+                ),
+                renewal_threshold_seconds=getattr(
+                    self,
+                    "_renewal_threshold_seconds",
+                    _DEFAULT_RENEWAL_THRESHOLD_SECONDS,
+                ),
             )
         else:
             session = self._create_session_handle()
             config = SessionControllerConfig(
-                base_admissions_url="/admissions/{patient_record}"
+                base_admissions_url="/admissions/{patient_record}",
+                max_jobs_per_session=getattr(self, "_max_jobs", _DEFAULT_MAX_JOBS),
+                max_lifetime_seconds=getattr(
+                    self, "_max_lifetime_seconds", _DEFAULT_MAX_LIFETIME_SECONDS
+                ),
+                max_consecutive_failures=getattr(
+                    self,
+                    "_max_consecutive_failures",
+                    _DEFAULT_MAX_CONSECUTIVE_FAILURES,
+                ),
+                renewal_threshold_seconds=getattr(
+                    self,
+                    "_renewal_threshold_seconds",
+                    _DEFAULT_RENEWAL_THRESHOLD_SECONDS,
+                ),
             )
         adapter = self.adapter_class(session=session, config=config)
         return adapter
@@ -460,7 +583,6 @@ class Command(BaseCommand):
         )
         from apps.ingestion.extractors.legacy_session_bootstrap import (
             LegacyBootstrapError,
-            bootstrap_legacy_session,
             resolve_legacy_url_templates,
         )
         from apps.ingestion.extractors.playwright_session_handle import (
@@ -491,18 +613,25 @@ class Command(BaseCommand):
             raise CommandError(_CREDENTIAL_RESOLUTION_MESSAGE)
 
         profile = ExclusiveBrowserProfile(label="persistent-worker")
-        handle = PlaywrightSessionHandle(profile=profile, headless=True)
+        # PSW-S19 R6: the --headless/--no-headless CLI value reaches the
+        # concrete Playwright handle.
+        handle = PlaywrightSessionHandle(
+            profile=profile, headless=getattr(self, "_headless", _DEFAULT_HEADLESS)
+        )
         handle.start()
+        # PSW-S19 R3: the bridge owns the sanitized bootstrap boundary so the
+        # same login + #tempoSessao readiness can be re-run after every restart.
+        bridge = RealHandleBridge(
+            handle,
+            credentials=credentials,
+            login_timeout=_LOGIN_TIMEOUT_SECONDS,
+        )
         # Same no-context-chain pattern for bootstrap failures (see above).
         bootstrap_failed = False
         try:
-            # Bootstrap the authenticated legacy session on the root page.
-            page = handle.ensure_current_page()
-            bootstrap_legacy_session(
-                page,
-                credentials=credentials,
-                login_timeout=_LOGIN_TIMEOUT_SECONDS,
-            )
+            # Bootstrap the authenticated legacy session on the root page via
+            # the bridge boundary (reused verbatim on restart+rebootstrap).
+            bridge.bootstrap()
         except LegacyBootstrapError:
             # Best-effort teardown; the sanitized CommandError is raised
             # outside this handler to avoid linking the raw chain.
@@ -520,7 +649,7 @@ class Command(BaseCommand):
         if bootstrap_failed:
             raise CommandError(_BOOTSTRAP_FAILURE_MESSAGE)
 
-        return RealHandleBridge(handle)
+        return bridge
 
     def _require_real_handle_config(self) -> None:
         """Raise a sanitized CommandError if required real config is missing.
@@ -760,11 +889,13 @@ class Command(BaseCommand):
             self._processed_count += 1
 
             # Conservative health gate between jobs: if the shared session
-            # has degraded past a threshold, restart it before the next claim
-            # rather than carrying a sick browser into the next run.
+            # has degraded past a threshold, restart AND re-bootstrap it before
+            # the next claim rather than carrying a sick or unauthenticated
+            # browser into the next run. PSW-S19 R2/R3: the adapter is the
+            # single lifecycle owner of restart + sanitized rebootstrap; a
+            # connected-but-unauthenticated page after restart is NOT ready.
             if adapter.controller.restart_required():
-                adapter.session.restart_browser()
-                adapter.controller.reset_after_restart()
+                adapter.restart_and_rebootstrap()
 
     def _max_runs_reached(self) -> bool:
         """Return whether the ``--max-runs`` cap has been reached.

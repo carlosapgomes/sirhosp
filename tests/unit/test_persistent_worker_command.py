@@ -1862,12 +1862,10 @@ class TestRealHandleGuards:
         assert run.status == "queued"
 
     def test_real_handle_creates_and_bootstraps_handle(self, monkeypatch):
-        """The real-handle path starts the handle and bootstraps the session."""
+        """The real-handle path starts the handle and bootstraps via the bridge."""
         _clear_source_credentials_env(monkeypatch)
 
-        mock_page = MagicMock()
         mock_handle = MagicMock()
-        mock_handle.ensure_current_page.return_value = mock_page
 
         with override_settings(**_REAL_URL_OVERRIDES), override_settings(
             SOURCE_SYSTEM_URL="https://legacy.test/login",
@@ -1878,27 +1876,24 @@ class TestRealHandleGuards:
             ".PlaywrightSessionHandle",
             return_value=mock_handle,
         ), patch(
-            "apps.ingestion.extractors.legacy_session_bootstrap"
-            ".bootstrap_legacy_session"
-        ) as mock_bootstrap, patch(
             "apps.ingestion.extractors.real_handle_bridge.RealHandleBridge"
         ) as mock_bridge_cls:
             cmd = PersistentWorkerCommand()
             cmd._use_real_handle = True
             result = cmd._create_session_handle()
 
-        # Handle started and page exposed for bootstrap.
+        # Handle started.
         mock_handle.start.assert_called_once()
-        mock_handle.ensure_current_page.assert_called_once()
-        # Bootstrap invoked with the handle's page and credentials.
-        mock_bootstrap.assert_called_once()
-        bootstrap_args, bootstrap_kwargs = mock_bootstrap.call_args
-        assert bootstrap_args[0] is mock_page
-        creds = bootstrap_kwargs["credentials"]
+        # PSW-S19 R3: the bridge owns the bootstrap boundary and is constructed
+        # with the handle plus the resolved credentials and login timeout.
+        mock_bridge_cls.assert_called_once()
+        bridge_args, bridge_kwargs = mock_bridge_cls.call_args
+        assert bridge_args[0] is mock_handle
+        creds = bridge_kwargs["credentials"]
         assert creds.username == "operador"
         assert creds.url == "https://legacy.test/login"
-        # Bridge wraps the started handle.
-        mock_bridge_cls.assert_called_once_with(mock_handle)
+        # Bootstrap is invoked through the bridge boundary at startup.
+        mock_bridge_cls.return_value.bootstrap.assert_called_once()
         assert result is mock_bridge_cls.return_value
 
     def test_real_handle_configures_adapter_with_real_url_templates(
@@ -4336,3 +4331,275 @@ class TestDemographicsStubSanitizationDispatch:
             blob = str(metric.details_json or "")
             assert sentinel not in blob
             assert "/demographics/" not in blob
+
+
+# =========================================================================
+# PSW-S19: lifecycle configuration, headless CLI, restart + rebootstrap
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestLifecycleConfigurationValidation:
+    """PSW-S19 R6: the closed configuration set is exposed via one CLI path,
+    validated as positive, and fails BEFORE any run is claimed."""
+
+    @pytest.mark.parametrize(
+        "option,value",
+        [
+            ("max_jobs", 0),
+            ("max_jobs", -1),
+            ("max_lifetime_seconds", 0),
+            ("max_lifetime_seconds", -10),
+            ("max_consecutive_failures", 0),
+            ("max_consecutive_failures", -2),
+            ("renewal_threshold_seconds", 0),
+            ("renewal_threshold_seconds", -5),
+        ],
+    )
+    def test_non_positive_threshold_rejected_before_claim(self, option, value):
+        """Invalid lifecycle thresholds raise CommandError and leave runs queued."""
+        run = _queue_admissions_run()
+        kwargs = {option: value}
+        with pytest.raises(CommandError):
+            call_command(
+                "process_ingestion_runs_persistent_session", **kwargs
+            )
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_positive_thresholds_accepted(self):
+        """Positive lifecycle thresholds do not raise during validation."""
+        run = _queue_admissions_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                max_jobs=1,
+                max_lifetime_seconds=1,
+                max_consecutive_failures=1,
+                renewal_threshold_seconds=1,
+            )
+        run.refresh_from_db()
+        assert run.status == "succeeded"
+
+
+@pytest.mark.django_db
+class TestHeadlessCliReachesHandle:
+    """PSW-S19 R6: the --headless/--no-headless CLI value reaches the concrete
+    PlaywrightSessionHandle."""
+
+    def _run_real_handle(self, *, headless):
+        """Invoke the real-handle path and return the PlaywrightSessionHandle mock."""
+        run = _queue_admissions_run()
+        from apps.ingestion.extractors.legacy_session_bootstrap import (
+            LegacyUrlTemplates,
+        )
+        from apps.ingestion.historical_extraction import SourceCredentials
+
+        with patch(
+            "apps.ingestion.extractors.playwright_session_handle.PlaywrightSessionHandle"
+        ) as mock_handle, patch(
+            "apps.ingestion.extractors.browser_profile.ExclusiveBrowserProfile"
+        ), patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap.bootstrap_legacy_session"
+        ), patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap.resolve_legacy_url_templates",
+            return_value=LegacyUrlTemplates("a", "e", "s"),
+        ), patch(
+            "apps.ingestion.historical_extraction.resolve_source_credentials",
+            return_value=SourceCredentials(url="u", username="un", password="pw"),
+        ), patch(
+            "apps.ingestion.extractors.real_handle_bridge.RealHandleBridge"
+        ), patch.object(
+            PersistentWorkerCommand, "_process_once"
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                real_handle=True,
+                run_id=run.pk,
+                max_runs=1,
+                headless=headless,
+            )
+        mock_handle.assert_called_once()
+        return mock_handle
+
+    def test_default_headless_reaches_handle(self):
+        """Default (no flag) reaches the handle as headless=True."""
+        mock_handle = self._run_real_handle(headless=True)
+        assert mock_handle.call_args.kwargs["headless"] is True
+
+    def test_no_headless_flag_reaches_handle(self):
+        """--no-headless reaches the handle as headless=False."""
+        mock_handle = self._run_real_handle(headless=False)
+        assert mock_handle.call_args.kwargs["headless"] is False
+
+
+@pytest.mark.django_db
+class TestRestartRebootstrapCommand:
+    """PSW-S19 R3/R8: between jobs the worker restarts AND re-bootstraps the
+    authenticated session before claiming a later run."""
+
+    @staticmethod
+    def _snapshot_html() -> str:
+        import json
+
+        # AdmissionSnapshotParser requires camelCase keys.
+        camel_data = [
+            {
+                "admissionKey": "ADM-001",
+                "admissionStart": "2024-01-15",
+                "admissionEnd": "2024-01-20",
+                "ward": "Enfermaria A",
+                "bed": "001",
+            }
+        ]
+        return (
+            "<html><body>"
+            '<div id="tempoSessao">T: <span>00</span>:<span>29</span>:<span>01</span></div>'
+            '<div id="admission-snapshot-data">'
+            + json.dumps(camel_data)
+            + "</div></body></html>"
+        )
+
+    def test_threshold_causes_one_restart_and_rebootstrap_before_next_job(self):
+        """R8: two jobs reuse one login/context; the max-jobs threshold then
+        causes exactly ONE restart plus ONE rebootstrap before the third job."""
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        snapshot_html = self._snapshot_html()
+        blank_html = "<html><body></body></html>"
+
+        class _Session:
+            def __init__(self) -> None:
+                self._html = snapshot_html
+                self.restart_calls = 0
+                self.bootstrap_calls = 0
+
+            def get_page_html(self) -> str:
+                return self._html
+
+            def is_connected(self) -> bool:
+                return True
+
+            def click_selector(self, selector: str) -> None:  # noqa: ARG002
+                pass
+
+            def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+                return True
+
+            def get_tab_classes(self) -> list[str]:
+                return ["tabs-first tabs-last tabs-selected"]
+
+            def close_last_non_root_tab(self):
+                return TabCleanupOutcome.ROOT_ONLY
+
+            def restart_browser(self) -> None:
+                self.restart_calls += 1
+                # A fresh Chromium context is connected but UNAUTHENTICATED.
+                self._html = blank_html
+
+            def bootstrap(self) -> None:
+                self.bootstrap_calls += 1
+                self._html = snapshot_html
+
+        session = _Session()
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig(max_jobs_per_session=2)
+        )
+
+        for pr in ("J1", "J2", "J3"):
+            _queue_admissions_run(
+                parameters_json={"patient_record": pr, "intent": "admissions_only"}
+            )
+
+        # Disable admissions auto-enqueue (demographics/full_sync follow-ups)
+        # so the queue stays exactly the three admissions runs and the
+        # restart/rebootstrap ordering is observable.
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ), patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session"
+            ".persist_admissions_snapshot",
+            return_value=(None, {"seen": 0, "created": 0, "updated": 0}),
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session", max_runs=3
+            )
+
+        assert session.restart_calls == 1
+        assert session.bootstrap_calls == 1
+        assert IngestionRun.objects.filter(status="succeeded").count() == 3
+
+    def test_restart_without_rebootstrap_cannot_process_later_run(self):
+        """Self-eval gate 1/R3: a restart that leaves a connected BLANK page
+        (no bootstrap available) is NOT ready, so the later run stays queued."""
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        snapshot_html = self._snapshot_html()
+        blank_html = "<html><body></body></html>"
+
+        class _Session:
+            def __init__(self) -> None:
+                self._html = snapshot_html
+                self.restart_calls = 0
+
+            def get_page_html(self) -> str:
+                return self._html
+
+            def is_connected(self) -> bool:
+                return True
+
+            def click_selector(self, selector: str) -> None:  # noqa: ARG002
+                pass
+
+            def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+                return True
+
+            def get_tab_classes(self) -> list[str]:
+                return ["tabs-first tabs-last tabs-selected"]
+
+            def close_last_non_root_tab(self):
+                return TabCleanupOutcome.ROOT_ONLY
+
+            def restart_browser(self) -> None:
+                self.restart_calls += 1
+                self._html = blank_html
+
+        session = _Session()
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig(max_jobs_per_session=2)
+        )
+
+        for pr in ("J1", "J2", "J3"):
+            _queue_admissions_run(
+                parameters_json={"patient_record": pr, "intent": "admissions_only"}
+            )
+
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter", return_value=adapter
+        ), patch(
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session"
+            ".persist_admissions_snapshot",
+            return_value=(None, {"seen": 0, "created": 0, "updated": 0}),
+        ):
+            call_command(
+                "process_ingestion_runs_persistent_session", max_runs=3
+            )
+
+        assert session.restart_calls == 1
+        assert IngestionRun.objects.filter(status="succeeded").count() == 2
+        assert IngestionRun.objects.filter(status="queued").count() == 1
