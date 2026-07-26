@@ -2301,6 +2301,73 @@ class TestBridgeC1EmptyChunkRecoveryAndFailureWindow:
         assert "http" not in msg
         assert "selector" not in msg
 
+    def test_ascending_order_failure_emits_window_warning_via_helper(
+        self, caplog
+    ) -> None:
+        """PSW-S21-C2: the optional ascending-order failure uses the existing
+        recoverable-chunk warning helper, so its bounded ISO window is
+        observable at ``WARNING`` while the no-op control flow continues
+        through visualize to a genuine empty result."""
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        # Single bounded chunk (10 days) so the recorded window is unambiguous.
+        admission = [{
+            "admissionKey": "ADM-SENTINEL",
+            "admissionStart": "2026-04-01",
+            "admissionEnd": "2026-04-10",
+            "ward": "",
+            "bed": "cred:supersecret-SENTINEL",
+        }]
+        handle = FakePlaywrightHandle()
+        handle.ensure_current_page = lambda: MagicMock()  # type: ignore[method-assign]
+        bridge = RealHandleBridge(handle)
+
+        base = self._BASE
+        with (
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(f"{base}._read_and_build_snapshot", return_value=list(admission)),
+            patch(f"{base}.open_internacao_detail"),
+            patch(f"{base}.click_evolucao"),
+            patch(f"{base}.fill_evolution_dates", return_value=True),
+            # Ascending-order raises a raw (non-timeout) sentinel exception;
+            # the no-op flow must continue past it.
+            patch(
+                f"{base}.select_ascending_order",
+                side_effect=RuntimeError("RAW EXCEPTION SENTINEL"),
+            ),
+            patch(f"{base}.click_visualizar_report"),
+            patch(f"{base}.wait_for_report_or_no_evolutions", return_value=False),
+            caplog.at_level("WARNING"),
+        ):
+            result = bridge.extract_evolutions_via_legacy_actions(
+                patient_record="PATIENT-SENTINEL",
+                start_date="2026-04-01",
+                end_date="2026-04-10",
+                timeout=30,
+            )
+
+        # No-op flow continued through visualize to a genuine empty result.
+        assert result == []
+        ascending_warnings = [
+            rec.getMessage() for rec in caplog.records
+            if rec.levelname == "WARNING"
+            and "ascending order select failed" in rec.getMessage()
+        ]
+        assert len(ascending_warnings) == 1
+        msg = ascending_warnings[0]
+        # Exact bounded operational window.
+        assert "window_start=2026-04-01" in msg
+        assert "window_end=2026-04-10" in msg
+        # No sensitive sentinel reaches the record.
+        assert "PATIENT-SENTINEL" not in msg
+        assert "ADM-SENTINEL" not in msg
+        assert "RAW EXCEPTION SENTINEL" not in msg
+        assert "supersecret-SENTINEL" not in msg
+        assert "http" not in msg
+        assert "selector" not in msg
+
 
 # ===========================================================================
 # PSW-S16: Real-handle demographics extraction via legacy actions

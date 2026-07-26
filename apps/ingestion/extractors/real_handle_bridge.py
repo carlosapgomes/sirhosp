@@ -1006,11 +1006,10 @@ class RealHandleBridge:
                 except NavigationTimeoutError:
                     raise
                 except Exception:
-                    logger.debug(
-                        "Evolution action flow: ascending order select "
-                        "failed (no-op) window_start=%s window_end=%s",
-                        chunk_start.isoformat(),
-                        chunk_end.isoformat(),
+                    _log_recoverable_chunk_failure(
+                        "Evolution action flow: ascending order select failed (no-op)",
+                        chunk_start,
+                        chunk_end,
                     )
 
                 # Step 5e: Click visualize.
