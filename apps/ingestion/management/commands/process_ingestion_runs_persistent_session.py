@@ -254,6 +254,10 @@ class _StubSessionHandle:
     def is_connected(self) -> bool:
         return False
 
+    def supports_real_evolution_actions(self) -> bool:
+        """PSW-S20-C1: explicit stub capability (URL/container path)."""
+        return False
+
     def click_selector(self, selector: str) -> None:
         pass
 

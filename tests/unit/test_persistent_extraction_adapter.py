@@ -15,6 +15,7 @@ from apps.ingestion.extractors.errors import (
     InvalidJsonError,
 )
 from apps.ingestion.extractors.persistent_extraction_adapter import (
+    _DISPATCH_INVALID_MESSAGE,
     PersistentExtractionAdapter,
 )
 from apps.ingestion.extractors.session_controller import (
@@ -180,6 +181,11 @@ class FakeExtractionSession:
 
     def is_connected(self) -> bool:
         return self._connected
+
+    def supports_real_evolution_actions(self) -> bool:
+        # PSW-S20-C1: explicit stub capability. Only exact ``False`` selects
+        # the URL/container stub path; absence/non-boolean fails closed.
+        return False
 
     def click_selector(self, selector: str) -> None:
         self._clicked_selectors.append(selector)
@@ -1668,16 +1674,16 @@ class TestRestartAndRebootstrap:
 
 
 # ===========================================================================
-# PSW-S20: action-first real evolution dispatch
+# PSW-S20-C1: fail-closed evolution dispatch
 # ===========================================================================
 #
-# R1/R2: a real legacy handle has no reloadable evolution deep link, so the
-# adapter must call the legacy evolution ACTIONS directly and must NOT first
-# open a synthetic/direct evolution URL. Dispatch is selected by an EXPLICIT
-# capability (``supports_real_evolution_actions() is True``); a plain
-# MagicMock auto-creates the attribute and its call returns a truthy
-# MagicMock, which is NOT ``True`` (identity check), so it cannot change
-# dispatch (self-eval gate 4).
+# Dispatch is selected by an EXPLICIT boolean capability
+# (``supports_real_evolution_actions()``). Exact ``True`` MUST drive the
+# legacy action method (a missing/non-callable action method is a wiring
+# failure, never a fallback to a synthetic URL). Exact ``False`` selects the
+# URL/container stub path. Any other value (absent method, non-boolean
+# return, or an unconfigured MagicMock whose call returns a truthy non-bool
+# object) FAILS CLOSED: no action call and no ``open_tab``.
 
 _READY_COUNTER_HTML = (
     "<html><body>"
@@ -1687,36 +1693,26 @@ _READY_COUNTER_HTML = (
 )
 
 
-class _RealActionSession:
-    """Real-like session that EXPLICITLY advertises legacy action navigation.
+class _DispatchSession:
+    """Shared readiness plumbing for PSW-S20-C1 dispatch probes.
 
-    ``open_tab`` records the call and returns False to prove the action path
-    must not rely on a synthetic/direct evolution URL (R2). The action method
-    is recorded so tests can assert dispatch + timeout propagation (R6).
+    Returns a valid session counter (29 minutes) so the adapter's readiness
+    checkpoints pass and dispatch is actually reached. Records synthetic URL
+    opens and action calls so fail-closed rows can prove ``open_tab`` and the
+    action method were never reached.
     """
 
-    def __init__(
-        self,
-        *,
-        action_result: list[dict] | None = None,
-        action_error: BaseException | None = None,
-    ) -> None:
-        self._html = _READY_COUNTER_HTML
+    _html = _READY_COUNTER_HTML
+
+    def __init__(self) -> None:
         self.open_tab_calls: list[tuple[str, int]] = []
         self.action_calls: list[dict] = []
-        self._action_result = (
-            action_result if action_result is not None else []
-        )
-        self._action_error = action_error
 
-    def supports_real_evolution_actions(self) -> bool:
+    def is_connected(self) -> bool:
         return True
 
     def get_page_html(self) -> str:
         return self._html
-
-    def is_connected(self) -> bool:
-        return True
 
     def click_selector(self, selector: str) -> None:  # noqa: ARG002
         pass
@@ -1734,6 +1730,30 @@ class _RealActionSession:
     def restart_browser(self) -> None:
         pass
 
+
+class _RealActionSession(_DispatchSession):
+    """Row 1: capability ``True`` + callable action method.
+
+    ``open_tab`` records the call and returns False to prove the action path
+    does not rely on a synthetic/direct evolution URL (R2). The action method
+    is recorded so tests can assert dispatch + timeout propagation (R6).
+    """
+
+    def __init__(
+        self,
+        *,
+        action_result: list[dict] | None = None,
+        action_error: BaseException | None = None,
+    ) -> None:
+        super().__init__()
+        self._action_result = (
+            action_result if action_result is not None else []
+        )
+        self._action_error = action_error
+
+    def supports_real_evolution_actions(self) -> bool:
+        return True
+
     def extract_evolutions_via_legacy_actions(self, **kwargs) -> list[dict]:
         self.action_calls.append(kwargs)
         if self._action_error is not None:
@@ -1741,13 +1761,43 @@ class _RealActionSession:
         return [dict(item) for item in self._action_result]
 
 
-class TestExtractEvolutionsActionFirstDispatch:
-    """PSW-S20: real handles dispatch action-first; stubs/tests keep the
-    URL+container path; MagicMock cannot change dispatch."""
+class _TrueNoActionSession(_DispatchSession):
+    """Row 2: capability ``True`` but the action method is ABSENT."""
 
-    def test_real_capability_calls_action_method_without_open_tab(self) -> None:
-        """R1/R2: a real session reaches the action method with ZERO synthetic
-        evolution URL opens, even though ``open_tab`` would fail."""
+    def supports_real_evolution_actions(self) -> bool:
+        return True
+
+
+class _TrueNonCallableActionSession(_DispatchSession):
+    """Row 3: capability ``True`` but the action attribute is non-callable."""
+
+    def supports_real_evolution_actions(self) -> bool:
+        return True
+
+    extract_evolutions_via_legacy_actions = "not-callable"
+
+
+class _AbsentCapabilitySession(_DispatchSession):
+    """Row 5: the capability method is not defined at all."""
+
+
+class TestExtractEvolutionsDispatch:
+    """PSW-S20-C1: closed dispatch matrix for evolution extraction.
+
+    Exact ``True`` + callable action -> action path (zero URL opens).
+    Exact ``True`` + missing/non-callable action -> sanitized
+    ``ExtractionError`` (zero URL opens).
+    Exact ``False`` -> stub URL/container path.
+    Absent/non-boolean capability (incl. an unconfigured MagicMock) ->
+    sanitized ``ExtractionError`` (zero action, zero URL).
+    """
+
+    def test_true_capability_callable_action_uses_actions_zero_urls(
+        self,
+    ) -> None:
+        """Row 1: exact True + callable action reaches the action method with
+        ZERO synthetic evolution URL opens, even though ``open_tab`` would
+        fail."""
         events = [
             {
                 "admission_key": "ADM-1",
@@ -1767,9 +1817,7 @@ class TestExtractEvolutionsActionFirstDispatch:
             timeout=45,
         )
 
-        # No synthetic/direct evolution URL was opened (R2).
         assert session.open_tab_calls == []
-        # The action method was called exactly once with the full contract.
         assert len(session.action_calls) == 1
         assert session.action_calls[0] == {
             "patient_record": "12345",
@@ -1778,6 +1826,99 @@ class TestExtractEvolutionsActionFirstDispatch:
             "timeout": 45,
         }
         assert len(result) == 1
+
+    def test_true_capability_missing_action_fails_closed(self) -> None:
+        """Row 2: exact True but the action method is ABSENT -> sanitized
+        ``ExtractionError``; zero action calls and zero URL opens."""
+        session = _TrueNoActionSession()
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(ExtractionError) as exc:
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+
+        assert session.open_tab_calls == []
+        assert session.action_calls == []
+        assert str(exc.value) == _DISPATCH_INVALID_MESSAGE
+
+    def test_true_capability_non_callable_action_fails_closed(self) -> None:
+        """Row 3: exact True but the action attribute is non-callable ->
+        sanitized ``ExtractionError``; zero action calls, zero URL opens."""
+        session = _TrueNonCallableActionSession()
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(ExtractionError) as exc:
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+
+        assert session.open_tab_calls == []
+        assert str(exc.value) == _DISPATCH_INVALID_MESSAGE
+
+    def test_false_capability_keeps_url_container_path(self) -> None:
+        """Row 4: exact False selects the stub URL/container + PDF fallback
+        path; the action method is never a dispatch option."""
+        session = FakeExtractionSession()
+        session.set_html(EVOLUTION_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            timeout=60,
+        )
+
+        assert len(result) == 2
+        assert len(session.opened_urls) == 1
+        assert session._last_open_timeout == 60
+
+    def test_absent_capability_fails_closed(self) -> None:
+        """Row 5: the capability method is not defined -> sanitized
+        ``ExtractionError``; zero action calls, zero URL opens."""
+        session = _AbsentCapabilitySession()
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(ExtractionError) as exc:
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+
+        assert session.open_tab_calls == []
+        assert session.action_calls == []
+        assert str(exc.value) == _DISPATCH_INVALID_MESSAGE
+
+    def test_unconfigured_magicmock_fails_closed(self) -> None:
+        """Row 6: a plain unconfigured MagicMock auto-creates both the
+        capability and the action method, but the capability call returns a
+        truthy non-boolean object, so dispatch FAILS CLOSED: the action method
+        is never called and ``open_tab`` is never called."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.is_connected.return_value = True
+        session.get_page_html.return_value = _READY_COUNTER_HTML
+        session.get_tab_classes.return_value = [
+            "tabs-first tabs-last tabs-selected",
+        ]
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(ExtractionError):
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+
+        session.extract_evolutions_via_legacy_actions.assert_not_called()
+        session.open_tab.assert_not_called()
 
     def test_real_capability_propagates_typed_timeout(self) -> None:
         """R5/R6: a typed action timeout propagates (it is NOT turned into an
@@ -1816,61 +1957,4 @@ class TestExtractEvolutionsActionFirstDispatch:
         )
 
         assert result == []
-        # The action path still runs tab cleanup + job accounting.
         assert adapter._controller.jobs_processed == 1
-
-    def test_magicmock_cannot_change_dispatch_to_action_path(self) -> None:
-        """Self-eval gate 4: a plain MagicMock auto-creates
-        ``extract_evolutions_via_legacy_actions`` and
-        ``supports_real_evolution_actions``, but the EXPLICIT capability
-        check (``is True``) is False for a MagicMock, so dispatch stays on
-        the stub URL/container path and the action method is never called."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.is_connected.return_value = True
-        session.get_page_html.return_value = (
-            "<html><body>"
-            '<div id="tempoSessao">'
-            "<span>00</span>:<span>29</span>:<span>01</span>"
-            "</div>"
-            '<div id="evolution-data">[]</div>'
-            "</body></html>"
-        )
-        session.get_tab_classes.return_value = [
-            "tabs-first tabs-last tabs-selected",
-        ]
-        session.open_tab.return_value = True
-        session.extract_evolutions_pdf.return_value = []
-        adapter = PersistentExtractionAdapter(session)
-
-        result = adapter.extract_evolutions(
-            patient_record="12345",
-            start_date="2024-01-01",
-            end_date="2024-01-31",
-        )
-
-        assert result == []
-        # The action method exists on the MagicMock but was NOT called.
-        session.extract_evolutions_via_legacy_actions.assert_not_called()
-
-    def test_stub_session_without_capability_keeps_url_container_path(
-        self,
-    ) -> None:
-        """R8: a stub/test session (no real capability) keeps the URL template
-        + container fast path; the action method is not a dispatch option."""
-        session = FakeExtractionSession()
-        session.set_html(EVOLUTION_PAGE_HTML)
-        adapter = PersistentExtractionAdapter(session)
-
-        result = adapter.extract_evolutions(
-            patient_record="12345",
-            start_date="2024-01-01",
-            end_date="2024-12-31",
-            timeout=60,
-        )
-
-        assert len(result) == 2
-        # Stub path opened the synthetic evolution URL and propagated timeout.
-        assert len(session.opened_urls) == 1
-        assert session._last_open_timeout == 60

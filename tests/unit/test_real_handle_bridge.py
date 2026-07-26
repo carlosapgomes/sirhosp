@@ -1521,6 +1521,198 @@ class TestBridgeExtractEvolutionsViaLegacyActions:
 
 
 # ===========================================================================
+# PSW-S20-C1: action-flow cooperative timeout budget
+# ===========================================================================
+
+
+class TestBridgeActionFlowTimeoutBudget:
+    """PSW-S20-C1 A2: ONE cooperative deadline bounds every action helper,
+    the report wait, and the download. Each helper receives a positive
+    ``timeout_ms`` no greater than the caller budget; later helpers receive
+    the SAME deadline's remaining budget (never a fresh full timeout)."""
+
+    _BASE = "apps.ingestion.extractors.real_handle_bridge"
+
+    def test_action_flow_shares_one_deadline_across_all_helpers(self) -> None:
+        """One deadline propagates to every named boundary; later helpers see
+        a strictly smaller remaining budget after a consumed step."""
+        import time
+
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        budget_s = 60
+        budget_ms = budget_s * 1000
+        base = self._BASE
+
+        spies = {
+            name: MagicMock()
+            for name in (
+                "search_patient",
+                "click_internacoes",
+                "open_internacao_detail",
+                "click_evolucao",
+                "select_ascending_order",
+                "click_visualizar_report",
+            )
+        }
+        ensure = MagicMock()
+        # Inject real time consumption so later helpers provably see a smaller
+        # remaining budget (ONE shared deadline, not per-helper resets).
+        ensure.side_effect = lambda *a, **k: time.sleep(0.30)
+        read_snap = MagicMock(
+            return_value=[{
+                "admissionKey": "K1",
+                "admissionStart": "2026-01-01",
+                "admissionEnd": "2026-01-15",
+                "ward": "",
+                "bed": "",
+            }]
+        )
+        fill_dates = MagicMock(return_value=True)
+        report_wait = MagicMock(return_value=True)
+        resolve_pdf = MagicMock(return_value="https://example/report.pdf")
+        download = MagicMock(return_value=b"%PDF-1.4 ok")
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch(f"{base}.ensure_search_screen", ensure),
+            patch(f"{base}.search_patient", spies["search_patient"]),
+            patch(f"{base}.click_internacoes", spies["click_internacoes"]),
+            patch(f"{base}._read_and_build_snapshot", read_snap),
+            patch(
+                f"{base}.open_internacao_detail",
+                spies["open_internacao_detail"],
+            ),
+            patch(f"{base}.click_evolucao", spies["click_evolucao"]),
+            patch(f"{base}.fill_evolution_dates", fill_dates),
+            patch(
+                f"{base}.select_ascending_order",
+                spies["select_ascending_order"],
+            ),
+            patch(
+                f"{base}.click_visualizar_report",
+                spies["click_visualizar_report"],
+            ),
+            patch(f"{base}.wait_for_report_or_no_evolutions", report_wait),
+            patch.object(bridge, "_resolve_pdf_url_from_report_page", resolve_pdf),
+            patch.object(bridge, "_download_pdf", download),
+            patch(f"{base}.extract_pdf_text", return_value="raw text"),
+            patch(
+                f"{base}.normalize_pdf_report_text",
+                return_value=[{
+                    "admission_key": "K1",
+                    "happened_at": "2026-01-10T09:00:00",
+                    "event_type": "medical",
+                    "content": "ok",
+                    "profession": "Dr",
+                }],
+            ),
+            patch.object(bridge, "_resolve_active_page", return_value=MagicMock()),
+        ):
+            result = bridge.extract_evolutions_via_legacy_actions(
+                patient_record="123",
+                start_date="2026-01-01",
+                end_date="2026-01-15",
+                timeout=budget_s,
+            )
+
+        def ms_of(spy: MagicMock) -> int:
+            calls = spy.call_args_list
+            assert calls, "action helper was not called"
+            assert "timeout_ms" in calls[0].kwargs, "no timeout_ms propagated"
+            return calls[0].kwargs["timeout_ms"]
+
+        ordered = [
+            ensure,
+            spies["search_patient"],
+            spies["click_internacoes"],
+            read_snap,
+            spies["open_internacao_detail"],
+            spies["click_evolucao"],
+            fill_dates,
+            spies["select_ascending_order"],
+            spies["click_visualizar_report"],
+            report_wait,
+        ]
+        values = [ms_of(s) for s in ordered]
+
+        # Every named boundary received a positive timeout_ms within budget.
+        for v in values:
+            assert 0 < v <= budget_ms
+
+        # The deadline is shared: after ensure_search_screen consumed ~0.30s,
+        # every later helper received a strictly smaller budget than it.
+        assert values[1] < values[0]
+        for v in values[1:]:
+            assert v <= values[0]
+
+        # Report wait + download share the same deadline (bounded, not flat).
+        assert report_wait.call_args.kwargs["timeout_ms"] <= budget_ms
+        resolve_pdf.assert_called_once()
+        download.assert_called_once()
+        assert len(result) == 1
+
+    def test_action_flow_propagates_typed_timeout_from_bounded_helper(
+        self,
+    ) -> None:
+        """A typed ``NavigationTimeoutError`` raised by a bounded action helper
+        propagates unchanged (never swallowed or turned into an empty window)."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationTimeoutError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        base = self._BASE
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch(
+                f"{base}.ensure_search_screen",
+                side_effect=NavigationTimeoutError("deadline expired"),
+            ),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(f"{base}._read_and_build_snapshot", return_value=[]),
+            patch.object(
+                bridge, "_resolve_active_page", return_value=MagicMock()
+            ),
+        ):
+            with pytest.raises(NavigationTimeoutError):
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="123",
+                    start_date="2026-01-01",
+                    end_date="2026-01-15",
+                    timeout=60,
+                )
+
+    def test_legacy_helper_binds_fixed_waits_to_timeout_ms(self) -> None:
+        """A legacy action helper bounds its fixed Playwright wait by the
+        supplied ``timeout_ms`` instead of the full default."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            click_visualizar_report,
+        )
+
+        page = MagicMock()
+        frame = MagicMock()
+        page.frame.return_value = frame
+        button = MagicMock()
+        frame.locator.return_value = button
+
+        click_visualizar_report(page, timeout_ms=250)
+
+        wait_timeout = button.first.wait_for.call_args.kwargs["timeout"]
+        # Bounded by the 250ms budget, strictly below the 15000ms default.
+        assert 0 < wait_timeout <= 250
+
+
+# ===========================================================================
 # PSW-S16: Real-handle demographics extraction via legacy actions
 # ===========================================================================
 

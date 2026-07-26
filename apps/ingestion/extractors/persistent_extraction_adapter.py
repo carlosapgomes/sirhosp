@@ -82,6 +82,14 @@ _EVOLUTION_DATA_CONTAINER_RE = re.compile(
 )
 """Regex to extract JSON array from a ``<div id="evolution-data">`` container."""
 
+# PSW-S20-C1: constant sanitized message for invalid real-evolution dispatch
+# wiring. Raised when the capability is absent/non-boolean/non-callable, or a
+# real capability whose action method is absent/non-callable. Carries no
+# patient record, URL, selector, HTML, cookie, credential, or dynamic text.
+_DISPATCH_INVALID_MESSAGE = (
+    "The extraction session has an invalid real-evolution dispatch wiring."
+)
+
 # ---------------------------------------------------------------------------
 # Demographics data extraction constants (PSW-S16)
 # ---------------------------------------------------------------------------
@@ -528,37 +536,39 @@ class PersistentExtractionAdapter:
         if not self._controller.renew_if_needed():
             raise ExtractionError("Session renewal failed before extraction")
 
-        # Step 3: Navigate + extract evolutions (PSW-S20 action-first).
-        #
-        # R1/R2: the real legacy UI has no reloadable evolution deep link, so a
-        # real session that EXPLICITLY advertises real action navigation
-        # takes the action-first path: the legacy evolution actions are called
-        # directly WITHOUT first opening a synthetic/direct evolution URL.
-        # The JSON/pre fast paths and the PSW-S11 PDF fallback remain ONLY on
-        # the stub/test path, where ``open_tab`` is the legitimate navigation
-        # and the container was reached legitimately (R3). The capability is
-        # checked with ``is True`` so a plain ``MagicMock`` (whose attribute
-        # call returns a truthy MagicMock) cannot change dispatch (gate 4).
-        if self._session_supports_real_evolution_actions() and hasattr(
-            self._session, "extract_evolutions_via_legacy_actions"
-        ):
+        # Step 3: Dispatch by the explicit real-evolution capability
+        # (PSW-S20-C1 fail-closed). Exact ``True`` MUST drive the legacy
+        # action method; a missing/non-callable action method is a wiring
+        # failure that NEVER falls back to a synthetic URL. Exact ``False``
+        # selects the stub URL/container path. Any other value (absent
+        # method, non-boolean return, or an unconfigured MagicMock whose
+        # call returns a truthy non-bool object) FAILS CLOSED: no action
+        # call and no ``open_tab``.
+        capability = getattr(
+            self._session, "supports_real_evolution_actions", None
+        )
+        if not callable(capability):
+            raise ExtractionError(_DISPATCH_INVALID_MESSAGE)
+        capability_value = capability()
+        if capability_value is True:
+            action_method = getattr(
+                self._session,
+                "extract_evolutions_via_legacy_actions",
+                None,
+            )
+            if not callable(action_method):
+                raise ExtractionError(_DISPATCH_INVALID_MESSAGE)
             # PSW-S17 R2/R3: typed action timeouts (NavigationTimeoutError,
-            # EvolutionPdfTimeoutError) and typed EvolutionPdfError propagate
-            # unchanged; the command classifies them. A genuine empty window
-            # stays an empty list (R5), distinct from a timeout.
-            #
-            # Dispatch is selected by the explicit capability (``is True``)
-            # above; the ``hasattr`` is only for static narrowing so mypy can
-            # resolve this optional real-only method on the ``SessionHandle``
-            # protocol — a MagicMock fails the ``is True`` check, so it never
-            # reaches this call (gate 4).
-            result = self._session.extract_evolutions_via_legacy_actions(
+            # EvolutionPdfTimeoutError) and typed EvolutionPdfError
+            # propagate unchanged; the command classifies them. A genuine
+            # empty window stays an empty list (R5), distinct from a timeout.
+            result = action_method(
                 patient_record=patient_record,
                 start_date=start_date,
                 end_date=end_date,
                 timeout=timeout,
             )
-        else:
+        elif capability_value is False:
             # Stub/test path: URL template + container + PSW-S11 PDF fallback.
             url = _build_admissions_url(
                 self._evolutions_url_template,
@@ -594,6 +604,8 @@ class PersistentExtractionAdapter:
                     end_date=end_date,
                     timeout=timeout,
                 )
+        else:
+            raise ExtractionError(_DISPATCH_INVALID_MESSAGE)
 
         # Step 6 (PSW-S11 fix): map the adapter's 5-key evolution contract
         # (admission_key/happened_at/event_type/content/profession) onto the
@@ -613,24 +625,6 @@ class PersistentExtractionAdapter:
         self._controller.mark_job_processed()
 
         return result
-
-    def _session_supports_real_evolution_actions(self) -> bool:
-        """Return True only when the session EXPLICITLY advertises real legacy
-        evolution action navigation.
-
-        PSW-S20 R1 (self-eval gate 4): dispatch must NOT be inferred from an
-        arbitrary method accidentally present on a mock. A plain ``MagicMock``
-        auto-creates ``supports_real_evolution_actions`` and its call returns a
-        truthy ``MagicMock``, which is NOT ``True`` (identity check), so it
-        cannot switch dispatch to the action path. Only a session that
-        explicitly returns ``True`` (e.g. ``RealHandleBridge``) takes the
-        action-first path; stub/test sessions keep the URL-template +
-        container path.
-        """
-        capability = getattr(
-            self._session, "supports_real_evolution_actions", None
-        )
-        return callable(capability) and capability() is True
 
     # ------------------------------------------------------------------
     # Demographics extraction (PSW-S16)

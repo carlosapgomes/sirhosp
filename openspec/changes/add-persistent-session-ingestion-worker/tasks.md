@@ -459,6 +459,22 @@ PSW-S17 command-level timeout tests were re-wired to reach the same typed
 PDF-timeout boundary through the new action-first path (the timeout taxonomy
 and sanitization contract is unchanged).
 
+PSW-S20-C1 corrective closure (authoritative): dispatch is now fail-closed.
+The capability is resolved as an explicit boolean: exact `True` MUST drive
+the legacy action method (a missing/non-callable action method is a wiring
+failure that NEVER falls back to a synthetic URL); exact `False` selects the
+URL/container stub path; any other value (absent method, non-boolean return,
+or an unconfigured MagicMock) raises one constant sanitized `ExtractionError`
+with zero action calls and zero `open_tab`. Concrete stub/fake sessions
+(`_StubSessionHandle`, `FakeExtractionSession`, `_PdfBridgeSession`) now
+declare `supports_real_evolution_actions() -> False`. The cooperative
+deadline is created before the first required UI action and every action
+helper (`ensure_search_screen` through `click_visualizar_report`) plus the
+report wait and download receive the same deadline's remaining budget via a
+new optional `timeout_ms` keyword (default `None` preserves all existing
+callers); the deadline is never reset per admission or helper. PSW-S17
+taxonomy, sentinels, and the command-level timeout proofs are unchanged.
+
 ## 21. PSW-S21: Canonical chunking and multi-admission flow
 
 - [ ] 21.1 Add failing tests for at-most-15-day chunks, canonical overlap,

@@ -441,7 +441,7 @@ def search_patient(
     page.wait_for_timeout(_bound_ms(deadline_s, 1200))
 
 
-def click_internacoes(page: Any) -> None:
+def click_internacoes(page: Any, *, timeout_ms: int | None = None) -> None:
     """Click the 'Internações' text element to open the admissions list.
 
     Modeled after ``path2.py``: waits for the exact text ``"Internações"``
@@ -454,10 +454,11 @@ def click_internacoes(page: Any) -> None:
         NavigationTimeoutError: If the wait/click times out (Playwright timeout).
         NavigationError: If the Internações element is not found for other reasons.
     """
+    deadline_s = _deadline_s(timeout_ms)
     try:
         internacoes = page.get_by_text("Internações", exact=True)
-        internacoes.wait_for(state="visible", timeout=15000)
-        internacoes.click()
+        internacoes.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
+        internacoes.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
     except NavigationError:
         raise
     except Exception as exc:
@@ -468,7 +469,7 @@ def click_internacoes(page: Any) -> None:
             ),
         )
 
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(_bound_ms(deadline_s, 500))
 
 
 def wait_for_admissions_table(
@@ -739,6 +740,7 @@ def open_internacao_detail(
     page: Any,
     *,
     admission_key: str,
+    timeout_ms: int | None = None,
 ) -> None:
     """Open the admission detail page by clicking the details link.
 
@@ -758,6 +760,7 @@ def open_internacao_detail(
         NavigationTimeoutError: on Playwright timeout.
         NavigationError: if the row or details link cannot be found.
     """
+    deadline_s = _deadline_s(timeout_ms)
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         raise NavigationError(
@@ -772,7 +775,7 @@ def open_internacao_detail(
     )
     row_locator = frame.locator(row_selector)
     try:
-        row_locator.first.wait_for(state="visible", timeout=10000)
+        row_locator.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 10000))
     except Exception:
         # Fallback: try first row with details link (sanitized log; no key).
         logger.debug(
@@ -783,7 +786,7 @@ def open_internacao_detail(
             f'{SEL_INTERNACOES_TABLE_ROWS}:has({SEL_DETAILS_LINK})'
         )
         try:
-            row_locator.first.wait_for(state="visible", timeout=5000)
+            row_locator.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 5000))
         except Exception as exc:
             _raise_required_action_error(
                 exc,
@@ -797,8 +800,8 @@ def open_internacao_detail(
     )
     details_link = frame.locator(details_row_selector)
     try:
-        details_link.first.wait_for(state="visible", timeout=10000)
-        details_link.first.click()
+        details_link.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 10000))
+        details_link.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
     except Exception as exc:
         _raise_required_action_error(
             exc,
@@ -807,10 +810,10 @@ def open_internacao_detail(
             ),
         )
 
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(_bound_ms(deadline_s, 1500))
 
 
-def click_evolucao(page: Any) -> None:
+def click_evolucao(page: Any, *, timeout_ms: int | None = None) -> None:
     """Click the 'Evolução' button inside ``frame_pol``.
 
     Modeled after ``path2.open_report_for_interval()``.
@@ -825,6 +828,7 @@ def click_evolucao(page: Any) -> None:
         NavigationError: If the button is not found or is disabled for
             non-timeout reasons.
     """
+    deadline_s = _deadline_s(timeout_ms)
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         raise NavigationError(
@@ -834,7 +838,7 @@ def click_evolucao(page: Any) -> None:
 
     evo_button = frame.get_by_role("button", name="Evolução")
     try:
-        evo_button.first.wait_for(state="visible", timeout=15000)
+        evo_button.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
     except NavigationError:
         raise
     except Exception as exc:
@@ -847,7 +851,7 @@ def click_evolucao(page: Any) -> None:
         )
 
     try:
-        evo_button.first.click()
+        evo_button.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
     except NavigationError:
         raise
     except Exception as exc:
@@ -856,7 +860,7 @@ def click_evolucao(page: Any) -> None:
             fallback_message="Falha ao acionar o botão Evolução.",
         )
 
-    page.wait_for_timeout(1000)
+    page.wait_for_timeout(_bound_ms(deadline_s, 1000))
 
 
 def fill_evolution_dates(
@@ -864,6 +868,7 @@ def fill_evolution_dates(
     *,
     start_date_br: str,
     end_date_br: str,
+    timeout_ms: int | None = None,
 ) -> bool:
     """Fill date inputs inside the evolution modal with ``DD/MM/YYYY``.
 
@@ -891,6 +896,7 @@ def fill_evolution_dates(
     Raises:
         NavigationTimeoutError: when a present date input times out.
     """
+    deadline_s = _deadline_s(timeout_ms)
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         logger.warning(
@@ -903,9 +909,12 @@ def fill_evolution_dates(
     start_input = frame.locator(SEL_DATE_START)
     if _locator_count(start_input) > 0:
         try:
-            start_input.first.wait_for(state="visible", timeout=10000)
-            start_input.first.click()
-            start_input.first.fill(start_date_br)
+            start_input.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 10000))
+            start_input.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+            start_input.first.fill(
+                start_date_br,
+                **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS),
+            )
             filled_start = True
         except Exception as exc:
             _raise_required_action_error(
@@ -920,9 +929,12 @@ def fill_evolution_dates(
     end_input = frame.locator(SEL_DATE_END)
     if _locator_count(end_input) > 0:
         try:
-            end_input.first.wait_for(state="visible", timeout=10000)
-            end_input.first.click()
-            end_input.first.fill(end_date_br)
+            end_input.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 10000))
+            end_input.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+            end_input.first.fill(
+                end_date_br,
+                **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS),
+            )
             filled_end = True
         except Exception as exc:
             _raise_required_action_error(
@@ -932,7 +944,7 @@ def fill_evolution_dates(
                 ),
             )
 
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(_bound_ms(deadline_s, 500))
     return filled_start and filled_end
 
 
@@ -949,7 +961,7 @@ def _locator_count(locator: Any) -> int:
         return 0
 
 
-def select_ascending_order(page: Any) -> None:
+def select_ascending_order(page: Any, *, timeout_ms: int | None = None) -> None:
     """Select 'Crescente' in the evolution order dropdown if present.
 
     Modeled after ``path2.select_order_crescente()``. Uses JS evaluation
@@ -970,6 +982,7 @@ def select_ascending_order(page: Any) -> None:
         NavigationTimeoutError: when the order select IS present and a
             Playwright timeout occurs during interaction.
     """
+    deadline_s = _deadline_s(timeout_ms)
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         return
@@ -982,7 +995,7 @@ def select_ascending_order(page: Any) -> None:
     # The select IS present. A Playwright timeout from here is a typed
     # timeout, not optional absence.
     try:
-        order_select.first.wait_for(state="attached", timeout=5000)
+        order_select.first.wait_for(state="attached", timeout=_bound_ms(deadline_s, 5000))
     except NavigationError:
         raise
     except Exception as exc:
@@ -1020,10 +1033,10 @@ def select_ascending_order(page: Any) -> None:
             fallback_message="Ascending-order evaluation failed.",
         )
 
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(_bound_ms(deadline_s, 500))
 
 
-def click_visualizar_report(page: Any) -> None:
+def click_visualizar_report(page: Any, *, timeout_ms: int | None = None) -> None:
     """Click the 'UltimosQuinzedias' (visualize) button.
 
     Modeled after ``path2.click_visualizar_relatorio()``.
@@ -1035,6 +1048,7 @@ def click_visualizar_report(page: Any) -> None:
         NavigationTimeoutError: on Playwright timeout.
         NavigationError: If the button is not found.
     """
+    deadline_s = _deadline_s(timeout_ms)
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
         raise NavigationError(
@@ -1044,15 +1058,15 @@ def click_visualizar_report(page: Any) -> None:
 
     button = frame.locator(SEL_VISUALIZAR_BUTTON)
     try:
-        button.first.wait_for(state="visible", timeout=15000)
-        button.first.click()
+        button.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
+        button.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
     except Exception as exc:
         _raise_required_action_error(
             exc,
             fallback_message="Could not find or click the visualize button.",
         )
 
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(_bound_ms(deadline_s, 1500))
 
 
 def wait_for_report_or_no_evolutions(
@@ -1171,7 +1185,9 @@ def _build_admission_snapshot(
     return snapshot
 
 
-def _read_and_build_snapshot(page: Any) -> list[dict[str, Any]]:
+def _read_and_build_snapshot(
+    page: Any, *, timeout_ms: int | None = None
+) -> list[dict[str, Any]]:
     """Read admission rows from the page and build the canonical snapshot.
 
     Combined convenience: waits for the admissions table, reads rows, and
@@ -1186,7 +1202,10 @@ def _read_and_build_snapshot(page: Any) -> list[dict[str, Any]]:
     Raises:
         NavigationError: If the admissions table is not available.
     """
-    wait_for_admissions_table(page)
+    if timeout_ms is None:
+        wait_for_admissions_table(page)
+    else:
+        wait_for_admissions_table(page, timeout_ms=timeout_ms)
     rows = read_admissions_rows(page)
     return _build_admission_snapshot(rows)
 

@@ -2331,6 +2331,10 @@ class _PdfBridgeSession:
     def is_connected(self) -> bool:
         return self._connected
 
+    def supports_real_evolution_actions(self) -> bool:
+        # PSW-S20-C1: explicit stub capability (URL/container + PDF fallback).
+        return False
+
     def click_selector(self, selector: str) -> None:  # noqa: ARG002
         pass
 

@@ -721,9 +721,15 @@ class RealHandleBridge:
         # PSW-S17 R2/R3: typed navigation/wait timeouts MUST propagate as
         # typed timeouts so the run records ("timeout", True). Non-timeout
         # NavigationError failures keep the legacy empty-result behavior.
+        #
+        # PSW-S20-C1 A2: ONE cooperative deadline bounds the COMPLETE action
+        # sequence, from the first required UI action through report wait and
+        # download. Created before any action; never reset per admission/helper.
+        deadline_s = _pdf_deadline_s(timeout)
+
         # Step 1: Ensure search screen visible (reuse PSW-S12 helpers)
         try:
-            ensure_search_screen(page)
+            ensure_search_screen(page, timeout_ms=_pdf_remaining_ms(deadline_s))
         except NavigationTimeoutError:
             raise
         except NavigationError:
@@ -734,7 +740,11 @@ class RealHandleBridge:
 
         # Step 2: Search for the patient
         try:
-            search_patient(page, patient_record=patient_record)
+            search_patient(
+                page,
+                patient_record=patient_record,
+                timeout_ms=_pdf_remaining_ms(deadline_s),
+            )
         except NavigationTimeoutError:
             raise
         except NavigationError:
@@ -745,7 +755,7 @@ class RealHandleBridge:
 
         # Step 3: Click Interna\u00e7\u00f5es
         try:
-            click_internacoes(page)
+            click_internacoes(page, timeout_ms=_pdf_remaining_ms(deadline_s))
         except NavigationTimeoutError:
             raise
         except NavigationError:
@@ -756,7 +766,9 @@ class RealHandleBridge:
 
         # Step 4: Read admissions and select overlapping ones
         try:
-            admissions = _read_and_build_snapshot(page)
+            admissions = _read_and_build_snapshot(
+                page, timeout_ms=_pdf_remaining_ms(deadline_s)
+            )
         except NavigationTimeoutError:
             raise
         except NavigationError:
@@ -789,18 +801,18 @@ class RealHandleBridge:
             return []
 
         # Step 5: For each overlapping admission, open details and
-        # generate the evolution report.
-        # PSW-S17 post-cbf50c1 (D17/R1): the caller ``timeout`` is an UPPER
-        # BOUND shared by the report wait, URL resolution, and download.
+        # generate the evolution report. The shared deadline (created above
+        # before the first action) bounds every per-admission helper too.
         all_events: list[dict[str, Any]] = []
-        deadline_s = _pdf_deadline_s(timeout)
 
         for idx, admission in enumerate(overlapping):
             if idx > 0:
                 # Re-navigate to admissions (no multi-admission optimisations)
                 try:
-                    click_internacoes(page)
-                    admissions = _read_and_build_snapshot(page)
+                    click_internacoes(page, timeout_ms=_pdf_remaining_ms(deadline_s))
+                    admissions = _read_and_build_snapshot(
+                        page, timeout_ms=_pdf_remaining_ms(deadline_s)
+                    )
                 except NavigationTimeoutError:
                     raise
                 except NavigationError:
@@ -816,6 +828,7 @@ class RealHandleBridge:
                 open_internacao_detail(
                     page,
                     admission_key=admission_key,
+                    timeout_ms=_pdf_remaining_ms(deadline_s),
                 )
             except NavigationTimeoutError:
                 raise
@@ -827,7 +840,7 @@ class RealHandleBridge:
 
             # Step 5b: Click Evolu\u00e7\u00e3o
             try:
-                click_evolucao(page)
+                click_evolucao(page, timeout_ms=_pdf_remaining_ms(deadline_s))
             except NavigationTimeoutError:
                 raise
             except NavigationError:
@@ -856,6 +869,7 @@ class RealHandleBridge:
                     page,
                     start_date_br=br_start,
                     end_date_br=br_end,
+                    timeout_ms=_pdf_remaining_ms(deadline_s),
                 )
             except NavigationTimeoutError:
                 raise
@@ -866,7 +880,7 @@ class RealHandleBridge:
 
             # Step 5d: Select ascending order
             try:
-                select_ascending_order(page)
+                select_ascending_order(page, timeout_ms=_pdf_remaining_ms(deadline_s))
             except NavigationTimeoutError:
                 raise
             except Exception:
@@ -877,7 +891,7 @@ class RealHandleBridge:
 
             # Step 5e: Click visualize
             try:
-                click_visualizar_report(page)
+                click_visualizar_report(page, timeout_ms=_pdf_remaining_ms(deadline_s))
             except NavigationTimeoutError:
                 raise
             except NavigationError:
