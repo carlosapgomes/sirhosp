@@ -777,6 +777,13 @@ class RealHandleBridge:
             )
             return []
 
+        # PSW-S20-C2: the snapshot is a non-interruptible operation. After it
+        # returns, classify an expired shared deadline BEFORE interpreting
+        # the snapshot as a selection input — an overrun must not masquerade as
+        # an empty/no-overlap functional result. Propagates a typed
+        # EvolutionPdfTimeoutError through the PSW-S17 taxonomy.
+        _pdf_remaining_ms(deadline_s)
+
         overlap_failed = False
         try:
             overlapping = choose_overlapping_admissions(
@@ -791,6 +798,12 @@ class RealHandleBridge:
             # the handler only suppresses *display* of the context; the raw
             # reference would still be attached.
             overlap_failed = True
+        # PSW-S20-C2: overlap selection is non-interruptible. After it returns
+        # or raises a functional NavigationError, classify an expired shared
+        # deadline BEFORE converting the failure to a no-overlap error or
+        # interpreting an empty result. Propagates a typed
+        # EvolutionPdfTimeoutError (never caught/wrapped here).
+        _pdf_remaining_ms(deadline_s)
         if overlap_failed:
             raise EvolutionPdfError(
                 "Nenhuma interna\u00e7\u00e3o com interse\u00e7\u00e3o "
@@ -820,6 +833,9 @@ class RealHandleBridge:
                         "Evolution action flow: re-navigation failed (sanitized)"
                     )
                     continue
+                # PSW-S20-C2: classify an overrun re-navigation snapshot
+                # before the next admission action uses the refreshed state.
+                _pdf_remaining_ms(deadline_s)
 
             admission_key = admission.get("admissionKey") or ""
 

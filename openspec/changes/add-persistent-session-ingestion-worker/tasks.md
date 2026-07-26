@@ -475,6 +475,18 @@ new optional `timeout_ms` keyword (default `None` preserves all existing
 callers); the deadline is never reset per admission or helper. PSW-S17
 taxonomy, sentinels, and the command-level timeout proofs are unchanged.
 
+PSW-S20-C2 corrective closure (authoritative): post-operation deadline
+classification. After a non-interruptible snapshot or overlap-selection
+returns, an expired shared deadline is now classified BEFORE the result is
+interpreted: `_pdf_remaining_ms(deadline_s)` is checked immediately after
+the initial `_read_and_build_snapshot(...)`, immediately after
+`choose_overlapping_admissions(...)` returns or raises a functional
+NavigationError (before any no-overlap `EvolutionPdfError` or empty-result
+interpretation), and immediately after each later-admission re-navigation
+snapshot. An overrun propagates a typed `EvolutionPdfTimeoutError` through
+the frozen PSW-S17 taxonomy; no new helper, state, exception, deadline, or
+abstraction was added and the existing `deadline_s` is never reset.
+
 ## 21. PSW-S21: Canonical chunking and multi-admission flow
 
 - [ ] 21.1 Add failing tests for at-most-15-day chunks, canonical overlap,

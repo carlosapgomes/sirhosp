@@ -1711,6 +1711,200 @@ class TestBridgeActionFlowTimeoutBudget:
         # Bounded by the 250ms budget, strictly below the 15000ms default.
         assert 0 < wait_timeout <= 250
 
+    def test_initial_snapshot_overrun_classified_as_timeout(self) -> None:
+        """PSW-S20-C2: when the initial snapshot overruns the shared deadline,
+        the expired deadline is classified BEFORE the empty result is
+        interpreted. The result is a typed EvolutionPdfTimeoutError, never a
+        no-overlap/empty interpretation, and selection never runs."""
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        base = self._BASE
+        clock = {"t": 1000.0}
+
+        def fake_monotonic() -> float:
+            return clock["t"]
+
+        def overrun_snapshot(*a, **k):  # noqa: ANN202
+            # Non-interruptible operation "took" beyond the budget.
+            clock["t"] += 2.0
+            return []
+
+        choose = MagicMock()
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch("time.monotonic", new=fake_monotonic),
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(
+                f"{base}._read_and_build_snapshot",
+                side_effect=overrun_snapshot,
+            ),
+            patch(f"{base}.choose_overlapping_admissions", choose),
+            patch.object(
+                bridge, "_resolve_active_page", return_value=MagicMock()
+            ),
+        ):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="P1",
+                    start_date="2026-01-01",
+                    end_date="2026-01-31",
+                    timeout=1,
+                )
+
+        # The empty snapshot was NOT interpreted: selection never ran.
+        choose.assert_not_called()
+
+    def test_selection_overrun_wins_over_no_overlap_error(self) -> None:
+        """PSW-S20-C2: when overlap selection overruns and raises a functional
+        NavigationError, the expired deadline is classified BEFORE the failure
+        is converted to a no-overlap EvolutionPdfError."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        base = self._BASE
+        clock = {"t": 1000.0}
+
+        def fake_monotonic() -> float:
+            return clock["t"]
+
+        def overrun_choose(*a, **k):  # noqa: ANN202
+            clock["t"] += 2.0
+            raise NavigationError("selection failed")
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch("time.monotonic", new=fake_monotonic),
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(
+                f"{base}._read_and_build_snapshot",
+                return_value=[{
+                    "admissionKey": "K1",
+                    "admissionStart": "2026-01-01",
+                    "admissionEnd": "2026-01-31",
+                    "ward": "",
+                    "bed": "",
+                }],
+            ),
+            patch(
+                f"{base}.choose_overlapping_admissions",
+                side_effect=overrun_choose,
+            ),
+            patch.object(
+                bridge, "_resolve_active_page", return_value=MagicMock()
+            ),
+        ):
+            with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="P1",
+                    start_date="2026-01-01",
+                    end_date="2026-01-31",
+                    timeout=1,
+                )
+
+        # The functional no-overlap error was NOT emitted (exact type check:
+        # EvolutionPdfTimeoutError subclasses EvolutionPdfError).
+        assert type(exc_info.value) is EvolutionPdfTimeoutError
+        assert type(exc_info.value) is not EvolutionPdfError
+
+    def test_renavigation_snapshot_overrun_stops_next_admission(
+        self,
+    ) -> None:
+        """PSW-S20-C2: when the re-navigation snapshot for a later admission
+        overruns the shared deadline, the expired deadline is classified
+        BEFORE the next admission action runs."""
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        base = self._BASE
+        clock = {"t": 1000.0}
+
+        def fake_monotonic() -> float:
+            return clock["t"]
+
+        def _admission(key: str) -> MagicMock:
+            m = MagicMock()
+            m.get.return_value = key
+            return m
+
+        two_admissions = [_admission("K1"), _admission("K2")]
+        snapshot_calls = {"n": 0}
+
+        def snapshot(*a, **k):  # noqa: ANN202
+            snapshot_calls["n"] += 1
+            if snapshot_calls["n"] == 1:
+                return []  # initial value unused: choose is patched
+            clock["t"] += 2.0  # re-navigation snapshot overruns
+            return []
+
+        open_detail = MagicMock()
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch("time.monotonic", new=fake_monotonic),
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(f"{base}._read_and_build_snapshot", side_effect=snapshot),
+            patch(
+                f"{base}.choose_overlapping_admissions",
+                return_value=two_admissions,
+            ),
+            patch(f"{base}.open_internacao_detail", open_detail),
+            patch(f"{base}.click_evolucao"),
+            patch(f"{base}.fill_evolution_dates", return_value=True),
+            patch(f"{base}.select_ascending_order"),
+            patch(f"{base}.click_visualizar_report"),
+            patch(
+                f"{base}.wait_for_report_or_no_evolutions",
+                return_value=False,
+            ),
+            patch.object(
+                bridge, "_resolve_active_page", return_value=MagicMock()
+            ),
+        ):
+            with pytest.raises(EvolutionPdfTimeoutError):
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="P1",
+                    start_date="2026-01-01",
+                    end_date="2026-01-31",
+                    timeout=1,
+                )
+
+        # The second admission's detail action was NOT reached after the
+        # overrun: only the first admission opened its detail.
+        assert open_detail.call_count == 1
+        # Placement #3 classifies the overrun at the boundary, BEFORE the
+        # second admission's key is read (without #3 the bridge would reach
+        # ``admission.get("admissionKey")`` for K2 before the next helper's
+        # deadline argument raises).
+        two_admissions[1].get.assert_not_called()
+
 
 # ===========================================================================
 # PSW-S16: Real-handle demographics extraction via legacy actions
