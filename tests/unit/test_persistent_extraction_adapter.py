@@ -6,6 +6,8 @@ abstraction using fake browser/session objects — no real browser required.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from apps.ingestion.extractors.errors import (
@@ -1372,7 +1374,15 @@ class _RebootstrapSession:
     to ``bootstrap_legacy_session`` via ``RealHandleBridge.bootstrap``).
     """
 
-    def __init__(self, *, authenticated: str, blank: str) -> None:
+    def __init__(
+        self,
+        *,
+        authenticated: str,
+        blank: str,
+        bootstrap_noop: bool = False,
+        restart_exception: BaseException | None = None,
+        bootstrap_exception: BaseException | None = None,
+    ) -> None:
         self._authenticated = authenticated
         self._blank = blank
         self._html = authenticated
@@ -1380,6 +1390,9 @@ class _RebootstrapSession:
         self.bootstrap_calls = 0
         self.bootstrap_failures = 0
         self.opened_urls: list[str] = []
+        self._bootstrap_noop = bootstrap_noop
+        self._restart_exception = restart_exception
+        self._bootstrap_exception = bootstrap_exception
 
     def get_page_html(self) -> str:
         return self._html
@@ -1402,98 +1415,91 @@ class _RebootstrapSession:
 
     def restart_browser(self) -> None:
         self.restart_calls += 1
+        if self._restart_exception is not None:
+            raise self._restart_exception
         # A fresh Chromium context is connected but UNAUTHENTICATED.
         self._html = self._blank
 
     def bootstrap(self) -> None:
         self.bootstrap_calls += 1
+        if self._bootstrap_exception is not None:
+            raise self._bootstrap_exception
         if self.bootstrap_failures > 0:
             self.bootstrap_failures -= 1
             raise RuntimeError("sanitized bootstrap failure")
-        self._html = self._authenticated
+        if not self._bootstrap_noop:
+            self._html = self._authenticated
+
+
+class _NoBootstrapSession:
+    """Connected session WITHOUT a bootstrap capability.
+
+    Used to prove the closed matrix row "bootstrap absent or non-callable":
+    the boundary performs no restart, no reset, and returns False while the
+    pre-existing restart trigger stays pending.
+    """
+
+    def __init__(self, *, html: str) -> None:
+        self._html = html
+        self.restart_calls = 0
+
+    def get_page_html(self) -> str:
+        return self._html
+
+    def is_connected(self) -> bool:
+        return True
+
+    def click_selector(self, selector: str) -> None:  # noqa: ARG002
+        pass
+
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+        return True
+
+    def get_tab_classes(self) -> list[str]:
+        return ["tabs-first tabs-last tabs-selected"]
+
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
+        return TabCleanupOutcome.ROOT_ONLY
+
+    def restart_browser(self) -> None:
+        self.restart_calls += 1
 
 
 class TestRestartAndRebootstrap:
-    """PSW-S19 R2/R3/R4/R5/R8: the adapter is the single lifecycle boundary
-    that restarts the browser AND re-bootstraps authentication before another
-    claim. Connectivity after restart is never treated as readiness."""
+    """PSW-S19-C1 closed restart/rebootstrap matrix regressions.
 
-    def test_connected_blank_page_after_restart_is_not_ready(self) -> None:
-        """Self-eval gate 1: a connected blank page is NOT ready.
+    The adapter is the single lifecycle boundary. Success requires the
+    bootstrap capability, a successful restart, a successful bootstrap, AND an
+    observed valid ``#tempoSessao`` marker before ``reset_after_restart()``
+    runs exactly once. Every other condition returns False without resetting
+    recovery, emits at most a constant sanitized warning, and never mutates a
+    queued run.
+    """
 
-        After ``restart_browser()`` blanks the page and NO bootstrap is
-        available, ``ensure_session_ready()`` must return False because
-        ``#tempoSessao`` is absent — restart alone never equals readiness.
-        """
-
-        class _BlankSession:
-            """Connected session that goes blank on restart, with no bootstrap."""
-
-            def __init__(self) -> None:
-                self._html = "<html><body></body></html>"
-                self.restart_calls = 0
-
-            def get_page_html(self) -> str:
-                return self._html
-
-            def is_connected(self) -> bool:
-                return True
-
-            def click_selector(self, selector: str) -> None:  # noqa: ARG002
-                pass
-
-            def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
-                return True
-
-            def get_tab_classes(self) -> list[str]:
-                return ["tabs-first tabs-last tabs-selected"]
-
-            def close_last_non_root_tab(self) -> TabCleanupOutcome:
-                return TabCleanupOutcome.ROOT_ONLY
-
-            def restart_browser(self) -> None:
-                self.restart_calls += 1
-                self._html = "<html><body></body></html>"
-
-        session = _BlankSession()
+    def test_missing_bootstrap_returns_false_no_restart_no_reset(self) -> None:
+        """Matrix row 1: bootstrap absent → no restart, no reset, False; the
+        pre-existing restart trigger stays pending."""
+        session = _NoBootstrapSession(html=VALID_FULL_PAGE_HTML)
         adapter = PersistentExtractionAdapter(
             session, config=SessionControllerConfig()
         )
         adapter.controller.jobs_processed = 999
 
-        assert adapter.ensure_session_ready() is False
-        # A restart was attempted but could not produce readiness.
-        assert session.restart_calls >= 1
+        result = adapter.restart_and_rebootstrap()
 
-    def test_rebootstrap_restores_readiness_after_restart(self) -> None:
-        """R3: bootstrap re-runs login and restores #tempoSessao readiness."""
+        assert result is False
+        assert session.restart_calls == 0
+        assert adapter.controller.jobs_processed == 999
+        assert adapter.controller.restart_required() is True
+
+    def test_bootstrap_without_marker_returns_false_no_reset(self) -> None:
+        """Matrix row 4: bootstrap returns but #tempoSessao is invalid →
+        completed restart, no reset, False; recovery stays pending."""
         session = _RebootstrapSession(
             authenticated=VALID_FULL_PAGE_HTML,
             blank="<html><body></body></html>",
+            bootstrap_noop=True,
         )
-        adapter = PersistentExtractionAdapter(
-            session, config=SessionControllerConfig()
-        )
-        assert adapter.ensure_session_ready() is True
-
-        adapter.controller.jobs_processed = 999
-        assert adapter.restart_and_rebootstrap() is True
-        assert session.restart_calls == 1
-        assert session.bootstrap_calls == 1
-        # After rebootstrap the authenticated readiness marker is back.
-        assert adapter.ensure_session_ready() is True
-
-    def test_rebootstrap_failure_retains_recovery_state(self) -> None:
-        """R5: a failed rebootstrap does NOT reset counters and raises nothing.
-
-        Recovery state is retained so the next ``ensure_session_ready()`` retry
-        can attempt rebootstrap again. No exception escapes the boundary.
-        """
-        session = _RebootstrapSession(
-            authenticated=VALID_FULL_PAGE_HTML,
-            blank="<html><body></body></html>",
-        )
-        session.bootstrap_failures = 99  # permanent failure
         session._html = session._blank
         adapter = PersistentExtractionAdapter(
             session, config=SessionControllerConfig()
@@ -1503,19 +1509,103 @@ class TestRestartAndRebootstrap:
         result = adapter.restart_and_rebootstrap()
 
         assert result is False
-        # Restart happened, bootstrap failed.
         assert session.restart_calls == 1
         assert session.bootstrap_calls == 1
-        # Counters NOT reset: still restart-required.
         assert adapter.controller.jobs_processed == 999
         assert adapter.controller.restart_required() is True
-        # ensure_session_ready retries safely and still cannot claim while
-        # rebootstrap keeps failing.
+
+    def test_restart_exception_is_sanitized_no_reset(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Matrix row 2: restart_browser() raises → attempted, no reset, False;
+        the dynamic exception text is never observable."""
+        sentinel = "sensitive-profile-path=/tmp/private-profile-xyz"
+        session = _RebootstrapSession(
+            authenticated=VALID_FULL_PAGE_HTML,
+            blank="<html><body></body></html>",
+            restart_exception=RuntimeError(sentinel),
+        )
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+        adapter.controller.jobs_processed = 999
+
+        with caplog.at_level(logging.WARNING):
+            result = adapter.restart_and_rebootstrap()
+
+        assert result is False
+        assert session.restart_calls == 1
+        assert session.bootstrap_calls == 0
+        assert adapter.controller.jobs_processed == 999
+        assert adapter.controller.restart_required() is True
+        assert sentinel not in caplog.text
+
+    def test_bootstrap_exception_returns_false_no_reset(self) -> None:
+        """Matrix row 3: bootstrap() raises → completed restart, no reset, False."""
+        session = _RebootstrapSession(
+            authenticated=VALID_FULL_PAGE_HTML,
+            blank="<html><body></body></html>",
+            bootstrap_exception=RuntimeError("sensitive-bootstrap-detail"),
+        )
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+        adapter.controller.jobs_processed = 999
+
+        result = adapter.restart_and_rebootstrap()
+
+        assert result is False
+        assert session.restart_calls == 1
+        assert session.bootstrap_calls == 1
+        assert adapter.controller.jobs_processed == 999
+        assert adapter.controller.restart_required() is True
+
+    def test_valid_bootstrap_resets_once(self) -> None:
+        """Matrix row 5: valid bootstrap restores #tempoSessao → reset exactly
+        once and return True."""
+        session = _RebootstrapSession(
+            authenticated=VALID_FULL_PAGE_HTML,
+            blank="<html><body></body></html>",
+        )
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+        adapter.controller.jobs_processed = 999
+        original_reset = adapter.controller.reset_after_restart
+        reset_calls = 0
+
+        def counting_reset() -> None:
+            nonlocal reset_calls
+            reset_calls += 1
+            original_reset()
+
+        adapter.controller.reset_after_restart = counting_reset
+
+        result = adapter.restart_and_rebootstrap()
+
+        assert result is True
+        assert session.restart_calls == 1
+        assert session.bootstrap_calls == 1
+        assert reset_calls == 1
+        assert adapter.controller.jobs_processed == 0
+
+    def test_pending_restart_not_bypassed_by_old_ready_page(self) -> None:
+        """Readiness ordering: an old page with a valid marker cannot bypass an
+        already-pending max-jobs restart when bootstrap capability is absent."""
+        session = _NoBootstrapSession(html=VALID_FULL_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig()
+        )
+        adapter.controller.jobs_processed = 999
+
+        # The current page is ready, but the pending restart is authoritative.
         assert adapter.ensure_session_ready() is False
-        assert session.bootstrap_calls >= 2
+        assert session.restart_calls == 0
+        assert adapter.controller.restart_required() is True
 
     def test_no_claim_while_rebootstrap_incomplete(self) -> None:
-        """R4: ensure_session_ready stays False until rebootstrap completes."""
+        """R4/R5: ensure_session_ready stays False until rebootstrap completes,
+        then retries safely without mutating any run."""
         session = _RebootstrapSession(
             authenticated=VALID_FULL_PAGE_HTML,
             blank="<html><body></body></html>",
@@ -1527,7 +1617,6 @@ class TestRestartAndRebootstrap:
         )
         adapter.controller.jobs_processed = 999
 
-        # Two failed attempts: still not ready, recovery retained.
         assert adapter.ensure_session_ready() is False
         assert adapter.ensure_session_ready() is False
         assert session.bootstrap_calls == 2

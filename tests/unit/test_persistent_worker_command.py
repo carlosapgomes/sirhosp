@@ -717,6 +717,12 @@ class TestCleanupRecoveryClaimGate:
             def restart_browser(self_inner) -> None:
                 events.append("restart")
 
+            def bootstrap(self_inner) -> None:
+                # PSW-S19-C1: the S18 fake now models the bootstrap capability.
+                # The snapshot already carries #tempoSessao, so bootstrap is a
+                # no-op for HTML; it only records the lifecycle event.
+                events.append("bootstrap")
+
         adapter = PersistentExtractionAdapter(session=_Session())
 
         # PSW-S18-C2 D: observe claim/restart/reset/claim ordering across the
@@ -753,6 +759,7 @@ class TestCleanupRecoveryClaimGate:
             )
 
         restart_positions = [i for i, e in enumerate(events) if e == "restart"]
+        bootstrap_positions = [i for i, e in enumerate(events) if e == "bootstrap"]
         reset_positions = [i for i, e in enumerate(events) if e == "reset"]
         claim_positions = [i for i, e in enumerate(events) if e == "claim"]
         open_positions = [i for i, e in enumerate(events) if e == "open_tab"]
@@ -761,9 +768,11 @@ class TestCleanupRecoveryClaimGate:
         assert len(open_positions) >= 2, events
         # D2: a reset occurred between the two claims.
         assert reset_positions, events
-        # D1/D2/D3 ordering: first action < restart < reset < second claim
-        # < second action.
-        assert open_positions[0] < restart_positions[0] < reset_positions[0]
+        # PSW-S19-C1: strengthened order — first action < restart < bootstrap
+        # < reset < second claim < second action.
+        assert bootstrap_positions, events
+        assert open_positions[0] < restart_positions[0] < bootstrap_positions[0]
+        assert bootstrap_positions[0] < reset_positions[0]
         assert reset_positions[0] < claim_positions[1] < open_positions[1]
         # No Playwright Page was closed during cleanup.
         assert close_page.page_close_calls == 0
@@ -4538,9 +4547,9 @@ class TestRestartRebootstrapCommand:
         assert session.bootstrap_calls == 1
         assert IngestionRun.objects.filter(status="succeeded").count() == 3
 
-    def test_restart_without_rebootstrap_cannot_process_later_run(self):
-        """Self-eval gate 1/R3: a restart that leaves a connected BLANK page
-        (no bootstrap available) is NOT ready, so the later run stays queued."""
+    def test_missing_bootstrap_blocks_restart_and_later_run(self):
+        """PSW-S19-C1: with no bootstrap capability, a pending max-jobs restart
+        is not satisfied (no restart, no reset); the later run stays queued."""
         from apps.ingestion.extractors.persistent_extraction_adapter import (
             PersistentExtractionAdapter,
         )
@@ -4600,6 +4609,6 @@ class TestRestartRebootstrapCommand:
                 "process_ingestion_runs_persistent_session", max_runs=3
             )
 
-        assert session.restart_calls == 1
+        assert session.restart_calls == 0
         assert IngestionRun.objects.filter(status="succeeded").count() == 2
         assert IngestionRun.objects.filter(status="queued").count() == 1

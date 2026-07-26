@@ -740,24 +740,19 @@ class PersistentExtractionAdapter:
     def ensure_session_ready(self) -> bool:
         """Ensure the underlying persistent session is ready for work.
 
-        PSW-S19 R2/R3/R4: the single lifecycle boundary. A connected but
-        unauthenticated page after a restart is NOT ready. When the controller
-        reports ``restart_required()``, the adapter restarts the browser AND
-        re-bootstraps authentication (login + ``#tempoSessao``) through this
-        same boundary before another claim can occur. There is no background
-        login thread.
+        PSW-S19-C1: a pending restart is authoritative even when the old page
+        still looks ready, so ``restart_required()`` is resolved BEFORE
+        ordinary readiness may be accepted. When a restart is required, the
+        closed restart/rebootstrap boundary runs; it returns ``True`` only
+        after the authenticated ``#tempoSessao`` marker is observed. There is
+        no background login thread.
 
         Returns:
             True if the session is ready, False if recovery failed or
             rebootstrap is incomplete.
         """
-        if self._controller.ensure_ready():
-            return True
-        if not self._controller.restart_required():
-            return False
-        if not self._restart_and_rebootstrap():
-            return False  # R4/R5: restart/rebootstrap incomplete or failed
-        # R3: require the authenticated readiness marker after rebootstrap.
+        if self._controller.restart_required():
+            return self._restart_and_rebootstrap()
         return self._controller.ensure_ready()
 
     def restart_and_rebootstrap(self) -> bool:
@@ -767,36 +762,51 @@ class PersistentExtractionAdapter:
         Called by the worker between jobs (a safe point) once the controller
         reports ``restart_required()``. Returns True only when the browser was
         restarted, the authenticated session re-bootstrapped through the
-        handle/bridge ``bootstrap()`` boundary, and the controller counters
-        reset. On rebootstrap failure (R5) recovery state is retained and no
-        reset occurs.
+        handle/bridge ``bootstrap()`` boundary, the ``#tempoSessao`` marker was
+        observed, and the controller counters reset. On any failure (R5)
+        recovery state is retained and no reset occurs.
         """
         return self._restart_and_rebootstrap()
 
     def _restart_and_rebootstrap(self) -> bool:
-        """Restart browser, re-bootstrap auth, and reset controller state.
+        """Run the closed restart/rebootstrap boundary.
 
-        PSW-S19 R3: re-runs the sanitized bootstrap/login through the
-        ``bootstrap()`` capability exposed by the handle/bridge boundary; the
-        caller then requires ``#tempoSessao`` readiness via ``ensure_ready()``.
-        Connectivity after restart is never treated as authentication.
+        Success order (PSW-S19-C1 closed matrix):
 
-        PSW-S19 R5: on rebootstrap failure the controller counters are NOT
-        reset, so ``restart_required()`` stays True and the next
-        ``ensure_session_ready()`` retries safely. No exception escapes this
-        boundary and no queued run is mutated.
+            bootstrap capability is callable
+            -> restart browser/context
+            -> run bootstrap/login
+            -> controller ensure_ready observes valid #tempoSessao
+            -> reset_after_restart exactly once
+            -> return True
+
+        Every other condition returns ``False`` without resetting recovery:
+        bootstrap absent/non-callable (no restart), ``restart_browser()``
+        raising, ``bootstrap()`` raising, or the readiness marker being
+        invalid after bootstrap. Failures emit at most a constant sanitized
+        warning; no exception text, URL, profile path, credential, cookie,
+        selector, or raw HTML is observable, and no queued run is mutated.
         """
-        self._session.restart_browser()
         bootstrap = getattr(self._session, "bootstrap", None)
-        if callable(bootstrap):
-            try:
-                bootstrap()
-            except Exception:  # noqa: BLE001 - sanitized lifecycle boundary
-                # R5: retain recovery state; do NOT reset_after_restart.
-                logger.warning(
-                    "Persistent session rebootstrap failed (sanitized)"
-                )
-                return False
+        if not callable(bootstrap):
+            # bootstrap capability absent: no restart, no reset, recovery pending.
+            return False
+        try:
+            self._session.restart_browser()
+        except Exception:  # noqa: BLE001 - sanitized lifecycle boundary
+            logger.warning("Persistent session restart failed (sanitized)")
+            return False
+        try:
+            bootstrap()
+        except Exception:  # noqa: BLE001 - sanitized lifecycle boundary
+            logger.warning("Persistent session rebootstrap failed (sanitized)")
+            return False
+        if not self._controller.ensure_ready():
+            logger.warning(
+                "Persistent session readiness marker missing after "
+                "rebootstrap (sanitized)"
+            )
+            return False
         self._controller.reset_after_restart()
         return True
 

@@ -396,6 +396,24 @@ ownership is preserved across restart (`release_after_shutdown(remove=False)`
 then `acquire()`; destructive cleanup only on shutdown) (R7). The current
 worker (`process_ingestion_runs`) CLI and behavior are unchanged (R9).
 
+PSW-S19-C1 closure (authoritative): the restart/rebootstrap boundary now
+reports success and resets recovery only after authenticated readiness is
+observed. `_restart_and_rebootstrap()` requires the `bootstrap()` capability
+before restarting; captures `restart_browser()` and `bootstrap()` failures
+with a constant sanitized warning (no exception text, URL, profile path,
+credential, cookie, selector, or raw HTML); validates `#tempoSessao` via
+`ensure_ready()` before calling `reset_after_restart()` exactly once; and
+returns `False` without resetting on any other condition (bootstrap absent,
+restart raise, bootstrap raise, or invalid marker). `ensure_session_ready()`
+resolves `restart_required()` before ordinary readiness, so an old ready page
+cannot bypass a pending threshold. Two compatibility corrections were made
+in the command tests: the PSW-S18 fake now models the `bootstrap()`
+capability (order strengthened to `restart < bootstrap < reset < second
+claim`), and the no-bootstrap proof was renamed to reflect that a missing
+bootstrap blocks restart (and the later run) with `restart_calls == 0`.
+Audit findings A1/A2 are resolved; PSW-S17/PSW-S18 observable behavior is
+preserved.
+
 ## 20. PSW-S20: Action-first real evolution dispatch
 
 - [ ] 20.1 Add a failing real-like adapter test proving the real handle reaches
