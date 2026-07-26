@@ -489,17 +489,45 @@ abstraction was added and the existing `deadline_s` is never reset.
 
 ## 21. PSW-S21: Canonical chunking and multi-admission flow
 
-- [ ] 21.1 Add failing tests for at-most-15-day chunks, canonical overlap,
+- [x] 21.1 Add failing tests for at-most-15-day chunks, canonical overlap,
   guaranteed progress, final single-day windows, and multiple overlapping
   admissions.
-- [ ] 21.2 Reuse the canonical dependency-free chunking module and remove the
+- [x] 21.2 Reuse the canonical dependency-free chunking module and remove the
   duplicate unused helper.
-- [ ] 21.3 Process every selected admission/chunk through the existing session,
+- [x] 21.3 Process every selected admission/chunk through the existing session,
   restore navigation between iterations, and retain the correct admission key.
-- [ ] 21.4 Preserve previously extracted events when a later chunk is empty and
+- [x] 21.4 Preserve previously extracted events when a later chunk is empty and
   avoid fake data or infinite loops.
-- [ ] 21.5 Run official validation and create
+- [x] 21.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S21-report.md`.
+
+PSW-S21 closure (authoritative): the persistent evolution action flow now
+chunks each admission's bounded window and processes every overlapping
+admission through the same authenticated session. The app reuses the
+canonical dependency-free module
+(`automation/source_system/medical_evolution/chunking.py`) via a lazily-loaded
+file-path wrapper in `legacy_navigation.build_chunks_for_interval`; no
+chunking algorithm is copied into `apps/ingestion` and the unused duplicate
+`_build_chunks_for_interval` (plus its `_CHUNK_DAYS`/`_CHUNK_OVERLAP`
+constants) was removed. For each overlapping admission the bridge clips the
+requested window to `max(requested, admissionStart) ..
+min(requested, admissionEnd)` (open-ended admissions fall back to the
+requested bound, mirroring `path2`), builds the bounded chunks, opens the
+detail once, and iterates the chunks: between consecutive chunks with a
+prior report it restores the detail page via the new
+`go_back_to_detail_from_report` helper (clicks the report ``Voltar`` and
+waits for `consultaDetalheInternacao.xhtml` + the ``Evolução`` button); each
+chunk fills its OWN bounded DD/MM/YYYY dates, so no report window exceeds 15
+inclusive days with canonical one-day overlap. A genuine empty chunk returns
+no fake events and never discards already-collected events (`continue` leaves
+`all_events` untouched); the real admission key is stamped on every event via
+`normalize_pdf_report_text(..., admission_key=...)`. Every per-admission and
+per-chunk helper receives the SAME shared cooperative deadline's remaining
+budget; typed timeouts propagate through the frozen PSW-S17 taxonomy and
+non-timeout recoverable failures skip the chunk while preserving priors. No
+new browser/context/login is created during iteration (verified by a no-
+subprocess/no-`sync_playwright` proof). PSW-S17/PSW-S18/PSW-S19/PSW-S20
+observable contracts are preserved and not re-audited.
 
 ## 22. PSW-S22: Authenticated PDF form-download parity
 

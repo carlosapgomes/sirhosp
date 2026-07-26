@@ -42,6 +42,7 @@ import json
 import logging
 import re
 import time
+from datetime import date, datetime
 from typing import Any
 
 from apps.ingestion.extractors.errors import is_playwright_timeout_error
@@ -50,6 +51,7 @@ from apps.ingestion.extractors.legacy_navigation import (
     NavigationTimeoutError,
     _read_and_build_snapshot,
     _remaining_ms,
+    build_chunks_for_interval,
     build_demographics,
     choose_overlapping_admissions,
     click_evolucao,
@@ -57,6 +59,7 @@ from apps.ingestion.extractors.legacy_navigation import (
     click_visualizar_report,
     ensure_search_screen,
     fill_evolution_dates,
+    go_back_to_detail_from_report,
     open_internacao_detail,
     search_patient,
     select_ascending_order,
@@ -68,6 +71,7 @@ from apps.ingestion.extractors.persistent_evolution_pdf import (
     EvolutionPdfError,
     EvolutionPdfFlow,
     EvolutionPdfTimeoutError,
+    _format_br_date,
     extract_pdf_text,
     normalize_pdf_report_text,
     resolve_pdf_url_from_page,
@@ -92,6 +96,29 @@ logger = logging.getLogger(__name__)
 _EVOLUTION_DATE_FILL_REQUIRED_MESSAGE = (
     "Required evolution date inputs could not be filled."
 )
+
+
+def _coerce_admission_date(value: Any, fallback: date) -> date:
+    """Parse an admission date (ISO ``YYYY-MM-DD`` or BR ``DD/MM/YYYY``).
+
+    PSW-S21 R5: admissions come from the canonical snapshot as ISO strings.
+    Open-ended admissions (empty ``admissionEnd``) and any unparseable value
+    fall back to the requested bound, mirroring ``path2``'s
+    ``admission_end = current_admission["admissionEnd"] or requested_end``
+    semantics. This never raises so the per-admission window stays bounded
+    even for partial/defensive inputs.
+    """
+    if value is None:
+        return fallback
+    text = str(value).strip()
+    if not text:
+        return fallback
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return fallback
 
 # ---------------------------------------------------------------------------
 # URL patterns for page-type detection
@@ -813,9 +840,18 @@ class RealHandleBridge:
         if not overlapping:
             return []
 
-        # Step 5: For each overlapping admission, open details and
-        # generate the evolution report. The shared deadline (created above
-        # before the first action) bounds every per-admission helper too.
+        # PSW-S21 R1/R2/R3: requested window bounds for the per-admission
+        # clipping. Each admission is processed over its OWN bounded window
+        # (max(requested, admissionStart) .. min(requested, admissionEnd)),
+        # then split into at-most-15-day chunks with canonical overlap via the
+        # canonical dependency-free chunking module.
+        requested_start = _coerce_admission_date(start_date, date.today())
+        requested_end = _coerce_admission_date(end_date, date.today())
+
+        # Step 5: For each overlapping admission, open details and generate
+        # the evolution report for every bounded chunk. The shared deadline
+        # (created above before the first action) bounds every per-admission
+        # and per-chunk helper too.
         all_events: list[dict[str, Any]] = []
 
         for idx, admission in enumerate(overlapping):
@@ -837,9 +873,30 @@ class RealHandleBridge:
                 # before the next admission action uses the refreshed state.
                 _pdf_remaining_ms(deadline_s)
 
+            # PSW-S21 R5: keep each real admission key on its events and
+            # process admissions in deterministic (snapshot) order.
             admission_key = admission.get("admissionKey") or ""
 
-            # Step 5a: Open admission detail
+            # PSW-S21 R1/R2: clip the requested window to this admission and
+            # build the bounded chunk windows (canonical algorithm).
+            adm_start = _coerce_admission_date(
+                admission.get("admissionStart"), requested_start
+            )
+            adm_end = _coerce_admission_date(
+                admission.get("admissionEnd"), requested_end
+            )
+            effective_start = max(requested_start, adm_start)
+            effective_end = min(requested_end, adm_end)
+            if effective_end < effective_start:
+                logger.debug(
+                    "Evolution action flow: admission has no effective "
+                    "overlap after clipping (sanitized)"
+                )
+                continue
+
+            chunks = build_chunks_for_interval(effective_start, effective_end)
+
+            # Step 5a: Open admission detail once per admission.
             try:
                 open_internacao_detail(
                     page,
@@ -854,152 +911,175 @@ class RealHandleBridge:
                 )
                 continue
 
-            # Step 5b: Click Evolu\u00e7\u00e3o
-            try:
-                click_evolucao(page, timeout_ms=_pdf_remaining_ms(deadline_s))
-            except NavigationTimeoutError:
-                raise
-            except NavigationError:
-                logger.warning(
-                    "Evolution action flow: Evolu\u00e7\u00e3o click failed (sanitized)"
-                )
-                continue
+            # PSW-S21 R6: between consecutive chunks of the SAME admission,
+            # restore the detail page before re-opening the evolution modal.
+            last_chunk_had_report = False
+            for chunk_idx, (chunk_start, chunk_end) in enumerate(chunks):
+                if chunk_idx > 0 and last_chunk_had_report:
+                    try:
+                        go_back_to_detail_from_report(
+                            page, timeout_ms=_pdf_remaining_ms(deadline_s)
+                        )
+                    except NavigationTimeoutError:
+                        raise
+                    except NavigationError:
+                        logger.warning(
+                            "Evolution action flow: between-chunk restore "
+                            "failed (sanitized)"
+                        )
+                        break
 
-            # Step 5c: Fill dates (convert ISO to DD/MM/YYYY).
-            # PSW-S20 R4: the date inputs are REQUIRED for a correct report
-            # window. A fill failure (input present but not fillable) OR
-            # absent inputs MUST stop report generation with a typed sanitized
-            # EvolutionPdfError — never continue with default/unbounded dates.
-            # The wrapper is raised OUTSIDE the ``except`` handler so neither
-            # ``__cause__`` nor ``__context__`` carries the raw NavigationError.
-            from apps.ingestion.extractors.persistent_evolution_pdf import (  # noqa: PLC0415
-                _format_br_date,
-            )
+                # Step 5b: Click Evolu\u00e7\u00e3o to open the date modal.
+                try:
+                    click_evolucao(page, timeout_ms=_pdf_remaining_ms(deadline_s))
+                except NavigationTimeoutError:
+                    raise
+                except NavigationError:
+                    logger.warning(
+                        "Evolution action flow: Evolu\u00e7\u00e3o click "
+                        "failed (sanitized)"
+                    )
+                    break
 
-            br_start = _format_br_date(start_date)
-            br_end = _format_br_date(end_date)
-            dates_filled = False
-            date_fill_failed = False
-            try:
-                dates_filled = fill_evolution_dates(
-                    page,
-                    start_date_br=br_start,
-                    end_date_br=br_end,
-                    timeout_ms=_pdf_remaining_ms(deadline_s),
-                )
-            except NavigationTimeoutError:
-                raise
-            except NavigationError:
-                date_fill_failed = True
-            if date_fill_failed or not dates_filled:
-                raise EvolutionPdfError(_EVOLUTION_DATE_FILL_REQUIRED_MESSAGE)
+                # Step 5c: Fill the BOUNDED chunk dates (convert to DD/MM/YYYY).
+                # PSW-S20 R4: the date inputs are REQUIRED for a correct
+                # report window. A fill failure (input present but not
+                # fillable) OR absent inputs MUST stop report generation with
+                # a typed sanitized EvolutionPdfError — never continue with
+                # default/unbounded dates. Raised OUTSIDE the ``except``
+                # handler so neither ``__cause__`` nor ``__context__`` carries
+                # the raw NavigationError.
+                br_start = _format_br_date(chunk_start.isoformat())
+                br_end = _format_br_date(chunk_end.isoformat())
+                dates_filled = False
+                date_fill_failed = False
+                try:
+                    dates_filled = fill_evolution_dates(
+                        page,
+                        start_date_br=br_start,
+                        end_date_br=br_end,
+                        timeout_ms=_pdf_remaining_ms(deadline_s),
+                    )
+                except NavigationTimeoutError:
+                    raise
+                except NavigationError:
+                    date_fill_failed = True
+                if date_fill_failed or not dates_filled:
+                    raise EvolutionPdfError(_EVOLUTION_DATE_FILL_REQUIRED_MESSAGE)
 
-            # Step 5d: Select ascending order
-            try:
-                select_ascending_order(page, timeout_ms=_pdf_remaining_ms(deadline_s))
-            except NavigationTimeoutError:
-                raise
-            except Exception:
-                logger.debug(
-                    "Evolution action flow: ascending order select "
-                    "failed (no-op)"
-                )
+                # Step 5d: Select ascending order (optional no-op on failure).
+                try:
+                    select_ascending_order(
+                        page, timeout_ms=_pdf_remaining_ms(deadline_s)
+                    )
+                except NavigationTimeoutError:
+                    raise
+                except Exception:
+                    logger.debug(
+                        "Evolution action flow: ascending order select "
+                        "failed (no-op)"
+                    )
 
-            # Step 5e: Click visualize
-            try:
-                click_visualizar_report(page, timeout_ms=_pdf_remaining_ms(deadline_s))
-            except NavigationTimeoutError:
-                raise
-            except NavigationError:
-                logger.warning(
-                    "Evolution action flow: visualize click failed (sanitized)"
-                )
-                continue
+                # Step 5e: Click visualize.
+                try:
+                    click_visualizar_report(
+                        page, timeout_ms=_pdf_remaining_ms(deadline_s)
+                    )
+                except NavigationTimeoutError:
+                    raise
+                except NavigationError:
+                    logger.warning(
+                        "Evolution action flow: visualize click failed (sanitized)"
+                    )
+                    break
 
-            # Step 5f: Wait for report or detect no-evolutions.
-            # PSW-S17 R2/R3: polling-budget expiry raises a typed
-            # NavigationTimeoutError; only an explicit no-evolutions dialog
-            # may yield the False (skip) result. The wait is bounded by the
-            # remaining caller budget (never a flat 120s that exceeds it).
-            try:
-                report_ready = wait_for_report_or_no_evolutions(
-                    page,
-                    timeout_ms=_pdf_bound_ms(deadline_s, 120_000),
-                )
-            except NavigationTimeoutError:
-                raise
-            if not report_ready:
-                logger.debug(
-                    "Evolution action flow: explicit no-evolutions dialog "
-                    "for this admission (sanitized)"
-                )
-                continue
+                # Step 5f: Wait for report or detect no-evolutions.
+                # PSW-S17 R2/R3: polling-budget expiry raises a typed
+                # NavigationTimeoutError; only an explicit no-evolutions
+                # dialog may yield the False (skip) result.
+                # PSW-S21 R7: a genuine empty chunk returns no fake events
+                # and does NOT discard events already collected.
+                try:
+                    report_ready = wait_for_report_or_no_evolutions(
+                        page,
+                        timeout_ms=_pdf_bound_ms(deadline_s, 120_000),
+                    )
+                except NavigationTimeoutError:
+                    raise
+                if not report_ready:
+                    logger.debug(
+                        "Evolution action flow: explicit no-evolutions dialog "
+                        "for this chunk (sanitized)"
+                    )
+                    last_chunk_had_report = False
+                    continue
 
-            # Step 5g: Download PDF through existing context. URL resolution
-            # and download share the remaining caller budget (D17/R1).
-            try:
-                pdf_url = self._resolve_pdf_url_from_report_page(
-                    page, deadline_s
-                )
-            except EvolutionPdfTimeoutError:
-                # PSW-S17 post-cbf50c1 (D17): typed bounded-locator timeout
-                # MUST propagate; it must not be swallowed as a generic
-                # URL-resolution failure.
-                raise
-            except Exception:
-                logger.warning(
-                    "Evolution action flow: PDF URL resolution failed (sanitized)"
-                )
-                continue
+                # Step 5g: Download PDF through existing context.
+                try:
+                    pdf_url = self._resolve_pdf_url_from_report_page(
+                        page, deadline_s
+                    )
+                except EvolutionPdfTimeoutError:
+                    # PSW-S17 post-cbf50c1 (D17): typed bounded-locator
+                    # timeout MUST propagate.
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Evolution action flow: PDF URL resolution "
+                        "failed (sanitized)"
+                    )
+                    last_chunk_had_report = True
+                    continue
 
-            if not pdf_url:
-                continue
+                if not pdf_url:
+                    last_chunk_had_report = True
+                    continue
 
-            try:
-                pdf_bytes = self._download_pdf(
-                    page,
-                    pdf_url,
-                    deadline_s,
-                )
-            except EvolutionPdfTimeoutError:
-                raise
-            except Exception:
-                logger.warning(
-                    "Evolution action flow: PDF download failed (sanitized)"
-                )
-                continue
+                try:
+                    pdf_bytes = self._download_pdf(page, pdf_url, deadline_s)
+                except EvolutionPdfTimeoutError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "Evolution action flow: PDF download failed (sanitized)"
+                    )
+                    last_chunk_had_report = True
+                    continue
 
-            # Step 5h: Extract text and normalise (D21: deadline-checked
-            # boundaries; typed timeouts propagate, non-timeout
-            # EvolutionPdfError skips this admission).
-            try:
-                raw_text = extract_pdf_text(pdf_bytes)
-            except EvolutionPdfTimeoutError:
-                raise
-            except EvolutionPdfError:
-                logger.warning(
-                    "Evolution action flow: PDF text extraction "
-                    "failed (sanitized)"
-                )
-                continue
-            # After extraction / before normalization.
-            _pdf_remaining_ms(deadline_s)
-            try:
-                events = normalize_pdf_report_text(
-                    raw_text,
-                    admission_key=admission_key,
-                )
-            except EvolutionPdfTimeoutError:
-                raise
-            except EvolutionPdfError:
-                logger.warning(
-                    "Evolution action flow: PDF text normalization "
-                    "failed (sanitized)"
-                )
-                continue
-            # After normalization.
-            _pdf_remaining_ms(deadline_s)
-            all_events.extend(events)
+                # Step 5h: Extract text and normalise (D21: deadline-checked
+                # boundaries; typed timeouts propagate, non-timeout
+                # EvolutionPdfError skips this chunk but preserves priors).
+                try:
+                    raw_text = extract_pdf_text(pdf_bytes)
+                except EvolutionPdfTimeoutError:
+                    raise
+                except EvolutionPdfError:
+                    logger.warning(
+                        "Evolution action flow: PDF text extraction "
+                        "failed (sanitized)"
+                    )
+                    last_chunk_had_report = True
+                    continue
+                # After extraction / before normalization.
+                _pdf_remaining_ms(deadline_s)
+                try:
+                    events = normalize_pdf_report_text(
+                        raw_text,
+                        admission_key=admission_key,
+                    )
+                except EvolutionPdfTimeoutError:
+                    raise
+                except EvolutionPdfError:
+                    logger.warning(
+                        "Evolution action flow: PDF text normalization "
+                        "failed (sanitized)"
+                    )
+                    last_chunk_had_report = True
+                    continue
+                # After normalization.
+                _pdf_remaining_ms(deadline_s)
+                all_events.extend(events)
+                last_chunk_had_report = True
 
         return all_events
 

@@ -1907,6 +1907,235 @@ class TestBridgeActionFlowTimeoutBudget:
 
 
 # ===========================================================================
+# PSW-S21: Canonical chunking and multi-admission flow
+# ===========================================================================
+
+
+class TestBridgeCanonicalChunkingAndMultiAdmission:
+    """PSW-S21: bounded 15-day chunks with canonical overlap, processed
+    through the SAME authenticated session, with state restored between
+    admissions and chunks, prior events preserved across empty chunks, and
+    the correct real admission key stamped on every event.
+
+    Every nav helper is patched so the unit under test is the bridge's
+    chunk/admission orchestration (not Playwright). The admission snapshot
+    carries real ISO dates so the bridge can compute the bounded per-chunk
+    windows via the canonical chunking module.
+    """
+
+    _BASE = "apps.ingestion.extractors.real_handle_bridge"
+
+    @staticmethod
+    def _admission(key: str, start: str, end: str = "") -> dict:
+        return {
+            "admissionKey": key,
+            "admissionStart": start,
+            "admissionEnd": end,
+            "ward": "",
+            "bed": "",
+        }
+
+    def _run(
+        self,
+        *,
+        snapshot,
+        report_ready_side_effects,
+        normalize_side_effect=None,
+        patient_record="123",
+        start_date="2026-01-01",
+        end_date="2026-01-31",
+    ):
+        """Run the action flow with every nav helper patched as a spy/mock.
+
+        Returns a dict of spies so each test can assert on call counts, the
+        bounded chunk windows, and the per-chunk/per-admission ordering.
+        """
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        base = self._BASE
+        spies = {
+            name: MagicMock()
+            for name in (
+                "ensure_search_screen",
+                "search_patient",
+                "click_internacoes",
+                "open_internacao_detail",
+                "click_evolucao",
+                "fill_evolution_dates",
+                "select_ascending_order",
+                "click_visualizar_report",
+                "go_back_to_detail_from_report",
+            )
+        }
+        # fill_evolution_dates records the bounded chunk windows it received.
+        fill_calls: list[dict] = []
+
+        def _fill(*a, **k):
+            fill_calls.append(
+                {
+                    "start_date_br": k.get("start_date_br"),
+                    "end_date_br": k.get("end_date_br"),
+                }
+            )
+            return True
+
+        spies["fill_evolution_dates"].side_effect = _fill
+
+        read_snap = MagicMock(return_value=list(snapshot))
+        report_wait = MagicMock(side_effect=list(report_ready_side_effects))
+        resolve_pdf = MagicMock(return_value="https://example/report.pdf")
+        download = MagicMock(return_value=b"%PDF-1.4 ok")
+        extract_text = MagicMock(return_value="raw text")
+
+        if normalize_side_effect is None:
+            def _default_normalize(*a, **k):
+                return [{
+                    "admission_key": k.get("admission_key", ""),
+                    "happened_at": "2026-01-10T09:00:00",
+                    "event_type": "medical",
+                    "content": "ok",
+                    "profession": "Dr",
+                }]
+
+            normalize = MagicMock(side_effect=_default_normalize)
+        else:
+            normalize = MagicMock(side_effect=normalize_side_effect)
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch(f"{base}.ensure_search_screen", spies["ensure_search_screen"]),
+            patch(f"{base}.search_patient", spies["search_patient"]),
+            patch(f"{base}.click_internacoes", spies["click_internacoes"]),
+            patch(f"{base}._read_and_build_snapshot", read_snap),
+            patch(f"{base}.open_internacao_detail", spies["open_internacao_detail"]),
+            patch(f"{base}.click_evolucao", spies["click_evolucao"]),
+            patch(f"{base}.fill_evolution_dates", spies["fill_evolution_dates"]),
+            patch(f"{base}.select_ascending_order", spies["select_ascending_order"]),
+            patch(f"{base}.click_visualizar_report", spies["click_visualizar_report"]),
+            patch(f"{base}.go_back_to_detail_from_report", spies["go_back_to_detail_from_report"]),
+            patch(f"{base}.wait_for_report_or_no_evolutions", report_wait),
+            patch.object(bridge, "_resolve_pdf_url_from_report_page", resolve_pdf),
+            patch.object(bridge, "_download_pdf", download),
+            patch(f"{base}.extract_pdf_text", extract_text),
+            patch(f"{base}.normalize_pdf_report_text", normalize),
+            patch.object(bridge, "_resolve_active_page", return_value=MagicMock()),
+        ):
+            result = bridge.extract_evolutions_via_legacy_actions(
+                patient_record=patient_record,
+                start_date=start_date,
+                end_date=end_date,
+                timeout=60,
+            )
+
+        return {
+            "result": result,
+            "spies": spies,
+            "fill_calls": fill_calls,
+            "report_wait": report_wait,
+            "normalize": normalize,
+            "resolve_pdf": resolve_pdf,
+            "download": download,
+            "open_detail": spies["open_internacao_detail"],
+            "go_back": spies["go_back_to_detail_from_report"],
+            "click_internacoes": spies["click_internacoes"],
+            "read_snap": read_snap,
+        }
+
+    @staticmethod
+    def _br_to_date(br: str):
+        from datetime import datetime
+        return datetime.strptime(br, "%d/%m/%Y").date()
+
+    def test_long_window_chunked_into_bounded_15_day_intervals(self) -> None:
+        """R1/R2: a 31-day admission is split into <=15-day chunks with
+        canonical overlap; each chunk window is filled, and the detail state
+        is restored between chunks (go_back called chunk_count-1 times)."""
+        out = self._run(
+            snapshot=[self._admission("K1", "2026-01-01", "2026-01-31")],
+            report_ready_side_effects=[True, True, True],
+        )
+
+        # 31 days -> 3 chunks; fill called once per chunk.
+        assert len(out["fill_calls"]) == 3
+        # Every filled window spans at most 15 inclusive days (R2).
+        for call in out["fill_calls"]:
+            start = self._br_to_date(call["start_date_br"])
+            end = self._br_to_date(call["end_date_br"])
+            assert (end - start).days + 1 <= 15
+        # Canonical 1-day overlap: chunk2.start == chunk1.end.
+        c = out["fill_calls"]
+        assert c[1]["start_date_br"] == c[0]["end_date_br"]
+        # State restored between chunks: go_back called chunk_count - 1 times.
+        assert out["go_back"].call_count == 2
+        # All chunk events accumulated (R7: nothing discarded).
+        assert len(out["result"]) == 3
+
+    def test_empty_middle_chunk_preserves_prior_and_continues(self) -> None:
+        """R7: a genuine empty MIDDLE chunk returns no fake events and does
+        not discard events already collected; the later chunk continues."""
+        out = self._run(
+            snapshot=[self._admission("K1", "2026-01-01", "2026-01-31")],
+            report_ready_side_effects=[True, False, True],
+        )
+
+        # Middle chunk was empty: normalize ran only for chunks 1 and 3.
+        assert out["normalize"].call_count == 2
+        # Prior + later events preserved across the empty middle chunk.
+        assert len(out["result"]) == 2
+
+    def test_empty_final_chunk_preserves_prior_and_terminates(self) -> None:
+        """R7: a genuine empty FINAL chunk preserves earlier events and the
+        loop terminates without error or fake data."""
+        out = self._run(
+            snapshot=[self._admission("K1", "2026-01-01", "2026-01-31")],
+            report_ready_side_effects=[True, True, False],
+        )
+
+        assert out["normalize"].call_count == 2
+        assert len(out["result"]) == 2
+
+    def test_two_overlapping_admissions_distinct_keys_ordered(self) -> None:
+        """R5/R6: two admissions overlapping the window are both processed in
+        deterministic order, the admissions list is reopened between them, and
+        each event keeps its real admission key."""
+        out = self._run(
+            snapshot=[
+                self._admission("K1", "2026-01-01", "2026-01-10"),
+                self._admission("K2", "2026-01-20", "2026-01-30"),
+            ],
+            # Each admission is <=15 days -> one chunk each.
+            report_ready_side_effects=[True, True],
+        )
+
+        # Both admissions opened in deterministic (snapshot) order.
+        keys = [
+            call.kwargs.get("admission_key")
+            for call in out["open_detail"].call_args_list
+        ]
+        assert keys == ["K1", "K2"]
+        # Admissions list reopened before the second admission (no new login).
+        assert out["click_internacoes"].call_count >= 2
+        # Each event keeps its real admission key (distinct).
+        result_keys = sorted({event["admission_key"] for event in out["result"]})
+        assert result_keys == ["K1", "K2"]
+
+    def test_no_new_browser_context_or_login_between_chunks(self) -> None:
+        """R6: iteration never creates a new browser/context/login."""
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("playwright.sync_api.sync_playwright") as mock_sync,
+        ):
+            self._run(
+                snapshot=[self._admission("K1", "2026-01-01", "2026-01-31")],
+                report_ready_side_effects=[True, True, True],
+            )
+        mock_run.assert_not_called()
+        mock_sync.assert_not_called()
+
+
+# ===========================================================================
 # PSW-S16: Real-handle demographics extraction via legacy actions
 # ===========================================================================
 

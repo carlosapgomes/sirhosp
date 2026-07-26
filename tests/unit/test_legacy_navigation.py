@@ -2521,3 +2521,104 @@ class TestGetByTextActionHookFidelity:
             ("click", "text:Pesquisa Avançada", 2500),
             ("fill", "text:Pesquisa Avançada", 3500),
         ], events
+
+
+# ===========================================================================
+# PSW-S21: canonical chunking delegation, duplicate removal, go-back helper
+# ===========================================================================
+
+
+class TestCanonicalChunkingDelegation:
+    """PSW-S21 R1/R4: the app reuses the canonical dependency-free chunking
+    module and the duplicate algorithm copy is removed."""
+
+    def test_duplicate_chunking_helper_removed(self) -> None:
+        """R4: the unused duplicate ``_build_chunks_for_interval`` and its
+        ``_CHUNK_DAYS``/``_CHUNK_OVERLAP`` constants are gone from the app."""
+        import importlib
+
+        mod = importlib.import_module(
+            "apps.ingestion.extractors.legacy_navigation"
+        )
+        assert not hasattr(mod, "_build_chunks_for_interval")
+        assert not hasattr(mod, "_CHUNK_DAYS")
+        assert not hasattr(mod, "_CHUNK_OVERLAP")
+
+    def test_public_chunking_reuses_canonical_module(self) -> None:
+        """R1: ``build_chunks_for_interval`` is exposed and delegates to the
+        canonical module (16 inclusive days -> two chunks with canonical
+        1-day overlap)."""
+        from datetime import date
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            build_chunks_for_interval,
+        )
+
+        chunks = build_chunks_for_interval(date(2026, 1, 1), date(2026, 1, 16))
+        assert chunks == [
+            (date(2026, 1, 1), date(2026, 1, 15)),
+            (date(2026, 1, 15), date(2026, 1, 16)),
+        ]
+
+    def test_no_chunk_exceeds_15_days_through_app_wrapper(self) -> None:
+        """R2: every chunk from the app wrapper spans at most 15 days."""
+        from datetime import date, timedelta
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            build_chunks_for_interval,
+        )
+
+        start = date(2026, 1, 1)
+        for total_days in (1, 15, 16, 30, 90, 365):
+            end = start + timedelta(days=total_days - 1)
+            for chunk in build_chunks_for_interval(start, end):
+                assert (chunk[1] - chunk[0]).days + 1 <= 15
+
+
+class TestGoBackToDetailFromReport:
+    """PSW-S21 R6: between-chunk state restoration clicks the report's
+    ``Voltar`` button and waits for the admission detail page readiness."""
+
+    def test_go_back_clicks_voltar_and_waits_detail_readiness(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import (
+            go_back_to_detail_from_report,
+        )
+
+        frame = FakeNavigationFrame()
+        # Report page state -> detail page (Evolução button) after Voltar.
+        frame.set_url("/internacoes/relatorioAnaEvoInternacaoPdf.xhtml")
+        frame.make_selector_visible("role:button:Voltar")
+
+        transitions = {"done": False}
+
+        def _after_click(action, selector, timeout):  # noqa: ANN001
+            if action == "click":
+                frame.set_url("/internacoes/consultaDetalheInternacao.xhtml")
+                frame.make_selector_visible("role:button:Evolução")
+                transitions["done"] = True
+
+        frame.set_action_hook(_after_click)
+
+        page = FakeNavigationPage()
+        page._frame = frame
+
+        # Must not raise once the detail page re-appears.
+        go_back_to_detail_from_report(page, timeout_ms=2000)
+        assert transitions["done"] is True
+        assert "role:button:Voltar" in (frame._role_calls or []) or any(
+            "Voltar" in str(c) for c in (frame._role_calls or [])
+        )
+
+    def test_go_back_missing_frame_raises_navigation_error(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            go_back_to_detail_from_report,
+        )
+
+        page = FakeNavigationPage()
+        # No frame_pol available.
+        page._frame = None
+        with pytest.raises(NavigationError):
+            go_back_to_detail_from_report(page, timeout_ms=500)

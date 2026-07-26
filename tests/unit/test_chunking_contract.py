@@ -316,3 +316,66 @@ class TestLongPeriodChunking:
 
         missing = expected - covered
         assert not missing, f"Missing dates in coverage: {sorted(missing)[:5]}..."
+
+
+# ---------------------------------------------------------------------------
+# 7. PSW-S21 closed chunk-boundary table + anti-hang (bridge contract)
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalBoundaryTable:
+    """PSW-S21: the exact closed chunk-boundary table the persistent
+    evolution bridge relies on, plus the anti-hang guarantees (termination,
+    strictly-progressing ``chunk_start``, no repeated start).
+
+    These are characterization tests of the frozen canonical module: they
+    lock the contract so a future canonical change cannot silently break the
+    bridge's bounded report windows.
+    """
+
+    def test_one_day_is_one_progressing_chunk(self):
+        chunks = build_chunks_for_interval(date(2026, 1, 10), date(2026, 1, 10))
+        assert chunks == [(date(2026, 1, 10), date(2026, 1, 10))]
+
+    def test_exactly_15_inclusive_days_is_one_chunk(self):
+        chunks = build_chunks_for_interval(date(2026, 1, 1), date(2026, 1, 15))
+        assert len(chunks) == 1
+        assert _days_in_chunk(chunks[0]) == 15
+
+    def test_16_inclusive_days_is_two_chunks_with_canonical_overlap(self):
+        chunks = build_chunks_for_interval(date(2026, 1, 1), date(2026, 1, 16))
+        assert chunks == [
+            (date(2026, 1, 1), date(2026, 1, 15)),
+            (date(2026, 1, 15), date(2026, 1, 16)),
+        ]
+        # Canonical 1-day overlap: chunk2 starts on chunk1's end day.
+        assert chunks[1][0] == chunks[0][1]
+        for chunk in chunks:
+            assert _days_in_chunk(chunk) <= MAX_CHUNK_DAYS
+
+    @pytest.mark.parametrize(
+        "total_days",
+        [1, 2, 15, 16, 17, 29, 30, 31, 45, 90, 180, 365],
+        ids=lambda d: f"{d}_days",
+    )
+    def test_anti_hang_terminates_with_strictly_progressing_starts(
+        self, total_days: int
+    ):
+        """Final single day / any window: terminates, chunk_start never
+        repeats, consecutive starts strictly progress, no chunk > 15 days."""
+        start = date(2026, 1, 1)
+        end = start + timedelta(days=total_days - 1)
+        chunks = build_chunks_for_interval(start, end)
+
+        assert chunks, f"{total_days}-day window produced no chunks"
+        starts = [c[0] for c in chunks]
+        # No repeated chunk_start (anti-hang).
+        assert len(starts) == len(set(starts)), starts
+        # Strict progress between consecutive chunk starts.
+        for i in range(1, len(starts)):
+            assert starts[i] > starts[i - 1], starts
+        # Terminates exactly at end.
+        assert chunks[-1][1] == end
+        # Every chunk within the 15-day bound.
+        for chunk in chunks:
+            assert _days_in_chunk(chunk) <= MAX_CHUNK_DAYS

@@ -20,11 +20,13 @@ Design (per PSW-S12 scope):
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import math
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Mapping
 
 from apps.ingestion.extractors.errors import (
@@ -637,47 +639,71 @@ SEL_NO_EVOLUTIONS_DIALOG = '#msgDialog'
 
 
 # ---------------------------------------------------------------------------
-# Chunking helper
+# Canonical chunking (PSW-S21 R1/R4)
 # ---------------------------------------------------------------------------
+#
+# The chunking algorithm lives in exactly one place: the dependency-free
+# canonical module ``automation/source_system/medical_evolution/chunking.py``.
+# The previous app-local duplicate (``_build_chunks_for_interval`` with its
+# ``_CHUNK_DAYS``/``_CHUNK_OVERLAP`` constants) was removed because it was
+# unused and drifted from the canonical contract. The wrapper below loads the
+# canonical module lazily by file path (no ``sys.path`` mutation, no copied
+# algorithm) so both the automation connector and the persistent worker share
+# identical chunk boundaries.
+
+_CANONICAL_CHUNKING_FILE = (
+    Path(__file__).resolve().parents[3]
+    / "automation"
+    / "source_system"
+    / "medical_evolution"
+    / "chunking.py"
+)
+"""Path to the canonical dependency-free chunking module (single source)."""
+
+_canonical_chunking_cache: Any = None
 
 
-_CHUNK_DAYS = 15
-"""Default chunk size (calendar days) for evolution window splitting."""
+def _canonical_chunking() -> Any:
+    """Lazily load and cache the canonical chunking module by file path.
 
-_CHUNK_OVERLAP = 1
-"""Overlap days between consecutive chunks."""
+    Loading lazily (on first chunking need) keeps ``legacy_navigation`` import
+    cheap and avoids failing app-wide import if the canonical file is absent
+    in a slimmed deployment; the error surfaces at extraction time instead.
+    """
+    global _canonical_chunking_cache
+    if _canonical_chunking_cache is None:
+        spec = importlib.util.spec_from_file_location(
+            "_canonical_chunking", _CANONICAL_CHUNKING_FILE
+        )
+        if spec is None or spec.loader is None:
+            raise NavigationError(
+                "Could not load the canonical chunking module."
+            )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _canonical_chunking_cache = module
+    return _canonical_chunking_cache
 
 
-def _build_chunks_for_interval(
+def build_chunks_for_interval(
     start: date,
     end: date,
 ) -> list[tuple[date, date]]:
-    """Split ``[start, end]`` into ``_CHUNK_DAYS``-sized chunks with
-    ``_CHUNK_OVERLAP`` overlap. Modeled after
-    ``automation/source_system/medical_evolution/chunking.py``.
+    """Split ``[start, end]`` into at-most-15-day chunks (canonical overlap).
+
+    PSW-S21 R1: delegates to the canonical dependency-free module so the
+    chunking algorithm is never copied into the app. Each chunk spans at most
+    15 inclusive calendar days with a canonical one-day overlap and
+    deterministic, always-progressing bounds (the bounded report windows).
 
     Args:
         start: Start date (inclusive).
         end: End date (inclusive).
 
     Returns:
-        List of ``(chunk_start, chunk_end)`` tuples.
+        List of ``(chunk_start, chunk_end)`` tuples covering the full range.
     """
-    if start > end:
-        return []
-    if start == end:
-        return [(start, end)]
-
-    chunks: list[tuple[date, date]] = []
-    chunk_start = start
-    while chunk_start <= end:
-        chunk_end = min(
-            chunk_start + timedelta(days=_CHUNK_DAYS - 1),
-            end,
-        )
-        chunks.append((chunk_start, chunk_end))
-        chunk_start = chunk_end - timedelta(days=_CHUNK_OVERLAP) + timedelta(days=1)
-    return chunks
+    return _canonical_chunking().build_chunks_for_interval(start, end)
 
 
 def choose_overlapping_admissions(
@@ -1146,6 +1172,124 @@ def wait_for_report_or_no_evolutions(
             pass
 
         page.wait_for_timeout(min(poll_ms, max(1, timeout_ms - elapsed_ms)))
+
+
+# ---------------------------------------------------------------------------
+# Between-chunk restoration (PSW-S21 R6)
+# ---------------------------------------------------------------------------
+#
+# ``consultaDetalheInternacao.xhtml`` is the detail URL fragment shared by
+# ``open_internacao_detail`` and the between-chunk restoration helper
+# (matches ``path2.open_internacao_detail`` and
+# ``path2.go_back_to_detail_from_report``).
+
+_DETAIL_INTERNACAO_FRAGMENT = "consultaDetalheInternacao.xhtml"
+
+
+def go_back_to_detail_from_report(
+    page: Any,
+    *,
+    timeout_ms: int | None = None,
+) -> None:
+    """Return from the evolution report to the admission detail page.
+
+    PSW-S21 R6: between consecutive chunks of the SAME admission the report
+    page must be left and the detail page restored so the next chunk can
+    re-open the evolution modal with a fresh bounded window. Modeled after
+    ``path2.go_back_to_detail_from_report()``: click the report's ``Voltar``
+    button inside ``frame_pol`` and wait until the detail page
+    (``consultaDetalheInternacao.xhtml`` with an available ``Evolução``
+    button) is ready again.
+
+    Reuses the already-open persistent page (never a new browser/context).
+
+    Args:
+        page: A Playwright ``Page`` object on the report page.
+        timeout_ms: Optional remaining budget from the shared cooperative
+            deadline.
+
+    Raises:
+        NavigationTimeoutError: on a bounded Playwright timeout or deadline
+            expiry before the detail page re-appears.
+        NavigationError: If ``frame_pol`` is unavailable or the ``Voltar``
+            button cannot be clicked.
+    """
+    deadline_s = _deadline_s(timeout_ms)
+    frame = page.frame(name=SEL_FRAME_POL)
+    if frame is None:
+        raise NavigationError(
+            "The admissions iframe was not available when returning "
+            "from the evolution report."
+        )
+
+    voltar_button = frame.get_by_role("button", name="Voltar")
+    try:
+        voltar_button.first.wait_for(
+            state="visible", timeout=_bound_ms(deadline_s, 30000)
+        )
+        voltar_button.first.click(
+            **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
+        )
+    except NavigationError:
+        raise
+    except Exception as exc:
+        _raise_required_action_error(
+            exc,
+            fallback_message=(
+                "Could not click the report back button to restore "
+                "the admission detail page."
+            ),
+        )
+
+    _wait_for_detail_readiness(page, deadline_s)
+
+
+def _wait_for_detail_readiness(
+    page: Any,
+    deadline_s: float | None,
+    *,
+    poll_ms: int = 500,
+    default_budget_ms: int = 180000,
+) -> None:
+    """Poll ``frame_pol`` until the admission detail page is ready again.
+
+    Ready means the frame URL contains ``consultaDetalheInternacao.xhtml`` AND
+    the ``Evolução`` button is available. Bounded by the shared cooperative
+    deadline (or a conservative default when there is none); expiry raises a
+    typed ``NavigationTimeoutError``.
+    """
+    budget_ms = (
+        _remaining_ms_strict(deadline_s)
+        if deadline_s is not None
+        else default_budget_ms
+    )
+    started_at = time.monotonic()
+
+    while True:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        remaining_ms = budget_ms - elapsed_ms
+        if remaining_ms <= 0:
+            raise NavigationTimeoutError(_REQUIRED_ACTION_TIMEOUT_MESSAGE)
+
+        frame = page.frame(name=SEL_FRAME_POL)
+        if frame is not None:
+            try:
+                frame_url = frame.url or ""
+            except Exception:
+                frame_url = ""
+
+            if _DETAIL_INTERNACAO_FRAGMENT in frame_url:
+                try:
+                    has_evolucao = (
+                        frame.get_by_role("button", name="Evolução").count() > 0
+                    )
+                except Exception:
+                    has_evolucao = False
+
+                if has_evolucao:
+                    return
+
+        page.wait_for_timeout(min(poll_ms, max(1, remaining_ms)))
 
 
 # ---------------------------------------------------------------------------
