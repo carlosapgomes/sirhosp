@@ -416,21 +416,48 @@ preserved.
 
 ## 20. PSW-S20: Action-first real evolution dispatch
 
-- [ ] 20.1 Add a failing real-like adapter test proving the real handle reaches
+- [x] 20.1 Add a failing real-like adapter test proving the real handle reaches
   legacy action navigation without first opening a synthetic evolution URL.
-- [ ] 20.2 Make action navigation the real-handle path while retaining URL-based
+- [x] 20.2 Make action navigation the real-handle path while retaining URL-based
   behavior only for explicit stubs/tests.
-- [ ] 20.3 Make required date filling and report waits fail safely with
+- [x] 20.3 Make required date filling and report waits fail safely with
   typed, sanitized timeout/error semantics instead of continuing with
   default dates. PSW-S17 corrective closure already delivers the typed
   outer-exception contract at the source boundary
   (`NavigationTimeoutError`, `EvolutionPdfTimeoutError`); this task
   hardens selectors and required actions and MUST preserve and reverify
   that contract rather than claim a new owner.
-- [ ] 20.4 Preserve fast paths only where they do not bypass required real
+- [x] 20.4 Preserve fast paths only where they do not bypass required real
   navigation or persistence.
-- [ ] 20.5 Run official validation and create
+- [x] 20.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S20-report.md`.
+
+PSW-S20 closure (authoritative): evolution extraction is now action-first for
+the real persistent handle. Dispatch is selected by an EXPLICIT capability
+(`RealHandleBridge.supports_real_evolution_actions()` returning `True`),
+checked with ``is True`` so a plain ``MagicMock`` (whose auto-created
+attribute call returns a truthy MagicMock) cannot switch dispatch to the
+action path (R1, self-eval gate 4). The real handle calls the legacy
+ evolution actions (`extract_evolutions_via_legacy_actions`) directly and
+opens ZERO synthetic/direct evolution URLs (R2); the JSON/pre fast paths and
+the PSW-S11 PDF fallback remain ONLY on the stub/test path, where `open_tab`
+is the legitimate navigation and the container was reached legitimately
+(R3/R4 of the closed scenario matrix). A real-handle JSON/pre page state no
+longer bypasses required real navigation. Required date filling is hardened:
+`fill_evolution_dates` returns ``True`` only when BOTH date inputs were
+present and filled (aligning with `path2.open_report_for_interval`, which
+treats them as required); the bridge raises a typed sanitized
+`EvolutionPdfError` (constant message, raised outside the handler so no raw
+`__context__` is attached) and generates NO report when the inputs cannot be
+filled (R4). No-evolutions stays an empty successful list, distinct from a
+typed report/download timeout that propagates unchanged through the shared
+PSW-S17 taxonomy (R5); the requested `timeout` reaches the action waits and
+downloads via the existing shared deadline (R6). Error/stage messages carry
+no patient identifier, identifying URL, raw HTML, credential, or PDF bytes
+(R7). Stub tests and the current worker behavior are preserved (R8). The
+PSW-S17 command-level timeout tests were re-wired to reach the same typed
+PDF-timeout boundary through the new action-first path (the timeout taxonomy
+and sanitization contract is unchanged).
 
 ## 21. PSW-S21: Canonical chunking and multi-admission flow
 

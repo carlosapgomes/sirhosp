@@ -86,6 +86,13 @@ from apps.ingestion.extractors.session_policy import TabCleanupOutcome
 
 logger = logging.getLogger(__name__)
 
+# PSW-S20 R4/R7: constant sanitized message raised when the required
+# evolution date inputs cannot be filled. Carries no patient record, date
+# value, selector, URL, cookie, credential, or raw exception text.
+_EVOLUTION_DATE_FILL_REQUIRED_MESSAGE = (
+    "Required evolution date inputs could not be filled."
+)
+
 # ---------------------------------------------------------------------------
 # URL patterns for page-type detection
 # ---------------------------------------------------------------------------
@@ -358,6 +365,20 @@ class RealHandleBridge:
         # through one lifecycle owner. Credentials are held in memory only.
         self._credentials = credentials
         self._login_timeout = login_timeout
+
+    def supports_real_evolution_actions(self) -> bool:
+        """Advertise that this bridge drives the real legacy evolution actions.
+
+        PSW-S20 R1/R2: the adapter selects the action-first evolution path
+        ONLY when the session explicitly returns ``True`` here. The real
+        legacy UI has no reloadable evolution deep link, so the bridge must be
+        navigated through UI actions (search -> admissions -> detail ->
+        Evolu\u00e7\u00e3o -> dates -> report -> PDF) rather than a synthetic
+        ``/evolutions/...`` URL. Returning a real ``bool`` (not a truthy
+        object) lets the adapter's ``is True`` check reject auto-created
+        MagicMock capabilities.
+        """
+        return True
 
     # ------------------------------------------------------------------
     # SessionHandle protocol
@@ -815,25 +836,33 @@ class RealHandleBridge:
                 )
                 continue
 
-            # Step 5c: Fill dates (convert ISO to DD/MM/YYYY)
+            # Step 5c: Fill dates (convert ISO to DD/MM/YYYY).
+            # PSW-S20 R4: the date inputs are REQUIRED for a correct report
+            # window. A fill failure (input present but not fillable) OR
+            # absent inputs MUST stop report generation with a typed sanitized
+            # EvolutionPdfError — never continue with default/unbounded dates.
+            # The wrapper is raised OUTSIDE the ``except`` handler so neither
+            # ``__cause__`` nor ``__context__`` carries the raw NavigationError.
             from apps.ingestion.extractors.persistent_evolution_pdf import (  # noqa: PLC0415
                 _format_br_date,
             )
 
             br_start = _format_br_date(start_date)
             br_end = _format_br_date(end_date)
+            dates_filled = False
+            date_fill_failed = False
             try:
-                fill_evolution_dates(
+                dates_filled = fill_evolution_dates(
                     page,
                     start_date_br=br_start,
                     end_date_br=br_end,
                 )
             except NavigationTimeoutError:
                 raise
-            except Exception:
-                logger.warning(
-                    "Evolution action flow: date fill failed (continuing)"
-                )
+            except NavigationError:
+                date_fill_failed = True
+            if date_fill_failed or not dates_filled:
+                raise EvolutionPdfError(_EVOLUTION_DATE_FILL_REQUIRED_MESSAGE)
 
             # Step 5d: Select ascending order
             try:

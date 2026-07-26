@@ -1665,3 +1665,212 @@ class TestRestartAndRebootstrap:
         # No additional restart/rebootstrap for the post-threshold job.
         assert session.restart_calls == 1
         assert session.bootstrap_calls == 1
+
+
+# ===========================================================================
+# PSW-S20: action-first real evolution dispatch
+# ===========================================================================
+#
+# R1/R2: a real legacy handle has no reloadable evolution deep link, so the
+# adapter must call the legacy evolution ACTIONS directly and must NOT first
+# open a synthetic/direct evolution URL. Dispatch is selected by an EXPLICIT
+# capability (``supports_real_evolution_actions() is True``); a plain
+# MagicMock auto-creates the attribute and its call returns a truthy
+# MagicMock, which is NOT ``True`` (identity check), so it cannot change
+# dispatch (self-eval gate 4).
+
+_READY_COUNTER_HTML = (
+    "<html><body>"
+    '<div id="tempoSessao" class="tempo-sessao">'
+    "Tempo: <span>00</span>:<span>29</span>:<span>01</span>"
+    "</div></body></html>"
+)
+
+
+class _RealActionSession:
+    """Real-like session that EXPLICITLY advertises legacy action navigation.
+
+    ``open_tab`` records the call and returns False to prove the action path
+    must not rely on a synthetic/direct evolution URL (R2). The action method
+    is recorded so tests can assert dispatch + timeout propagation (R6).
+    """
+
+    def __init__(
+        self,
+        *,
+        action_result: list[dict] | None = None,
+        action_error: BaseException | None = None,
+    ) -> None:
+        self._html = _READY_COUNTER_HTML
+        self.open_tab_calls: list[tuple[str, int]] = []
+        self.action_calls: list[dict] = []
+        self._action_result = (
+            action_result if action_result is not None else []
+        )
+        self._action_error = action_error
+
+    def supports_real_evolution_actions(self) -> bool:
+        return True
+
+    def get_page_html(self) -> str:
+        return self._html
+
+    def is_connected(self) -> bool:
+        return True
+
+    def click_selector(self, selector: str) -> None:  # noqa: ARG002
+        pass
+
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:
+        self.open_tab_calls.append((url, timeout))
+        return False
+
+    def get_tab_classes(self) -> list[str]:
+        return ["tabs-first tabs-last tabs-selected"]
+
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
+        return TabCleanupOutcome.ROOT_ONLY
+
+    def restart_browser(self) -> None:
+        pass
+
+    def extract_evolutions_via_legacy_actions(self, **kwargs) -> list[dict]:
+        self.action_calls.append(kwargs)
+        if self._action_error is not None:
+            raise self._action_error
+        return [dict(item) for item in self._action_result]
+
+
+class TestExtractEvolutionsActionFirstDispatch:
+    """PSW-S20: real handles dispatch action-first; stubs/tests keep the
+    URL+container path; MagicMock cannot change dispatch."""
+
+    def test_real_capability_calls_action_method_without_open_tab(self) -> None:
+        """R1/R2: a real session reaches the action method with ZERO synthetic
+        evolution URL opens, even though ``open_tab`` would fail."""
+        events = [
+            {
+                "admission_key": "ADM-1",
+                "happened_at": "2024-01-16T10:00:00",
+                "event_type": "medical",
+                "content": "ok",
+                "profession": "Dr. A",
+            }
+        ]
+        session = _RealActionSession(action_result=events)
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+            timeout=45,
+        )
+
+        # No synthetic/direct evolution URL was opened (R2).
+        assert session.open_tab_calls == []
+        # The action method was called exactly once with the full contract.
+        assert len(session.action_calls) == 1
+        assert session.action_calls[0] == {
+            "patient_record": "12345",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "timeout": 45,
+        }
+        assert len(result) == 1
+
+    def test_real_capability_propagates_typed_timeout(self) -> None:
+        """R5/R6: a typed action timeout propagates (it is NOT turned into an
+        empty successful window)."""
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+
+        session = _RealActionSession(
+            action_error=EvolutionPdfTimeoutError(
+                "Persistent evolution PDF download timed out."
+            )
+        )
+        adapter = PersistentExtractionAdapter(session)
+
+        with pytest.raises(EvolutionPdfTimeoutError):
+            adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                timeout=10,
+            )
+
+    def test_real_capability_no_evolutions_returns_empty_not_timeout(
+        self,
+    ) -> None:
+        """R5: a genuine no-evolutions result is an empty successful window,
+        distinguishable from a timeout (which raises)."""
+        session = _RealActionSession(action_result=[])
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+        )
+
+        assert result == []
+        # The action path still runs tab cleanup + job accounting.
+        assert adapter._controller.jobs_processed == 1
+
+    def test_magicmock_cannot_change_dispatch_to_action_path(self) -> None:
+        """Self-eval gate 4: a plain MagicMock auto-creates
+        ``extract_evolutions_via_legacy_actions`` and
+        ``supports_real_evolution_actions``, but the EXPLICIT capability
+        check (``is True``) is False for a MagicMock, so dispatch stays on
+        the stub URL/container path and the action method is never called."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.is_connected.return_value = True
+        session.get_page_html.return_value = (
+            "<html><body>"
+            '<div id="tempoSessao">'
+            "<span>00</span>:<span>29</span>:<span>01</span>"
+            "</div>"
+            '<div id="evolution-data">[]</div>'
+            "</body></html>"
+        )
+        session.get_tab_classes.return_value = [
+            "tabs-first tabs-last tabs-selected",
+        ]
+        session.open_tab.return_value = True
+        session.extract_evolutions_pdf.return_value = []
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-01-31",
+        )
+
+        assert result == []
+        # The action method exists on the MagicMock but was NOT called.
+        session.extract_evolutions_via_legacy_actions.assert_not_called()
+
+    def test_stub_session_without_capability_keeps_url_container_path(
+        self,
+    ) -> None:
+        """R8: a stub/test session (no real capability) keeps the URL template
+        + container fast path; the action method is not a dispatch option."""
+        session = FakeExtractionSession()
+        session.set_html(EVOLUTION_PAGE_HTML)
+        adapter = PersistentExtractionAdapter(session)
+
+        result = adapter.extract_evolutions(
+            patient_record="12345",
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            timeout=60,
+        )
+
+        assert len(result) == 2
+        # Stub path opened the synthetic evolution URL and propagated timeout.
+        assert len(session.opened_urls) == 1
+        assert session._last_open_timeout == 60

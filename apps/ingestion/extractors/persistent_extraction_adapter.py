@@ -487,14 +487,22 @@ class PersistentExtractionAdapter:
     ) -> list[dict[str, Any]]:
         """Extract clinical evolutions through the persistent session.
 
+        PSW-S20 action-first dispatch:
+        - Real handle (explicit ``supports_real_evolution_actions()``
+          capability): call the legacy evolution actions directly WITHOUT
+          opening a synthetic/direct evolution URL (the real legacy UI has no
+          reloadable evolution deep link). Typed timeouts/errors propagate.
+        - Stub/test session: URL template (``open_tab``) + evolution container
+          + PSW-S11 PDF fallback (the only path where JSON/pre fast paths run,
+          reached legitimately via ``open_tab``).
+
         Lifecycle:
         1. Check session readiness (``ensure_ready``).
         2. Renew session if needed (``renew_if_needed``).
-        3. Navigate to evolution page (open tab with timeout).
-        4. Extract JSON data from evolution container in page HTML.
-        5. Parse and normalise evolution data.
-        6. Cleanup job tab (``close_job_tab_if_present``).
-        7. Mark job as processed (``mark_job_processed``).
+        3. Dispatch extraction (action-first for real handles; URL+container
+           for stubs/tests).
+        4. Cleanup job tab (``close_job_tab_if_present``).
+        5. Mark job as processed (``mark_job_processed``).
 
         Args:
             patient_record: Patient record identifier (prontuário).
@@ -520,65 +528,72 @@ class PersistentExtractionAdapter:
         if not self._controller.renew_if_needed():
             raise ExtractionError("Session renewal failed before extraction")
 
-        # Step 3: Navigate to evolution page.
-        # First priority: URL template (``open_tab``) + container parsing
-        # for stub/test compatibility and JSON/pre fast paths. The bridge
-        # returns evolution data from lightweight fast paths
-        # (``evolution-data-json`` script, ``pre.report-text``) when
-        # available.
-        url = _build_admissions_url(
-            self._evolutions_url_template,
-            patient_record=patient_record,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        # PSW-S17 R2/R3: a Playwright navigation timeout surfaces as a
-        # typed ExtractionTimeoutError from ``open_tab`` and propagates.
-        # Non-timeout failures produce a constant sanitized message (no URL).
-        if not self._session.open_tab(url, timeout=timeout):
-            raise ExtractionError(
-                "Failed to navigate to the evolution page."
-            )
-
-        # Step 4: Extract JSON data from evolution container
-        html = self._session.get_page_html()
-        json_text = _extract_json_from_container(
-            html, _EVOLUTION_DATA_DIV_ID, _EVOLUTION_DATA_CONTAINER_RE
-        )
-
-        # Step 5: Parse and normalise evolution data
-        result = _parse_evolutions_json(json_text)
-
-        # Step 5b (PSW-S11): PDF report fallback. The lightweight fast paths
-        # (``evolution-data-json`` script, ``pre.report-text``) are tried first
-        # by the bridge. When they yield no events, delegate to the real
-        # legacy PDF flow on sessions that expose it (``RealHandleBridge``),
-        # reusing the already-open persistent page/context — never a new
-        # browser or subprocess. A genuine empty window stays an empty list.
-        if not result and hasattr(self._session, "extract_evolutions_pdf"):
-            result = self._session.extract_evolutions_pdf(
-                start_date=start_date,
-                end_date=end_date,
-                timeout=timeout,
-            )
-
-        # Step 5c (PSW-S13): Real legacy action navigation fallback.
-        # When fast paths (JSON script + pre.report-text + PDF fallback)
-        # yield no events AND the session exposes the legacy action flow,
-        # navigate the real JSP/PrimeFaces UI to extract evolutions.
-        # The action method handles admissions selection, detail
-        # navigation, date filling, report generation, PDF download,
-        # text extraction, and normalisation internally, returning the
-        # 5-key evolution contract. A genuine empty window stays [].
-        if not result and hasattr(
+        # Step 3: Navigate + extract evolutions (PSW-S20 action-first).
+        #
+        # R1/R2: the real legacy UI has no reloadable evolution deep link, so a
+        # real session that EXPLICITLY advertises real action navigation
+        # takes the action-first path: the legacy evolution actions are called
+        # directly WITHOUT first opening a synthetic/direct evolution URL.
+        # The JSON/pre fast paths and the PSW-S11 PDF fallback remain ONLY on
+        # the stub/test path, where ``open_tab`` is the legitimate navigation
+        # and the container was reached legitimately (R3). The capability is
+        # checked with ``is True`` so a plain ``MagicMock`` (whose attribute
+        # call returns a truthy MagicMock) cannot change dispatch (gate 4).
+        if self._session_supports_real_evolution_actions() and hasattr(
             self._session, "extract_evolutions_via_legacy_actions"
         ):
+            # PSW-S17 R2/R3: typed action timeouts (NavigationTimeoutError,
+            # EvolutionPdfTimeoutError) and typed EvolutionPdfError propagate
+            # unchanged; the command classifies them. A genuine empty window
+            # stays an empty list (R5), distinct from a timeout.
+            #
+            # Dispatch is selected by the explicit capability (``is True``)
+            # above; the ``hasattr`` is only for static narrowing so mypy can
+            # resolve this optional real-only method on the ``SessionHandle``
+            # protocol — a MagicMock fails the ``is True`` check, so it never
+            # reaches this call (gate 4).
             result = self._session.extract_evolutions_via_legacy_actions(
                 patient_record=patient_record,
                 start_date=start_date,
                 end_date=end_date,
                 timeout=timeout,
             )
+        else:
+            # Stub/test path: URL template + container + PSW-S11 PDF fallback.
+            url = _build_admissions_url(
+                self._evolutions_url_template,
+                patient_record=patient_record,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            # PSW-S17 R2/R3: a Playwright navigation timeout surfaces as a
+            # typed ExtractionTimeoutError from ``open_tab`` and propagates.
+            # Non-timeout failures produce a constant sanitized message (no
+            # URL, patient record, or token).
+            if not self._session.open_tab(url, timeout=timeout):
+                raise ExtractionError(
+                    "Failed to navigate to the evolution page."
+                )
+
+            # Extract JSON data from the evolution container.
+            html = self._session.get_page_html()
+            json_text = _extract_json_from_container(
+                html, _EVOLUTION_DATA_DIV_ID, _EVOLUTION_DATA_CONTAINER_RE
+            )
+            result = _parse_evolutions_json(json_text)
+
+            # PSW-S11 PDF report fallback. The lightweight fast paths
+            # (``evolution-data-json`` script, ``pre.report-text``) are tried
+            # first by the bridge/stub. When they yield no events, delegate
+            # to the PDF flow on sessions that expose it, reusing the
+            # already-open persistent page/context — never a new browser or
+            # subprocess. A genuine empty window stays an empty list.
+            if not result and hasattr(self._session, "extract_evolutions_pdf"):
+                result = self._session.extract_evolutions_pdf(
+                    start_date=start_date,
+                    end_date=end_date,
+                    timeout=timeout,
+                )
 
         # Step 6 (PSW-S11 fix): map the adapter's 5-key evolution contract
         # (admission_key/happened_at/event_type/content/profession) onto the
@@ -586,7 +601,7 @@ class PersistentExtractionAdapter:
         # (content_text/profession_type/author_name/signature_line/
         # patient_source_key/source_system). The adapter knows the
         # patient_record, so it is the single place to enrich both the
-        # fast-path and the PDF-fallback events for persistence.
+        # fast-path and the action/PDF-fallback events for persistence.
         result = _enrich_evolutions_for_persistence(
             result, patient_record=patient_record
         )
@@ -598,6 +613,24 @@ class PersistentExtractionAdapter:
         self._controller.mark_job_processed()
 
         return result
+
+    def _session_supports_real_evolution_actions(self) -> bool:
+        """Return True only when the session EXPLICITLY advertises real legacy
+        evolution action navigation.
+
+        PSW-S20 R1 (self-eval gate 4): dispatch must NOT be inferred from an
+        arbitrary method accidentally present on a mock. A plain ``MagicMock``
+        auto-creates ``supports_real_evolution_actions`` and its call returns a
+        truthy ``MagicMock``, which is NOT ``True`` (identity check), so it
+        cannot switch dispatch to the action path. Only a session that
+        explicitly returns ``True`` (e.g. ``RealHandleBridge``) takes the
+        action-first path; stub/test sessions keep the URL-template +
+        container path.
+        """
+        capability = getattr(
+            self._session, "supports_real_evolution_actions", None
+        )
+        return callable(capability) and capability() is True
 
     # ------------------------------------------------------------------
     # Demographics extraction (PSW-S16)

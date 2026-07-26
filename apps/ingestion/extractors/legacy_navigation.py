@@ -864,7 +864,7 @@ def fill_evolution_dates(
     *,
     start_date_br: str,
     end_date_br: str,
-) -> None:
+) -> bool:
     """Fill date inputs inside the evolution modal with ``DD/MM/YYYY``.
 
     PSW-S17 R2 (second corrective closure): optional date inputs are probed
@@ -872,12 +872,21 @@ def fill_evolution_dates(
     timeout from its ``wait_for``/``click``/``fill`` raises a typed
     :class:`NavigationTimeoutError` instead of being swallowed.
 
-    Modeled after ``path2.open_report_for_interval()``.
+    PSW-S20 R4: returns ``True`` ONLY when BOTH the start and end date
+    inputs were present and filled. Returning ``False`` (absent iframe or
+    either required input) lets the caller fail safely instead of
+    generating a report for an unbounded/default window. Modeled after
+    ``path2.open_report_for_interval``, which treats the date inputs as
+    required.
 
     Args:
         page: A Playwright ``Page`` object.
         start_date_br: Start date in ``DD/MM/YYYY`` format.
         end_date_br: End date in ``DD/MM/YYYY`` format.
+
+    Returns:
+        ``True`` if both date inputs were present and filled; ``False`` if
+        the iframe or either required input was absent.
 
     Raises:
         NavigationTimeoutError: when a present date input times out.
@@ -887,8 +896,9 @@ def fill_evolution_dates(
         logger.warning(
             "Evolution date iframe not available (sanitized)."
         )
-        return
+        return False
 
+    filled_start = False
     # Fill start date (only if the input is present).
     start_input = frame.locator(SEL_DATE_START)
     if _locator_count(start_input) > 0:
@@ -896,6 +906,7 @@ def fill_evolution_dates(
             start_input.first.wait_for(state="visible", timeout=10000)
             start_input.first.click()
             start_input.first.fill(start_date_br)
+            filled_start = True
         except Exception as exc:
             _raise_required_action_error(
                 exc,
@@ -904,6 +915,7 @@ def fill_evolution_dates(
                 ),
             )
 
+    filled_end = False
     # Fill end date (only if the input is present).
     end_input = frame.locator(SEL_DATE_END)
     if _locator_count(end_input) > 0:
@@ -911,6 +923,7 @@ def fill_evolution_dates(
             end_input.first.wait_for(state="visible", timeout=10000)
             end_input.first.click()
             end_input.first.fill(end_date_br)
+            filled_end = True
         except Exception as exc:
             _raise_required_action_error(
                 exc,
@@ -920,6 +933,7 @@ def fill_evolution_dates(
             )
 
     page.wait_for_timeout(500)
+    return filled_start and filled_end
 
 
 def _locator_count(locator: Any) -> int:

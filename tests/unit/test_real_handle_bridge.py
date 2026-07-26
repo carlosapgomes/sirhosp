@@ -696,7 +696,15 @@ class TestBridgeToAdapterIntegration:
         assert result[0]["admission_key"] == "ADM-RK-001"
 
     def test_bridge_adapter_evolution_flow(self) -> None:
-        """Full adapter.extract_evolutions() succeeds with bridge output."""
+        """PSW-S20: the real bridge dispatches action-first end-to-end.
+
+        ``adapter.extract_evolutions`` calls the bridge's
+        ``extract_evolutions_via_legacy_actions`` directly (no synthetic
+        evolution URL) and enriches the returned 5-key events with the
+        persistible schema. The JSON container translation remains covered by
+        the direct bridge tests (``TestRealHandleBridgeEvolutions``); it is no
+        longer reached through ``open_tab`` on the real handle (R2/R3).
+        """
         from apps.ingestion.extractors.persistent_extraction_adapter import (
             PersistentExtractionAdapter,
         )
@@ -720,17 +728,40 @@ class TestBridgeToAdapterIntegration:
             ),
         )
 
-        # Replace handle HTML with legacy evolution JSON before navigation
-        handle.set_html(LEGACY_EVOLUTIONS_PAGE_JSON)
+        action_events = [
+            {
+                "admission_key": "ADM-RK-001",
+                "happened_at": "2024-01-15T10:30:00",
+                "event_type": "medical",
+                "content": "Paciente estável.",
+                "profession": "Dr. Silva",
+            },
+            {
+                "admission_key": "ADM-RK-001",
+                "happened_at": "2024-01-16T09:00:00",
+                "event_type": "nursing",
+                "content": "Curativo trocado.",
+                "profession": "Enf. Maria",
+            },
+        ]
+        with patch.object(
+            bridge,
+            "extract_evolutions_via_legacy_actions",
+            return_value=action_events,
+        ):
+            result = adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-12-31",
+            )
 
-        result = adapter.extract_evolutions(
-            patient_record="12345",
-            start_date="2024-01-01",
-            end_date="2024-12-31",
-        )
-
+        # No synthetic evolution URL opened on the real handle (R2).
+        assert handle._opened_urls == []
         assert isinstance(result, list)
         assert len(result) == 2
+        # Adapter enrichment added the persistible schema.
+        assert result[0]["patient_source_key"] == "12345"
+        assert result[0]["source_system"] == "tasy"
         assert result[0]["content"] is not None
 
     def test_bridge_tab_cleanup_is_only_cleanup(self) -> None:
@@ -1044,109 +1075,18 @@ class TestBridgeExtractEvolutionsViaLegacyActions:
 
         assert result == []
 
-    def test_adapter_uses_legacy_actions_when_yield_no_json_events(
+    def test_real_handle_adapter_calls_action_method_without_open_tab(
         self,
     ) -> None:
-        """Adapter calls legacy action flow when fast paths yield no events
-        and the session supports it."""
-        # Import helper to generate valid PDF bytes inline
-        from apps.ingestion.extractors.persistent_extraction_adapter import (
-            PersistentExtractionAdapter,
-        )
-        from apps.ingestion.extractors.real_handle_bridge import (
-            RealHandleBridge,
-        )
-        from apps.ingestion.extractors.session_controller import (
-            SessionControllerConfig,
-        )
-        from tests.unit.test_persistent_evolution_pdf import (  # noqa: PLC0415
-            REPRESENTATIVE_REPORT_TEXT,
-            _build_pdf_bytes,
-        )
+        """PSW-S20 R1/R2: the real handle dispatches action-first.
 
-        handle = FakePlaywrightHandle()
-
-        # Return HTML with NO evolution data (empty container)
-        # so fast paths yield []
-        handle.set_html(
-            '<html><body>'
-            '<div id="tempoSessao"><span>00</span>:<span>27</span>:'
-            '<span>30</span></div>'
-            '<div id="evolution-data">[]</div>'
-            '</body></html>'
-        )
-
-        valid_pdf_bytes = _build_pdf_bytes(REPRESENTATIVE_REPORT_TEXT)
-
-        mock_row_locator = MagicMock()
-        mock_row_locator.wait_for = MagicMock()
-        initial_frame = MagicMock()
-        initial_frame.locator.return_value = mock_row_locator
-        initial_frame.eval_on_selector_all.return_value = [
-            {
-                "dataRi": "0",
-                "dataRk": "ADM-RK-001",
-                "cells": ["15/01/2024", "20/01/2024", "A", "B",
-                          "Detalhes"],
-                "hasDetailsLink": True,
-            },
-        ]
-        # Configure the frame to appear as a report page immediately
-        # so wait_for_report_or_no_evolutions does NOT poll for 120s.
-        def frame_side_effect(name):
-            nonlocal initial_frame
-            return initial_frame
-
-        page = MagicMock()
-        page.frame.side_effect = frame_side_effect
-        from apps.ingestion.extractors.persistent_evolution_pdf import (  # noqa: PLC0415
-            _PDF_OBJECT_SELECTOR,
-        )
-
-        pdf_object_locator = MagicMock()
-        pdf_object_locator.count.return_value = 1
-        pdf_object_locator.first.get_attribute.return_value = (
-            "https://example.com/report.pdf"
-        )
-        page.locator.side_effect = (
-            lambda selector, *a, **k: pdf_object_locator
-            if selector == _PDF_OBJECT_SELECTOR
-            else MagicMock()
-        )
-        page.url = "https://legacy.example.com/"
-        page.context.request.get.return_value.ok = True
-        page.context.request.get.return_value.body.return_value = (
-            valid_pdf_bytes
-        )
-
-        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
-
-        bridge = RealHandleBridge(handle)
-        adapter = PersistentExtractionAdapter(
-            bridge,
-            config=SessionControllerConfig(
-                base_evolutions_url="/evolutions/{patient_record}",
-            ),
-        )
-
-        # Fast paths yield [] via the empty evolution-data container
-        # (open_tab -> bridge get_page_html -> evolution-data div -> []);
-        # PDF fallback (extract_evolutions_pdf) exists on the bridge;
-        # legacy action fallback (extract_evolutions_via_legacy_actions)
-        # also exists. With fakes, the action path proceeds through
-        # admissions selection, downloads a valid PDF via the existing
-        # context, extracts text, normalises, and returns events.
-        result = adapter.extract_evolutions(
-            patient_record="12345",
-            start_date="2024-01-01",
-            end_date="2024-01-31",
-        )
-
-        assert isinstance(result, list)
-        assert len(result) >= 1
-
-    def test_existing_json_fast_path_still_works(self) -> None:
-        """Adapter still uses JSON script tag fast path when present."""
+        The adapter calls ``extract_evolutions_via_legacy_actions`` directly
+        and opens ZERO synthetic/direct evolution URLs, even though the bridge
+        still exposes ``open_tab`` and the legacy URL template is configured.
+        The action method is patched so the dispatch contract (not the action
+        internals) is the unit under test; the action internals are covered by
+        the bridge-level tests below.
+        """
         from apps.ingestion.extractors.persistent_extraction_adapter import (
             PersistentExtractionAdapter,
         )
@@ -1159,23 +1099,89 @@ class TestBridgeExtractEvolutionsViaLegacyActions:
 
         handle = FakePlaywrightHandle()
         handle.set_html(LEGACY_EVOLUTIONS_PAGE_JSON)
-
         bridge = RealHandleBridge(handle)
-        adapter = PersistentExtractionAdapter(
-            bridge,
-            config=SessionControllerConfig(
-                base_evolutions_url="/evolutions/{patient_record}",
-            ),
-        )
 
-        result = adapter.extract_evolutions(
+        action_events = [
+            {
+                "admission_key": "ADM-RK-001",
+                "happened_at": "2024-01-15T10:30:00",
+                "event_type": "medical",
+                "content": "Paciente estável.",
+                "profession": "Dr. Silva",
+            }
+        ]
+        with patch.object(
+            bridge,
+            "extract_evolutions_via_legacy_actions",
+            return_value=action_events,
+        ) as mock_action:
+            adapter = PersistentExtractionAdapter(
+                bridge,
+                config=SessionControllerConfig(
+                    base_evolutions_url="/evolutions/{patient_record}",
+                ),
+            )
+            result = adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+                timeout=33,
+            )
+
+        # R2: no synthetic/direct evolution URL was opened on the handle.
+        assert handle._opened_urls == []
+        # The action method was called once with the full contract + timeout.
+        mock_action.assert_called_once_with(
             patient_record="12345",
             start_date="2024-01-01",
             end_date="2024-01-31",
+            timeout=33,
+        )
+        assert isinstance(result, list)
+        assert len(result) >= 1
+
+    def test_real_handle_does_not_open_synthetic_evolution_url(
+        self,
+    ) -> None:
+        """PSW-S20 R3: a JSON/pre page state does NOT bypass required real
+        navigation. Even when the page holds a ``evolution-data-json`` script,
+        the real handle never opens a synthetic evolution URL and the action
+        method is the only extraction path."""
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
         )
 
-        # JSON fast path should return events
-        assert len(result) >= 1
+        handle = FakePlaywrightHandle()
+        handle.set_html(LEGACY_EVOLUTIONS_PAGE_JSON)
+        bridge = RealHandleBridge(handle)
+
+        with patch.object(
+            bridge,
+            "extract_evolutions_via_legacy_actions",
+            return_value=[],
+        ) as mock_action:
+            adapter = PersistentExtractionAdapter(
+                bridge,
+                config=SessionControllerConfig(
+                    base_evolutions_url="/evolutions/{patient_record}",
+                ),
+            )
+            result = adapter.extract_evolutions(
+                patient_record="12345",
+                start_date="2024-01-01",
+                end_date="2024-01-31",
+            )
+
+        # The JSON in the page was NOT consumed via a synthetic open_tab.
+        assert handle._opened_urls == []
+        mock_action.assert_called_once()
+        assert result == []
 
     def test_no_subprocess_or_new_browser(self) -> None:
         """The legacy actions path reuses the existing page/context.
@@ -1302,25 +1308,22 @@ class TestBridgeExtractEvolutionsViaLegacyActions:
             SessionControllerConfig,
         )
 
-        # Session where fast paths yield [] (empty evolution-data) and the
-        # PSW-S11 PDF fallback also yields [], so the adapter reaches the
-        # PSW-S13 legacy action fallback. The action method returns a
-        # single known event in the 5-key contract.
+        # Session that EXPLICITLY advertises real action navigation (R1:
+        # dispatch is selected by capability, not by method presence on a
+        # mock). The action method returns a single known event in the 5-key
+        # contract; the adapter must enrich it with the persistible schema.
         session = MagicMock()
         session.is_connected.return_value = True
         session.get_tab_classes.return_value = [
             "tabs-first tabs-last tabs-selected",
         ]
-        session.open_tab.return_value = True
         session.get_page_html.return_value = (
             "<html><body>"
             '<div id="tempoSessao">'
             "<span>00</span>:<span>29</span>:<span>01</span>"
-            "</div>"
-            '<div id="evolution-data">[]</div>'
-            "</body></html>"
+            "</div></body></html>"
         )
-        session.extract_evolutions_pdf.return_value = []
+        session.supports_real_evolution_actions.return_value = True
         session.extract_evolutions_via_legacy_actions.return_value = [
             {
                 "admission_key": "ADM-001",
@@ -1362,6 +1365,159 @@ class TestBridgeExtractEvolutionsViaLegacyActions:
             end_date="2024-01-31",
             timeout=120,
         )
+
+    def test_required_date_fill_failure_raises_typed_and_skips_report(
+        self,
+    ) -> None:
+        """PSW-S20 R4: a required date-fill failure stops report generation.
+
+        When ``fill_evolution_dates`` raises a non-timeout NavigationError
+        (a date input was present but could not be filled), the bridge raises
+        a typed ``EvolutionPdfError`` with a constant sanitized message and
+        does NOT proceed to generate the report (``click_visualizar_report``
+        is never called)."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.search_patient"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_internacoes"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge._read_and_build_snapshot",
+                return_value=[{
+                    "admissionKey": "K1",
+                    "admissionStart": "2026-01-01",
+                    "admissionEnd": "",
+                    "ward": "",
+                    "bed": "",
+                }],
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.open_internacao_detail"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_evolucao"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.fill_evolution_dates",
+                side_effect=NavigationError("could not fill date input"),
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.select_ascending_order"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_visualizar_report"
+            ) as mock_visualize,
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.wait_for_report_or_no_evolutions",
+                return_value=False,
+            ),
+            patch.object(
+                bridge, "_resolve_active_page", return_value=MagicMock()
+            ),
+        ):
+            with pytest.raises(EvolutionPdfError) as exc_info:
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="123",
+                    start_date="2026-01-01",
+                    end_date="2026-01-15",
+                )
+
+        # R4: no report was generated after the date-fill failure.
+        mock_visualize.assert_not_called()
+        # R7: the message is constant/sanitized (no raw cause text).
+        assert "could not fill date input" not in str(exc_info.value)
+        assert exc_info.value.__context__ is None
+        assert exc_info.value.__cause__ is None
+
+    def test_required_date_inputs_absent_raises_typed_and_skips_report(
+        self,
+    ) -> None:
+        """PSW-S20 R4: required date inputs absent -> typed failure, no report.
+
+        ``fill_evolution_dates`` returns False when the required start/end
+        date inputs are absent (the evolution modal did not expose them). The
+        bridge raises a typed ``EvolutionPdfError`` and never generates a
+        report for an unbounded/default window."""
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        with (
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.ensure_search_screen"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.search_patient"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_internacoes"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge._read_and_build_snapshot",
+                return_value=[{
+                    "admissionKey": "K1",
+                    "admissionStart": "2026-01-01",
+                    "admissionEnd": "",
+                    "ward": "",
+                    "bed": "",
+                }],
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.open_internacao_detail"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_evolucao"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.fill_evolution_dates",
+                return_value=False,
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.select_ascending_order"
+            ),
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.click_visualizar_report"
+            ) as mock_visualize,
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge.wait_for_report_or_no_evolutions",
+                return_value=False,
+            ),
+            patch.object(
+                bridge, "_resolve_active_page", return_value=MagicMock()
+            ),
+        ):
+            with pytest.raises(EvolutionPdfError):
+                bridge.extract_evolutions_via_legacy_actions(
+                    patient_record="123",
+                    start_date="2026-01-01",
+                    end_date="2026-01-15",
+                )
+
+        mock_visualize.assert_not_called()
 
 
 # ===========================================================================

@@ -1365,6 +1365,66 @@ class TestCommandLevelPersistentPdfTimeout:
     ``playwright.sync_api.TimeoutError`` type from a synthetic browser-like
     fake request. No Chromium is launched."""
 
+    @staticmethod
+    def _patch_real_action_flow_to_pdf_boundary():
+        """PSW-S20 wiring: patch the action-flow nav helpers so the real
+        bridge reaches the PDF URL-resolution / download boundary.
+
+        PSW-S20 made evolution extraction action-first for the real handle, so
+        the typed PDF timeout now originates inside
+        ``RealHandleBridge.extract_evolutions_via_legacy_actions``
+        (``_resolve_pdf_url_from_report_page`` / ``_download_pdf``) instead of
+        the PSW-S11 ``EvolutionPdfFlow`` reached via ``open_tab``. The nav
+        helpers are patched out so each test's fake page drives ONLY the PDF
+        boundary; the timeout taxonomy and sanitization contract (PSW-S17) is
+        unchanged. Returns an ``ExitStack`` context manager.
+        """
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        for name in (
+            "ensure_search_screen",
+            "search_patient",
+            "click_internacoes",
+            "open_internacao_detail",
+            "click_evolucao",
+            "select_ascending_order",
+            "click_visualizar_report",
+        ):
+            stack.enter_context(
+                patch(
+                    f"apps.ingestion.extractors.real_handle_bridge.{name}"
+                )
+            )
+        stack.enter_context(
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge"
+                "._read_and_build_snapshot",
+                return_value=[{
+                    "admissionKey": "ADM-PSW-S20",
+                    "admissionStart": "2026-01-01",
+                    "admissionEnd": "2026-01-15",
+                    "ward": "",
+                    "bed": "",
+                }],
+            )
+        )
+        stack.enter_context(
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge"
+                ".fill_evolution_dates",
+                return_value=True,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "apps.ingestion.extractors.real_handle_bridge"
+                ".wait_for_report_or_no_evolutions",
+                return_value=True,
+            )
+        )
+        return stack
+
     def test_pdf_download_timeout_records_timeout_category(
         self, caplog, capsys
     ):
@@ -1468,7 +1528,7 @@ class TestCommandLevelPersistentPdfTimeout:
             },
         )
 
-        with patch.object(
+        with self._patch_real_action_flow_to_pdf_boundary(), patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=adapter
         ), patch.object(
             RealHandleBridge, "navigate_to_admissions", return_value=True
@@ -1624,7 +1684,7 @@ class TestCommandLevelPersistentPdfTimeout:
             },
         )
 
-        with patch.object(
+        with self._patch_real_action_flow_to_pdf_boundary(), patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=adapter
         ), patch.object(
             RealHandleBridge, "navigate_to_admissions", return_value=True
@@ -1768,7 +1828,7 @@ class TestCommandLevelPersistentPdfTimeout:
             },
         )
 
-        with patch.object(
+        with self._patch_real_action_flow_to_pdf_boundary(), patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=adapter
         ), patch.object(
             RealHandleBridge, "navigate_to_admissions", return_value=True
