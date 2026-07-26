@@ -637,6 +637,20 @@ SEL_DETAILS_LINK = 'a[title="Detalhes da Internação"]'
 SEL_NO_EVOLUTIONS_DIALOG = '#msgDialog'
 """Dialog shown when there are no evolutions for a window."""
 
+SEL_DIALOG_CLOSE = '.ui-dialog-titlebar-close'
+"""Titlebar close button shared by PrimeFaces dialogs/modals.
+
+PSW-S21-C1: used only by the empty-chunk recovery to dismiss the visible
+no-evolutions warning and the evolution modal before restoring the detail page.
+"""
+
+SEL_EVOLUTION_MODAL = '#modalEvolucao'
+"""PrimeFaces evolution date-picker modal overlay.
+
+PSW-S21-C1: closed by the empty-chunk recovery when it remains visible after
+the no-evolutions warning.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Canonical chunking (PSW-S21 R1/R4)
@@ -1158,18 +1172,29 @@ def wait_for_report_or_no_evolutions(
             if has_print_links:
                 return True
 
-        # Check if no-evolutions dialog appeared
+        # Check if no-evolutions dialog appeared. The visibility probe is
+        # defensive (swallowed), but the recovery runs OUTSIDE the swallow so a
+        # typed timeout from recovery propagates through the PSW-S17 taxonomy.
+        detected_empty = False
         try:
             dialog = frame.locator(SEL_NO_EVOLUTIONS_DIALOG)
             if dialog.count() > 0:
                 try:
-                    if dialog.first.is_visible():
-                        # Detected explicit no-evolutions dialog
-                        return False
+                    detected_empty = dialog.first.is_visible()
                 except Exception:
                     pass
         except Exception:
             pass
+
+        if detected_empty:
+            # PSW-S21-C1: recover the detail-page state (close the no-evolutions
+            # warning + evolution modal, wait for detail readiness) within the
+            # remaining budget before signalling the genuine empty result, so
+            # the next chunk can re-open the evolution modal from detail state.
+            _recover_no_evolutions_to_detail(
+                page, budget_ms=max(1, timeout_ms - elapsed_ms)
+            )
+            return False
 
         page.wait_for_timeout(min(poll_ms, max(1, timeout_ms - elapsed_ms)))
 
@@ -1290,6 +1315,71 @@ def _wait_for_detail_readiness(
                     return
 
         page.wait_for_timeout(min(poll_ms, max(1, remaining_ms)))
+
+
+def _recover_no_evolutions_to_detail(page: Any, *, budget_ms: int) -> None:
+    """Close the no-evolutions warning + evolution modal, then restore detail.
+
+    PSW-S21-C1: a genuine empty chunk must leave the admission detail page
+    ready for the next chunk. Modeled after the smallest recovery mechanics in
+    ``path2.detect_no_evolutions_dialog_and_recover()`` and
+    ``path2.close_evolution_modal_if_open()``: dismiss the visible no-evolutions
+    warning dialog (frame first, page fallback) and the evolution modal via
+    their titlebar close button, then wait for the existing detail-readiness
+    condition before the caller returns ``False``.
+
+    Consumes only the remaining ``budget_ms`` passed by the caller. Playwright
+    timeouts and deadline expiry convert through the existing sanitized
+    ``NavigationTimeoutError``/``NavigationError`` boundaries; best-effort
+    close steps that fail for non-timeout reasons are skipped. No selector,
+    URL, HTML, warning text, or raw exception text is ever placed in a message.
+
+    Args:
+        page: A Playwright ``Page`` object showing the no-evolutions state.
+        budget_ms: Remaining milliseconds from the calling wait's budget.
+
+    Raises:
+        NavigationTimeoutError: on a bounded close/readiness timeout or
+            deadline expiry.
+    """
+    deadline_s = time.monotonic() + max(0, budget_ms) / 1000.0
+    frame = page.frame(name=SEL_FRAME_POL)
+    targets = (
+        (frame, SEL_NO_EVOLUTIONS_DIALOG),
+        (page, SEL_NO_EVOLUTIONS_DIALOG),
+        (frame, SEL_EVOLUTION_MODAL),
+    )
+    for owner, selector in targets:
+        if owner is None:
+            continue
+        try:
+            dialog = owner.locator(selector)
+            if dialog.count() == 0:
+                continue
+            target = dialog.first
+            if not target.is_visible():
+                continue
+        except NavigationError:
+            raise
+        except Exception:
+            continue
+        close_button = target.locator(SEL_DIALOG_CLOSE)
+        try:
+            if close_button.count() > 0:
+                close_button.first.click(
+                    timeout=_bound_ms(deadline_s, 3000)
+                )
+        except NavigationError:
+            raise
+        except Exception:
+            pass
+        try:
+            target.wait_for(state="hidden", timeout=_bound_ms(deadline_s, 3000))
+        except NavigationError:
+            raise
+        except Exception:
+            pass
+    _wait_for_detail_readiness(page, deadline_s)
 
 
 # ---------------------------------------------------------------------------

@@ -501,10 +501,10 @@ abstraction was added and the existing `deadline_s` is never reset.
 - [x] 21.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S21-report.md`.
 
-PSW-S21 closure (authoritative): the persistent evolution action flow now
-chunks each admission's bounded window and processes every overlapping
-admission through the same authenticated session. The app reuses the
-canonical dependency-free module
+PSW-S21 closure (authoritative; COMPLETE after C1): the persistent
+evolution action flow now chunks each admission's bounded window and
+processes every overlapping admission through the same authenticated session.
+The app reuses the canonical dependency-free module
 (`automation/source_system/medical_evolution/chunking.py`) via a lazily-loaded
 file-path wrapper in `legacy_navigation.build_chunks_for_interval`; no
 chunking algorithm is copied into `apps/ingestion` and the unused duplicate
@@ -518,15 +518,29 @@ prior report it restores the detail page via the new
 `go_back_to_detail_from_report` helper (clicks the report ``Voltar`` and
 waits for `consultaDetalheInternacao.xhtml` + the ``Evolução`` button); each
 chunk fills its OWN bounded DD/MM/YYYY dates, so no report window exceeds 15
-inclusive days with canonical one-day overlap. A genuine empty chunk returns
-no fake events and never discards already-collected events (`continue` leaves
-`all_events` untouched); the real admission key is stamped on every event via
-`normalize_pdf_report_text(..., admission_key=...)`. Every per-admission and
-per-chunk helper receives the SAME shared cooperative deadline's remaining
-budget; typed timeouts propagate through the frozen PSW-S17 taxonomy and
-non-timeout recoverable failures skip the chunk while preserving priors. No
-new browser/context/login is created during iteration (verified by a no-
-subprocess/no-`sync_playwright` proof). PSW-S17/PSW-S18/PSW-S19/PSW-S20
+inclusive days with canonical one-day overlap. A genuine empty chunk now
+RECOVERS the detail-page state before the next chunk: the no-evolutions
+boundary in `wait_for_report_or_no_evolutions` closes the visible warning
+dialog and the evolution modal (frame first, page fallback) within the
+remaining wait budget and then waits for detail readiness before returning
+`False`, so the next chunk re-opens the evolution modal from detail state; it
+returns no fake events and never discards already-collected events
+(`continue` leaves `all_events` untouched). The real admission key is stamped
+on every event via `normalize_pdf_report_text(..., admission_key=...)`.
+Every per-admission and per-chunk helper receives the SAME shared
+cooperative deadline's remaining budget; typed timeouts propagate through
+the frozen PSW-S17 taxonomy and non-timeout recoverable failures skip the
+chunk while preserving priors. Each existing recoverable per-chunk failure
+(between-chunk restore, Evolução click, required date-fill before raising the
+constant error, optional ascending-order, visualize, PDF URL
+resolution/missing, PDF download, text extraction, and normalization)
+records its bounded `window_start`/`window_end` ISO dates via one tiny
+sanitized logging helper that accepts only a constant reason plus the chunk
+dates (R8); no patient record, admission key, ward/bed, event/PDF content,
+URL, selector, cookie, credential, HTML, or raw exception reaches the record,
+and a genuine empty chunk is not a failure and emits no failure warning. No
+new browser/context/login is created during iteration (verified by a
+no-subprocess/no-`sync_playwright` proof). PSW-S17/PSW-S18/PSW-S19/PSW-S20
 observable contracts are preserved and not re-audited.
 
 ## 22. PSW-S22: Authenticated PDF form-download parity

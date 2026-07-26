@@ -120,6 +120,27 @@ def _coerce_admission_date(value: Any, fallback: date) -> date:
             continue
     return fallback
 
+
+def _log_recoverable_chunk_failure(
+    reason: str, chunk_start: date, chunk_end: date
+) -> None:
+    """Log a recoverable per-chunk failure with its bounded ISO window only.
+
+    PSW-S21-C1 R8: records exactly the bounded operational window
+    (``window_start``/``window_end``) alongside a constant sanitized reason so
+    the responsible bounded chunk is identifiable without patient data. Accepts
+    ONLY a constant reason and the chunk dates; never an exception or
+    identifier. The formatted record never carries patient record, admission
+    key, ward/bed, event/PDF content, URL, selector, cookie, credential, HTML,
+    or raw exception type/text.
+    """
+    logger.warning(
+        "%s window_start=%s window_end=%s",
+        reason,
+        chunk_start.isoformat(),
+        chunk_end.isoformat(),
+    )
+
 # ---------------------------------------------------------------------------
 # URL patterns for page-type detection
 # ---------------------------------------------------------------------------
@@ -923,9 +944,11 @@ class RealHandleBridge:
                     except NavigationTimeoutError:
                         raise
                     except NavigationError:
-                        logger.warning(
+                        _log_recoverable_chunk_failure(
                             "Evolution action flow: between-chunk restore "
-                            "failed (sanitized)"
+                            "failed (sanitized)",
+                            chunk_start,
+                            chunk_end,
                         )
                         break
 
@@ -935,9 +958,11 @@ class RealHandleBridge:
                 except NavigationTimeoutError:
                     raise
                 except NavigationError:
-                    logger.warning(
+                    _log_recoverable_chunk_failure(
                         "Evolution action flow: Evolu\u00e7\u00e3o click "
-                        "failed (sanitized)"
+                        "failed (sanitized)",
+                        chunk_start,
+                        chunk_end,
                     )
                     break
 
@@ -965,6 +990,12 @@ class RealHandleBridge:
                 except NavigationError:
                     date_fill_failed = True
                 if date_fill_failed or not dates_filled:
+                    _log_recoverable_chunk_failure(
+                        "Evolution action flow: required date inputs could "
+                        "not be filled (sanitized)",
+                        chunk_start,
+                        chunk_end,
+                    )
                     raise EvolutionPdfError(_EVOLUTION_DATE_FILL_REQUIRED_MESSAGE)
 
                 # Step 5d: Select ascending order (optional no-op on failure).
@@ -977,7 +1008,9 @@ class RealHandleBridge:
                 except Exception:
                     logger.debug(
                         "Evolution action flow: ascending order select "
-                        "failed (no-op)"
+                        "failed (no-op) window_start=%s window_end=%s",
+                        chunk_start.isoformat(),
+                        chunk_end.isoformat(),
                     )
 
                 # Step 5e: Click visualize.
@@ -988,8 +1021,11 @@ class RealHandleBridge:
                 except NavigationTimeoutError:
                     raise
                 except NavigationError:
-                    logger.warning(
-                        "Evolution action flow: visualize click failed (sanitized)"
+                    _log_recoverable_chunk_failure(
+                        "Evolution action flow: visualize click "
+                        "failed (sanitized)",
+                        chunk_start,
+                        chunk_end,
                     )
                     break
 
@@ -1024,14 +1060,22 @@ class RealHandleBridge:
                     # timeout MUST propagate.
                     raise
                 except Exception:
-                    logger.warning(
+                    _log_recoverable_chunk_failure(
                         "Evolution action flow: PDF URL resolution "
-                        "failed (sanitized)"
+                        "failed (sanitized)",
+                        chunk_start,
+                        chunk_end,
                     )
                     last_chunk_had_report = True
                     continue
 
                 if not pdf_url:
+                    _log_recoverable_chunk_failure(
+                        "Evolution action flow: PDF URL resolution "
+                        "failed (sanitized)",
+                        chunk_start,
+                        chunk_end,
+                    )
                     last_chunk_had_report = True
                     continue
 
@@ -1040,8 +1084,10 @@ class RealHandleBridge:
                 except EvolutionPdfTimeoutError:
                     raise
                 except Exception:
-                    logger.warning(
-                        "Evolution action flow: PDF download failed (sanitized)"
+                    _log_recoverable_chunk_failure(
+                        "Evolution action flow: PDF download failed (sanitized)",
+                        chunk_start,
+                        chunk_end,
                     )
                     last_chunk_had_report = True
                     continue
@@ -1054,9 +1100,11 @@ class RealHandleBridge:
                 except EvolutionPdfTimeoutError:
                     raise
                 except EvolutionPdfError:
-                    logger.warning(
+                    _log_recoverable_chunk_failure(
                         "Evolution action flow: PDF text extraction "
-                        "failed (sanitized)"
+                        "failed (sanitized)",
+                        chunk_start,
+                        chunk_end,
                     )
                     last_chunk_had_report = True
                     continue
@@ -1070,9 +1118,11 @@ class RealHandleBridge:
                 except EvolutionPdfTimeoutError:
                     raise
                 except EvolutionPdfError:
-                    logger.warning(
+                    _log_recoverable_chunk_failure(
                         "Evolution action flow: PDF text normalization "
-                        "failed (sanitized)"
+                        "failed (sanitized)",
+                        chunk_start,
+                        chunk_end,
                     )
                     last_chunk_had_report = True
                     continue

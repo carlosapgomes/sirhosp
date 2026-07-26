@@ -2136,6 +2136,173 @@ class TestBridgeCanonicalChunkingAndMultiAdmission:
 
 
 # ===========================================================================
+# PSW-S21-C1: empty-chunk recovery + recoverable failure-window evidence
+# ===========================================================================
+
+
+class TestBridgeC1EmptyChunkRecoveryAndFailureWindow:
+    """PSW-S21-C1: (A) a genuine empty chunk recovers the detail-page state
+    through the REAL no-evolutions boundary so a later chunk can continue, and
+    (B) an existing recoverable per-chunk failure records its bounded ISO
+    window with no patient/admission/raw sentinel.
+
+    The stateful fake (:class:`_EvolutionUiState`) models the real legacy UI
+    transitions and is driven by the REAL ``click_evolucao`` /
+    ``click_visualizar_report`` / ``go_back_to_detail_from_report`` /
+    ``wait_for_report_or_no_evolutions`` helpers — the empty-state recovery is
+    exercised for real, not replaced with a no-op mock.
+    """
+
+    _BASE = "apps.ingestion.extractors.real_handle_bridge"
+
+    def test_report_empty_report_sequence_keeps_prior_and_later_events(
+        self, caplog
+    ) -> None:
+        """C1 A: ``report -> empty -> report`` through one admission yields the
+        first and third chunk events; the third ``click_evolucao`` runs from
+        detail state because the empty boundary recovered the UI."""
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+        from tests.unit.test_legacy_navigation import (  # noqa: PLC0415
+            _EvolutionUiPage,
+            _EvolutionUiState,
+        )
+
+        # 31-day admission -> 3 canonical chunks.
+        admission = [{
+            "admissionKey": "ADM-A",
+            "admissionStart": "2026-03-01",
+            "admissionEnd": "2026-03-31",
+            "ward": "",
+            "bed": "",
+        }]
+        state = _EvolutionUiState(
+            visualize_outcomes=["report", "no_evolutions", "report"]
+        )
+        page = _EvolutionUiPage(state)
+
+        handle = FakePlaywrightHandle()
+        handle.ensure_current_page = lambda: page  # type: ignore[method-assign]
+        bridge = RealHandleBridge(handle)
+
+        base = self._BASE
+        with (
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(f"{base}._read_and_build_snapshot", return_value=list(admission)),
+            patch(f"{base}.open_internacao_detail"),
+            patch(f"{base}.fill_evolution_dates", return_value=True),
+            patch(f"{base}.select_ascending_order"),
+            # REAL: click_evolucao / click_visualizar_report /
+            # wait_for_report_or_no_evolutions / go_back_to_detail_from_report
+            # drive the stateful fake, including the empty-state recovery.
+            patch.object(
+                bridge, "_resolve_pdf_url_from_report_page",
+                return_value="https://example/report.pdf",
+            ),
+            patch.object(bridge, "_download_pdf", return_value=b"%PDF-1.4 ok"),
+            patch(f"{base}.extract_pdf_text", return_value="raw text"),
+            patch(
+                f"{base}.normalize_pdf_report_text",
+                side_effect=lambda *a, **k: [{
+                    "admission_key": k.get("admission_key", ""),
+                    "happened_at": "2026-03-10T09:00:00",
+                    "event_type": "medical",
+                    "content": "ok",
+                    "profession": "Dr",
+                }],
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            result = bridge.extract_evolutions_via_legacy_actions(
+                patient_record="123",
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+                timeout=30,
+            )
+
+        # First and third chunk events collected; middle chunk was empty.
+        assert len(result) == 2
+        assert [event["admission_key"] for event in result] == ["ADM-A", "ADM-A"]
+        # The empty boundary really recovered the detail page before chunk 3.
+        assert state.recovered_to_detail is True
+        # Three Evolução clicks, each from detail state (recovery made the
+        # third one possible; without recovery the third would fail in modal).
+        evo_clicks = [
+            e for e in state.click_log
+            if e[0] == "role:button:Evolução" and e[1] is None
+        ]
+        assert len(evo_clicks) == 3
+        assert all(entry[2] == "detail" for entry in evo_clicks)
+        # A genuine empty chunk is not a failure: no failure warning emitted.
+        assert not any(
+            "failed" in rec.getMessage() for rec in caplog.records
+            if rec.levelname == "WARNING"
+        )
+
+    def test_recoverable_failure_records_bounded_window_without_sentinels(
+        self, caplog
+    ) -> None:
+        """C1 B: an existing recoverable chunk failure (visualize click)
+        records exactly ``window_start``/``window_end`` and omits patient,
+        admission, URL, selector, and raw-exception sentinels."""
+        from apps.ingestion.extractors.legacy_navigation import NavigationError
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        # Single-chunk window (10 days) so the recorded window is unambiguous.
+        admission = [{
+            "admissionKey": "ADM-SENTINEL",
+            "admissionStart": "2026-02-01",
+            "admissionEnd": "2026-02-10",
+            "ward": "",
+            "bed": "",
+        }]
+        handle = FakePlaywrightHandle()
+        handle.ensure_current_page = lambda: MagicMock()  # type: ignore[method-assign]
+        bridge = RealHandleBridge(handle)
+
+        base = self._BASE
+        with (
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(f"{base}._read_and_build_snapshot", return_value=list(admission)),
+            patch(f"{base}.open_internacao_detail"),
+            patch(f"{base}.click_evolucao"),
+            patch(f"{base}.fill_evolution_dates", return_value=True),
+            patch(f"{base}.select_ascending_order"),
+            patch(
+                f"{base}.click_visualizar_report",
+                side_effect=NavigationError("RAW EXCEPTION SENTINEL"),
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            result = bridge.extract_evolutions_via_legacy_actions(
+                patient_record="PATIENT-SENTINEL",
+                start_date="2026-02-01",
+                end_date="2026-02-10",
+                timeout=30,
+            )
+
+        assert result == []
+        visualize_warnings = [
+            rec.getMessage() for rec in caplog.records
+            if rec.levelname == "WARNING" and "visualize click failed" in rec.getMessage()
+        ]
+        assert len(visualize_warnings) == 1
+        msg = visualize_warnings[0]
+        # The bounded operational window is recorded.
+        assert "window_start=2026-02-01" in msg
+        assert "window_end=2026-02-10" in msg
+        # No sensitive sentinel reaches the record.
+        assert "PATIENT-SENTINEL" not in msg
+        assert "ADM-SENTINEL" not in msg
+        assert "RAW EXCEPTION SENTINEL" not in msg
+        assert "http" not in msg
+        assert "selector" not in msg
+
+
+# ===========================================================================
 # PSW-S16: Real-handle demographics extraction via legacy actions
 # ===========================================================================
 

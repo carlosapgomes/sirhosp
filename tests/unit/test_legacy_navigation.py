@@ -1606,6 +1606,11 @@ class TestWaitForReportOrNoEvolutions:
         PSW-S17 R2/R3 correction: a polling-budget expiry is a TIMEOUT
         and raises ``NavigationTimeoutError``; it must NOT be conflated
         with the genuine no-evolutions result.
+
+        PSW-S21-C1: the no-evolutions boundary now recovers the detail-page
+        state (close the warning + modal, wait for detail readiness) before
+        returning ``False``; the fake models the detail ``Evolução`` action as
+        reachable so the bounded recovery succeeds.
         """
         from apps.ingestion.extractors.legacy_navigation import (
             SEL_NO_EVOLUTIONS_DIALOG,
@@ -1619,6 +1624,9 @@ class TestWaitForReportOrNoEvolutions:
         )
         # Explicit no-evolutions dialog visible -> False (not a timeout).
         frame.make_selector_visible(SEL_NO_EVOLUTIONS_DIALOG)
+        # The detail ``Evolução`` action is reachable once the recovery
+        # dismisses the warning/modal (detail readiness check).
+        frame.make_selector_visible("role:button:Evolução")
         page.set_frame(frame)
 
         result = wait_for_report_or_no_evolutions(
@@ -2622,3 +2630,235 @@ class TestGoBackToDetailFromReport:
         page._frame = None
         with pytest.raises(NavigationError):
             go_back_to_detail_from_report(page, timeout_ms=500)
+
+
+# ===========================================================================
+# PSW-S21-C1: stateful evolution-UI fake + empty-chunk recovery
+# ===========================================================================
+#
+# A minimal, owner-aware state machine that models the real legacy UI
+# transitions driven by the REAL legacy_navigation helpers (click_evolucao,
+# click_visualizar_report, go_back_to_detail_from_report, and the no-evolutions
+# recovery inside wait_for_report_or_no_evolutions). It exposes exactly the
+# Playwright surface those helpers query: frame.url, frame/page.locator(),
+# frame.get_by_role(), and page.wait_for_timeout().
+#
+# It records every click (key, sub, state_before, owner) so tests can prove the
+# recovery actually restored detail state instead of mocking it away.
+
+from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
+    SEL_DIALOG_CLOSE as _C1_DIALOG_CLOSE,
+)
+from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
+    SEL_EVOLUTION_MODAL as _C1_EVOLUTION_MODAL,
+)
+from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
+    SEL_FRAME_POL as _C1_FRAME_POL,
+)
+from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
+    SEL_NO_EVOLUTIONS_DIALOG as _C1_NO_EVOLUTIONS_DIALOG,
+)
+from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
+    SEL_PRINT_LINKS as _C1_PRINT_LINKS,
+)
+from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
+    SEL_VISUALIZAR_BUTTON as _C1_VISUALIZAR_BUTTON,
+)
+
+
+class _EvolutionUiState:
+    """Owner-aware state machine for the evolution report UI.
+
+    States: detail -> modal -> (report | no_evolutions) -> detail.
+    All queried elements live inside ``frame_pol``; page-owned lookups return
+    not-visible so the recovery's page fallback is exercised as a no-op.
+    """
+
+    def __init__(self, visualize_outcomes):
+        self._state = "detail"
+        self._outcomes = list(visualize_outcomes)
+        self._outcome_idx = 0
+        self._msg_dialog_hidden = False
+        self._modal_hidden = False
+        self.recovered_to_detail = False
+        self.click_log: list[tuple] = []
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    @property
+    def url(self) -> str:
+        if self._state == "report":
+            return "/internacoes/relatorioAnaEvoInternacaoPdf.xhtml"
+        return "/internacoes/consultaDetalheInternacao.xhtml"
+
+    def is_visible(self, owner: str, key: str) -> bool:
+        if owner != "frame":
+            return False
+        s = self._state
+        if key == "role:button:Evolução":
+            return s == "detail"
+        if key == _C1_VISUALIZAR_BUTTON:
+            return s == "modal"
+        if key == "role:button:Voltar":
+            return s == "report"
+        if key == _C1_PRINT_LINKS:
+            return s == "report"
+        if key == _C1_NO_EVOLUTIONS_DIALOG:
+            return s == "no_evolutions" and not self._msg_dialog_hidden
+        if key == _C1_EVOLUTION_MODAL:
+            return s in ("modal", "no_evolutions") and not self._modal_hidden
+        return False
+
+    def _next_outcome(self) -> str:
+        if self._outcome_idx < len(self._outcomes):
+            outcome = self._outcomes[self._outcome_idx]
+            self._outcome_idx += 1
+            return outcome
+        return "report"
+
+    def click(self, owner: str, key: str, sub=None) -> None:
+        self.click_log.append((key, sub, self._state, owner))
+        if owner != "frame":
+            return
+        if sub == _C1_DIALOG_CLOSE:
+            # Dismiss a visible dialog/modal via its titlebar close button.
+            if key == _C1_NO_EVOLUTIONS_DIALOG and self._state == "no_evolutions":
+                self._msg_dialog_hidden = True
+            elif key == _C1_EVOLUTION_MODAL and self._state == "no_evolutions":
+                self._modal_hidden = True
+                self._state = "detail"
+                self.recovered_to_detail = True
+            return
+        if key == "role:button:Evolução" and self._state == "detail":
+            self._state = "modal"
+        elif key == _C1_VISUALIZAR_BUTTON and self._state == "modal":
+            outcome = self._next_outcome()
+            self._state = outcome
+            if outcome == "no_evolutions":
+                self._msg_dialog_hidden = False
+                self._modal_hidden = False
+        elif key == "role:button:Voltar" and self._state == "report":
+            self._state = "detail"
+
+
+class _EvolutionUiLocator:
+    """Fake Playwright locator backed by :class:`_EvolutionUiState`."""
+
+    def __init__(self, state, owner, key, parent=None):
+        self._state = state
+        self._owner = owner
+        self._key = key
+        self._parent = parent
+
+    @property
+    def first(self):
+        return self
+
+    def _visible(self) -> bool:
+        if self._parent is not None:
+            # A sub-locator (e.g. the titlebar close button) exists iff its
+            # parent dialog/modal is visible.
+            return self._state.is_visible(self._owner, self._parent)
+        return self._state.is_visible(self._owner, self._key)
+
+    def count(self) -> int:
+        return 1 if self._visible() else 0
+
+    def is_visible(self) -> bool:
+        return self._visible()
+
+    def wait_for(self, *, state="visible", timeout=None):  # noqa: ARG002
+        vis = self._visible()
+        if state == "visible" and not vis:
+            raise Exception(f"{self._key} not visible in state")  # noqa: TRY002
+        if state == "hidden" and vis:
+            raise Exception(f"{self._key} still visible")  # noqa: TRY002
+        # "attached" and other states: treated as satisfied.
+
+    def click(self, *, timeout=None):  # noqa: ARG002
+        if self._parent is not None:
+            self._state.click(self._owner, self._parent, sub=self._key)
+        else:
+            self._state.click(self._owner, self._key)
+
+    def locator(self, selector):
+        return _EvolutionUiLocator(
+            self._state, self._owner, selector, parent=self._key
+        )
+
+
+class _EvolutionUiFrame:
+    """Fake Playwright frame backed by :class:`_EvolutionUiState`."""
+
+    def __init__(self, state):
+        self._state = state
+
+    @property
+    def url(self) -> str:
+        return self._state.url
+
+    def locator(self, selector):
+        return _EvolutionUiLocator(self._state, "frame", selector)
+
+    def get_by_role(self, role, *, name=None):  # noqa: ARG002
+        key = f"role:{role}:{name}" if name else f"role:{role}"
+        return _EvolutionUiLocator(self._state, "frame", key)
+
+
+class _EvolutionUiPage:
+    """Fake Playwright page backed by :class:`_EvolutionUiState`."""
+
+    def __init__(self, state):
+        self._state = state
+
+    def frame(self, name):
+        if name == _C1_FRAME_POL:
+            return _EvolutionUiFrame(self._state)
+        return None
+
+    def locator(self, selector):
+        return _EvolutionUiLocator(self._state, "page", selector)
+
+    def get_by_role(self, role, *, name=None):  # noqa: ARG002
+        key = f"role:{role}:{name}" if name else f"role:{role}"
+        return _EvolutionUiLocator(self._state, "page", key)
+
+    def wait_for_timeout(self, timeout_ms):  # noqa: ARG002
+        pass
+
+
+class TestNoEvolutionsEmptyChunkRecovery:
+    """PSW-S21-C1 A: a genuine no-evolutions boundary closes the warning
+    dialog and the evolution modal and restores detail readiness BEFORE the
+    function returns ``False``."""
+
+    def test_empty_boundary_closes_dialog_modal_and_restores_detail(self) -> None:
+        from apps.ingestion.extractors.legacy_navigation import (
+            wait_for_report_or_no_evolutions,
+        )
+
+        state = _EvolutionUiState(visualize_outcomes=["no_evolutions"])
+        page = _EvolutionUiPage(state)
+        frame = page.frame(_C1_FRAME_POL)
+
+        # Drive the real transition detail -> modal -> no_evolutions.
+        frame.get_by_role("button", name="Evolução").first.click(timeout=1000)
+        frame.locator(_C1_VISUALIZAR_BUTTON).first.click(timeout=1000)
+        assert state.state == "no_evolutions"
+
+        result = wait_for_report_or_no_evolutions(page, timeout_ms=5000)
+
+        # False is returned only AFTER recovery restored detail state.
+        assert result is False
+        assert state.state == "detail"
+        assert state.recovered_to_detail is True
+        # Both the warning dialog and the evolution modal were dismissed via
+        # their titlebar close button (the page fallback for the warning is a
+        # documented no-op because the dialog lives in frame_pol).
+        close_clicks = [
+            entry for entry in state.click_log
+            if entry[1] == _C1_DIALOG_CLOSE
+        ]
+        assert len(close_clicks) >= 2
