@@ -44,6 +44,7 @@ import re
 import time
 from datetime import date, datetime
 from typing import Any
+from urllib.parse import urljoin
 
 from apps.ingestion.extractors.errors import is_playwright_timeout_error
 from apps.ingestion.extractors.legacy_navigation import (
@@ -72,8 +73,10 @@ from apps.ingestion.extractors.persistent_evolution_pdf import (
     EvolutionPdfFlow,
     EvolutionPdfTimeoutError,
     _format_br_date,
+    assert_pdf_response_signature,
     extract_pdf_text,
     normalize_pdf_report_text,
+    read_locator_attribute,
     resolve_pdf_url_from_page,
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
@@ -95,6 +98,23 @@ logger = logging.getLogger(__name__)
 # value, selector, URL, cookie, credential, or raw exception text.
 _EVOLUTION_DATE_FILL_REQUIRED_MESSAGE = (
     "Required evolution date inputs could not be filled."
+)
+
+# PSW-S22 R2/R6: the real legacy report page exposes a JSF ``#printLinks``
+# form whose POST returns the PDF bytes when no direct PDF URL is resolvable.
+# Selectors are isolated here so they are testable with fakes and never
+# coupled to the portal web layer. The constant sanitized message is raised
+# when the form, its ``action``, or the ``javax.faces.ViewState`` hidden
+# input is missing (BEFORE any request is attempted). It carries no URL,
+# cookie, credential, patient data, or raw HTML.
+_PRINT_LINKS_FORM_SELECTOR = "#printLinks"
+_PRINT_LINKS_VIEWSTATE_SELECTOR = (
+    '#printLinks input[name="javax.faces.ViewState"]'
+)
+_PRINT_LINKS_FORM_ACTION_ATTR = "action"
+_PRINT_LINKS_VIEWSTATE_ATTR = "value"
+_EVOLUTION_PDF_FORM_UNRESOLVED_MESSAGE = (
+    "Evolution report download form could not be resolved"
 )
 
 
@@ -1049,42 +1069,42 @@ class RealHandleBridge:
                     last_chunk_had_report = False
                     continue
 
-                # Step 5g: Download PDF through existing context.
+                # Step 5g: Acquire PDF bytes through the existing context.
+                # PSW-S22 R1/R2: a valid direct PDF URL uses an authenticated
+                # GET; otherwise the authenticated ``#printLinks`` JSF form
+                # POST fallback is attempted. PSW-S17 post-cbf50c1 (D17): a
+                # typed bounded-locator timeout during URL resolution MUST
+                # propagate as a typed timeout.
                 try:
                     pdf_url = self._resolve_pdf_url_from_report_page(
                         page, deadline_s
                     )
                 except EvolutionPdfTimeoutError:
-                    # PSW-S17 post-cbf50c1 (D17): typed bounded-locator
-                    # timeout MUST propagate.
                     raise
                 except Exception:
-                    _log_recoverable_chunk_failure(
-                        "Evolution action flow: PDF URL resolution "
-                        "failed (sanitized)",
-                        chunk_start,
-                        chunk_end,
-                    )
-                    last_chunk_had_report = True
-                    continue
-
-                if not pdf_url:
-                    _log_recoverable_chunk_failure(
-                        "Evolution action flow: PDF URL resolution "
-                        "failed (sanitized)",
-                        chunk_start,
-                        chunk_end,
-                    )
-                    last_chunk_had_report = True
-                    continue
+                    # Non-timeout resolution failure: fall through to the
+                    # ``#printLinks`` form POST fallback (PSW-S22 R2) rather
+                    # than skipping the chunk.
+                    pdf_url = None
 
                 try:
-                    pdf_bytes = self._download_pdf(page, pdf_url, deadline_s)
+                    if pdf_url:
+                        pdf_bytes = self._download_pdf(
+                            page, pdf_url, deadline_s
+                        )
+                    else:
+                        pdf_bytes = self._download_pdf_via_print_links_form(
+                            page, deadline_s
+                        )
                 except EvolutionPdfTimeoutError:
                     raise
                 except Exception:
+                    # R6: typed sanitized failures (missing form/action/
+                    # ViewState, non-success HTTP, non-PDF body) are
+                    # recoverable per-chunk skips that preserve priors.
                     _log_recoverable_chunk_failure(
-                        "Evolution action flow: PDF download failed (sanitized)",
+                        "Evolution action flow: PDF acquisition "
+                        "failed (sanitized)",
                         chunk_start,
                         chunk_end,
                     )
@@ -1231,6 +1251,22 @@ class RealHandleBridge:
             raise EvolutionPdfError(
                 "Falha ao baixar o PDF do relatório de evolução"
             )
+        return self._read_and_validate_pdf_body(response, deadline_s)
+
+    def _read_and_validate_pdf_body(
+        self, response: Any, deadline_s: float
+    ) -> bytes:
+        """Read + classify + validate a PDF response body (shared GET/POST).
+
+        PSW-S17 post-31dd3c0 (D21) + PSW-S22 R5: observes the shared
+        monotonic ``deadline_s`` immediately before and after
+        ``response.body()``, classifies a public real Playwright timeout as
+        :class:`EvolutionPdfTimeoutError` and any other body failure as
+        :class:`EvolutionPdfError` (raised OUTSIDE the ``except`` handler so
+        neither ``__cause__`` nor ``__context__`` carries the raw exception),
+        then validates the content-type (when present) and the ``%PDF-``
+        signature before the bytes are returned for parsing.
+        """
         # Immediately before response.body().
         _pdf_remaining_ms(deadline_s)
         body_outcome = "ok"
@@ -1241,6 +1277,7 @@ class RealHandleBridge:
             body_outcome = (
                 "timeout" if is_playwright_timeout_error(exc) else "failed"
             )
+        # PSW-S17 D21: raised OUTSIDE the except handler.
         if body_outcome == "timeout":
             raise EvolutionPdfTimeoutError(_EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE)
         if body_outcome == "failed":
@@ -1249,8 +1286,147 @@ class RealHandleBridge:
             )
         # Immediately after response.body().
         _pdf_remaining_ms(deadline_s)
+        body_bytes = bytes(body or b"")
+        # PSW-S22 R5: validate content-type + %PDF- signature before parsing.
+        assert_pdf_response_signature(response, body_bytes)
+        return body_bytes
 
-        return bytes(body or b"")
+    # ------------------------------------------------------------------
+    # PSW-S22: authenticated #printLinks JSF form POST fallback
+    # ------------------------------------------------------------------
+
+    def _download_pdf_via_print_links_form(
+        self, page: Any, deadline_s: float
+    ) -> bytes:
+        """PSW-S22 R2: authenticated JSF POST fallback via ``#printLinks``.
+
+        Used when no valid direct PDF URL is resolvable. Parses the form
+        ``action`` and the ``javax.faces.ViewState`` hidden input through
+        bounded locator operations (no ``page.content()``) and POSTs the
+        required JSF fields through ``page.context.request``. The existing
+        authenticated context cookies/session are used implicitly (R3);
+        cookie or authorization values are never copied or logged. The
+        bounded chunk timeout is propagated to the POST (R4) and the response
+        is validated per R5.
+
+        R6: a missing form/action/ViewState surfaces as a typed sanitized
+        :class:`EvolutionPdfError` BEFORE any request is attempted. R7: PDF
+        bytes stay in memory; no filesystem artifact is created.
+
+        Args:
+            page: A Playwright-like ``Page`` with the rendered report.
+            deadline_s: Shared monotonic deadline (seconds).
+
+        Returns:
+            Raw PDF bytes.
+
+        Raises:
+            EvolutionPdfTimeoutError: On a bounded locator/POST timeout or
+                deadline expiry.
+            EvolutionPdfError: On a missing form/action/ViewState,
+                non-success HTTP, or non-PDF body.
+        """
+        # Pre-parse boundary: deadline check before any locator operation.
+        _pdf_remaining_ms(deadline_s)
+
+        action = self._read_print_links_attribute(
+            page, _PRINT_LINKS_FORM_SELECTOR, _PRINT_LINKS_FORM_ACTION_ATTR,
+            deadline_s,
+        )
+        view_state = self._read_print_links_attribute(
+            page, _PRINT_LINKS_VIEWSTATE_SELECTOR, _PRINT_LINKS_VIEWSTATE_ATTR,
+            deadline_s,
+        )
+        # R6: missing form/action/ViewState -> typed sanitized failure;
+        # no request.
+        if not action or not view_state:
+            raise EvolutionPdfError(_EVOLUTION_PDF_FORM_UNRESOLVED_MESSAGE)
+
+        action_url = urljoin(self._safe_page_url(page), action)
+        return self._post_print_links_form(
+            page, action_url, view_state, deadline_s
+        )
+
+    def _read_print_links_attribute(
+        self,
+        page: Any,
+        selector: str,
+        attribute: str,
+        deadline_s: float,
+    ) -> str | None:
+        """Read a ``#printLinks`` form attribute via a bounded locator op.
+
+        Returns the attribute value, or ``None`` for absence / non-timeout
+        read failure. Raises :class:`EvolutionPdfTimeoutError` on a bounded
+        Playwright timeout so the failure records the timeout category.
+        """
+        try:
+            locator = page.locator(selector)
+        except Exception:  # noqa: BLE001 - sanitized
+            return None
+        return read_locator_attribute(locator, attribute, deadline_s)
+
+    def _post_print_links_form(
+        self,
+        page: Any,
+        action_url: str,
+        view_state: str,
+        deadline_s: float,
+    ) -> bytes:
+        """POST the ``#printLinks`` JSF form through the existing context.
+
+        PSW-S22 R2/R3/R4: reuses ``page.context.request`` (the existing
+        authenticated session) and propagates the bounded deadline. The POST
+        body carries only the constant JSF field names and the parsed
+        ViewState; no cookie, authorization, patient, URL, or raw-payload
+        value is logged or surfaced.
+        """
+        context = getattr(page, "context", None)
+        request = getattr(context, "request", None) if context is not None else None
+        if request is None:
+            raise EvolutionPdfError(
+                "Browser context unavailable for PDF download"
+            )
+
+        # Pre-post boundary: _pdf_bound_ms checks the deadline and bounds it.
+        timeout_ms = _pdf_bound_ms(deadline_s, DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS)
+        form_fields = {
+            "printLinks": "printLinks",
+            "downloadLinkAjax": "downloadLinkAjax",
+            "javax.faces.ViewState": view_state,
+        }
+        post_outcome = "ok"
+        response = None
+        try:
+            response = request.post(
+                action_url, form=form_fields, timeout=timeout_ms
+            )
+        except Exception as exc:  # noqa: BLE001 - classified below
+            post_outcome = (
+                "timeout" if is_playwright_timeout_error(exc) else "failed"
+            )
+            if post_outcome == "failed":
+                logger.warning(
+                    "Evolution action flow: PDF form POST request failed "
+                    "(sanitized, non-timeout)"
+                )
+        # PSW-S17 D21: raised OUTSIDE the except handler.
+        if post_outcome == "timeout":
+            raise EvolutionPdfTimeoutError(_EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE)
+        if post_outcome == "failed":
+            raise EvolutionPdfError(
+                "Falha ao baixar o PDF do relatório de evolução"
+            )
+        assert response is not None  # post_outcome == "ok" implies a response
+
+        # After request.post(): catch a fake that ignored its timeout.
+        _pdf_remaining_ms(deadline_s)
+
+        if not getattr(response, "ok", False):
+            raise EvolutionPdfError(
+                "Falha ao baixar o PDF do relatório de evolução"
+            )
+        return self._read_and_validate_pdf_body(response, deadline_s)
 
     @staticmethod
     def _safe_page_url(page: Any) -> str:

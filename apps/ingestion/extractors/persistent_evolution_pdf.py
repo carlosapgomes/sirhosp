@@ -111,6 +111,11 @@ _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE = (
     "Persistent evolution PDF download timed out."
 )
 
+# PSW-S22 R5/R6: constant sanitized message raised when the downloaded
+# response is not a PDF (bad content-type or missing ``%PDF-`` signature).
+# Carries no URL, cookie, credential, patient data, or raw body text.
+_INVALID_PDF_MESSAGE = "Downloaded report content is not a valid PDF"
+
 
 # ---------------------------------------------------------------------------
 # PSW-S17 post-ce2c494 (D14): strict single-deadline helpers.
@@ -196,6 +201,102 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
     if not result:
         raise EvolutionPdfError("No text could be extracted from the report PDF")
     return result
+
+
+# ===========================================================================
+# PSW-S22: authenticated response validation primitives
+# ===========================================================================
+
+
+def _response_content_type(response: Any) -> str:
+    """Best-effort ``content-type`` header read (never leaks; never raises).
+
+    Used by :func:`assert_pdf_response_signature` to validate the response
+    content type when the header is present. Returns an empty string when the
+    response has no ``headers`` accessor or the header is absent so the caller
+    defers to the ``%PDF-`` signature check.
+    """
+    try:
+        headers = getattr(response, "headers", None)
+        if not headers:
+            return ""
+        getter = getattr(headers, "get", None)
+        if callable(getter):
+            return str(getter("content-type") or "")
+        if isinstance(headers, dict):
+            return str(headers.get("content-type") or "")
+    except Exception:  # noqa: BLE001 - sanitized
+        return ""
+    return ""
+
+
+def _is_pdf_compatible_content_type(content_type: str) -> bool:
+    """PSW-S22 R5 step 2: PDF-compatible content type when header present.
+
+    An absent/empty header defers to the ``%PDF-`` signature (step 3). A
+    ``text/*`` document (HTML/plain error page) is never a PDF and is rejected
+    here. Other types (including ``application/pdf`` and common binary
+    PDF-serving types such as ``application/octet-stream``) defer to the
+    authoritative ``%PDF-`` signature check.
+    """
+    if not content_type:
+        return True
+    lowered = content_type.lower()
+    if lowered.startswith("text/"):
+        return False
+    return True
+
+
+def assert_pdf_response_signature(response: Any, body: bytes) -> None:
+    """PSW-S22 R5 steps 2-3: validate content-type and ``%PDF-`` signature.
+
+    HTTP status (step 1) is validated by callers around the body read. This
+    helper validates the ``content-type`` header when present and the
+    ``%PDF-`` signature on a non-empty body, raising a sanitised
+    :class:`EvolutionPdfError` on any violation. It is called AFTER the body
+    is retrieved and BEFORE PDF text extraction so HTML/error bytes never
+    reach PyMuPDF as if valid.
+
+    Args:
+        response: The Playwright-like API response (``headers`` accessor).
+        body: Raw response body bytes.
+
+    Raises:
+        EvolutionPdfError: If the content-type is a non-PDF text document or
+            the body does not begin with ``%PDF-``.
+    """
+    if not _is_pdf_compatible_content_type(_response_content_type(response)):
+        raise EvolutionPdfError(_INVALID_PDF_MESSAGE)
+    if not body or not body[:5] == b"%PDF-":
+        raise EvolutionPdfError(_INVALID_PDF_MESSAGE)
+
+
+def read_locator_attribute(
+    locator: Any,
+    attribute: str,
+    deadline_s: float,
+    cap_ms: int = _DEFAULT_ACTION_TIMEOUT_MS,
+) -> str | None:
+    """Read a locator attribute with a bounded Playwright timeout.
+
+    PSW-S22 R2/R4: used to read the ``#printLinks`` form ``action`` and the
+    ``javax.faces.ViewState`` hidden input ``value`` through bounded locator
+    operations governed by the shared deadline (no ``page.content()``). A
+    bounded Playwright timeout raises :class:`EvolutionPdfTimeoutError`; any
+    non-timeout read failure returns ``None`` (treated as absence by the
+    caller). Returns ``None`` for an empty attribute.
+    """
+    try:
+        attr = locator.first.get_attribute(
+            attribute, timeout=_bound_ms(deadline_s, cap_ms)
+        )
+    except Exception as exc:  # noqa: BLE001 - sanitized below
+        if is_playwright_timeout_error(exc):
+            raise EvolutionPdfTimeoutError(
+                _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
+            ) from None
+        return None
+    return attr if attr else None
 
 
 # ===========================================================================

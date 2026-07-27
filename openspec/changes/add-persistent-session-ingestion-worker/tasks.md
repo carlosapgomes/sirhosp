@@ -545,20 +545,47 @@ observable contracts are preserved and not re-audited.
 
 ## 22. PSW-S22: Authenticated PDF form-download parity
 
-- [ ] 22.1 Add failing tests for direct PDF download and `#printLinks` POST
+- [x] 22.1 Add failing tests for direct PDF download and `#printLinks` POST
   fallback with synthetic ViewState and PDF bytes.
-- [ ] 22.2 Implement authenticated form fallback through the existing
+- [x] 22.2 Implement authenticated form fallback through the existing
   `context.request` without filesystem clinical artifacts.
-- [ ] 22.3 Propagate timeout and validate HTTP response, content type, and
+- [x] 22.3 Propagate timeout and validate HTTP response, content type, and
   PDF signature with sanitized typed failures. PSW-S17 corrective closure
   already maps the persistent download timeout to a typed
   `EvolutionPdfTimeoutError` at the source boundary; this task hardens
   HTTP/PDF validation and MUST preserve and reverify the typed
   outer-exception contract rather than claim a new owner.
-- [ ] 22.4 Preserve normalization, shared persistence, cleanup, and no-new-login
+- [x] 22.4 Preserve normalization, shared persistence, cleanup, and no-new-login
   guarantees.
-- [ ] 22.5 Run official validation and create
+- [x] 22.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S22-report.md`.
+
+PSW-S22 closure (authoritative): the persistent evolution acquisition now
+has direct/form parity through the already-authenticated context. A valid
+direct PDF URL uses an authenticated `request.get`; when no direct URL is
+resolvable the bridge parses the real `#printLinks` JSF form `action` and
+`javax.faces.ViewState` via bounded locator operations (no `page.content()`)
+and POSTs the required JSF fields (`printLinks`, `downloadLinkAjax`,
+`javax.faces.ViewState`) through the existing `page.context.request`. A
+missing form/action/ViewState raises a typed sanitized `EvolutionPdfError`
+BEFORE any request is attempted. The existing authenticated context
+cookies/session are used implicitly; no cookie, authorization, patient,
+URL, or raw-payload value is copied or logged. The bounded chunk timeout
+reaches GET and POST (via the shared monotonic deadline and
+`_pdf_bound_ms`), and a Playwright/request timeout or deadline overrun
+surfaces as a typed `EvolutionPdfTimeoutError` (raised outside the `except`
+handlers so neither `__cause__` nor `__context__` carries a raw exception).
+Response validation runs before parsing in this order: HTTP status
+(`response.ok`), PDF-compatible content-type when the header is present
+(`text/*` rejected; absent/binary deferred to the signature), and the
+`%PDF-` signature on a non-empty body — so HTML/error bytes never reach
+PyMuPDF as if valid. PDF bytes and extracted text stay in memory; no PDF,
+HTML, or debug file is created. The acquisition layer is kept separate from
+text normalization, which still stamps the real admission key on every
+event. PSW-S17/S18/S19/S20/S21 observable contracts, the current subprocess
+extractor, and the current worker behavior are preserved and not
+re-audited; the stub `EvolutionPdfFlow` download path remains guarded by
+`extract_pdf_text` and is out of scope for this acquisition-parity slice.
 
 ## 23. PSW-S23: Current-versus-persistent parity suite
 

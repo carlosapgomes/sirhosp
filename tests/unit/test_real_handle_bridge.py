@@ -15,6 +15,7 @@ No real legacy access required.
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -3247,3 +3248,683 @@ class TestBridgeOverlapFailureSanitization:
         # ``__context__`` set to the raw NavigationError).
         assert outer.__cause__ is None
         assert outer.__context__ is None
+
+
+# ===========================================================================
+# PSW-S22: authenticated PDF form-download parity
+# ===========================================================================
+
+
+class _S22AttrLocator:
+    """Locator fake exposing ``count()`` and ``first.get_attribute()``."""
+
+    def __init__(
+        self,
+        *,
+        count_value: int = 1,
+        attribute: str | None = None,
+        attribute_error: Exception | None = None,
+    ) -> None:
+        self._count = count_value
+        self._attribute = attribute
+        self._attribute_error = attribute_error
+        self.attribute_calls: list[tuple[str, dict[str, Any]]] = []
+        self.first = self
+
+    def count(self) -> int:
+        return self._count
+
+    def get_attribute(self, name: str, **kwargs: Any) -> str | None:
+        self.attribute_calls.append((name, kwargs))
+        if self._attribute_error is not None:
+            raise self._attribute_error
+        return self._attribute
+
+
+class _S22Response:
+    """Playwright-like API response fake."""
+
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        body: bytes = b"%PDF-1.4 ok",
+        status: int = 200,
+        content_type: str = "",
+        body_error: Exception | None = None,
+    ) -> None:
+        self.ok = ok
+        self.status = status
+        self._body = body
+        self._body_error = body_error
+        self.headers: dict[str, str] = {}
+        if content_type:
+            self.headers["content-type"] = content_type
+        self.body_calls: int = 0
+
+    def body(self) -> bytes:
+        self.body_calls += 1
+        if self._body_error is not None:
+            raise self._body_error
+        return self._body
+
+
+class _S22Request:
+    """Playwright-like ``APIRequestContext`` fake recording get/post calls."""
+
+    def __init__(
+        self,
+        *,
+        get_response: _S22Response | None = None,
+        post_response: _S22Response | None = None,
+        get_raises: Exception | None = None,
+        post_raises: Exception | None = None,
+    ) -> None:
+        self._get_response = get_response
+        self._post_response = post_response
+        self._get_raises = get_raises
+        self._post_raises = post_raises
+        self.get_calls: list[tuple[str, dict[str, Any]]] = []
+        self.post_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def get(self, url: str, **kwargs: Any) -> _S22Response:
+        self.get_calls.append((url, kwargs))
+        if self._get_raises is not None:
+            raise self._get_raises
+        if self._get_response is None:
+            raise RuntimeError("no GET response configured")
+        return self._get_response
+
+    def post(self, url: str, **kwargs: Any) -> _S22Response:
+        self.post_calls.append((url, kwargs))
+        if self._post_raises is not None:
+            raise self._post_raises
+        if self._post_response is None:
+            raise RuntimeError("no POST response configured")
+        return self._post_response
+
+
+class _S22ReportPage:
+    """Report page fake for the PSW-S22 acquisition paths."""
+
+    def __init__(
+        self,
+        *,
+        url: str = "https://legacy.example/relatorioAnaEvoInternacaoPdf.xhtml",
+        locators: dict[str, _S22AttrLocator] | None = None,
+        request: _S22Request | None = None,
+        frames: list[Any] | None = None,
+    ) -> None:
+        self.url = url
+        self._locators = locators or {}
+        self.context = MagicMock()
+        self.context.request = request or _S22Request()
+        self._frames = frames or []
+
+    def locator(self, selector: str) -> _S22AttrLocator:
+        if selector in self._locators:
+            return self._locators[selector]
+        return _S22AttrLocator(count_value=0)
+
+    @property
+    def frames(self) -> list[Any]:
+        return self._frames
+
+
+class TestBridgePdfFormDownloadParity:
+    """PSW-S22: authenticated PDF form-download parity.
+
+    Direct authenticated GET when a valid PDF URL is present (R1); the real
+    ``#printLinks`` JSF form POST fallback otherwise (R2); the existing
+    authenticated context is the only transport (R3); the bounded chunk
+    timeout propagates (R4); HTTP status / content-type / ``%PDF-`` signature
+    are validated before parsing (R5); typed sanitized failures for missing
+    form/action/ViewState, non-success HTTP, non-PDF body, and timeout (R6);
+    no filesystem artifact is created (R7); normalization/admission-key and
+    the no-new-browser/login guarantees are preserved (R8).
+    """
+
+    _BASE = "apps.ingestion.extractors.real_handle_bridge"
+
+    def _form_locators(
+        self,
+        *,
+        action: str | None = "/relatorio/post.xhtml",
+        view_state: str | None = "viewstate-123",
+    ) -> dict[str, _S22AttrLocator]:
+        from apps.ingestion.extractors.real_handle_bridge import (
+            _PRINT_LINKS_FORM_SELECTOR,
+            _PRINT_LINKS_VIEWSTATE_SELECTOR,
+        )
+
+        return {
+            _PRINT_LINKS_FORM_SELECTOR: _S22AttrLocator(attribute=action),
+            _PRINT_LINKS_VIEWSTATE_SELECTOR: _S22AttrLocator(
+                attribute=view_state
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # R1: direct authenticated GET path
+    # ------------------------------------------------------------------
+
+    def test_direct_get_success_returns_pdf_bytes(self) -> None:
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        body = b"%PDF-1.4 direct-bytes"
+        request = _S22Request(get_response=_S22Response(ok=True, body=body))
+        page = _S22ReportPage(request=request)
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        result = bridge._download_pdf(
+            page, "https://legacy.example/report.pdf", _pdf_deadline_s(60)
+        )
+
+        assert result == body
+        assert len(request.get_calls) == 1
+        # No form POST attempted on the direct path.
+        assert request.post_calls == []
+
+    def test_direct_get_http_failure_raises_typed(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        request = _S22Request(
+            get_response=_S22Response(ok=False, status=500, body=b"err")
+        )
+        page = _S22ReportPage(request=request)
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfError):
+            bridge._download_pdf(
+                page, "https://legacy.example/report.pdf", _pdf_deadline_s(60)
+            )
+
+    def test_direct_get_html_body_with_200_rejected_before_parsing(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        request = _S22Request(
+            get_response=_S22Response(
+                ok=True,
+                status=200,
+                body=b"<html><body>error page</body></html>",
+                content_type="text/html",
+            )
+        )
+        page = _S22ReportPage(request=request)
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfError):
+            bridge._download_pdf(
+                page, "https://legacy.example/report.pdf", _pdf_deadline_s(60)
+            )
+
+    def test_direct_get_invalid_bytes_rejected_before_parsing(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        request = _S22Request(
+            get_response=_S22Response(
+                ok=True,
+                status=200,
+                body=b"NOT-A-PDF-BYTES",
+                content_type="application/pdf",
+            )
+        )
+        page = _S22ReportPage(request=request)
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfError):
+            bridge._download_pdf(
+                page, "https://legacy.example/report.pdf", _pdf_deadline_s(60)
+            )
+
+    # ------------------------------------------------------------------
+    # R2: #printLinks JSF form POST fallback
+    # ------------------------------------------------------------------
+
+    def test_form_post_success_when_no_direct_url(self) -> None:
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        body = b"%PDF-1.4 form-bytes"
+        request = _S22Request(post_response=_S22Response(ok=True, body=body))
+        page = _S22ReportPage(
+            request=request, locators=self._form_locators()
+        )
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        result = bridge._download_pdf_via_print_links_form(
+            page, _pdf_deadline_s(60)
+        )
+
+        assert result == body
+        # Exactly one POST; no GET on the fallback path.
+        assert len(request.post_calls) == 1
+        assert request.get_calls == []
+
+    def test_form_post_includes_required_jsf_fields(self) -> None:
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        body = b"%PDF-1.4 form-bytes"
+        request = _S22Request(post_response=_S22Response(ok=True, body=body))
+        page = _S22ReportPage(
+            request=request,
+            locators=self._form_locators(view_state="viewstate-XYZ"),
+        )
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        bridge._download_pdf_via_print_links_form(page, _pdf_deadline_s(60))
+
+        assert len(request.post_calls) == 1
+        url, kwargs = request.post_calls[0]
+        # Action URL is resolved relative to the report page URL.
+        assert url == "https://legacy.example/relatorio/post.xhtml"
+        form = kwargs["form"]
+        assert set(form.keys()) == {
+            "printLinks",
+            "downloadLinkAjax",
+            "javax.faces.ViewState",
+        }
+        assert form["printLinks"] == "printLinks"
+        assert form["downloadLinkAjax"] == "downloadLinkAjax"
+        assert form["javax.faces.ViewState"] == "viewstate-XYZ"
+        # Bounded timeout propagated.
+        assert 1 <= kwargs["timeout"] <= 60_000
+
+    def test_form_post_http_failure_raises_typed(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        request = _S22Request(
+            post_response=_S22Response(ok=False, status=500, body=b"err")
+        )
+        page = _S22ReportPage(
+            request=request, locators=self._form_locators()
+        )
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfError):
+            bridge._download_pdf_via_print_links_form(
+                page, _pdf_deadline_s(60)
+            )
+
+    def test_form_post_timeout_raises_typed_no_sentinel(self) -> None:
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        sentinel = "Timeout at SECRET_URL cookie=SECRET_COOKIE"
+        request = _S22Request(
+            post_response=_S22Response(ok=True, body=b"%PDF-1.4"),
+            post_raises=PlaywrightTimeoutError(sentinel),
+        )
+        page = _S22ReportPage(
+            request=request, locators=self._form_locators()
+        )
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
+            bridge._download_pdf_via_print_links_form(
+                page, _pdf_deadline_s(60)
+            )
+
+        outer = exc_info.value
+        assert "SECRET_URL" not in str(outer)
+        assert "SECRET_COOKIE" not in str(outer)
+        assert outer.__cause__ is None
+        assert outer.__context__ is None
+
+    # ------------------------------------------------------------------
+    # R6: missing form/action/ViewState -> typed failure; no request
+    # ------------------------------------------------------------------
+
+    def test_missing_viewstate_raises_typed_before_post(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        request = _S22Request(post_response=_S22Response(ok=True))
+        page = _S22ReportPage(
+            request=request,
+            locators=self._form_locators(view_state=None),
+        )
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfError):
+            bridge._download_pdf_via_print_links_form(
+                page, _pdf_deadline_s(60)
+            )
+        # No POST attempted when the form is incomplete.
+        assert request.post_calls == []
+
+    def test_missing_action_raises_typed_before_post(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        request = _S22Request(post_response=_S22Response(ok=True))
+        page = _S22ReportPage(
+            request=request,
+            locators=self._form_locators(action=None),
+        )
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfError):
+            bridge._download_pdf_via_print_links_form(
+                page, _pdf_deadline_s(60)
+            )
+        assert request.post_calls == []
+
+    def test_missing_form_entirely_raises_typed_before_post(self) -> None:
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        request = _S22Request(post_response=_S22Response(ok=True))
+        # No locators registered -> page.locator returns a count=0 locator
+        # whose get_attribute returns None.
+        page = _S22ReportPage(request=request)
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfError):
+            bridge._download_pdf_via_print_links_form(
+                page, _pdf_deadline_s(60)
+            )
+        assert request.post_calls == []
+
+    # ------------------------------------------------------------------
+    # R7: no filesystem artifact; existing context only
+    # ------------------------------------------------------------------
+
+    def test_form_post_writes_no_file_and_uses_existing_context(self) -> None:
+        from unittest.mock import patch
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        body = b"%PDF-1.4 form-bytes"
+        request = _S22Request(post_response=_S22Response(ok=True, body=body))
+        page = _S22ReportPage(
+            request=request, locators=self._form_locators()
+        )
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with (
+            patch("builtins.open") as mock_open,
+            patch("pathlib.Path.write_bytes") as mock_write_bytes,
+            patch("pathlib.Path.write_text") as mock_write_text,
+        ):
+            result = bridge._download_pdf_via_print_links_form(
+                page, _pdf_deadline_s(60)
+            )
+
+        assert result == body
+        mock_open.assert_not_called()
+        mock_write_bytes.assert_not_called()
+        mock_write_text.assert_not_called()
+        # The existing page.context.request is the only transport used.
+        assert page.context.request is request
+
+    # ------------------------------------------------------------------
+    # R8: action-flow integration -> normalization + admission key via form
+    # ------------------------------------------------------------------
+
+    def test_action_flow_form_fallback_normalizes_with_admission_key(self) -> None:
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        body = b"%PDF-1.4 form-bytes"
+        request = _S22Request(post_response=_S22Response(ok=True, body=body))
+        page = _S22ReportPage(
+            request=request, locators=self._form_locators()
+        )
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        base = self._BASE
+        with (
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(
+                f"{base}._read_and_build_snapshot",
+                return_value=[{
+                    "admissionKey": "ADM-FORM",
+                    "admissionStart": "2026-01-01",
+                    "admissionEnd": "",
+                    "ward": "",
+                    "bed": "",
+                }],
+            ),
+            patch(f"{base}.open_internacao_detail"),
+            patch(f"{base}.click_evolucao"),
+            patch(f"{base}.fill_evolution_dates", return_value=True),
+            patch(f"{base}.select_ascending_order"),
+            patch(f"{base}.click_visualizar_report"),
+            patch(
+                f"{base}.wait_for_report_or_no_evolutions",
+                return_value=True,
+            ),
+            # No direct PDF URL -> forces the #printLinks form fallback.
+            patch.object(
+                bridge, "_resolve_pdf_url_from_report_page", return_value=None
+            ),
+            patch.object(bridge, "_resolve_active_page", return_value=page),
+            patch(
+                f"{base}.extract_pdf_text",
+                return_value="raw form text",
+            ),
+            patch(
+                f"{base}.normalize_pdf_report_text",
+                side_effect=lambda *a, **k: [{
+                    "admission_key": k.get("admission_key", ""),
+                    "happened_at": "2026-01-10T09:00:00",
+                    "event_type": "medical",
+                    "content": "ok",
+                    "profession": "Dr",
+                }],
+            ),
+        ):
+            result = bridge.extract_evolutions_via_legacy_actions(
+                patient_record="123",
+                start_date="2026-01-01",
+                end_date="2026-01-15",
+                timeout=60,
+            )
+
+        # The form POST was attempted exactly once and the direct GET never.
+        assert len(request.post_calls) == 1
+        assert request.get_calls == []
+        # The real admission key is stamped on the normalized event.
+        assert len(result) == 1
+        assert result[0]["admission_key"] == "ADM-FORM"
+
+    def test_action_flow_direct_url_skips_form_post(self) -> None:
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        body = b"%PDF-1.4 direct-bytes"
+        request = _S22Request(
+            get_response=_S22Response(ok=True, body=body),
+            post_response=_S22Response(ok=True, body=b"%PDF-1.4 form"),
+        )
+        page = _S22ReportPage(
+            request=request, locators=self._form_locators()
+        )
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        base = self._BASE
+        with (
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(
+                f"{base}._read_and_build_snapshot",
+                return_value=[{
+                    "admissionKey": "ADM-DIRECT",
+                    "admissionStart": "2026-01-01",
+                    "admissionEnd": "",
+                    "ward": "",
+                    "bed": "",
+                }],
+            ),
+            patch(f"{base}.open_internacao_detail"),
+            patch(f"{base}.click_evolucao"),
+            patch(f"{base}.fill_evolution_dates", return_value=True),
+            patch(f"{base}.select_ascending_order"),
+            patch(f"{base}.click_visualizar_report"),
+            patch(
+                f"{base}.wait_for_report_or_no_evolutions",
+                return_value=True,
+            ),
+            patch.object(
+                bridge,
+                "_resolve_pdf_url_from_report_page",
+                return_value="https://legacy.example/report.pdf",
+            ),
+            patch.object(bridge, "_resolve_active_page", return_value=page),
+            patch(f"{base}.extract_pdf_text", return_value="raw direct text"),
+            patch(
+                f"{base}.normalize_pdf_report_text",
+                return_value=[{
+                    "admission_key": "ADM-DIRECT",
+                    "happened_at": "2026-01-10T09:00:00",
+                    "event_type": "medical",
+                    "content": "ok",
+                    "profession": "Dr",
+                }],
+            ),
+        ):
+            result = bridge.extract_evolutions_via_legacy_actions(
+                patient_record="123",
+                start_date="2026-01-01",
+                end_date="2026-01-15",
+                timeout=60,
+            )
+
+        # Direct GET used; the form POST fallback never attempted.
+        assert len(request.get_calls) == 1
+        assert request.post_calls == []
+        assert result and result[0]["admission_key"] == "ADM-DIRECT"
+
+    def test_no_subprocess_or_new_browser_on_form_fallback(self) -> None:
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        body = b"%PDF-1.4 form-bytes"
+        request = _S22Request(post_response=_S22Response(ok=True, body=body))
+        page = _S22ReportPage(
+            request=request, locators=self._form_locators()
+        )
+        handle = FakePlaywrightHandle()
+        bridge = RealHandleBridge(handle)
+
+        base = self._BASE
+        with (
+            patch(f"{base}.ensure_search_screen"),
+            patch(f"{base}.search_patient"),
+            patch(f"{base}.click_internacoes"),
+            patch(
+                f"{base}._read_and_build_snapshot",
+                return_value=[{
+                    "admissionKey": "ADM-FORM",
+                    "admissionStart": "2026-01-01",
+                    "admissionEnd": "",
+                    "ward": "",
+                    "bed": "",
+                }],
+            ),
+            patch(f"{base}.open_internacao_detail"),
+            patch(f"{base}.click_evolucao"),
+            patch(f"{base}.fill_evolution_dates", return_value=True),
+            patch(f"{base}.select_ascending_order"),
+            patch(f"{base}.click_visualizar_report"),
+            patch(
+                f"{base}.wait_for_report_or_no_evolutions",
+                return_value=True,
+            ),
+            patch.object(
+                bridge, "_resolve_pdf_url_from_report_page", return_value=None
+            ),
+            patch.object(bridge, "_resolve_active_page", return_value=page),
+            patch(f"{base}.extract_pdf_text", return_value="raw form text"),
+            patch(f"{base}.normalize_pdf_report_text", return_value=[]),
+            patch("subprocess.run") as mock_run,
+            patch("subprocess.Popen") as mock_popen,
+            patch("playwright.sync_api.sync_playwright") as mock_sync,
+        ):
+            bridge.extract_evolutions_via_legacy_actions(
+                patient_record="123",
+                start_date="2026-01-01",
+                end_date="2026-01-15",
+                timeout=60,
+            )
+
+        mock_run.assert_not_called()
+        mock_popen.assert_not_called()
+        mock_sync.assert_not_called()
+        # The existing handle was never restarted; the form path reuses it.
+        assert handle.restart_calls == 0
