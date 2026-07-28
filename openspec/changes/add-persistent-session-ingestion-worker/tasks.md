@@ -560,32 +560,43 @@ observable contracts are preserved and not re-audited.
 - [x] 22.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S22-report.md`.
 
-PSW-S22 closure (authoritative): the persistent evolution acquisition now
-has direct/form parity through the already-authenticated context. A valid
-direct PDF URL uses an authenticated `request.get`; when no direct URL is
-resolvable the bridge parses the real `#printLinks` JSF form `action` and
-`javax.faces.ViewState` via bounded locator operations (no `page.content()`)
-and POSTs the required JSF fields (`printLinks`, `downloadLinkAjax`,
-`javax.faces.ViewState`) through the existing `page.context.request`. A
-missing form/action/ViewState raises a typed sanitized `EvolutionPdfError`
-BEFORE any request is attempted. The existing authenticated context
-cookies/session are used implicitly; no cookie, authorization, patient,
-URL, or raw-payload value is copied or logged. The bounded chunk timeout
-reaches GET and POST (via the shared monotonic deadline and
-`_pdf_bound_ms`), and a Playwright/request timeout or deadline overrun
-surfaces as a typed `EvolutionPdfTimeoutError` (raised outside the `except`
-handlers so neither `__cause__` nor `__context__` carries a raw exception).
-Response validation runs before parsing in this order: HTTP status
-(`response.ok`), PDF-compatible content-type when the header is present
-(`text/*` rejected; absent/binary deferred to the signature), and the
-`%PDF-` signature on a non-empty body — so HTML/error bytes never reach
-PyMuPDF as if valid. PDF bytes and extracted text stay in memory; no PDF,
-HTML, or debug file is created. The acquisition layer is kept separate from
-text normalization, which still stamps the real admission key on every
-event. PSW-S17/S18/S19/S20/S21 observable contracts, the current subprocess
-extractor, and the current worker behavior are preserved and not
-re-audited; the stub `EvolutionPdfFlow` download path remains guarded by
-`extract_pdf_text` and is out of scope for this acquisition-parity slice.
+PSW-S22 closure (authoritative; COMPLETE after C1): the persistent
+evolution acquisition now has direct/form parity through the
+already-authenticated context. A valid direct PDF URL uses an authenticated
+`request.get`; when no direct URL is resolvable the bridge resolves the
+existing `frame_pol` report frame (the same `SEL_FRAME_POL` contract used
+by `wait_for_report_or_no_evolutions`) and reads the real `#printLinks`
+JSF form `action` and `javax.faces.ViewState` from locators owned by that
+report frame (never from the top-level page), resolving a relative action
+against the report-frame URL. The POST still uses only the existing
+`page.context.request` with the required JSF fields (`printLinks`,
+`downloadLinkAjax`, `javax.faces.ViewState`). A missing report frame, form,
+action, or ViewState raises a typed sanitized `EvolutionPdfError` BEFORE
+any request is attempted; `read_locator_attribute` distinguishes genuine
+absence (a non-blocking `count()` probe returns zero) from a real
+attribute-read timeout, so absence reaches the unresolved-form path as an
+exact `EvolutionPdfError` with zero GET/POST calls, while a bounded
+Playwright attribute-read timeout on a locator proven present surfaces as a
+typed `EvolutionPdfTimeoutError` raised outside the `except` handler
+(neither `__cause__` nor `__context__` carries a raw exception). The
+existing authenticated context cookies/session are used implicitly; no
+cookie, authorization, patient, URL, or raw-payload value is copied or
+logged. The bounded chunk timeout reaches GET and POST (via the shared
+monotonic deadline and `_pdf_bound_ms`), and a Playwright/request timeout
+or deadline overrun surfaces as a typed `EvolutionPdfTimeoutError` (raised
+outside the `except` handlers so neither `__cause__` nor `__context__`
+carries a raw exception). Response validation runs before parsing in this
+order: HTTP status (`response.ok`), PDF-compatible content-type when the
+header is present (`text/*` rejected; absent/binary deferred to the
+signature), and the `%PDF-` signature on a non-empty body — so HTML/error
+bytes never reach PyMuPDF as if valid. PDF bytes and extracted text stay in
+memory; no PDF, HTML, or debug file is created. The acquisition layer is
+kept separate from text normalization, which still stamps the real
+admission key on every event. PSW-S17/S18/S19/S20/S21 observable
+contracts, the current subprocess extractor, and the current worker
+behavior are preserved and not re-audited; the stub `EvolutionPdfFlow`
+download path remains guarded by `extract_pdf_text` and is out of scope for
+this acquisition-parity slice.
 
 ## 23. PSW-S23: Current-versus-persistent parity suite
 

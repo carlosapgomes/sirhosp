@@ -3256,7 +3256,13 @@ class TestBridgeOverlapFailureSanitization:
 
 
 class _S22AttrLocator:
-    """Locator fake exposing ``count()`` and ``first.get_attribute()``."""
+    """Locator fake exposing ``count()`` and ``first.get_attribute()``.
+
+    A count of zero models a genuinely absent element: ``get_attribute`` is
+    a trap that must never be reached. Real Playwright would wait and time
+    out on an absent locator; the production code probes ``count()`` first
+    and treats zero as absence, so this trap proves that path is taken.
+    """
 
     def __init__(
         self,
@@ -3276,6 +3282,10 @@ class _S22AttrLocator:
 
     def get_attribute(self, name: str, **kwargs: Any) -> str | None:
         self.attribute_calls.append((name, kwargs))
+        if self._count == 0:
+            raise AssertionError(
+                "get_attribute must not be called on an absent locator"
+            )
         if self._attribute_error is not None:
             raise self._attribute_error
         return self._attribute
@@ -3344,31 +3354,68 @@ class _S22Request:
         return self._post_response
 
 
-class _S22ReportPage:
-    """Report page fake for the PSW-S22 acquisition paths."""
+class _S22ReportFrame:
+    """The ``frame_pol`` report frame fake owning the ``#printLinks`` locators."""
 
     def __init__(
         self,
         *,
-        url: str = "https://legacy.example/relatorioAnaEvoInternacaoPdf.xhtml",
+        url: str,
         locators: dict[str, _S22AttrLocator] | None = None,
-        request: _S22Request | None = None,
-        frames: list[Any] | None = None,
     ) -> None:
         self.url = url
         self._locators = locators or {}
-        self.context = MagicMock()
-        self.context.request = request or _S22Request()
-        self._frames = frames or []
 
     def locator(self, selector: str) -> _S22AttrLocator:
         if selector in self._locators:
             return self._locators[selector]
         return _S22AttrLocator(count_value=0)
 
-    @property
-    def frames(self) -> list[Any]:
-        return self._frames
+
+class _S22ReportPage:
+    """Top-level page fake owning ``context.request`` and the report frame.
+
+    Models the production topology: the report and ``#printLinks`` live in
+    the ``frame_pol`` iframe, while ``context.request`` stays on the page.
+    The top-level page URL and the report-frame URL use different paths so
+    action-base bugs are observable. ``page.locator()`` is a trap for the
+    form path: it records the call and returns an absent locator.
+    """
+
+    _TOP_URL = "https://legacy.example/portal/consulta.xhtml"
+    _FRAME_URL = (
+        "https://legacy.example/report/"
+        "relatorioAnaEvoInternacaoPdf.xhtml"
+    )
+
+    def __init__(
+        self,
+        *,
+        url: str | None = None,
+        frame_url: str | None = None,
+        locators: dict[str, _S22AttrLocator] | None = None,
+        request: _S22Request | None = None,
+    ) -> None:
+        self.url = url or self._TOP_URL
+        self.top_locator_calls: list[str] = []
+        self.context = MagicMock()
+        self.context.request = request or _S22Request()
+        self._frame: _S22ReportFrame | None = _S22ReportFrame(
+            url=frame_url or self._FRAME_URL, locators=locators or {}
+        )
+
+    def frame(self, name: str | None = None) -> _S22ReportFrame | None:
+        from apps.ingestion.extractors.legacy_navigation import SEL_FRAME_POL
+
+        if name == SEL_FRAME_POL:
+            return self._frame
+        return None
+
+    def locator(self, selector: str) -> _S22AttrLocator:
+        # TRAP: the form path must read locators from the report frame, never
+        # the top-level page. Record the call and return an absent locator.
+        self.top_locator_calls.append(selector)
+        return _S22AttrLocator(count_value=0)
 
 
 class TestBridgePdfFormDownloadParity:
@@ -3389,7 +3436,7 @@ class TestBridgePdfFormDownloadParity:
     def _form_locators(
         self,
         *,
-        action: str | None = "/relatorio/post.xhtml",
+        action: str | None = "post.xhtml",
         view_state: str | None = "viewstate-123",
     ) -> dict[str, _S22AttrLocator]:
         from apps.ingestion.extractors.real_handle_bridge import (
@@ -3548,8 +3595,9 @@ class TestBridgePdfFormDownloadParity:
 
         assert len(request.post_calls) == 1
         url, kwargs = request.post_calls[0]
-        # Action URL is resolved relative to the report page URL.
-        assert url == "https://legacy.example/relatorio/post.xhtml"
+        # Action URL is resolved relative to the report FRAME URL (not the
+        # top-level page URL).
+        assert url == "https://legacy.example/report/post.xhtml"
         form = kwargs["form"]
         assert set(form.keys()) == {
             "printLinks",
@@ -3928,3 +3976,118 @@ class TestBridgePdfFormDownloadParity:
         mock_sync.assert_not_called()
         # The existing handle was never restarted; the form path reuses it.
         assert handle.restart_calls == 0
+
+    # ------------------------------------------------------------------
+    # PSW-S22-C1: real report-frame topology + absence-vs-timeout parity
+    # ------------------------------------------------------------------
+
+    def test_form_post_reads_form_from_frame_pol_not_top_level_page(self) -> None:
+        """C1-A: the complete form lives only inside ``frame_pol``.
+
+        The top-level ``page.locator()`` must never be queried for the form;
+        the relative action is resolved against the report-frame URL; one
+        authenticated POST occurs through the existing request context.
+        """
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        body = b"%PDF-1.4 form-bytes"
+        request = _S22Request(post_response=_S22Response(ok=True, body=body))
+        page = _S22ReportPage(
+            request=request, locators=self._form_locators(view_state="VS-FRAME")
+        )
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        result = bridge._download_pdf_via_print_links_form(
+            page, _pdf_deadline_s(60)
+        )
+
+        assert result == body
+        # The form was read from frame_pol, never from the top-level page.
+        assert page.top_locator_calls == []
+        assert len(request.post_calls) == 1
+        assert request.get_calls == []
+        url, kwargs = request.post_calls[0]
+        # Relative action resolved against the report-frame URL.
+        assert url == "https://legacy.example/report/post.xhtml"
+        form = kwargs["form"]
+        assert form["javax.faces.ViewState"] == "VS-FRAME"
+        assert 1 <= kwargs["timeout"] <= 60_000
+
+    def test_missing_form_classified_as_absence_not_timeout(self) -> None:
+        """C1-B: a genuinely absent locator is probed via ``count()`` first.
+
+        Its attribute trap is never called, the exact outer type is
+        ``EvolutionPdfError`` (not ``EvolutionPdfTimeoutError``), the message
+        is constant/sanitized, and no GET or POST is attempted.
+        """
+        import pytest
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfError,
+            EvolutionPdfTimeoutError,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import (
+            _EVOLUTION_PDF_FORM_UNRESOLVED_MESSAGE,
+            RealHandleBridge,
+        )
+
+        request = _S22Request(post_response=_S22Response(ok=True))
+        # No locators registered on the frame -> both selectors are absent.
+        page = _S22ReportPage(request=request)
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+
+        with pytest.raises(EvolutionPdfError) as exc_info:
+            bridge._download_pdf_via_print_links_form(
+                page, _pdf_deadline_s(60)
+            )
+
+        assert not isinstance(exc_info.value, EvolutionPdfTimeoutError)
+        assert str(exc_info.value) == _EVOLUTION_PDF_FORM_UNRESOLVED_MESSAGE
+        # No request attempted for an unresolved form.
+        assert request.get_calls == []
+        assert request.post_calls == []
+        # The top-level page locator trap was not used either.
+        assert page.top_locator_calls == []
+
+    def test_present_locator_attribute_timeout_is_typed_no_context(self) -> None:
+        """C1-B: a present locator whose attribute read raises a real
+        Playwright timeout surfaces as ``EvolutionPdfTimeoutError`` raised
+        OUTSIDE the except handler (no cause/context, no sentinel leak)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            EvolutionPdfTimeoutError,
+            read_locator_attribute,
+        )
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+
+        sentinel = "Timeout at SECRET_URL cookie=SECRET_COOKIE"
+
+        class _PresentTimeoutLocator:
+            first = property(lambda self: self)
+
+            def count(self) -> int:
+                return 1
+
+            def get_attribute(self, name, **kwargs):  # noqa: ARG002
+                raise PlaywrightTimeoutError(sentinel)
+
+        with pytest.raises(EvolutionPdfTimeoutError) as exc_info:
+            read_locator_attribute(
+                _PresentTimeoutLocator(), "action", _pdf_deadline_s(60)
+            )
+
+        outer = exc_info.value
+        assert "SECRET_URL" not in str(outer)
+        assert "SECRET_COOKIE" not in str(outer)
+        assert outer.__cause__ is None
+        assert outer.__context__ is None

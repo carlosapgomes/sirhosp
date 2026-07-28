@@ -48,6 +48,7 @@ from urllib.parse import urljoin
 
 from apps.ingestion.extractors.errors import is_playwright_timeout_error
 from apps.ingestion.extractors.legacy_navigation import (
+    SEL_FRAME_POL,
     NavigationError,
     NavigationTimeoutError,
     _read_and_build_snapshot,
@@ -1329,39 +1330,57 @@ class RealHandleBridge:
         # Pre-parse boundary: deadline check before any locator operation.
         _pdf_remaining_ms(deadline_s)
 
+        # PSW-S22-C1 A: the report and ``#printLinks`` form live inside the
+        # ``frame_pol`` iframe (mirrors ``wait_for_report_or_no_evolutions``
+        # and the working ``path2.baixar_pdf_via_formulario_relatorio``
+        # reference). ``page`` remains the owner of ``context.request``.
+        report_frame = self._resolve_report_frame(page)
+        if report_frame is None:
+            raise EvolutionPdfError(_EVOLUTION_PDF_FORM_UNRESOLVED_MESSAGE)
+
         action = self._read_print_links_attribute(
-            page, _PRINT_LINKS_FORM_SELECTOR, _PRINT_LINKS_FORM_ACTION_ATTR,
-            deadline_s,
+            report_frame, _PRINT_LINKS_FORM_SELECTOR,
+            _PRINT_LINKS_FORM_ACTION_ATTR, deadline_s,
         )
         view_state = self._read_print_links_attribute(
-            page, _PRINT_LINKS_VIEWSTATE_SELECTOR, _PRINT_LINKS_VIEWSTATE_ATTR,
-            deadline_s,
+            report_frame, _PRINT_LINKS_VIEWSTATE_SELECTOR,
+            _PRINT_LINKS_VIEWSTATE_ATTR, deadline_s,
         )
         # R6: missing form/action/ViewState -> typed sanitized failure;
         # no request.
         if not action or not view_state:
             raise EvolutionPdfError(_EVOLUTION_PDF_FORM_UNRESOLVED_MESSAGE)
 
-        action_url = urljoin(self._safe_page_url(page), action)
+        # PSW-S22-C1 A: resolve a relative action against the report-frame
+        # URL, not the top-level page URL.
+        action_url = urljoin(self._safe_frame_url(report_frame), action)
         return self._post_print_links_form(
             page, action_url, view_state, deadline_s
         )
 
+    def _resolve_report_frame(self, page: Any) -> Any:
+        """Resolve the existing ``frame_pol`` report frame (never raises)."""
+        try:
+            return page.frame(name=SEL_FRAME_POL)
+        except Exception:  # noqa: BLE001 - sanitized
+            return None
+
     def _read_print_links_attribute(
         self,
-        page: Any,
+        owner: Any,
         selector: str,
         attribute: str,
         deadline_s: float,
     ) -> str | None:
-        """Read a ``#printLinks`` form attribute via a bounded locator op.
+        """Read a ``#printLinks`` form attribute from the report frame.
 
-        Returns the attribute value, or ``None`` for absence / non-timeout
-        read failure. Raises :class:`EvolutionPdfTimeoutError` on a bounded
-        Playwright timeout so the failure records the timeout category.
+        PSW-S22-C1 A: ``owner`` is the ``frame_pol`` report frame (never the
+        top-level page). Returns the attribute value, or ``None`` for
+        absence / non-timeout read failure. Raises
+        :class:`EvolutionPdfTimeoutError` on a bounded Playwright timeout.
         """
         try:
-            locator = page.locator(selector)
+            locator = owner.locator(selector)
         except Exception:  # noqa: BLE001 - sanitized
             return None
         return read_locator_attribute(locator, attribute, deadline_s)
@@ -1433,6 +1452,14 @@ class RealHandleBridge:
         """Safely extract the page URL (never leaks payloads)."""
         try:
             return str(page.url or "")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _safe_frame_url(frame: Any) -> str:
+        """Safely extract the report-frame URL (never leaks payloads)."""
+        try:
+            return str(frame.url or "")
         except Exception:
             return ""
 

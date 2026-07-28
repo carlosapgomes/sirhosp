@@ -279,23 +279,61 @@ def read_locator_attribute(
 ) -> str | None:
     """Read a locator attribute with a bounded Playwright timeout.
 
-    PSW-S22 R2/R4: used to read the ``#printLinks`` form ``action`` and the
-    ``javax.faces.ViewState`` hidden input ``value`` through bounded locator
-    operations governed by the shared deadline (no ``page.content()``). A
-    bounded Playwright timeout raises :class:`EvolutionPdfTimeoutError`; any
-    non-timeout read failure returns ``None`` (treated as absence by the
-    caller). Returns ``None`` for an empty attribute.
+    PSW-S22 R2/R4 + PSW-S22-C1: used to read the ``#printLinks`` form
+    ``action`` and the ``javax.faces.ViewState`` hidden input ``value``
+    through bounded locator operations governed by the shared deadline (no
+    ``page.content()``).
+
+    Absence versus timeout is distinguished explicitly so a genuinely
+    missing form/input is reported as absence (``None``) rather than
+    misclassified as a Playwright attribute-read timeout:
+
+    1. the shared deadline is checked before any locator work;
+    2. a non-blocking ``count()`` presence probe runs first;
+    3. the deadline is checked immediately after that probe;
+    4. a genuinely absent locator (count zero, or a sanitized non-timeout
+       probe failure) returns ``None`` WITHOUT reading the attribute;
+    5. the attribute is read with the existing bounded timeout only after a
+       positive presence probe (``_bound_ms`` re-checks the deadline, so a
+       deadline overrun surfaces as a typed timeout in normal flow);
+    6. an empty attribute or sanitized non-timeout read failure returns
+       ``None``;
+    7. a real Playwright attribute-read timeout raises
+       :class:`EvolutionPdfTimeoutError`;
+    8. the typed timeout is raised OUTSIDE the ``except`` handler so both
+       ``__cause__`` and ``__context__`` are ``None`` and no raw exception
+       sentinel is retained.
     """
+    # 1. deadline check before any locator work.
+    _remaining_ms(deadline_s)
+    # 2. non-blocking presence probe (Playwright ``count()`` is non-blocking).
+    try:
+        present = locator.count() > 0
+    except Exception:  # noqa: BLE001 - sanitized non-timeout probe failure
+        return None
+    # 3. deadline check immediately after the probe.
+    _remaining_ms(deadline_s)
+    # 4. genuinely absent -> None (no attribute read, no timeout).
+    if not present:
+        return None
+    # 5. read the attribute with the bounded timeout only after positive
+    #    presence. ``_bound_ms`` re-checks the deadline (overrun -> typed).
+    attr_outcome = "ok"
+    attr = None
     try:
         attr = locator.first.get_attribute(
             attribute, timeout=_bound_ms(deadline_s, cap_ms)
         )
-    except Exception as exc:  # noqa: BLE001 - sanitized below
-        if is_playwright_timeout_error(exc):
-            raise EvolutionPdfTimeoutError(
-                _EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE
-            ) from None
+    except Exception as exc:  # noqa: BLE001 - classified below
+        attr_outcome = (
+            "timeout" if is_playwright_timeout_error(exc) else "failed"
+        )
+    # 7/8. typed timeout raised OUTSIDE the except handler.
+    if attr_outcome == "timeout":
+        raise EvolutionPdfTimeoutError(_EVOLUTION_PDF_REPORT_TIMEOUT_MESSAGE)
+    if attr_outcome == "failed":
         return None
+    # 6. None for an empty attribute.
     return attr if attr else None
 
 
