@@ -32,6 +32,7 @@ normalization is listed in the slice report.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import ExitStack, contextmanager
 from datetime import datetime
@@ -62,6 +63,10 @@ from apps.ingestion.models import (
     IngestionRun,
     IngestionRunAttempt,
     IngestionRunStageMetric,
+)
+from apps.ingestion.services import (
+    compute_content_hash,
+    compute_event_identity_key,
 )
 from apps.patients.models import Admission, Patient
 
@@ -143,7 +148,7 @@ def _evolutions_full(pr: str, *, revised: bool = False) -> list[dict[str, Any]]:
     base = {
         "admission_key": f"ADM-NEW-{pr}",
         "patient_source_key": pr,
-        "patient_name": f"PACIENTE {pr}",
+        "patient_name": "PACIENTE TESTE",
         "source_system": "tasy",
         "ward": "Enfermaria",
         "bed": "02",
@@ -387,6 +392,120 @@ def _stage_statuses(run: IngestionRun) -> dict[str, str]:
     }
 
 
+def _clinical_counts() -> tuple[int, int, int]:
+    """Global Patient/Admission/ClinicalEvent row counts for delta checks."""
+    return (
+        Patient.objects.count(),
+        Admission.objects.count(),
+        ClinicalEvent.objects.count(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# C1-R1: deterministic persisted clinical snapshot (narrow normalization)
+#
+# The ONLY values normalized are the synthetic patient-record token (which
+# differs per worker) and the Patient PK embedded in event_identity_key.
+# Ward, bed, dates, content, content_hash, author, profession, and signature
+# are NEVER normalized, so a differing value can never hide behind equal
+# counts or equal normalized identifiers.
+# ---------------------------------------------------------------------------
+
+_PR_MARKER = "<PR>"
+_IDENTITY_PATIENT_ID = 0
+
+
+def _norm_token(value: Any, pr: str) -> Any:
+    if value is None:
+        return None
+    return value.replace(pr, _PR_MARKER)
+
+
+def _norm_identity_key(event: ClinicalEvent) -> str:
+    """Recompute event_identity_key with a constant patient PK.
+
+    The real identity key embeds the Patient DB PK (stable per row but
+    different across the two workers' independent rows). Recomputing it with
+    a constant PK lets two logically-identical events compare equal while
+    keeping happened_at/author/source_system observable. Mirrors
+    ``compute_event_identity_key``'s formula exactly.
+    """
+    raw = (
+        f"{event.patient.source_system}"
+        f"|{_IDENTITY_PATIENT_ID}"
+        f"|{event.happened_at.isoformat()}"
+        f"|{event.author_name}"
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _clinical_snapshot(pr: str) -> dict[str, Any]:
+    """Deterministic, normalized field snapshot of persisted clinical state."""
+    patient = Patient.objects.filter(
+        source_system="tasy", patient_source_key=pr
+    ).first()
+    if patient is None:
+        return {"patient": None, "admissions": [], "events": []}
+    patient_snap = {
+        "source_system": patient.source_system,
+        "patient_source_key": _norm_token(patient.patient_source_key, pr),
+        "name": patient.name,
+        "demographics": {
+            f: (getattr(patient, f, None) or "") for f in _DEMOGRAPHIC_FIELDS
+        },
+    }
+    admissions = [
+        {
+            "source_system": adm.source_system,
+            "source_admission_key": _norm_token(adm.source_admission_key, pr),
+            "source_patient_reference": _norm_token(
+                adm.source_patient_reference or "", pr
+            ),
+            "admission_date": (
+                adm.admission_date.isoformat() if adm.admission_date else None
+            ),
+            "discharge_date": (
+                adm.discharge_date.isoformat() if adm.discharge_date else None
+            ),
+            "ward": adm.ward,
+            "bed": adm.bed,
+        }
+        for adm in Admission.objects.filter(patient=patient)
+    ]
+    admissions.sort(
+        key=lambda a: (a["source_admission_key"], a["admission_date"] or "")
+    )
+    events = [
+        {
+            "patient_source_key": _norm_token(
+                ev.patient.patient_source_key, pr
+            ),
+            "admission_source_key": _norm_token(
+                ev.admission.source_admission_key, pr
+            ),
+            "event_identity_key": _norm_identity_key(ev),
+            "content_hash": ev.content_hash,
+            "happened_at": (
+                ev.happened_at.isoformat() if ev.happened_at else None
+            ),
+            "signed_at": ev.signed_at.isoformat() if ev.signed_at else None,
+            "author_name": ev.author_name,
+            "profession_type": ev.profession_type,
+            "content_text": ev.content_text,
+            "signature_line": ev.signature_line,
+        }
+        for ev in ClinicalEvent.objects.filter(
+            admission__patient=patient
+        ).select_related("admission", "patient")
+    ]
+    events.sort(key=lambda e: (e["event_identity_key"], e["content_hash"]))
+    return {
+        "patient": patient_snap,
+        "admissions": admissions,
+        "events": events,
+    }
+
+
 def _observable(run: IngestionRun, pr: str) -> dict[str, Any]:
     run.refresh_from_db()
     patient = Patient.objects.filter(
@@ -425,6 +544,7 @@ def _observable(run: IngestionRun, pr: str) -> dict[str, Any]:
         "has_heartbeat": run.worker_heartbeat_at is not None,
         "batch_status": batch.status if batch else None,
         "batch_closed": (batch.finished_at is not None) if batch else None,
+        "clinical": _clinical_snapshot(pr),
     }
 
 
@@ -458,7 +578,7 @@ def _preseed(intent: str, pr: str) -> None:
     """
     if intent == "admissions_only":
         patient = Patient.objects.create(
-            source_system="tasy", patient_source_key=pr, name=f"OLD {pr}"
+            source_system="tasy", patient_source_key=pr, name="OLD PATIENT"
         )
         Admission.objects.create(
             patient=patient,
@@ -475,7 +595,7 @@ def _preseed(intent: str, pr: str) -> None:
         )
     elif intent == "demographics_only":
         Patient.objects.create(
-            source_system="tasy", patient_source_key=pr, name=f"OLD {pr}"
+            source_system="tasy", patient_source_key=pr, name="OLD PATIENT"
         )
 
 
@@ -510,6 +630,76 @@ def _needs_batch(intent: str) -> bool:
 # ===========================================================================
 # R1/R2: intent pairwise parity matrix
 # ===========================================================================
+
+
+@pytest.mark.django_db
+class TestComparatorSensitivity:
+    """C1-R1: equal row counts must NOT hide differing persisted values.
+
+    Two states with identical counts but a differing Admission value (ward)
+    and a differing ClinicalEvent value (content) must produce non-equal
+    observable snapshots. Against the count-only snapshot this fails because
+    the counts match -- the meaningful RED for C1.
+    """
+
+    def _seed_state(self, pr: str, ward: str, content: str) -> IngestionRun:
+        run = IngestionRun.objects.create(
+            status="succeeded",
+            intent="full_admission_sync",
+            attempt_count=1,
+            max_attempts=1,
+            admissions_seen=1,
+            admissions_created=1,
+            events_processed=1,
+            events_created=1,
+            parameters_json={
+                "patient_record": pr,
+                "intent": "full_admission_sync",
+            },
+        )
+        patient = Patient.objects.create(
+            source_system="tasy",
+            patient_source_key=pr,
+            name="PACIENTE SENS",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key=f"ADM-NEW-{pr}",
+            admission_date=timezone.make_aware(datetime(2024, 2, 1, 0, 0, 0)),
+            ward=ward,
+            bed="01",
+        )
+        happened = timezone.make_aware(datetime(2024, 2, 5, 9, 0, 0))
+        ClinicalEvent.objects.create(
+            admission=admission,
+            patient=patient,
+            ingestion_run=run,
+            event_identity_key=compute_event_identity_key(
+                {
+                    "source_system": "tasy",
+                    "happened_at": "2024-02-05T09:00:00",
+                    "author_name": "DRA. TESTE",
+                },
+                patient_id=patient.pk,
+            ),
+            content_hash=compute_content_hash(content),
+            happened_at=happened,
+            signed_at=happened,
+            author_name="DRA. TESTE",
+            profession_type="medica",
+            content_text=content,
+            signature_line="Dra. Teste CRM-SP 12345",
+        )
+        return run
+
+    def test_equal_counts_with_differing_values_are_not_equal(self) -> None:
+        run_a = self._seed_state("SENS-A", "WARD-A", "CONTENT-A")
+        run_b = self._seed_state("SENS-B", "WARD-B", "CONTENT-B")
+        snap_a = _observable(run_a, "SENS-A")
+        snap_b = _observable(run_b, "SENS-B")
+        # Equal counts must NOT hide the differing ward + content values.
+        assert snap_a != snap_b, (snap_a, snap_b)
 
 
 @pytest.mark.django_db
@@ -729,24 +919,27 @@ class TestSharedFailureBoundaryParity:
         self, boundary_id, exc_factory, expected_reason, expected_timed_out,
         terminal,
     ) -> None:
-        pr_cur = f"F-{boundary_id}-CUR"
-        pr_per = f"F-{boundary_id}-PER"
-
         # Current worker
         run_cur = self._queue(boundary_id, "CUR")
+        before_cur = _clinical_counts()
         with ExitStack() as stack:
             for p in _current_patches(fail_exc=exc_factory()):
                 stack.enter_context(p)
             call_command("process_ingestion_runs")
         run_cur.refresh_from_db()
+        # C1-R2: zero clinical persistence delta on failure (exact counts).
+        assert _clinical_counts() == before_cur, boundary_id
 
         # Persistent worker
         run_per = self._queue(boundary_id, "PER")
+        before_per = _clinical_counts()
         with ExitStack() as stack:
             for p in _persistent_patches(fail_exc=exc_factory()):
                 stack.enter_context(p)
             call_command("process_ingestion_runs_persistent_session")
         run_per.refresh_from_db()
+        # C1-R2: zero clinical persistence delta on failure (exact counts).
+        assert _clinical_counts() == before_per, boundary_id
 
         # --- Classification parity ---
         for run in (run_cur, run_per):
@@ -774,33 +967,36 @@ class TestSharedFailureBoundaryParity:
                 run.batch.refresh_from_db()
                 assert run.batch.status == "running"
 
-        # --- No bad persistence: zero clinical rows on either side ---
-        for pr in (pr_cur, pr_per):
-            assert not Patient.objects.filter(
-                source_system="tasy", patient_source_key=pr
-            ).exists(), boundary_id
-        assert Admission.objects.count() == 0 or not Admission.objects.filter(
-            source_system="tasy",
-            source_admission_key__in=[
-                f"ADM-DEDUP-{pr_cur}", f"ADM-NEW-{pr_cur}",
-                f"ADM-DEDUP-{pr_per}", f"ADM-NEW-{pr_per}",
-            ],
-        ).exists()
+        # --- No bad persistence: proven above by the exact model-count
+        # delta being zero for each failure execution (current and
+        # persistent). The weaker key-shape check is removed.
 
-        # --- Cross-worker observable snapshot equality (run/attempt/stage) ---
+        # --- Cross-worker observable snapshot equality including attempt
+        # cardinality/state (C1-R2). ---
         def _snap(run: IngestionRun) -> dict[str, Any]:
             assert run.batch is not None, boundary_id
+            attempts = list(IngestionRunAttempt.objects.filter(run=run))
             latest = (
-                IngestionRunAttempt.objects.filter(run=run)
-                .order_by("-attempt_number").first()
+                max(attempts, key=lambda a: a.attempt_number)
+                if attempts else None
             )
             return {
                 "status": run.status,
                 "failure_reason": run.failure_reason,
                 "timed_out": run.timed_out,
-                "attempt_status": latest.status if latest else None,
-                "attempt_failure_reason": latest.failure_reason if latest else None,
-                "attempt_timed_out": latest.timed_out if latest else None,
+                "attempt_count": run.attempt_count,
+                "attempt_row_count": len(attempts),
+                "latest_attempt_number": (
+                    latest.attempt_number if latest else None
+                ),
+                "latest_attempt_status": latest.status if latest else None,
+                "latest_attempt_failure_reason": (
+                    latest.failure_reason if latest else None
+                ),
+                "latest_attempt_timed_out": (
+                    latest.timed_out if latest else None
+                ),
+                "next_retry_at_present": run.next_retry_at is not None,
                 "stage_statuses": _stage_statuses(run),
                 "batch_status": run.batch.status,
             }
@@ -851,12 +1047,20 @@ class TestHeterogeneousMultiJobSequence:
         class _SequenceSession:
             def __init__(self_inner) -> None:
                 self_inner.restart_calls = 0
+                self_inner.bootstrap_calls = 0
+
+            def bootstrap(self_inner) -> None:
+                # The ONE synthetic initial login/authentication boundary.
+                # Marks the fake session ready and increments the counter so
+                # the test can prove authentication ran exactly once.
+                self_inner.bootstrap_calls += 1
 
             def get_page_html(self_inner) -> str:
                 return html
 
             def is_connected(self_inner) -> bool:
-                return True
+                # Ready only after the initial login/bootstrap boundary.
+                return self_inner.bootstrap_calls >= 1
 
             def click_selector(self_inner, selector: str) -> None:  # noqa: ARG002
                 pass
@@ -921,6 +1125,9 @@ class TestHeterogeneousMultiJobSequence:
         created_adapters: list = []
 
         def _create_once(self_cmd):
+            # The patched command factory runs the ONE initial
+            # bootstrap/login boundary, then returns the single adapter.
+            session.bootstrap()
             created_adapters.append(adapter)
             return adapter
 
@@ -947,9 +1154,12 @@ class TestHeterogeneousMultiJobSequence:
         assert len(runs) == 4, runs
         assert all(r.status == "succeeded" for r in runs), [r.status for r in runs]
 
-        # ONE handle created and reused for all four jobs (one login/handle).
+        # ONE handle created and reused for all four jobs. ONE initial
+        # login/bootstrap; the same fake session identity backs every job.
         assert len(created_adapters) == 1
         assert created_adapters[0] is adapter
+        assert adapter.session is session
+        assert session.bootstrap_calls == 1, session.bootstrap_calls
 
         # No browser/context relaunch between jobs: restart never triggered
         # (restart_required stayed False) and restart_browser was never called.
@@ -981,13 +1191,25 @@ class TestHeterogeneousMultiJobSequence:
 
 @pytest.mark.django_db
 class TestPersistentPathForbiddenCalls:
-    """The persistent per-job path never invokes subprocess for any intent."""
+    """The persistent per-job path never invokes forbidden lifecycle or
+    artifact surfaces for any supported intent (C1-R4)."""
 
     @pytest.mark.parametrize(
-        "intent", ["admissions_only", "demographics_only", "full_sync"]
+        "intent",
+        [
+            "admissions_only",
+            "demographics_only",
+            "full_sync",
+            "full_admission_sync",
+        ],
     )
-    def test_no_subprocess_for_intent(self, intent: str) -> None:
+    def test_no_forbidden_calls_for_intent(self, intent: str) -> None:
         import subprocess
+        import tempfile
+
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
 
         pr = f"FORBID-{intent}"
         _make_run(intent, pr, **_run_params_for(intent))
@@ -1003,13 +1225,50 @@ class TestPersistentPathForbiddenCalls:
                 "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"  # noqa: E501
                 ".enqueue_most_recent_admission_full_sync",
                 return_value=MagicMock(),
-            ), patch.object(subprocess, "run") as spy_run, patch.object(
+            ), patch.object(
+                subprocess, "run"
+            ) as spy_run, patch.object(
                 subprocess, "Popen"
-            ) as spy_popen:
+            ) as spy_popen, patch.object(
+                tempfile, "TemporaryDirectory"
+            ) as spy_tmpdir, patch.object(
+                Path, "write_text"
+            ) as spy_write_text, patch.object(
+                Path, "write_bytes"
+            ) as spy_write_bytes, patch.object(
+                PlaywrightSessionHandle, "start"
+            ) as spy_handle_start, patch.object(
+                PlaywrightSessionHandle, "restart_browser"
+            ) as spy_handle_restart:
                 call_command("process_ingestion_runs_persistent_session")
 
-        assert spy_run.call_count == 0
-        assert spy_popen.call_count == 0
+        # No subprocess on the persistent per-job path.
+        assert spy_run.call_count == 0, intent
+        assert spy_popen.call_count == 0, intent
+        # No temporary JSON/file artifact.
+        assert spy_tmpdir.call_count == 0, intent
+        assert spy_write_text.call_count == 0, intent
+        assert spy_write_bytes.call_count == 0, intent
+        # No real handle startup or restart per job (factory is patched, so
+        # the real handle is never instantiated; this confirms the per-job
+        # path does not start/restart it).
+        assert spy_handle_start.call_count == 0, intent
+        assert spy_handle_restart.call_count == 0, intent
+
+
+# C1-R4: static sentinel guard -- the parity module never embeds a literal
+# synthetic real URL or real report-route string. Built by concatenation so
+# the guard does not match its own definition.
+def test_no_url_sentinel_in_parity_module() -> None:
+    module_path = Path(__file__).read_text(encoding="utf-8")
+    sentinels = [
+        "http" + "://",
+        "https" + "://",
+        "/evolutions" + "/",
+        "relatorioAna" + "Evo",
+    ]
+    for sentinel in sentinels:
+        assert sentinel not in module_path, sentinel
 
 
 # ===========================================================================
