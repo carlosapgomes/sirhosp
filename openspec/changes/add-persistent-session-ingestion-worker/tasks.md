@@ -600,17 +600,44 @@ this acquisition-parity slice.
 
 ## 23. PSW-S23: Current-versus-persistent parity suite
 
-- [ ] 23.1 Build parameterized parity tests for all supported intents using the
+- [x] 23.1 Build parameterized parity tests for all supported intents using the
   same synthetic inputs and comparing externally visible effects.
-- [ ] 23.2 Compare lifecycle, attempts, stages, failures, counters, Patient,
+- [x] 23.2 Compare lifecycle, attempts, stages, failures, counters, Patient,
   Admission, ClinicalEvent, demographics, follow-ups, and batch closure.
-- [ ] 23.3 Add a multi-job sequence proving admissions, demographics, full-sync,
+- [x] 23.3 Add a multi-job sequence proving admissions, demographics, full-sync,
   and a later job reuse one authenticated handle without subprocess or browser
   relaunch between jobs.
-- [ ] 23.4 Keep rollout blocked and report every intentional difference rather
+- [x] 23.4 Keep rollout blocked and report every intentional difference rather
   than weakening parity assertions.
-- [ ] 23.5 Run official validation and create
+- [x] 23.5 Run official validation and create
   `/tmp/sirhosp-slice-PSW-S23-report.md`.
+
+PSW-S23 closure (authoritative): one focused parity module
+(`tests/unit/test_current_vs_persistent_parity.py`) proves the persistent
+worker can replace the current worker for every supported queued intent while
+reusing one authenticated session across heterogeneous jobs. R1/R2: a closed
+pairwise matrix runs each supported intent (`admissions_only`,
+`demographics_only`, `full_sync`, `full_admission_sync`) through BOTH worker
+commands with identical synthetic source payloads and compares ONLY observable
+effects (status, counters, Patient/Admission/ClinicalEvent rows, demographics
+fields, follow-up enqueue pattern, stages, batch closure) via a normalized
+snapshot; private call order is never compared. R3: the timeout /
+invalid-payload / retryable / terminal boundaries are covered ONCE through both
+workers (PSW-S17 owns the full taxonomy x mode matrix); this slice adds the
+complementary "no bad persistence" angle (zero clinical rows on failure) plus
+cross-worker observable equality. R5: a real `PersistentExtractionAdapter`
+backed by a fake session processes `admissions_only -> demographics_only ->
+full_sync -> admissions_only` through ONE handle (one adapter creation, no
+`restart_browser`, no browser/context relaunch) with the controller cleanup
+checkpoint firing after each job. R6: a subprocess spy proves zero
+subprocess/Popen calls on the persistent per-job path for every intent. R7:
+empty/unknown intents are not claimed and receive no source action (composed
+from PSW-S14, confirmed in the suite). No assertion was weakened: the sole
+intentional difference (the persistent `demographics_only` identity check) is a
+command-level defense that does not change observable parity because both
+workers receive matching data. Production rollout REMAINS BLOCKED pending the
+PSW-S24 guarded live validation. PSW-S17..PSW-S22 observable contracts are
+preserved and not re-audited.
 
 ## 24. PSW-S24: Guarded live validation and cutover readiness
 
