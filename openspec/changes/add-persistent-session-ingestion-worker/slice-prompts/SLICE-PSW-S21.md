@@ -8,7 +8,7 @@ all change artifacts, PSW-S20 report, canonical
 selection/iteration, persistent navigation/bridge/adapter, gap planner, and
 focused tests. Start clean.
 
-## Mandatory DeepSeek4-Flash Protocol
+## Mandatory Protocol for the Implementing LLM
 
 1. Record `BASE_REF`, clean status, and requirement matrix.
 2. Run official unit baseline before editing; record exact summary/exit.
@@ -17,6 +17,28 @@ focused tests. Start clean.
 5. Inspect for duplicate/dead chunking and unbounded windows.
 6. Run every official validation command.
 7. Update tasks/report/commit/push only when complete and stop.
+
+## Inherited Contracts — Frozen and Not Reopened
+
+PSW-S17 through PSW-S20 are frozen prerequisites. Preserve their timeout,
+observable sanitization, cleanup, restart, and dispatch behavior without
+re-auditing private exception state or replaying inherited failure matrices.
+
+The PSW-S17 deadline is cooperative; this slice only proves that each report
+window receives the existing remaining budget. It does not add a hard
+wall-clock guarantee.
+
+If a non-critical inherited defect appears, record a separate remediation.
+Only a critical safety issue or a direct blocker to the bounded chunk loop may
+stop PSW-S21.
+
+## Acceptance Freeze and Artifact Policy
+
+The interval cases and multi-admission scenarios below are the complete proof
+set. Do not add arbitrary date ranges or intent matrices after RED.
+
+Update active requirements in place; do not append D-numbered corrective
+sections. Report Before/After fragments only for files changed in this pass.
 
 ## Objective
 
@@ -42,6 +64,30 @@ session.
 - **R8:** A failure records the responsible bounded window without patient data
   and follows existing retry/cleanup semantics.
 - **R9:** Preserve current worker behavior and gap planning.
+
+## Closed Scenario Table
+
+Chunk boundaries:
+
+| Interval | Required result |
+| --- | --- |
+| one day | one progressing chunk |
+| exactly 15 inclusive days | one chunk |
+| 16 inclusive days | two chunks with canonical overlap |
+| final single day | terminates without repeated `chunk_start` |
+
+Flow scenarios:
+
+| Admissions/chunks | Required result |
+| --- | --- |
+| one admission, one chunk | one bounded report window |
+| one admission, multiple chunks | ordered accumulation |
+| two overlapping admissions | deterministic order; distinct keys |
+| empty middle chunk | prior events preserved; later chunk continues |
+| empty final chunk | prior events preserved; loop terminates |
+
+“All admissions” in this slice means every admission in the explicit
+two-admission scenario, not an unbounded universal dataset.
 
 ## Expected Scope
 
@@ -114,6 +160,7 @@ Required answers: no, no, no, no, no.
 ./scripts/test-in-container.sh integration
 ./scripts/test-in-container.sh lint
 ./scripts/test-in-container.sh typecheck
+./scripts/test-in-container.sh quality-gate
 openspec validate add-persistent-session-ingestion-worker --strict
 git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 ```
@@ -123,6 +170,7 @@ git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 Create `/tmp/sirhosp-slice-PSW-S21-report.md` with protocol evidence, complete
 chunk boundary table, multi-admission trace, RED/GREEN, inspections,
 commands/exit codes, files, risks, and verifier handoff.
+Include real Before/After fragments only for files changed in this pass.
 
 Final prompt: implement only PSW-S21. Any unbounded window, duplicate algorithm,
 hang risk, lost prior event, or missing gate means incomplete.

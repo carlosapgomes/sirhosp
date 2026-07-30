@@ -10,7 +10,7 @@ clean.
 The real legacy UI has no reloadable evolution deep link. The real handle must
 not try `/evolutions/...` before action navigation.
 
-## Mandatory DeepSeek4-Flash Protocol
+## Mandatory Protocol for the Implementing LLM
 
 1. Record `BASE_REF`, clean status, and requirement matrix.
 2. Run official unit baseline before editing and record exit/summary.
@@ -20,6 +20,29 @@ not try `/evolutions/...` before action navigation.
 5. Run and interpret URL/action/timeout inspections.
 6. Run every official gate.
 7. Mark tasks/report/commit/push only after complete evidence; then stop.
+
+## Inherited Contracts — Frozen and Not Reopened
+
+PSW-S17 timeout classification, observable-surface sanitization, and lifecycle
+parity are frozen prerequisites. PSW-S18 cleanup and PSW-S19
+restart/rebootstrap are also inherited. Preserve them, but do not re-run their
+full matrices or inspect private exception context objects.
+
+`raise ... from None` remains accepted under the PSW-S17 policy. Deadline
+behavior remains bounded timeout-capable calls plus boundary checks, with no
+hard wall-clock claim.
+
+An inherited non-critical defect belongs in a separate remediation. Do not
+absorb it into dispatch work unless it blocks an explicit requirement below.
+
+## Acceptance Freeze and Artifact Policy
+
+PSW-S20 owns dispatch selection and required evolution actions only. Its
+evidence is limited to the scenarios enumerated below. Do not add chunking,
+form download, global sanitization sweeps, or lifecycle parity matrices.
+
+Update the active contract in place; do not append D-numbered corrective
+sections. Report Before/After fragments only for files changed in this pass.
 
 ## Objective
 
@@ -43,6 +66,20 @@ Required date/report steps must fail safely rather than continue with defaults.
 - **R7:** Error/stage messages must not contain patient identifiers, URLs with
   identifiers, raw HTML, credentials, or PDF bytes.
 - **R8:** Preserve stub tests and current worker behavior.
+
+## Closed Scenario Matrix
+
+| Capability/state | Required observable result |
+| --- | --- |
+| real action capability | action path; zero synthetic evolution URL opens |
+| explicit stub capability | existing URL/container test path remains |
+| required date action fails | typed failure; no report or persistence |
+| report wait times out | inherited timeout category; not empty success |
+| explicit no-evolutions state | empty success; not timeout |
+| legitimately reached JSON/pre state | existing fast path may run |
+
+These six rows are the complete dispatch proof. PSW-S17 error matrices are not
+repeated per row.
 
 ## Expected Scope
 
@@ -125,6 +162,7 @@ Required answers: no, no, no, no, no.
 ./scripts/test-in-container.sh integration
 ./scripts/test-in-container.sh lint
 ./scripts/test-in-container.sh typecheck
+./scripts/test-in-container.sh quality-gate
 openspec validate add-persistent-session-ingestion-worker --strict
 git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 ```
@@ -134,6 +172,7 @@ git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 Create `/tmp/sirhosp-slice-PSW-S20-report.md` with protocol evidence, dispatch
 sequence before/after, RED/GREEN, timeout matrix, inspections, command results,
 files, risks, and verifier handoff.
+Include real Before/After fragments only for files changed in this pass.
 
 Final prompt: implement only PSW-S20. Any direct real URL prerequisite,
 swallowed required action, identifier leak, or missing gate makes the slice

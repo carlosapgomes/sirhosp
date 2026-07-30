@@ -10,7 +10,7 @@ timeout, normalization, and full-sync tests. Start clean.
 
 Use only synthetic anonymous HTML, ViewState, headers, and PDF bytes.
 
-## Mandatory DeepSeek4-Flash Protocol
+## Mandatory Protocol for the Implementing LLM
 
 1. Record `BASE_REF`, clean status, and requirement matrix.
 2. Run official unit baseline before edits; record exit and summary.
@@ -19,6 +19,28 @@ Use only synthetic anonymous HTML, ViewState, headers, and PDF bytes.
 5. Run download/filesystem/security inspections and explain occurrences.
 6. Run all official gates.
 7. Mark tasks/report/commit/push only after complete evidence, then stop.
+
+## Inherited Contracts — Frozen and Not Reopened
+
+PSW-S17 timeout/sanitization semantics and PSW-S18 through PSW-S21 lifecycle,
+cleanup, dispatch, and chunk contracts are frozen. Preserve them without
+re-auditing their private internals or repeating their full test matrices.
+
+GET/POST receive the current remaining bounded timeout. `response.body()` has
+no explicit timeout argument and follows PSW-S17 cooperative boundary checks;
+no hard wall-clock guarantee is required or claimed.
+
+Any non-critical inherited defect belongs in a separate focused remediation.
+Do not absorb it into PDF acquisition unless it blocks an explicit row below.
+
+## Acceptance Freeze and Artifact Policy
+
+The direct/fallback and response-validation tables below are the complete proof
+surface. Do not expand this slice into a generic JSF client, PDF parser audit,
+or global secret scan.
+
+Update active requirements in place; do not append D-numbered corrective
+sections. Report Before/After fragments only for files changed in this pass.
 
 ## Objective
 
@@ -45,6 +67,27 @@ without filesystem clinical artifacts or a new login/browser.
 - **R8:** Preserve normalization, admission key, shared persistence, tab cleanup,
   and no-new-browser/login guarantees.
 - **R9:** Keep current subprocess extractor unchanged.
+
+## Closed Acquisition and Validation Matrix
+
+Acquisition:
+
+| Source state | Required transport |
+| --- | --- |
+| valid direct PDF URL | authenticated GET |
+| no valid direct URL, complete `#printLinks` form | authenticated JSF POST |
+| missing action or ViewState | typed sanitized failure; no request |
+
+Response validation, in this order:
+
+1. successful HTTP status;
+2. PDF-compatible content type when the header is present;
+3. non-empty body beginning with `%PDF-`;
+4. PDF parser accepts bytes;
+5. extracted normalized text is non-empty.
+
+“Valid PDF” in this slice means exactly these checks. Do not add unrelated PDF
+conformance requirements.
 
 ## Expected Scope
 
@@ -117,6 +160,7 @@ Required answers: no, no, no, no, no.
 ./scripts/test-in-container.sh integration
 ./scripts/test-in-container.sh lint
 ./scripts/test-in-container.sh typecheck
+./scripts/test-in-container.sh quality-gate
 openspec validate add-persistent-session-ingestion-worker --strict
 git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 ```
@@ -126,6 +170,7 @@ git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 Create `/tmp/sirhosp-slice-PSW-S22-report.md` with protocol evidence, direct vs
 form request table, RED/GREEN, security/filesystem inspections, snippets,
 commands/exit codes, files, risks, and verifier handoff.
+Include real Before/After fragments only for files changed in this pass.
 
 Final prompt: implement only PSW-S22. Missing JSF fallback, unsafe body handling,
 filesystem output, secret leakage, or absent gate means incomplete.

@@ -13,7 +13,7 @@ synthetic/approved records, or operator supervision is unavailable, report
 `Status: INCOMPLETE/BLOCKED`; do not mark tasks, change rollout status, commit,
 or push.
 
-## Mandatory DeepSeek4-Flash Protocol
+## Mandatory Protocol for the Implementing LLM
 
 1. Record `BASE_REF`, branch, clean status, environment classification, and
    requirement/evidence matrix without recording secrets.
@@ -26,6 +26,29 @@ or push.
 6. Run final official gates and documentation inspections.
 7. Update readiness docs/tasks, commit, and push only if every criterion passes.
    Otherwise create the blocked report and leave versioned files unchanged.
+
+## Inherited Contracts — Frozen and Not Reopened
+
+PSW-S17 through PSW-S23 are frozen prerequisites. Live validation observes
+their integrated behavior; it does not redefine timeout, sanitization,
+cleanup, restart, chunk, PDF, or parity contracts.
+
+PSW-S17 sanitization remains limited to observable/persisted surfaces, and its
+deadline remains cooperative. Do not inspect private exception context or
+claim hard wall-clock interruption.
+
+If live validation reveals a code defect, stop and propose a focused
+remediation. Production code changes are forbidden here.
+
+## Acceptance Freeze and Artifact Policy
+
+The evidence table and required sequence below are the complete live gate.
+Do not add new live scenarios after execution begins. A missing mandatory row
+is `INCOMPLETE/BLOCKED`, not an invitation to broaden the slice.
+
+Update active readiness text in place; do not append D-numbered corrective
+sections. Report Before/After fragments only for versioned files changed after
+successful validation. A blocked run changes no versioned file.
 
 ## Objective
 
@@ -63,14 +86,35 @@ All are mandatory:
   before the next claim.
 - **R7:** Observe renewal/popup behavior at a safe checkpoint or retain rollout
   blocker if it cannot be exercised.
-- **R8:** Compare sanitized success/failure rates, durations, attempts, queue
-  latency, temp/profile size, RAM, shared memory, swap, and log growth with the
-  current worker.
-- **R9:** Reconcile thresholds, headless mode, resource bounds, selectors,
-  proposal, design, specs, tasks, deploy/rollout docs, and unresolved risks.
-- **R10:** Declare replacement-ready only if all automated/live evidence passes,
+- **R8:** Compare the mandatory resource/operations metrics in the evidence
+  table with the current worker. Record shared-memory and swap only when the
+  approved environment exposes them safely.
+- **R9:** Reconcile only the readiness artifacts enumerated in the evidence
+  table. List unresolved risks without opening implementation work.
+- **R10:** Declare replacement-ready only if every mandatory row is observed,
   rollback is rehearsed, and no blocker remains. Otherwise keep the current
   worker and document the blocker.
+
+## Closed Live Evidence Table
+
+| Evidence | Requirement |
+| --- | --- |
+| guarded `admissions_only` | mandatory |
+| same-session `demographics_only` | mandatory |
+| one bounded `full_sync` chunk | mandatory |
+| multi-chunk/admission ordering | only if approved case exposes it |
+| direct or JSF PDF path actually observed | mandatory |
+| heterogeneous session reuse and cleanup | mandatory |
+| controlled restart and rebootstrap | mandatory |
+| renewal/popup checkpoint | mandatory or rollout stays blocked |
+| rollback command rehearsal | mandatory |
+| success/failure, duration, attempts, queue latency | mandatory |
+| RSS/RAM, temp/profile size, and log growth | mandatory |
+| shared memory and swap | only if safely observable |
+
+Readiness reconciliation is limited to proposal, design/spec/tasks,
+rollout/deploy guidance, configuration examples, and the unresolved-risk list.
+No other document becomes a hidden completion criterion.
 
 ## Expected Scope
 
@@ -161,6 +205,9 @@ Create `/tmp/sirhosp-slice-PSW-S24-report.md` with `Status: COMPLETE` or
 `INCOMPLETE/BLOCKED`, preconditions, sanitized evidence matrix, command exit
 codes without secrets/IDs, observed lifecycle/resource results, rollback proof,
 remaining blockers, changed files, and verifier handoff.
+If complete, include real Before/After fragments only for versioned files
+changed in this pass. If blocked, include no versioned-file snippets because no
+versioned file may change.
 
 Final prompt: implement only PSW-S24. Without authorized live access and every
 observed criterion, produce only a blocked temporary report; do not modify

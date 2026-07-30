@@ -10,7 +10,7 @@ from a clean branch.
 A Chromium restart creates an unauthenticated session. Readiness after restart
 requires bootstrap/login and `#tempoSessao`, not merely a connected context.
 
-## Mandatory DeepSeek4-Flash Protocol
+## Mandatory Protocol for the Implementing LLM
 
 1. Record `BASE_REF`, branch, clean status, and requirement matrix.
 2. Run official unit baseline before edits; record exit and summary.
@@ -22,6 +22,31 @@ requires bootstrap/login and `#tempoSessao`, not merely a connected context.
 
 Any missing evidence, failing gate, or unauthenticated post-restart claim makes
 the slice incomplete.
+
+## Inherited Contracts — Frozen and Not Reopened
+
+PSW-S17 and the verified PSW-S18 cleanup contract are frozen prerequisites.
+Preserve their observable behavior without re-auditing timeout taxonomy,
+sanitization internals, exception context objects, or DOM cleanup semantics.
+
+PSW-S17 sanitization applies only to persisted fields, logs, command output,
+`CommandError`, and rendered tracebacks. Suppressed internal `__context__` is
+accepted unless re-emitted. Its deadline remains cooperative, not a hard
+wall-clock bound.
+
+If a non-critical inherited defect is discovered, name a separate remediation;
+do not absorb it into PSW-S19. Only a critical safety defect or a blocker to an
+explicit requirement below may stop this slice.
+
+## Acceptance Freeze and Artifact Policy
+
+The requirements, lifecycle paths, and configuration keys below are the full
+acceptance surface. Do not add new thresholds, health policies, selectors, or
+private implementation invariants during implementation or verification.
+
+Update active requirements in place; never add D-numbered corrective
+appendices. The report needs Before/After fragments only for files changed in
+this execution pass.
 
 ## Objective
 
@@ -47,6 +72,21 @@ headless configuration and prove real multi-job reuse semantics with fakes.
 - **R8:** Prove two jobs use one login/context, then a threshold causes exactly
   one restart plus rebootstrap before a later job.
 - **R9:** Keep current-worker CLI and behavior unchanged.
+
+## Closed Configuration Set
+
+Only these configuration values belong to PSW-S19:
+
+| Key | Required validation | Required proof |
+| --- | --- | --- |
+| max jobs | positive integer | threshold causes one restart |
+| max lifetime | positive duration | expiry requests restart |
+| consecutive failures | positive integer | threshold requests restart |
+| renewal threshold | positive duration | threshold state is effective |
+| headless | explicit boolean | CLI value reaches concrete handle |
+
+Before editing, record each existing default and its CLI/settings source in the
+report. Do not introduce additional lifecycle configuration in this slice.
 
 ## Expected Scope
 
@@ -99,7 +139,7 @@ Explain which layer owns restart, bootstrap, configuration, and profile cleanup.
 - [ ] Failed rebootstrap mutates no queued run.
 - [ ] Multi-job sequence proves one login before threshold.
 - [ ] Later job proves exactly one restart/rebootstrap.
-- [ ] All configuration values are effective and validated.
+- [ ] The five enumerated configuration values are effective and validated.
 - [ ] Headless CLI reaches the concrete handle.
 - [ ] Current worker remains unchanged.
 - [ ] All official gates pass.
@@ -122,6 +162,7 @@ Required answers: no, no, no, no, no.
 ./scripts/test-in-container.sh integration
 ./scripts/test-in-container.sh lint
 ./scripts/test-in-container.sh typecheck
+./scripts/test-in-container.sh quality-gate
 openspec validate add-persistent-session-ingestion-worker --strict
 git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 ```
@@ -131,6 +172,8 @@ git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 Create `/tmp/sirhosp-slice-PSW-S19-report.md` with protocol evidence, lifecycle
 state diagram/table, config table, RED/GREEN, inspections, commands/exit codes,
 files, risks, and verifier handoff.
+Include real Before/After fragments only for files changed in this pass. Do not
+re-prove inherited PSW-S17 or PSW-S18 contracts.
 
 Final prompt: implement only PSW-S19. Connectivity without authentication,
 claims during recovery, ineffective configuration, or missing evidence means

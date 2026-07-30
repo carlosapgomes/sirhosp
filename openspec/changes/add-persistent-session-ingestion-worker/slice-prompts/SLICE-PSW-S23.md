@@ -10,7 +10,7 @@ This slice is a parity proof and may make narrowly required fixes only when a
 failing parity case exposes a small defect within the file budget. Do not weaken
 assertions to preserve known differences.
 
-## Mandatory DeepSeek4-Flash Protocol
+## Mandatory Protocol for the Implementing LLM
 
 1. Record `BASE_REF`, clean status, requirement matrix, and supported-intent
    table before edits.
@@ -24,6 +24,28 @@ assertions to preserve known differences.
 6. Run every official gate.
 7. Mark tasks/report/commit/push only with complete evidence, then stop.
 
+## Inherited Contracts — Frozen and Not Reopened
+
+PSW-S17 through PSW-S22 are frozen prerequisites. This slice composes their
+observable outcomes; it does not re-prove every timeout category, cleanup
+state, restart threshold, chunk boundary, or PDF validation for every intent.
+
+Observable-surface sanitization and cooperative deadline semantics remain as
+defined by PSW-S17. Suppressed internal exception context is not re-audited.
+
+An inherited non-critical defect becomes a separate focused remediation. If a
+parity failure requires broad production work or exceeds the file cap, stop
+blocked instead of expanding PSW-S23.
+
+## Acceptance Freeze and Artifact Policy
+
+Use the pairwise scenario matrix below. It is the complete parity proof; do not
+form the Cartesian product of four intents, every historical failure category,
+and every lifecycle mode.
+
+Update active requirements in place; do not append D-numbered corrective
+sections. Report Before/After fragments only for files changed in this pass.
+
 ## Objective
 
 Prove that the persistent worker can replace the current worker for every
@@ -32,26 +54,42 @@ jobs.
 
 ## Requirements
 
-- **R1:** Use one scenario table for `admissions_only`, `demographics_only`,
-  `full_sync`, and `full_admission_sync` with equivalent synthetic source data.
-- **R2:** Compare terminal/intermediate status, attempts, timestamps, stages,
-  failure fields, retry scheduling, and `FinalRunFailure`.
-- **R3:** Compare run counters, gaps, parameters/metrics, follow-up runs, and
-  batch closure.
-- **R4:** Compare persisted Patient, Admission, ClinicalEvent, revisions,
-  demographics, ward/bed backfill, and admission association.
-- **R5:** Cover success, zero-data/no-evolutions, update/dedup, source timeout,
-  invalid payload, retryable error, and attempts-exhausted cases.
-- **R6:** Normalize only intentional non-semantic differences such as worker
-  label/PID and clock values. List every normalization in the report.
-- **R7:** Run the sequence `admissions_only -> demographics_only -> full_sync ->
+- **R1:** Use one pairwise scenario table for `admissions_only`,
+  `demographics_only`, `full_sync`, and `full_admission_sync` with equivalent
+  synthetic source data.
+- **R2:** For each row, compare only the listed observable run/lifecycle,
+  persistence, and counter effects. Do not compare private call order.
+- **R3:** Cover the shared failure boundary once for timeout, invalid payload,
+  retryable failure, and attempts exhausted; do not multiply those cases by
+  every intent because PSW-S17 already owns failure taxonomy parity.
+- **R4:** Normalize only enumerated non-semantic differences such as worker
+  label/PID and clock values. List each normalization in the report.
+- **R5:** Run `admissions_only -> demographics_only -> full_sync ->
   admissions_only` with one handle and assert one login, no browser/context
-  relaunch between jobs, and safe cleanup after each job.
-- **R8:** Assert no persistent-job subprocess, temporary JSON, synthetic direct
+  relaunch, and safe cleanup after each job.
+- **R6:** Assert no persistent-job subprocess, temporary JSON, synthetic direct
   real URL, or secret/clinical artifact.
-- **R9:** Empty/unknown intents remain outside replacement scope and receive no
+- **R7:** Empty/unknown intents remain outside replacement scope and receive no
   source action.
-- **R10:** Keep rollout blocked; fake parity alone is not live readiness.
+- **R8:** Keep rollout blocked; fake parity is not live readiness.
+
+## Closed Pairwise Parity Matrix
+
+| Scenario | Required comparison |
+| --- | --- |
+| `admissions_only` success + dedup | counters, patient/admission, follow-ups |
+| `demographics_only` success + update | fields, metrics, follow-ups |
+| `full_sync` success + no evolutions | gaps, events, batch/stages |
+| `full_admission_sync` success | admission association and revisions |
+| shared timeout boundary | timeout category and retry scheduling |
+| shared invalid payload boundary | normalized failure and no bad persistence |
+| shared retryable failure | queued retry and no final failure |
+| shared attempts exhausted | terminal state, final failure, batch closure |
+| heterogeneous sequence | one login/handle; cleanup between jobs |
+| empty/unknown intent | no source action |
+
+Each supported intent needs its assigned row, not both a success and every
+failure row.
 
 ## Expected Scope
 
@@ -101,18 +139,18 @@ Explain determinism and every intentionally ignored field.
 
 ## Binary Success Criteria
 
-- [ ] All four supported intents have parity scenarios.
-- [ ] Success/empty/update/timeout/retry/terminal cases compare equal effects.
-- [ ] Clinical and operational persistence matches.
+- [ ] All four supported intents pass their assigned pairwise scenario.
+- [ ] Shared timeout/invalid/retry/terminal rows compare equal effects.
+- [ ] Clinical and operational persistence matches in the assigned rows.
 - [ ] Multi-job sequence uses one login/handle before configured restart.
 - [ ] Forbidden lifecycle/artifact calls remain zero.
 - [ ] Empty/unknown intents cause no source action.
-- [ ] No assertion was weakened without documented intentional difference.
+- [ ] No assertion was weakened without a documented intentional difference.
 - [ ] All official gates pass.
 
 ## Self-Evaluation Gates
 
-1. Does any supported intent lack a success and failure comparison?
+1. Does any supported intent lack its assigned pairwise comparison?
 2. Are tests comparing only mock calls instead of observable effects?
 3. Is any difference hidden by broad snapshot filtering?
 4. Did multi-job proof actually execute heterogeneous intents?
@@ -138,6 +176,7 @@ git diff --name-only "$BASE_REF"...HEAD -- '*.md' | xargs -r markdownlint-cli2
 Create `/tmp/sirhosp-slice-PSW-S23-report.md` with protocol evidence, full parity
 matrix, intentional-difference list, multi-job trace, forbidden-call evidence,
 RED/GREEN, commands/exit codes, files, risks, and exact verifier reruns.
+Include real Before/After fragments only for files changed in this pass.
 
 Final prompt: implement only PSW-S23. Missing intent/scenario coverage, mock-only
 proof, hidden difference, failing gate, or readiness overclaim means incomplete.
