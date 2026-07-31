@@ -641,18 +641,18 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
 
 ## 23A. PSW-S24-PRE: Guarded real multi-run execution
 
-- [ ] 23A.1 Add a closed real-handle CLI mode matrix that preserves the
+- [x] 23A.1 Add a closed real-handle CLI mode matrix that preserves the
   single-run smoke and rejects invalid combinations before adapter creation.
-- [ ] 23A.2 Add a bounded, ordered allow-list of two through four explicit run
+- [x] 23A.2 Add a bounded, ordered allow-list of two through four explicit run
   IDs that preflights every row before one adapter/bootstrap and never claims
   unlisted work.
-- [ ] 23A.3 Make the existing continuous real queue loop reachable only through
+- [x] 23A.3 Make the existing continuous real queue loop reachable only through
   an explicit default-off `--enable-real-queue` opt-in; do not enable deployment
   or claim rollout readiness.
-- [ ] 23A.4 Prove with command/DB tests that heterogeneous listed jobs reuse the
+- [x] 23A.4 Prove with command/DB tests that heterogeneous listed jobs reuse the
   session, stop after a failed job, and complete restart plus rebootstrap before
   a later claim.
-- [ ] 23A.5 Preserve frozen worker/extraction contracts, update only the allowed
+- [x] 23A.5 Preserve frozen worker/extraction contracts, update only the allowed
   design/spec/rollout/task artifacts, run official validation, and create
   `/tmp/sirhosp-slice-PSW-S24-PRE-report.md`.
 

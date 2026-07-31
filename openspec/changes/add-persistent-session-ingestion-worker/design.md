@@ -264,6 +264,34 @@ Rationale: the persistent lifecycle changes source navigation and operational
 failure modes. Cutover must be based on observable parity, not matching method
 names or mock call counts.
 
+### Decision 16: Closed real-handle CLI mode matrix
+
+The real persistent handle must never drain the production queue by accident.
+The command therefore exposes exactly four closed CLI modes, validated before
+any adapter/browser creation or run mutation:
+
+1. stub (no `--real-handle`): existing queue behavior unchanged;
+2. single real smoke: `--real-handle --run-id ID --max-runs 1`;
+3. bounded validation: repeatable `--validation-run-id` of two through four
+   distinct positive IDs in operator order, with `--max-runs` equal to the
+   count; every listed row is preflichted before one adapter/bootstrap, jobs
+   reuse the same session, processing never falls through to an unlisted row,
+   and a claim race, job failure, or restart failure leaves later selected rows
+   untouched;
+4. continuous real queue: `--real-handle --loop --enable-real-queue`, default
+   off and forbidden with `--run-id`/`--validation-run-id`/`--max-runs`.
+
+`--real-handle --loop` without the explicit opt-in fails before adapter/browser
+creation. Every other combination fails before `_create_adapter()` and before
+any run mutation. Bounded and continuous real modes are command surface only:
+they do not create a new queue, claim algorithm, worker service, or deployment
+default. Rollout remains blocked pending authorized PSW-S24 live validation.
+
+Rationale: the single-run smoke guard (PSW-S10) proved the command cannot yet
+run two jobs under one login, restart before a later claim, or start the
+documented continuous real queue. A closed matrix makes the real operational
+surface explicit and auditable without enabling deployment by default.
+
 ## Risks / Trade-offs
 
 - Profile/cache growth -> use exclusive profiles, tmpfs limits, safe cache

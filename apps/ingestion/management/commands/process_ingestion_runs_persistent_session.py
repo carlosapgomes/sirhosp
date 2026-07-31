@@ -86,6 +86,26 @@ PSW-S12 status:
 - This is still a guarded MANUAL SMOKE path — full-sync real evolution
   navigation is scoped to PSW-S13.
 
+PSW-S24-PRE status:
+- The real-handle CLI exposes a CLOSED mode matrix, validated before any
+  adapter/browser creation or run mutation:
+
+  1. stub (no ``--real-handle``): existing queue behavior unchanged;
+  2. single real smoke: ``--real-handle --run-id ID --max-runs 1``;
+  3. bounded validation: repeatable ``--validation-run-id`` (two through four
+     distinct positive IDs, operator order) with ``--max-runs`` equal to the
+     count; every listed row is preflichted before one adapter/bootstrap, runs
+     reuse the same session, processing never falls through to an unlisted row,
+     and a claim race, job failure, or restart failure leaves later selected
+     rows untouched;
+  4. continuous real queue: ``--real-handle --loop --enable-real-queue``;
+     default-off and forbidden with ``--run-id``/``--validation-run-id``/
+     ``--max-runs``. ``--real-handle --loop`` without the opt-in fails before
+     adapter/browser creation.
+
+- Neither the bounded nor the continuous real mode is rollout-ready. Both stay
+  disabled until authorized PSW-S24 live validation succeeds.
+
 Usage::
 
     # Single pass
@@ -200,6 +220,88 @@ _INVALID_LIFELIFE_CONFIG_MESSAGE = (
     "Persistent-session lifecycle configuration is invalid "
     "(max jobs, max lifetime, consecutive failures, and renewal threshold "
     "must all be positive integers)."
+)
+
+# PSW-S24-PRE: closed real-handle CLI mode labels.
+_MODE_STUB = "stub"
+_MODE_SINGLE_SMOKE = "single_smoke"
+_MODE_BOUNDED = "bounded"
+_MODE_CONTINUOUS_REAL = "continuous_real"
+
+# Single real smoke messages (preserved verbatim for the R2 regression).
+_REAL_HANDLE_REQUIRES_RUN_ID = (
+    "--real-handle requires --run-id to avoid draining the "
+    "production queue. Specify a single queued IngestionRun id "
+    "for the manual smoke."
+)
+_REAL_HANDLE_REQUIRES_MAX_RUNS_ONE = (
+    "--real-handle requires --max-runs 1 to bound the manual smoke "
+    "to a single run. Pass --max-runs 1 explicitly."
+)
+
+# Continuous real queue opt-in messages (R8).
+_ENABLE_REAL_QUEUE_REQUIRES_REAL_AND_LOOP = (
+    "--enable-real-queue is valid only with both --real-handle and --loop."
+)
+_ENABLE_REAL_QUEUE_FORBIDS_SELECTION = (
+    "--enable-real-queue forbids --run-id, --validation-run-id, and "
+    "--max-runs."
+)
+_REAL_LOOP_REQUIRES_ENABLE_REAL_QUEUE = (
+    "--real-handle --loop requires --enable-real-queue to enter the "
+    "continuous real queue. Without the opt-in the real loop stays disabled."
+)
+
+# Bounded validation mode messages (R1/R3/R4/R7/R9). No run IDs, patient
+# identifiers, or source data: ordinal/count information only.
+_BOUNDED_FORBIDS_LOOP_RUN_ID = (
+    "Bounded validation mode forbids --loop and --run-id."
+)
+_BOUNDED_SIZE_MESSAGE = (
+    "Bounded validation requires between two and four --validation-run-id "
+    "values."
+)
+_BOUNDED_DISTINCT_MESSAGE = (
+    "Bounded validation --validation-run-id values must be distinct."
+)
+_BOUNDED_POSITIVE_MESSAGE = (
+    "Bounded validation --validation-run-id values must be positive."
+)
+_BOUNDED_REQUIRES_MAX_RUNS = (
+    "Bounded validation requires --max-runs equal to the number of "
+    "--validation-run-id values."
+)
+_BOUNDED_MAX_RUNS_MISMATCH = (
+    "Bounded validation requires --max-runs equal to the number of "
+    "--validation-run-id values."
+)
+_BOUNDED_ROW_MISSING_MESSAGE = (
+    "A selected validation row does not exist; nothing processed."
+)
+_BOUNDED_ROW_NOT_QUEUED_MESSAGE = (
+    "A selected validation row is not queued; nothing processed."
+)
+_BOUNDED_ROW_RETRY_NOT_DUE_MESSAGE = (
+    "A selected validation row retry is not yet due; nothing processed."
+)
+_BOUNDED_ROW_UNSUPPORTED_INTENT_MESSAGE = (
+    "A selected validation row has an unsupported intent; nothing processed."
+)
+_BOUNDED_ROW_UNCLAIMABLE_MESSAGE = (
+    "A selected validation row is no longer claimable; stopping the "
+    "bounded sequence."
+)
+_BOUNDED_ROW_NOT_SUCCEEDED_MESSAGE = (
+    "A selected validation row did not finish as succeeded; stopping the "
+    "bounded sequence."
+)
+_BOUNDED_RESTART_FAILED_MESSAGE = (
+    "Persistent session restart failed during bounded validation; stopping "
+    "the bounded sequence."
+)
+_BOUNDED_SESSION_NOT_READY_MESSAGE = (
+    "Session not ready during bounded validation; stopping the bounded "
+    "sequence."
 )
 
 _PERSISTENT_LABEL_PREFIX = "persistent-worker"
@@ -384,9 +486,36 @@ class Command(BaseCommand):
                 f"Default: {'headless' if _DEFAULT_HEADLESS else 'headed'}."
             ),
         )
+        # PSW-S24-PRE: closed real-handle CLI mode matrix options. These two
+        # options, together with --real-handle/--run-id/--max-runs/--loop, form
+        # the four closed modes validated in ``_validate_cli_mode`` before any
+        # adapter/browser creation or run mutation.
+        parser.add_argument(
+            "--validation-run-id",
+            type=int,
+            action="append",
+            default=None,
+            help=(
+                "Operator-selected queued IngestionRun id for bounded live "
+                "validation. Repeat two through four times in operator order; "
+                "pair with --max-runs equal to the count. Forbids --loop, "
+                "--run-id, and --enable-real-queue."
+            ),
+        )
+        parser.add_argument(
+            "--enable-real-queue",
+            action="store_true",
+            default=False,
+            help=(
+                "Opt in to the existing continuous real queue loop. Requires "
+                "both --real-handle and --loop; forbids --run-id, "
+                "--validation-run-id, and --max-runs. Default is off; the real "
+                "queue worker is NOT production rollout-ready."
+            ),
+        )
 
     def handle(self, *args, **options):
-        loop: bool = options["loop"]
+        self._loop: bool = options["loop"]
         sleep_seconds: int = options["sleep_seconds"]
         self._use_real_handle: bool = options["real_handle"]
         self._run_id: int | None = options.get("run_id")
@@ -398,37 +527,31 @@ class Command(BaseCommand):
         self._max_consecutive_failures: int = options["max_consecutive_failures"]
         self._renewal_threshold_seconds: int = options["renewal_threshold_seconds"]
         self._headless: bool = options["headless"]
+        # PSW-S24-PRE: closed real-handle CLI mode matrix options.
+        self._validation_run_ids: list[int] = list(
+            options.get("validation_run_id") or []
+        )
+        self._enable_real_queue: bool = options["enable_real_queue"]
 
         # PSW-S19 R6: validate positive ranges before any claim (no browser,
         # no adapter, no run mutated). Invalid thresholds fail fast here.
         self._validate_lifecycle_options()
 
-        # Safety guard: a real-legacy manual smoke must target exactly one
-        # explicitly selected run so it cannot accidentally drain the
-        # production queue. This is checked before any run is claimed.
-        if self._use_real_handle and self._run_id is None:
-            raise CommandError(
-                "--real-handle requires --run-id to avoid draining the "
-                "production queue. Specify a single queued IngestionRun id "
-                "for the manual smoke."
-            )
+        # PSW-S24-PRE R1: validate the closed CLI mode matrix and resolve
+        # exactly one mode before any adapter/browser creation or run mutation.
+        # Every combination outside the matrix fails here.
+        self._validate_cli_mode()
 
-        # Safety guard: a real-legacy manual smoke must be bounded to exactly
-        # one run via --max-runs 1 so it cannot enter an idle loop or process
-        # more than the selected run. Checked before _create_adapter() (no
-        # browser launched) and before any claim. Does not affect the stub path.
-        if self._use_real_handle and self._max_runs != 1:
-            raise CommandError(
-                "--real-handle requires --max-runs 1 to bound the manual smoke "
-                "to a single run. Pass --max-runs 1 explicitly."
-            )
-
-        # Preflight the selected run before creating the adapter.
-        # If the selected run has an unsupported intent (empty, unknown,
-        # demographics_only, or conflicting model/JSON intents), reject
-        # without starting a browser/session/login.
-        if self._run_id is not None and not self._preflight_selected_run():
-            return
+        # All-or-nothing preflight for the bounded allow-list runs before one
+        # adapter/bootstrap is created. A single selected run (--run-id),
+        # whether on the stub path or the single real smoke, is preflichted
+        # before any adapter/browser creation (unchanged behavior).
+        if self._mode == _MODE_BOUNDED:
+            if not self._preflight_bounded_runs():
+                return
+        elif self._run_id is not None:
+            if not self._preflight_selected_run():
+                return
 
         # The adapter (and its persistent browser/session) is created ONCE
         # at startup and reused across all claimed runs. This is the core
@@ -436,7 +559,10 @@ class Command(BaseCommand):
         # "Browser and session reuse").
         adapter = self._create_adapter()
         try:
-            if loop:
+            if self._mode == _MODE_BOUNDED:
+                self._process_bounded_sequence(adapter)
+            elif self._loop:
+                # Stub continuous loop or the opted-in continuous real queue.
                 self._run_loop(adapter, sleep_seconds=sleep_seconds)
             else:
                 self._process_once(adapter)
@@ -486,6 +612,68 @@ class Command(BaseCommand):
         for _flag, value in thresholds:
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise CommandError(_INVALID_LIFELIFE_CONFIG_MESSAGE)
+
+    def _validate_cli_mode(self) -> None:
+        """Validate the closed real-handle CLI mode matrix (PSW-S24-PRE R1).
+
+        Resolves exactly one of four modes and raises a sanitized
+        ``CommandError`` for any combination outside the matrix:
+
+        - stub: no ``--real-handle`` (existing behavior unchanged);
+        - single real smoke: ``--real-handle --run-id ID --max-runs 1``;
+        - bounded validation: repeatable ``--validation-run-id`` (two through
+          four distinct positive IDs) with ``--max-runs`` equal to the count;
+        - continuous real queue: ``--real-handle --loop --enable-real-queue``.
+
+        Every other combination fails before ``_create_adapter()`` and before
+        any run mutation. Sets ``self._mode`` for dispatch.
+        """
+        real = bool(getattr(self, "_use_real_handle", False))
+        loop = bool(getattr(self, "_loop", False))
+        run_id = getattr(self, "_run_id", None)
+        max_runs = getattr(self, "_max_runs", None)
+        validation_ids = list(getattr(self, "_validation_run_ids", None) or [])
+        enable_real_queue = bool(getattr(self, "_enable_real_queue", False))
+
+        if enable_real_queue:
+            if not (real and loop):
+                raise CommandError(_ENABLE_REAL_QUEUE_REQUIRES_REAL_AND_LOOP)
+            if run_id is not None or validation_ids or max_runs is not None:
+                raise CommandError(_ENABLE_REAL_QUEUE_FORBIDS_SELECTION)
+            self._mode = _MODE_CONTINUOUS_REAL
+            return
+
+        if real and loop:
+            # --real-handle --loop without the explicit opt-in still fails
+            # before adapter/browser creation and before a claim.
+            raise CommandError(_REAL_LOOP_REQUIRES_ENABLE_REAL_QUEUE)
+
+        if validation_ids:
+            if loop or run_id is not None:
+                raise CommandError(_BOUNDED_FORBIDS_LOOP_RUN_ID)
+            if len(validation_ids) < 2 or len(validation_ids) > 4:
+                raise CommandError(_BOUNDED_SIZE_MESSAGE)
+            if len(set(validation_ids)) != len(validation_ids):
+                raise CommandError(_BOUNDED_DISTINCT_MESSAGE)
+            if any(_id <= 0 for _id in validation_ids):
+                raise CommandError(_BOUNDED_POSITIVE_MESSAGE)
+            if max_runs is None:
+                raise CommandError(_BOUNDED_REQUIRES_MAX_RUNS)
+            if max_runs != len(validation_ids):
+                raise CommandError(_BOUNDED_MAX_RUNS_MISMATCH)
+            self._mode = _MODE_BOUNDED
+            return
+
+        if real:
+            # Single real smoke: exactly one --run-id and --max-runs 1.
+            if run_id is None:
+                raise CommandError(_REAL_HANDLE_REQUIRES_RUN_ID)
+            if max_runs != 1:
+                raise CommandError(_REAL_HANDLE_REQUIRES_MAX_RUNS_ONE)
+            self._mode = _MODE_SINGLE_SMOKE
+            return
+
+        self._mode = _MODE_STUB
 
     def _create_adapter(self) -> PersistentExtractionAdapter:
         """Create a new PersistentExtractionAdapter.
@@ -900,6 +1088,125 @@ class Command(BaseCommand):
             # connected-but-unauthenticated page after restart is NOT ready.
             if adapter.controller.restart_required():
                 adapter.restart_and_rebootstrap()
+
+    def _preflight_bounded_runs(self) -> bool:
+        """All-or-nothing preflight for the bounded allow-list (PSW-S24-PRE R3).
+
+        Validates every listed row for existence, queued state, retry due
+        time, and supported/enabled intent (with model/JSON agreement) BEFORE
+        any adapter/bootstrap is created. On any failure emits a sanitized
+        warning and returns False; no run is mutated and no adapter is built.
+        """
+        now = timezone.now()
+        for run_id in self._validation_run_ids:
+            try:
+                run = IngestionRun.objects.get(pk=run_id)
+            except IngestionRun.DoesNotExist:
+                self.stderr.write(
+                    self.style.WARNING(_BOUNDED_ROW_MISSING_MESSAGE)
+                )
+                return False
+            if run.status != "queued":
+                self.stderr.write(
+                    self.style.WARNING(_BOUNDED_ROW_NOT_QUEUED_MESSAGE)
+                )
+                return False
+            if run.next_retry_at is not None and run.next_retry_at > now:
+                self.stderr.write(
+                    self.style.WARNING(_BOUNDED_ROW_RETRY_NOT_DUE_MESSAGE)
+                )
+                return False
+            if not self._validate_run_intent(run):
+                self.stderr.write(
+                    self.style.WARNING(_BOUNDED_ROW_UNSUPPORTED_INTENT_MESSAGE)
+                )
+                return False
+        return True
+
+    @staticmethod
+    def _claim_listed_run(run_id: int) -> IngestionRun | None:
+        """Claim one operator-listed ID under row-lock (PSW-S24-PRE R4).
+
+        Bounded validation mode only: claims the exact listed primary key when
+        it is still queued, using the same
+        ``select_for_update(skip_locked=True)`` discipline as the normal claim.
+        It NEVER falls through to a generic or unlisted eligible row.
+        """
+        return (
+            IngestionRun.objects
+            .select_for_update(skip_locked=True)
+            .filter(pk=run_id, status="queued")
+            .first()
+        )
+
+    def _process_bounded_sequence(
+        self, adapter: PersistentExtractionAdapter
+    ) -> None:
+        """Process the operator-ordered bounded allow-list (PSW-S24-PRE).
+
+        Reuses the persistent adapter/session across consecutive selected jobs
+        (one bootstrap). Claims only the next listed ID under row-lock, never
+        falling through to a generic/unlisted queue row. Stops — leaving every
+        later selected row untouched — when the cap is reached, the session is
+        not ready, a selected row becomes unclaimable, a restart/rebootstrap
+        fails, or a processed run does not finish as succeeded. Output uses
+        only ordinal/count information and sanitized lifecycle messages (no
+        run IDs or source data).
+        """
+        ids = list(self._validation_run_ids)
+        total = len(ids)
+        processed = 0
+        index = 0
+        while index < total:
+            if self._max_runs_reached():
+                break
+            if not adapter.ensure_session_ready():
+                self.stderr.write(
+                    self.style.WARNING(_BOUNDED_SESSION_NOT_READY_MESSAGE)
+                )
+                break
+            selected_id = ids[index]
+            with transaction.atomic():
+                run = self._claim_listed_run(selected_id)
+                if run is None:
+                    self.stderr.write(
+                        self.style.WARNING(_BOUNDED_ROW_UNCLAIMABLE_MESSAGE)
+                    )
+                    break
+                if not self._validate_run_intent(run):
+                    self._reject_unsupported_intent(run, run.intent)
+                    break
+                run.status = "running"
+                run.save(update_fields=["status"])
+
+            self._process_run(run, adapter)
+            self._processed_count += 1
+            processed += 1
+
+            run.refresh_from_db()
+            if run.status != "succeeded":
+                self.stderr.write(
+                    self.style.WARNING(_BOUNDED_ROW_NOT_SUCCEEDED_MESSAGE)
+                )
+                break
+
+            index += 1
+            # Restart plus rebootstrap at a safe point before the next claim,
+            # reusing the single adapter lifecycle boundary. A restart failure
+            # leaves every later selected row queued and untouched.
+            if index < total and adapter.controller.restart_required():
+                if not adapter.restart_and_rebootstrap():
+                    self.stderr.write(
+                        self.style.WARNING(_BOUNDED_RESTART_FAILED_MESSAGE)
+                    )
+                    break
+
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Bounded validation processed {processed} of {total} "
+                f"selected row(s)."
+            )
+        )
 
     def _max_runs_reached(self) -> bool:
         """Return whether the ``--max-runs`` cap has been reached.

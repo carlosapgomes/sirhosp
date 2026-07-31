@@ -248,6 +248,66 @@ live validation demonstrate that the persistent worker can replace it safely.
 - **THEN** the persistent worker remains a guarded candidate
 - **AND** production replacement is not declared ready
 
+### Requirement: Guarded real multi-run execution surface
+
+The persistent-session worker SHALL expose exactly four closed real-handle CLI
+modes, validated before any adapter/browser creation or run mutation, and SHALL
+keep bounded validation and the continuous real queue disabled until authorized
+PSW-S24 live validation succeeds.
+
+#### Scenario: Single real smoke is preserved
+
+- **WHEN** an operator runs `--real-handle --run-id ID --max-runs 1`
+- **THEN** exactly the selected queued run is processed under one bootstrap
+- **AND** the command rejects the smoke without `--run-id` or with `--max-runs`
+  other than `1` before adapter creation
+
+#### Scenario: Bounded validation processes an ordered allow-list
+
+- **WHEN** an operator passes two through four distinct positive
+  `--validation-run-id` values with `--max-runs` equal to the count
+- **THEN** every listed row is preflichted (queued, retry-due, supported
+  intent, model/JSON agreement) before one adapter/bootstrap is created
+- **AND** the listed rows are claimed in operator-supplied order under
+  `select_for_update(skip_locked=True)`
+- **AND** the worker never claims an unlisted eligible row
+- **AND** the listed jobs reuse the same persistent adapter/session
+- **AND** a claim race, a job that does not finish as `succeeded`, or a
+  restart/rebootstrap failure stops the sequence and leaves every later
+  selected row queued and untouched
+
+#### Scenario: Bounded guard rejects invalid combinations
+
+- **WHEN** the bounded list has fewer than two or more than four values, a
+  duplicate or non-positive ID, a `--max-runs` mismatch, or `--loop`,
+  `--run-id`, or `--enable-real-queue` is also passed
+- **THEN** the command raises a sanitized error before adapter creation
+- **AND** no run is mutated
+
+#### Scenario: Restart and rebootstrap before a later claim
+
+- **WHEN** four selected jobs run with a jobs-per-session threshold of three
+- **THEN** jobs one through three reuse the initial bootstrap
+- **AND** restart plus rebootstrap completes before the fourth claim
+- **AND** a restart failure leaves the fourth selected row queued and untouched
+
+#### Scenario: Continuous real queue is default-off
+
+- **WHEN** `--real-handle --loop` is passed without `--enable-real-queue`
+- **THEN** the command fails before adapter/browser creation and before a claim
+- **AND** `--enable-real-queue` is valid only with both `--real-handle` and
+  `--loop` and forbids `--run-id`, `--validation-run-id`, and `--max-runs`
+- **AND** the opt-in reuses the existing queue, locking, readiness, and shutdown
+  paths without creating a new worker, queue, or deployment default
+
+#### Scenario: Bounded output is sanitized
+
+- **WHEN** the bounded mode emits operational messages
+- **THEN** the dedicated bounded summary and stop messages use only
+  ordinal/count information and sanitized lifecycle messages
+- **AND** they contain no selected run IDs, patient identifiers, clinical
+  content, URLs, credentials, cookies, HTML, or PDF data
+
 ### Requirement: Shared evolution ingestion service
 
 The system SHALL provide a shared evolution ingestion service used by both the

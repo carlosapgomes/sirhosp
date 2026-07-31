@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import os
+from contextlib import ExitStack
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -4616,3 +4617,811 @@ class TestRestartRebootstrapCommand:
         assert session.restart_calls == 0
         assert IngestionRun.objects.filter(status="succeeded").count() == 2
         assert IngestionRun.objects.filter(status="queued").count() == 1
+
+
+# ===========================================================================
+# PSW-S24-PRE: closed real-handle CLI mode matrix
+# ===========================================================================
+
+
+def _patch_bounded_followups():
+    """Context-manager-free patch targets to suppress admissions follow-ups.
+
+    Bounded validation must only ever process the operator-listed rows, so the
+    admissions-only auto-enqueued follow-ups (demographics_only and the
+    most-recent-admission full_sync) are suppressed to keep the queue clean
+    and the ordered sequence observable.
+    """
+    cmd_path = (
+        "apps.ingestion.management.commands"
+        ".process_ingestion_runs_persistent_session"
+    )
+    return [
+        patch(f"{cmd_path}.queue_demographics_only_run", return_value=MagicMock()),
+        patch(
+            f"{cmd_path}.enqueue_most_recent_admission_full_sync",
+            return_value=None,
+        ),
+        patch(
+            f"{cmd_path}.persist_admissions_snapshot",
+            return_value=(None, {"seen": 0, "created": 0, "updated": 0}),
+        ),
+    ]
+
+
+@pytest.mark.django_db
+class TestBoundedValidationMode:
+    """PSW-S24-PRE R1/R4/R5: bounded ordered allow-list of 2-4 selected runs.
+
+    The bounded mode processes a small, explicit, operator-ordered allow-list
+    of two through four queued runs under one persistent adapter/session, never
+    falling through to an unlisted queue row.
+    """
+
+    def test_four_listed_runs_execute_in_listed_order_with_one_adapter(self):
+        """RED proof: four heterogeneous runs run in operator order, one adapter."""
+        run_b = _queue_admissions_run(
+            parameters_json={"patient_record": "VB", "intent": "admissions_only"}
+        )
+        run_a = _queue_admissions_run(
+            parameters_json={"patient_record": "VA", "intent": "admissions_only"}
+        )
+        run_d = _queue_admissions_run(
+            parameters_json={"patient_record": "VD", "intent": "admissions_only"}
+        )
+        run_c = _queue_admissions_run(
+            parameters_json={"patient_record": "VC", "intent": "admissions_only"}
+        )
+        # Operator order is deliberately NOT primary-key order.
+        order = [run_a.pk, run_c.pk, run_b.pk, run_d.pk]
+
+        processed: list[str] = []
+
+        def _record_snapshot(*, patient_record, **kwargs):  # noqa: ARG001
+            processed.append(patient_record)
+            return []
+
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter.get_admission_snapshot.side_effect = _record_snapshot
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=mock_adapter,
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=order,
+                max_runs=4,
+            )
+
+        for run in (run_a, run_b, run_c, run_d):
+            run.refresh_from_db()
+            assert run.status == "succeeded"
+        # Operator-supplied order, not primary-key order.
+        assert processed == ["VA", "VC", "VB", "VD"], processed
+
+    def test_two_listed_runs_accepted(self):
+        """The lower bound (two distinct IDs) is accepted."""
+        run1 = _queue_admissions_run(
+            parameters_json={"patient_record": "LO2-1", "intent": "admissions_only"}
+        )
+        run2 = _queue_admissions_run(
+            parameters_json={"patient_record": "LO2-2", "intent": "admissions_only"}
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=mock_adapter,
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=[run1.pk, run2.pk],
+                max_runs=2,
+            )
+        run1.refresh_from_db()
+        run2.refresh_from_db()
+        assert run1.status == "succeeded"
+        assert run2.status == "succeeded"
+
+    def test_does_not_claim_unlisted_eligible_row(self):
+        """No fallthrough: an unlisted eligible row stays queued throughout."""
+        listed = _queue_admissions_run(
+            parameters_json={"patient_record": "NL-1", "intent": "admissions_only"}
+        )
+        listed2 = _queue_admissions_run(
+            parameters_json={"patient_record": "NL-2", "intent": "admissions_only"}
+        )
+        unlisted = _queue_admissions_run(
+            parameters_json={"patient_record": "NL-X", "intent": "admissions_only"}
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=mock_adapter,
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=[listed.pk, listed2.pk],
+                max_runs=2,
+            )
+        listed.refresh_from_db()
+        listed2.refresh_from_db()
+        unlisted.refresh_from_db()
+        assert listed.status == "succeeded"
+        assert listed2.status == "succeeded"
+        assert unlisted.status == "queued"
+
+
+@pytest.mark.django_db
+class TestBoundedModeGuardMatrix:
+    """PSW-S24-PRE R1: every combination outside the matrix fails before the
+    adapter is created and before any run is mutated."""
+
+    def _assert_rejected(self, *, ids=None, **kwargs):
+        run = _queue_admissions_run(
+            parameters_json={"patient_record": "GM", "intent": "admissions_only"}
+        )
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            with pytest.raises(CommandError):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    **({"validation_run_id": ids} if ids is not None else {}),
+                    **kwargs,
+                )
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_single_id_rejected(self):
+        run = _queue_admissions_run()
+        self._assert_rejected(ids=[run.pk], max_runs=1)
+
+    def test_five_ids_rejected(self):
+        ids = [
+            _queue_admissions_run(
+                parameters_json={
+                    "patient_record": f"G{i}",
+                    "intent": "admissions_only",
+                }
+            ).pk
+            for i in range(5)
+        ]
+        self._assert_rejected(ids=ids, max_runs=5)
+
+    def test_duplicate_ids_rejected(self):
+        run = _queue_admissions_run(
+            parameters_json={"patient_record": "DUP", "intent": "admissions_only"}
+        )
+        run2 = _queue_admissions_run(
+            parameters_json={"patient_record": "DUP2", "intent": "admissions_only"}
+        )
+        self._assert_rejected(ids=[run.pk, run.pk, run2.pk], max_runs=3)
+
+    def test_nonpositive_id_rejected(self):
+        run = _queue_admissions_run()
+        run2 = _queue_admissions_run()
+        self._assert_rejected(ids=[run.pk, 0, run2.pk], max_runs=3)
+
+    def test_missing_max_runs_rejected(self):
+        run = _queue_admissions_run()
+        run2 = _queue_admissions_run()
+        self._assert_rejected(ids=[run.pk, run2.pk])
+
+    def test_max_runs_mismatch_rejected(self):
+        run = _queue_admissions_run()
+        run2 = _queue_admissions_run()
+        run3 = _queue_admissions_run()
+        self._assert_rejected(ids=[run.pk, run2.pk, run3.pk], max_runs=2)
+
+    def test_loop_forbidden_in_bounded(self):
+        run = _queue_admissions_run()
+        run2 = _queue_admissions_run()
+        self._assert_rejected(ids=[run.pk, run2.pk], max_runs=2, loop=True)
+
+    def test_run_id_forbidden_in_bounded(self):
+        run = _queue_admissions_run()
+        run2 = _queue_admissions_run()
+        self._assert_rejected(
+            ids=[run.pk, run2.pk], max_runs=2, run_id=run.pk
+        )
+
+    def test_enable_real_queue_forbidden_in_bounded(self):
+        run = _queue_admissions_run()
+        run2 = _queue_admissions_run()
+        self._assert_rejected(
+            ids=[run.pk, run2.pk], max_runs=2, enable_real_queue=True
+        )
+
+
+@pytest.mark.django_db
+class TestBoundedAllRowPreflight:
+    """PSW-S24-PRE R3: all-or-nothing preflight before one adapter/bootstrap."""
+
+    def test_one_bad_row_blocks_adapter_and_leaves_all_unchanged(self):
+        good1 = _queue_admissions_run(
+            parameters_json={"patient_record": "PF1", "intent": "admissions_only"}
+        )
+        bad = _queue_admissions_run(
+            parameters_json={"patient_record": "PFBAD", "intent": "admissions_only"}
+        )
+        bad.status = "running"  # not queued -> preflight failure
+        bad.save(update_fields=["status"])
+        good2 = _queue_admissions_run(
+            parameters_json={"patient_record": "PF2", "intent": "admissions_only"}
+        )
+        order = [good1.pk, bad.pk, good2.pk]
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=order,
+                max_runs=3,
+            )
+        mock_create.assert_not_called()
+        good1.refresh_from_db()
+        good2.refresh_from_db()
+        bad.refresh_from_db()
+        assert good1.status == "queued"
+        assert good2.status == "queued"
+        assert bad.status == "running"
+
+    def test_unsupported_intent_row_blocks_all(self):
+        good = _queue_admissions_run(
+            parameters_json={"patient_record": "PF3", "intent": "admissions_only"}
+        )
+        unsupported = IngestionRun.objects.create(
+            status="queued",
+            intent="unknown_purpose",
+            max_attempts=1,
+            parameters_json={
+                "patient_record": "PFU",
+                "intent": "unknown_purpose",
+            },
+        )
+        order = [good.pk, unsupported.pk]
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=order,
+                max_runs=2,
+            )
+        mock_create.assert_not_called()
+        good.refresh_from_db()
+        unsupported.refresh_from_db()
+        assert good.status == "queued"
+        assert unsupported.status == "queued"
+
+
+@pytest.mark.django_db
+class TestBoundedClaimRaceAndFailureStop:
+    """PSW-S24-PRE R4/R7: stop on claim race or failed job; no generic claim."""
+
+    def test_claim_race_stops_without_generic_fallback(self):
+        run1 = _queue_admissions_run(
+            parameters_json={"patient_record": "CR1", "intent": "admissions_only"}
+        )
+        run2 = _queue_admissions_run(
+            parameters_json={"patient_record": "CR2", "intent": "admissions_only"}
+        )
+        run3 = _queue_admissions_run(
+            parameters_json={"patient_record": "CR3", "intent": "admissions_only"}
+        )
+        unlisted = _queue_admissions_run(
+            parameters_json={"patient_record": "CRU", "intent": "admissions_only"}
+        )
+        order = [run1.pk, run2.pk, run3.pk]
+
+        def _snapshot(*, patient_record, **kwargs):  # noqa: ARG001
+            if patient_record == "CR1":
+                # Simulate another worker claiming run2 after preflight.
+                run2.status = "running"
+                run2.worker_label = "other:1"
+                run2.save(update_fields=["status", "worker_label"])
+            return []
+
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter.get_admission_snapshot.side_effect = _snapshot
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=mock_adapter,
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=order,
+                max_runs=3,
+            )
+        run1.refresh_from_db()
+        run2.refresh_from_db()
+        run3.refresh_from_db()
+        unlisted.refresh_from_db()
+        assert run1.status == "succeeded"
+        assert run2.status == "running"  # claimed by other; we did not touch it
+        assert run3.status == "queued"  # later selected row untouched
+        assert unlisted.status == "queued"  # no generic fallback claim
+
+    def test_failed_job_leaves_later_selected_rows_queued(self):
+        run1 = _queue_admissions_run(
+            parameters_json={"patient_record": "FJ1", "intent": "admissions_only"}
+        )
+        run2 = _queue_admissions_run(
+            max_attempts=1,
+            parameters_json={"patient_record": "FJ2", "intent": "admissions_only"},
+        )
+        run3 = _queue_admissions_run(
+            parameters_json={"patient_record": "FJ3", "intent": "admissions_only"}
+        )
+        order = [run1.pk, run2.pk, run3.pk]
+
+        def _snapshot(*, patient_record, **kwargs):  # noqa: ARG001
+            if patient_record == "FJ2":
+                raise SnapshotContainerMissingError("missing container")
+            return []
+
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter.get_admission_snapshot.side_effect = _snapshot
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=mock_adapter,
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=order,
+                max_runs=3,
+            )
+        run1.refresh_from_db()
+        run2.refresh_from_db()
+        run3.refresh_from_db()
+        assert run1.status == "succeeded"
+        assert run2.status == "failed"  # terminal failure
+        assert run3.status == "queued"  # later selected row untouched
+
+
+@pytest.mark.django_db
+class TestBoundedRestartBeforeLaterClaim:
+    """PSW-S24-PRE R6: restart plus rebootstrap completes before a later claim,
+    and a restart failure leaves the later selected row queued and untouched."""
+
+    @staticmethod
+    def _snapshot_html() -> str:
+        import json
+
+        camel = [
+            {
+                "admissionKey": "ADM-RST",
+                "admissionStart": "2024-01-15",
+                "admissionEnd": "2024-01-20",
+                "ward": "Enfermaria A",
+                "bed": "001",
+            }
+        ]
+        return (
+            "<html><body>"
+            '<div id="tempoSessao">T: <span>00</span>:<span>29</span>:<span>01</span></div>'
+            '<div id="admission-snapshot-data">' + json.dumps(camel) + "</div></body></html>"
+        )
+
+    def _make_session(self, *, fail_rebootstrap=False):
+        snapshot_html = self._snapshot_html()
+        blank_html = "<html><body></body></html>"
+
+        class _Session:
+            def __init__(self_inner) -> None:
+                self_inner._html = snapshot_html
+                self_inner.restart_calls = 0
+                self_inner.bootstrap_calls = 0
+                self_inner._fail_rebootstrap = fail_rebootstrap
+
+            def get_page_html(self_inner) -> str:
+                return self_inner._html
+
+            def is_connected(self_inner) -> bool:
+                return True
+
+            def click_selector(self_inner, selector: str) -> None:  # noqa: ARG002
+                pass
+
+            def open_tab(self_inner, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+                return True
+
+            def get_tab_classes(self_inner) -> list[str]:
+                return ["tabs-first tabs-last tabs-selected"]
+
+            def close_last_non_root_tab(self_inner):
+                return TabCleanupOutcome.ROOT_ONLY
+
+            def restart_browser(self_inner) -> None:
+                self_inner.restart_calls += 1
+                self_inner._html = blank_html
+
+            def bootstrap(self_inner) -> None:
+                if self_inner._fail_rebootstrap and self_inner.restart_calls >= 1:
+                    raise RuntimeError("rebootstrap failed")
+                self_inner.bootstrap_calls += 1
+                self_inner._html = snapshot_html
+
+        return _Session()
+
+    def test_restart_rebootstrap_before_fourth_claim(self):
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        session = self._make_session()
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig(max_jobs_per_session=3)
+        )
+        runs = [
+            _queue_admissions_run(
+                parameters_json={
+                    "patient_record": f"RST{i}",
+                    "intent": "admissions_only",
+                }
+            )
+            for i in range(4)
+        ]
+        order = [r.pk for r in runs]
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand, "_create_adapter", return_value=adapter
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=order,
+                max_runs=4,
+                max_jobs=3,
+            )
+        for r in runs:
+            r.refresh_from_db()
+            assert r.status == "succeeded"
+        assert session.restart_calls == 1, session.restart_calls
+        assert session.bootstrap_calls == 1, session.bootstrap_calls
+
+    def test_restart_failure_leaves_fourth_row_queued(self):
+        from apps.ingestion.extractors.persistent_extraction_adapter import (
+            PersistentExtractionAdapter,
+        )
+        from apps.ingestion.extractors.session_controller import (
+            SessionControllerConfig,
+        )
+
+        session = self._make_session(fail_rebootstrap=True)
+        adapter = PersistentExtractionAdapter(
+            session, config=SessionControllerConfig(max_jobs_per_session=3)
+        )
+        runs = [
+            _queue_admissions_run(
+                parameters_json={
+                    "patient_record": f"RSF{i}",
+                    "intent": "admissions_only",
+                }
+            )
+            for i in range(4)
+        ]
+        order = [r.pk for r in runs]
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand, "_create_adapter", return_value=adapter
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=order,
+                max_runs=4,
+                max_jobs=3,
+            )
+        for r in runs[:3]:
+            r.refresh_from_db()
+            assert r.status == "succeeded"
+        runs[3].refresh_from_db()
+        assert runs[3].status == "queued"  # restart failure -> untouched
+        assert session.restart_calls >= 1
+
+
+@pytest.mark.django_db
+class TestContinuousRealQueueOptIn:
+    """PSW-S24-PRE R8: the real continuous loop is default-off and reachable
+    only through the explicit ``--enable-real-queue`` opt-in."""
+
+    def test_real_loop_without_opt_in_fails_before_adapter(self):
+        run = _queue_admissions_run()
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            with pytest.raises(CommandError):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    loop=True,
+                )
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_enable_real_queue_requires_real_handle_and_loop(self):
+        run = _queue_admissions_run()
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            with pytest.raises(CommandError):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    enable_real_queue=True,
+                )
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_enable_real_queue_forbids_run_id(self):
+        run = _queue_admissions_run()
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            with pytest.raises(CommandError):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    loop=True,
+                    enable_real_queue=True,
+                    run_id=run.pk,
+                )
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_enable_real_queue_forbids_validation_run_id(self):
+        run = _queue_admissions_run()
+        run2 = _queue_admissions_run()
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            with pytest.raises(CommandError):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    loop=True,
+                    enable_real_queue=True,
+                    validation_run_id=[run.pk, run2.pk],
+                )
+        mock_create.assert_not_called()
+
+    def test_enable_real_queue_reaches_existing_loop(self):
+        """With the opt-in, the existing loop is reached (no new queue/worker)."""
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        cmd_path = (
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session"
+        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+                )
+            )
+            stack.enter_context(
+                patch(f"{cmd_path}.time.sleep", side_effect=[None, KeyboardInterrupt])
+            )
+            stack.enter_context(patch("signal.signal"))
+            with pytest.raises(KeyboardInterrupt):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    loop=True,
+                    enable_real_queue=True,
+                    sleep_seconds=1,
+                )
+        mock_adapter.ensure_session_ready.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestBoundedSanitization:
+    """PSW-S24-PRE R9: new bounded-mode output contains no selected IDs or
+    source data. The existing per-run ``#<pk>`` operational IDs remain allowed
+    under the frozen PSW-S17 sanitization contract; the dedicated bounded
+    summary and stop messages use only ordinal/count information.
+    """
+
+    def test_bounded_summary_is_ordinal_and_source_tokens_do_not_leak(
+        self, capsys
+    ):
+        sentinel_a = "SENT-PSK-BOUNDED-A-777"
+        sentinel_b = "SENT-PSK-BOUNDED-B-778"
+        run_a = _queue_admissions_run(
+            parameters_json={
+                "patient_record": sentinel_a,
+                "intent": "admissions_only",
+            }
+        )
+        run_b = _queue_admissions_run(
+            parameters_json={
+                "patient_record": sentinel_b,
+                "intent": "admissions_only",
+            }
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=mock_adapter,
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=[run_a.pk, run_b.pk],
+                max_runs=2,
+            )
+        captured = capsys.readouterr()
+        # Source data (patient tokens) must never leak on any surface.
+        assert sentinel_a not in captured.out
+        assert sentinel_a not in captured.err
+        assert sentinel_b not in captured.out
+        assert sentinel_b not in captured.err
+        # The dedicated bounded summary uses only ordinal/count information.
+        summary_lines = [
+            line
+            for line in captured.out.splitlines()
+            if "Bounded validation" in line
+        ]
+        assert summary_lines, captured.out
+        for line in summary_lines:
+            assert str(run_a.pk) not in line, line
+            assert str(run_b.pk) not in line, line
+
+    def test_bounded_stop_warning_has_no_selected_ids(self, capsys):
+        sentinel = "SENT-PSK-BOUNDED-STOP-779"
+        run_a = _queue_admissions_run(
+            parameters_json={
+                "patient_record": sentinel,
+                "intent": "admissions_only",
+            }
+        )
+        run_b = _queue_admissions_run(
+            max_attempts=1,
+            parameters_json={
+                "patient_record": "SENT-PSK-BOUNDED-STOP-780",
+                "intent": "admissions_only",
+            },
+        )
+        run_c = _queue_admissions_run(
+            parameters_json={
+                "patient_record": "SENT-PSK-BOUNDED-STOP-781",
+                "intent": "admissions_only",
+            }
+        )
+
+        def _snapshot(*, patient_record, **kwargs):  # noqa: ARG001
+            if patient_record == "SENT-PSK-BOUNDED-STOP-780":
+                raise SnapshotContainerMissingError("missing container")
+            return []
+
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter.get_admission_snapshot.side_effect = _snapshot
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=mock_adapter,
+                )
+            )
+            for p in _patch_bounded_followups():
+                stack.enter_context(p)
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                validation_run_id=[run_a.pk, run_b.pk, run_c.pk],
+                max_runs=3,
+            )
+        captured = capsys.readouterr()
+        # The new stop message and summary carry no selected IDs or tokens.
+        stop_lines = [
+            line
+            for line in captured.err.splitlines() + captured.out.splitlines()
+            if "bounded sequence" in line or "Bounded validation" in line
+        ]
+        assert stop_lines, (captured.out, captured.err)
+        for line in stop_lines:
+            assert str(run_a.pk) not in line, line
+            assert str(run_b.pk) not in line, line
+            assert str(run_c.pk) not in line, line
+            assert sentinel not in line, line
+        run_c.refresh_from_db()
+        assert run_c.status == "queued"  # later selected row untouched
+
+
+@pytest.mark.django_db
+class TestSingleSmokeRegressionPreserved:
+    """PSW-S24-PRE R2: the existing one-ID real smoke contract is unchanged."""
+
+    def test_single_smoke_still_requires_run_id(self):
+        run = _queue_admissions_run()
+        with pytest.raises(CommandError):
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                real_handle=True,
+                max_runs=1,
+            )
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_single_smoke_still_requires_max_runs_one(self):
+        run = _queue_admissions_run()
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            with pytest.raises(CommandError) as exc_info:
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    run_id=run.pk,
+                    max_runs=2,
+                )
+        assert "--max-runs" in str(exc_info.value)
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        assert run.status == "queued"
+
+    def test_single_smoke_passes_and_processes_one(self):
+        run = _queue_admissions_run()
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        with patch.object(
+            PersistentWorkerCommand,
+            "_create_adapter",
+            return_value=mock_adapter,
+        ) as mock_create:
+            call_command(
+                "process_ingestion_runs_persistent_session",
+                real_handle=True,
+                run_id=run.pk,
+                max_runs=1,
+            )
+        mock_create.assert_called_once()
+        run.refresh_from_db()
+        assert run.status == "succeeded"

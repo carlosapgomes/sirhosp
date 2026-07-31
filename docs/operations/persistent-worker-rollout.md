@@ -48,6 +48,16 @@
 >    and PDF flow against the real legacy UI, and operational threshold tuning
 >    (max-jobs, max-lifetime).
 >
+> 5. **PSW-S24-PRE — guarded real multi-run command surface (NOT
+>    rollout-ready).** The `--real-handle` path now exposes a closed CLI mode
+>    matrix: the single-run smoke is preserved; a bounded, ordered
+>    `--validation-run-id` allow-list (two through four runs, one session,
+>    restart before a later claim) is the intended PSW-S24 live-validation
+>    surface; and the existing continuous real queue loop is reachable only
+>    through an explicit default-off `--enable-real-queue` opt-in. Both real
+>    multi-run modes stay disabled until authorized PSW-S24 live validation
+>    succeeds.
+>
 > This document describes the **intended future rollout plan** and
 > **controlled lab/staging experiment guidance**. Do not apply the scaling or
 > side-by-side procedures in production until the prerequisites above are met.
@@ -127,6 +137,46 @@ uv run python manage.py process_ingestion_runs_persistent_session \
 > and passwords must never be logged. Bootstrap, navigation, and PDF-flow
 > failures must be sanitized. The bridge/PDF flow still require live validation
 > against the real legacy UI before any continuous worker rollout.
+
+### 1.3 Real-handle CLI mode matrix (PSW-S24-PRE)
+
+The `--real-handle` path now exposes a CLOSED CLI mode matrix, validated before
+any adapter/browser creation or run mutation. None of the real modes is
+rollout-ready; all stay disabled until authorized PSW-S24 live validation
+succeeds.
+
+| Mode | Flags | Owns |
+| --- | --- | --- |
+| stub | (no `--real-handle`) | all eligible |
+| single smoke | `--real-handle --run-id ID --max-runs 1` | one ID |
+| bounded | `--validation-run-id` x2-4 + cap | listed only |
+| continuous | `--real-handle --loop --enable-real-queue` | enabled |
+
+Bounded validation is the intended PSW-S24 live-validation surface: an operator
+lists two through four queued run IDs in operator order with an exact `--max-runs`
+cap. Every listed row is preflichted (queued, retry-due, supported intent) before
+one adapter/bootstrap; the listed jobs reuse the same session; processing never
+falls through to an unlisted row; and a claim race, a job that does not finish
+as `succeeded`, or a restart/rebootstrap failure leaves every later selected row
+queued and untouched.
+
+```bash
+# BOUNDED LIVE VALIDATION ONLY (placeholders; NOT rollout-ready):
+uv run python manage.py process_ingestion_runs_persistent_session \
+    --real-handle \
+    --validation-run-id <ID_1> --validation-run-id <ID_2> \
+    --max-runs 2
+```
+
+`--real-handle --loop` without the explicit `--enable-real-queue` opt-in fails
+before adapter/browser creation. The opt-in is forbidden with `--run-id`,
+`--validation-run-id`, or `--max-runs`, and it reuses the existing queue,
+locking, readiness, and shutdown paths without creating a new worker, queue, or
+deployment default.
+
+> Bounded and continuous real modes are command surface only. They do NOT
+declare production rollout readiness. Real IDs, patient identifiers, clinical
+content, URLs, credentials, and cookies must never be logged.
 
 ---
 
