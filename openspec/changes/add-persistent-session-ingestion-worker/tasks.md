@@ -636,13 +636,31 @@ from PSW-S14, confirmed in the suite). No assertion was weakened: the sole
 intentional difference (the persistent `demographics_only` identity check) is a
 command-level defense that does not change observable parity because both
 workers receive matching data. Production rollout REMAINS BLOCKED pending the
-PSW-S24 guarded live validation. PSW-S17..PSW-S22 observable contracts are
-preserved and not re-audited.
+PSW-S24-PRE operational command slice and PSW-S24 guarded live validation.
+PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
+
+## 23A. PSW-S24-PRE: Guarded real multi-run execution
+
+- [ ] 23A.1 Add a closed real-handle CLI mode matrix that preserves the
+  single-run smoke and rejects invalid combinations before adapter creation.
+- [ ] 23A.2 Add a bounded, ordered allow-list of two through four explicit run
+  IDs that preflights every row before one adapter/bootstrap and never claims
+  unlisted work.
+- [ ] 23A.3 Make the existing continuous real queue loop reachable only through
+  an explicit default-off `--enable-real-queue` opt-in; do not enable deployment
+  or claim rollout readiness.
+- [ ] 23A.4 Prove with command/DB tests that heterogeneous listed jobs reuse the
+  session, stop after a failed job, and complete restart plus rebootstrap before
+  a later claim.
+- [ ] 23A.5 Preserve frozen worker/extraction contracts, update only the allowed
+  design/spec/rollout/task artifacts, run official validation, and create
+  `/tmp/sirhosp-slice-PSW-S24-PRE-report.md`.
 
 ## 24. PSW-S24: Guarded live validation and cutover readiness
 
-- [ ] 24.1 Define sanitized operator-run evidence for real admissions,
-  demographics, chunked evolutions, renewal, cleanup, and restart/rebootstrap.
+- [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
+  allow-list for real admissions, demographics, chunked evolutions, renewal,
+  cleanup, and restart/rebootstrap.
 - [ ] 24.2 Run guarded validation within the approved concurrency limit, or mark
   the slice blocked without changing rollout status when access is unavailable.
 - [ ] 24.3 Reconcile proposal, design, specs, tasks, rollout docs, defaults, and

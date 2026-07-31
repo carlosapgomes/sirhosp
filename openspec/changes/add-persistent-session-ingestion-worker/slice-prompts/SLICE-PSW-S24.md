@@ -2,10 +2,11 @@
 
 ## Handoff for a Context-Zero Implementer
 
-Implement only PSW-S24 after PSW-S23 is committed, pushed, and independently
-verified. Read project instructions, all change artifacts, every PSW-S14-S23
-report, rollout/deploy guidance, architecture/ADR concurrency limits, and the
-real-handle command guardrails. Start from a clean tree.
+Implement only PSW-S24 after PSW-S24-PRE is committed, pushed, and
+independently verified. Read project instructions, all change artifacts, every
+PSW-S14-S23 and PSW-S24-PRE report, rollout/deploy guidance, architecture/ADR
+concurrency limits, and the real-handle command guardrails. Start from a clean
+tree.
 
 This slice requires authorized lab/staging access to the real legacy UI and a
 non-production or explicitly approved database. If access, authorization, safe
@@ -29,9 +30,9 @@ or push.
 
 ## Inherited Contracts — Frozen and Not Reopened
 
-PSW-S17 through PSW-S23 are frozen prerequisites. Live validation observes
-their integrated behavior; it does not redefine timeout, sanitization,
-cleanup, restart, chunk, PDF, or parity contracts.
+PSW-S17 through PSW-S23 and PSW-S24-PRE are frozen prerequisites. Live
+validation observes their integrated behavior; it does not redefine CLI mode,
+timeout, sanitization, cleanup, restart, chunk, PDF, or parity contracts.
 
 PSW-S17 sanitization remains limited to observable/persisted surfaces, and its
 deadline remains cooperative. Do not inspect private exception context or
@@ -60,7 +61,7 @@ preserving the current worker as rollback.
 
 All are mandatory:
 
-- PSW-S23 status is COMPLETE and verifier-approved;
+- PSW-S24-PRE status is COMPLETE and verifier-approved;
 - authorized lab/staging legacy access;
 - approved non-sensitive test records/run IDs supplied by an operator;
 - persistent-worker scale starts at zero;
@@ -128,9 +129,11 @@ scale a production service automatically.
 
 ## Validation Procedure
 
-Before live execution, write sanitized commands with placeholders in the report.
-Use only explicit `--run-id` and bounded run count. Do not paste credentials or
-real IDs into the report or shell history captured there.
+Before live execution, write the bounded allow-list command with placeholders
+in the report. Use only repeated explicit `--validation-run-id` values and an
+exact matching `--max-runs`; never record real values in the report or captured
+shell history. Do not use the continuous `--enable-real-queue` path for this
+validation.
 
 Required sequence:
 
