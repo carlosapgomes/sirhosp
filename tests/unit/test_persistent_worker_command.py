@@ -4649,6 +4649,225 @@ def _patch_bounded_followups():
     ]
 
 
+# ---------------------------------------------------------------------------
+# C1-R2: real-session orchestration fakes.
+#
+# These fakes stand in for the concrete external browser/login/source-I/O
+# collaborators at their import boundary inside
+# ``_create_bootstrapped_real_handle``. They let the REAL command
+# ``_create_adapter`` / ``_create_bootstrapped_real_handle`` build a REAL
+# ``PersistentExtractionAdapter`` over a REAL ``PersistentSessionController``
+# (real bootstrap/restart/rebootstrap/dispatch orchestration), while no real
+# Playwright/Chromium is started and no real credentials/HTML/PDF are used.
+# Persistence, planning, and ingestion services run for real on synthetic data.
+# ---------------------------------------------------------------------------
+
+
+def _synth_admissions_container(pr: str) -> str:
+    """camelCase admissions snapshot the REAL adapter parser reads."""
+    import json
+
+    camel = [
+        {
+            "admissionKey": f"ADM-NEW-{pr}",
+            "admissionStart": "2024-02-01 00:00:00",
+            "admissionEnd": None,
+            "ward": "Enfermaria",
+            "bed": "02",
+        }
+    ]
+    return (
+        f'<div id="admission-snapshot-data">{json.dumps(camel)}</div>'
+    )
+
+
+def _synth_demographics(pr: str) -> dict:
+    """Minimal valid demographics payload (prontuario identifies ``pr``)."""
+    return {
+        "prontuario": pr,
+        "nome": f"PACIENTE SYNTH {pr}",
+        "sexo": "Feminino",
+        "data_nascimento": "10/05/1980",
+        "nome_mae": "MAE SYNTH",
+        "cpf": "12345678900",
+    }
+
+
+def _synth_evolutions(pr: str) -> list[dict]:
+    """5-key evolution payload the REAL adapter enriches for persistence."""
+    return [
+        {
+            "admission_key": f"ADM-NEW-{pr}",
+            "happened_at": "2024-02-05T09:00:00",
+            "event_type": "medical_evolution",
+            "content": "Paciente estavel (synthetic).",
+            "profession": "medica",
+        }
+    ]
+
+
+class _FakeRealBridge:
+    """Fake ``RealHandleBridge`` (login/DOM-translation boundary).
+
+    Records the bootstrap/restart lifecycle and provides synthetic
+    admissions/demographics/evolutions data so the REAL adapter + controller
+    can orchestrate extraction over it.
+    """
+
+    instances = 0
+    last = None
+    fail_next_rebootstrap = False
+
+    _COUNTDOWN = (
+        "<div id=\"tempoSessao\">T: <span>09</span>:<span>00</span>"
+        ":<span>00</span></div>"
+    )
+
+    def __init__(self, handle, credentials=None, login_timeout=60):  # noqa: ARG002
+        type(self).instances += 1
+        type(self).last = self
+        self._handle = handle
+        self.lifecycle_log: list[str] = []
+        self.extraction_log: list[tuple[str, str]] = []
+        self._current = ""
+
+    # --- SessionHandle protocol (controller contract) ---
+    def is_connected(self) -> bool:
+        return True
+
+    def get_page_html(self) -> str:
+        return f"<html><body>{self._COUNTDOWN}{self._current}</body></html>"
+
+    def click_selector(self, selector: str) -> None:  # noqa: ARG002
+        pass
+
+    def get_tab_classes(self) -> list[str]:
+        # Root-only tab state so cleanup is a safe no-op (ROOT_ONLY) and the
+        # controller does not force a recovery restart between jobs.
+        return ["tabs-first tabs-last tabs-selected"]
+
+    def close_last_non_root_tab(self):
+        return TabCleanupOutcome.ROOT_ONLY
+
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
+        return True
+
+    # --- Lifecycle boundary (bootstrap/restart/shutdown) ---
+    def bootstrap(self) -> None:
+        if (
+            type(self).fail_next_rebootstrap
+            and self.lifecycle_log.count("restart") >= 1
+        ):
+            raise RuntimeError("rebootstrap failed (synthetic)")
+        self.lifecycle_log.append("bootstrap")
+
+    def restart_browser(self) -> None:
+        self.lifecycle_log.append("restart")
+
+    def shutdown(self) -> None:
+        self._handle.shutdown()
+
+    # --- Extraction entry points (adapter contract) ---
+    def supports_real_evolution_actions(self) -> bool:
+        return True
+
+    def navigate_to_admissions(self, patient_record: str) -> bool:
+        self.extraction_log.append(("admissions", patient_record))
+        self._current = _synth_admissions_container(patient_record)
+        return True
+
+    def extract_demographics_via_legacy_actions(
+        self, patient_record: str, timeout: int = 120  # noqa: ARG002
+    ) -> dict:
+        self.extraction_log.append(("demographics", patient_record))
+        return _synth_demographics(patient_record)
+
+    def extract_evolutions_via_legacy_actions(
+        self,
+        patient_record: str,
+        start_date: str = "",  # noqa: ARG002
+        end_date: str = "",  # noqa: ARG002
+        timeout: int = 120,  # noqa: ARG002
+    ) -> list[dict]:
+        self.extraction_log.append(("evolutions", patient_record))
+        return _synth_evolutions(patient_record)
+
+
+class _FakePlaywrightHandle:
+    """Fake ``PlaywrightSessionHandle``: records start/shutdown, no Chromium."""
+
+    instances = 0
+
+    def __init__(self, *args, **kwargs):  # noqa: ANN204, ARG002
+        type(self).instances += 1
+        self.start_calls = 0
+        self.shutdown_calls = 0
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+
+class _FakeBrowserProfile:
+    """Fake ``ExclusiveBrowserProfile`` (no real profile lock)."""
+
+    instances = 0
+
+    def __init__(self, *args, **kwargs):  # noqa: ANN204, ARG002
+        type(self).instances += 1
+
+
+def _patch_real_session_collaborators(*, fail_rebootstrap: bool = False):
+    """Patch the five import-boundary browser/login/source-I/O collaborators.
+
+    Returns a list of ``patch`` context managers (for ``ExitStack``) that let
+    the REAL ``_create_adapter`` build a REAL adapter+controller over the fake
+    bridge/handle, faking only Playwright I/O, the browser profile, source
+    credentials, URL templates, and the login/DOM-translation bridge.
+    """
+    from apps.ingestion.extractors.legacy_session_bootstrap import (
+        LegacyUrlTemplates,
+    )
+
+    _FakeRealBridge.instances = 0
+    _FakeRealBridge.last = None
+    _FakeRealBridge.fail_next_rebootstrap = fail_rebootstrap
+    _FakePlaywrightHandle.instances = 0
+    _FakeBrowserProfile.instances = 0
+    templates = LegacyUrlTemplates(
+        admissions_url_template="/admissions/{patient_record}",
+        evolutions_url_template="/evolutions/{patient_record}",
+        safe_renewal_url="/safe-renewal",
+    )
+    return [
+        patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".resolve_legacy_url_templates",
+            return_value=templates,
+        ),
+        patch(
+            "apps.ingestion.historical_extraction.resolve_source_credentials",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "apps.ingestion.extractors.browser_profile"
+            ".ExclusiveBrowserProfile",
+            _FakeBrowserProfile,
+        ),
+        patch(
+            "apps.ingestion.extractors.playwright_session_handle"
+            ".PlaywrightSessionHandle",
+            _FakePlaywrightHandle,
+        ),
+        patch(
+            "apps.ingestion.extractors.real_handle_bridge.RealHandleBridge",
+            _FakeRealBridge,
+        ),
+    ]
+
+
 @pytest.mark.django_db
 class TestBoundedValidationMode:
     """PSW-S24-PRE R1/R4/R5: bounded ordered allow-list of 2-4 selected runs.
@@ -4658,56 +4877,95 @@ class TestBoundedValidationMode:
     falling through to an unlisted queue row.
     """
 
-    def test_four_listed_runs_execute_in_listed_order_with_one_adapter(self):
-        """RED proof: four heterogeneous runs run in operator order, one adapter."""
-        run_b = _queue_admissions_run(
-            parameters_json={"patient_record": "VB", "intent": "admissions_only"}
-        )
-        run_a = _queue_admissions_run(
-            parameters_json={"patient_record": "VA", "intent": "admissions_only"}
-        )
-        run_d = _queue_admissions_run(
-            parameters_json={"patient_record": "VD", "intent": "admissions_only"}
-        )
-        run_c = _queue_admissions_run(
-            parameters_json={"patient_record": "VC", "intent": "admissions_only"}
-        )
-        # Operator order is deliberately NOT primary-key order.
-        order = [run_a.pk, run_c.pk, run_b.pk, run_d.pk]
+    def test_heterogeneous_four_jobs_one_real_session_lifecycle(self, capsys):
+        """C1-R2: admissions -> demographics -> full_sync -> admissions through
+        the REAL command startup.
 
-        processed: list[str] = []
-
-        def _record_snapshot(*, patient_record, **kwargs):  # noqa: ARG001
-            processed.append(patient_record)
-            return []
-
-        mock_adapter = _make_adapter_mock(snapshot_result=[])
-        mock_adapter.get_admission_snapshot.side_effect = _record_snapshot
+        Exercises the production ``_validate_cli_mode``, ``_create_adapter``,
+        ``_process_bounded_sequence``, ordered claim, dispatch, controller,
+        restart, rebootstrap, and shutdown paths, faking ONLY the concrete
+        external browser/login/source-I/O collaborators at their import
+        boundary (no real Playwright, no ready adapter injected).
+        """
+        r1 = _queue_admissions_run(
+            parameters_json={"patient_record": "HETA", "intent": "admissions_only"}
+        )
+        r2 = IngestionRun.objects.create(
+            status="queued",
+            intent="demographics_only",
+            max_attempts=1,
+            parameters_json={"patient_record": "HETB", "intent": "demographics_only"},
+        )
+        r3 = IngestionRun.objects.create(
+            status="queued",
+            intent="full_admission_sync",
+            max_attempts=1,
+            parameters_json={
+                "patient_record": "HETC",
+                "intent": "full_admission_sync",
+            },
+        )
+        r4 = _queue_admissions_run(
+            parameters_json={"patient_record": "HETD", "intent": "admissions_only"}
+        )
+        unlisted = _queue_admissions_run(
+            parameters_json={"patient_record": "HETU", "intent": "admissions_only"}
+        )
+        order = [r1.pk, r2.pk, r3.pk, r4.pk]
 
         with ExitStack() as stack:
-            stack.enter_context(
-                patch.object(
-                    PersistentWorkerCommand,
-                    "_create_adapter",
-                    return_value=mock_adapter,
-                )
-            )
-            for p in _patch_bounded_followups():
+            for p in _patch_real_session_collaborators():
                 stack.enter_context(p)
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=order,
                 max_runs=4,
+                max_jobs=3,
             )
 
-        for run in (run_a, run_b, run_c, run_d):
+        for run in (r1, r2, r3, r4):
             run.refresh_from_db()
             assert run.status == "succeeded"
-        # Operator-supplied order, not primary-key order.
-        assert processed == ["VA", "VC", "VB", "VD"], processed
+        unlisted.refresh_from_db()
+        assert unlisted.status == "queued"
+
+        bridge = _FakeRealBridge.last
+        handle = bridge._handle
+        # One browser handle / bridge / adapter lifecycle for the invocation.
+        assert _FakePlaywrightHandle.instances == 1
+        assert _FakeRealBridge.instances == 1
+        assert handle.start_calls == 1
+        # Initial bootstrap (1) + restart (1) + rebootstrap (1) => total 2.
+        assert bridge.lifecycle_log == ["bootstrap", "restart", "bootstrap"], (
+            bridge.lifecycle_log
+        )
+        # One shutdown of the single session.
+        assert handle.shutdown_calls == 1
+        # Heterogeneous extraction methods exercised in operator order.
+        assert bridge.extraction_log == [
+            ("admissions", "HETA"),
+            ("demographics", "HETB"),
+            ("admissions", "HETC"),
+            ("evolutions", "HETC"),
+            ("admissions", "HETD"),
+        ], bridge.extraction_log
+        # Complete bounded output: no run-ID label pattern, no run PK (selected
+        # or follow-up), and no source/patient tokens on any surface.
+        captured = capsys.readouterr()
+        assert "Run #" not in captured.out
+        assert "run #" not in captured.out
+        assert "Run #" not in captured.err
+        assert "run #" not in captured.err
+        for run in IngestionRun.objects.all():
+            assert f"#{run.pk}" not in captured.out, run.pk
+            assert f"#{run.pk}" not in captured.err, run.pk
+        for token in ("HETA", "HETB", "HETC", "HETD", "HETU"):
+            assert token not in captured.out, token
+            assert token not in captured.err, token
 
     def test_two_listed_runs_accepted(self):
-        """The lower bound (two distinct IDs) is accepted."""
+        """The lower bound (two distinct IDs) is accepted under the real handle."""
         run1 = _queue_admissions_run(
             parameters_json={"patient_record": "LO2-1", "intent": "admissions_only"}
         )
@@ -4727,6 +4985,7 @@ class TestBoundedValidationMode:
                 stack.enter_context(p)
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=[run1.pk, run2.pk],
                 max_runs=2,
             )
@@ -4759,6 +5018,7 @@ class TestBoundedValidationMode:
                 stack.enter_context(p)
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=[listed.pk, listed2.pk],
                 max_runs=2,
             )
@@ -4775,7 +5035,7 @@ class TestBoundedModeGuardMatrix:
     """PSW-S24-PRE R1: every combination outside the matrix fails before the
     adapter is created and before any run is mutated."""
 
-    def _assert_rejected(self, *, ids=None, **kwargs):
+    def _assert_rejected(self, *, ids=None, real_handle=True, **kwargs):
         run = _queue_admissions_run(
             parameters_json={"patient_record": "GM", "intent": "admissions_only"}
         )
@@ -4785,12 +5045,34 @@ class TestBoundedModeGuardMatrix:
             with pytest.raises(CommandError):
                 call_command(
                     "process_ingestion_runs_persistent_session",
+                    real_handle=real_handle,
                     **({"validation_run_id": ids} if ids is not None else {}),
                     **kwargs,
                 )
         mock_create.assert_not_called()
         run.refresh_from_db()
         assert run.status == "queued"
+
+    def test_bounded_without_real_handle_rejected(self):
+        """C1-R1: a bounded allow-list/cap without --real-handle is rejected
+        before adapter creation and before any run mutation."""
+        run = _queue_admissions_run()
+        run2 = _queue_admissions_run()
+        with patch.object(
+            PersistentWorkerCommand, "_create_adapter"
+        ) as mock_create:
+            with pytest.raises(CommandError) as exc_info:
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    validation_run_id=[run.pk, run2.pk],
+                    max_runs=2,
+                )
+        assert "--real-handle" in str(exc_info.value)
+        mock_create.assert_not_called()
+        run.refresh_from_db()
+        run2.refresh_from_db()
+        assert run.status == "queued"
+        assert run2.status == "queued"
 
     def test_single_id_rejected(self):
         run = _queue_admissions_run()
@@ -4849,7 +5131,10 @@ class TestBoundedModeGuardMatrix:
         run = _queue_admissions_run()
         run2 = _queue_admissions_run()
         self._assert_rejected(
-            ids=[run.pk, run2.pk], max_runs=2, enable_real_queue=True
+            ids=[run.pk, run2.pk],
+            max_runs=2,
+            loop=True,
+            enable_real_queue=True,
         )
 
 
@@ -4875,6 +5160,7 @@ class TestBoundedAllRowPreflight:
         ) as mock_create:
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=order,
                 max_runs=3,
             )
@@ -4905,6 +5191,7 @@ class TestBoundedAllRowPreflight:
         ) as mock_create:
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=order,
                 max_runs=2,
             )
@@ -4956,6 +5243,7 @@ class TestBoundedClaimRaceAndFailureStop:
                 stack.enter_context(p)
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=order,
                 max_runs=3,
             )
@@ -5000,6 +5288,7 @@ class TestBoundedClaimRaceAndFailureStop:
                 stack.enter_context(p)
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=order,
                 max_runs=3,
             )
@@ -5016,120 +5305,15 @@ class TestBoundedRestartBeforeLaterClaim:
     """PSW-S24-PRE R6: restart plus rebootstrap completes before a later claim,
     and a restart failure leaves the later selected row queued and untouched."""
 
-    @staticmethod
-    def _snapshot_html() -> str:
-        import json
+    def test_failed_rebootstrap_leaves_fourth_row_queued(self, capsys):
+        """C1-R2: a failed rebootstrap after the restart boundary leaves the
+        later selected row queued and untouched, with no source action on it.
 
-        camel = [
-            {
-                "admissionKey": "ADM-RST",
-                "admissionStart": "2024-01-15",
-                "admissionEnd": "2024-01-20",
-                "ward": "Enfermaria A",
-                "bed": "001",
-            }
-        ]
-        return (
-            "<html><body>"
-            '<div id="tempoSessao">T: <span>00</span>:<span>29</span>:<span>01</span></div>'
-            '<div id="admission-snapshot-data">' + json.dumps(camel) + "</div></body></html>"
-        )
-
-    def _make_session(self, *, fail_rebootstrap=False):
-        snapshot_html = self._snapshot_html()
-        blank_html = "<html><body></body></html>"
-
-        class _Session:
-            def __init__(self_inner) -> None:
-                self_inner._html = snapshot_html
-                self_inner.restart_calls = 0
-                self_inner.bootstrap_calls = 0
-                self_inner._fail_rebootstrap = fail_rebootstrap
-
-            def get_page_html(self_inner) -> str:
-                return self_inner._html
-
-            def is_connected(self_inner) -> bool:
-                return True
-
-            def click_selector(self_inner, selector: str) -> None:  # noqa: ARG002
-                pass
-
-            def open_tab(self_inner, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
-                return True
-
-            def get_tab_classes(self_inner) -> list[str]:
-                return ["tabs-first tabs-last tabs-selected"]
-
-            def close_last_non_root_tab(self_inner):
-                return TabCleanupOutcome.ROOT_ONLY
-
-            def restart_browser(self_inner) -> None:
-                self_inner.restart_calls += 1
-                self_inner._html = blank_html
-
-            def bootstrap(self_inner) -> None:
-                if self_inner._fail_rebootstrap and self_inner.restart_calls >= 1:
-                    raise RuntimeError("rebootstrap failed")
-                self_inner.bootstrap_calls += 1
-                self_inner._html = snapshot_html
-
-        return _Session()
-
-    def test_restart_rebootstrap_before_fourth_claim(self):
-        from apps.ingestion.extractors.persistent_extraction_adapter import (
-            PersistentExtractionAdapter,
-        )
-        from apps.ingestion.extractors.session_controller import (
-            SessionControllerConfig,
-        )
-
-        session = self._make_session()
-        adapter = PersistentExtractionAdapter(
-            session, config=SessionControllerConfig(max_jobs_per_session=3)
-        )
-        runs = [
-            _queue_admissions_run(
-                parameters_json={
-                    "patient_record": f"RST{i}",
-                    "intent": "admissions_only",
-                }
-            )
-            for i in range(4)
-        ]
-        order = [r.pk for r in runs]
-        with ExitStack() as stack:
-            stack.enter_context(
-                patch.object(
-                    PersistentWorkerCommand, "_create_adapter", return_value=adapter
-                )
-            )
-            for p in _patch_bounded_followups():
-                stack.enter_context(p)
-            call_command(
-                "process_ingestion_runs_persistent_session",
-                validation_run_id=order,
-                max_runs=4,
-                max_jobs=3,
-            )
-        for r in runs:
-            r.refresh_from_db()
-            assert r.status == "succeeded"
-        assert session.restart_calls == 1, session.restart_calls
-        assert session.bootstrap_calls == 1, session.bootstrap_calls
-
-    def test_restart_failure_leaves_fourth_row_queued(self):
-        from apps.ingestion.extractors.persistent_extraction_adapter import (
-            PersistentExtractionAdapter,
-        )
-        from apps.ingestion.extractors.session_controller import (
-            SessionControllerConfig,
-        )
-
-        session = self._make_session(fail_rebootstrap=True)
-        adapter = PersistentExtractionAdapter(
-            session, config=SessionControllerConfig(max_jobs_per_session=3)
-        )
+        Runs through the REAL command startup (real ``_create_adapter``),
+        faking only the concrete browser/login/source-I/O collaborators. The
+        successful restart/rebootstrap case is covered by the heterogeneous
+        sequence test.
+        """
         runs = [
             _queue_admissions_run(
                 parameters_json={
@@ -5141,15 +5325,11 @@ class TestBoundedRestartBeforeLaterClaim:
         ]
         order = [r.pk for r in runs]
         with ExitStack() as stack:
-            stack.enter_context(
-                patch.object(
-                    PersistentWorkerCommand, "_create_adapter", return_value=adapter
-                )
-            )
-            for p in _patch_bounded_followups():
+            for p in _patch_real_session_collaborators(fail_rebootstrap=True):
                 stack.enter_context(p)
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=order,
                 max_runs=4,
                 max_jobs=3,
@@ -5158,8 +5338,27 @@ class TestBoundedRestartBeforeLaterClaim:
             r.refresh_from_db()
             assert r.status == "succeeded"
         runs[3].refresh_from_db()
-        assert runs[3].status == "queued"  # restart failure -> untouched
-        assert session.restart_calls >= 1
+        assert runs[3].status == "queued"  # rebootstrap failure -> untouched
+        bridge = _FakeRealBridge.last
+        # Initial bootstrap + restart happened; the rebootstrap raised before
+        # appending, so the fourth selected row never received a source action.
+        assert bridge.lifecycle_log == ["bootstrap", "restart"], (
+            bridge.lifecycle_log
+        )
+        assert all(pr != "RSF3" for _method, pr in bridge.extraction_log), (
+            bridge.extraction_log
+        )
+        # Complete bounded output: no run-ID label pattern and no source token.
+        captured = capsys.readouterr()
+        assert "Run #" not in captured.out
+        assert "run #" not in captured.out
+        assert "Run #" not in captured.err
+        assert "run #" not in captured.err
+        for run in IngestionRun.objects.all():
+            assert f"#{run.pk}" not in captured.out, run.pk
+            assert f"#{run.pk}" not in captured.err, run.pk
+        assert "RSF3" not in captured.out
+        assert "RSF3" not in captured.err
 
 
 @pytest.mark.django_db
@@ -5259,28 +5458,34 @@ class TestContinuousRealQueueOptIn:
 
 @pytest.mark.django_db
 class TestBoundedSanitization:
-    """PSW-S24-PRE R9: new bounded-mode output contains no selected IDs or
-    source data. The existing per-run ``#<pk>`` operational IDs remain allowed
-    under the frozen PSW-S17 sanitization contract; the dedicated bounded
-    summary and stop messages use only ordinal/count information.
-    """
+    """C1-R3: complete bounded-mode stdout/stderr carry no run IDs (selected or
+    follow-up), no run-ID label pattern, and no source/patient tokens. Ordinal
+    and count evidence remain present. Assertions span the FULL capture, not a
+    filtered subset of lines."""
 
-    def test_bounded_summary_is_ordinal_and_source_tokens_do_not_leak(
-        self, capsys
-    ):
-        sentinel_a = "SENT-PSK-BOUNDED-A-777"
-        sentinel_b = "SENT-PSK-BOUNDED-B-778"
+    def _assert_no_ids_or_source(self, captured, source_tokens):
+        # No run-ID label pattern on any surface.
+        assert "Run #" not in captured.out, captured.out
+        assert "run #" not in captured.out, captured.out
+        assert "Run #" not in captured.err, captured.err
+        assert "run #" not in captured.err, captured.err
+        # No run primary key (selected or auto-enqueued follow-up).
+        for run in IngestionRun.objects.all():
+            assert f"#{run.pk}" not in captured.out, (run.pk, captured.out)
+            assert f"#{run.pk}" not in captured.err, (run.pk, captured.err)
+        # No source/patient tokens.
+        for token in source_tokens:
+            assert token not in captured.out, token
+            assert token not in captured.err, token
+
+    def test_bounded_success_complete_output_has_no_ids_or_source(self, capsys):
+        tok_a = "SENT-PSK-BOUNDED-SUCC-A"
+        tok_b = "SENT-PSK-BOUNDED-SUCC-B"
         run_a = _queue_admissions_run(
-            parameters_json={
-                "patient_record": sentinel_a,
-                "intent": "admissions_only",
-            }
+            parameters_json={"patient_record": tok_a, "intent": "admissions_only"}
         )
         run_b = _queue_admissions_run(
-            parameters_json={
-                "patient_record": sentinel_b,
-                "intent": "admissions_only",
-            }
+            parameters_json={"patient_record": tok_b, "intent": "admissions_only"}
         )
         mock_adapter = _make_adapter_mock(snapshot_result=[])
         with ExitStack() as stack:
@@ -5291,54 +5496,36 @@ class TestBoundedSanitization:
                     return_value=mock_adapter,
                 )
             )
-            for p in _patch_bounded_followups():
-                stack.enter_context(p)
+            # Real persistence + follow-ups so the admissions success and the
+            # auto-enqueued follow-up messages are exercised end to end.
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=[run_a.pk, run_b.pk],
                 max_runs=2,
             )
         captured = capsys.readouterr()
-        # Source data (patient tokens) must never leak on any surface.
-        assert sentinel_a not in captured.out
-        assert sentinel_a not in captured.err
-        assert sentinel_b not in captured.out
-        assert sentinel_b not in captured.err
-        # The dedicated bounded summary uses only ordinal/count information.
-        summary_lines = [
-            line
-            for line in captured.out.splitlines()
-            if "Bounded validation" in line
-        ]
-        assert summary_lines, captured.out
-        for line in summary_lines:
-            assert str(run_a.pk) not in line, line
-            assert str(run_b.pk) not in line, line
+        self._assert_no_ids_or_source(captured, [tok_a, tok_b])
+        # Ordinal/count evidence remains present.
+        assert "Bounded validation processed" in captured.out, captured.out
 
-    def test_bounded_stop_warning_has_no_selected_ids(self, capsys):
-        sentinel = "SENT-PSK-BOUNDED-STOP-779"
+    def test_bounded_failure_complete_output_has_no_ids_or_source(self, capsys):
+        tok_a = "SENT-PSK-BOUNDED-FAIL-A"
+        tok_b = "SENT-PSK-BOUNDED-FAIL-B"
+        tok_c = "SENT-PSK-BOUNDED-FAIL-C"
         run_a = _queue_admissions_run(
-            parameters_json={
-                "patient_record": sentinel,
-                "intent": "admissions_only",
-            }
+            parameters_json={"patient_record": tok_a, "intent": "admissions_only"}
         )
         run_b = _queue_admissions_run(
             max_attempts=1,
-            parameters_json={
-                "patient_record": "SENT-PSK-BOUNDED-STOP-780",
-                "intent": "admissions_only",
-            },
+            parameters_json={"patient_record": tok_b, "intent": "admissions_only"},
         )
         run_c = _queue_admissions_run(
-            parameters_json={
-                "patient_record": "SENT-PSK-BOUNDED-STOP-781",
-                "intent": "admissions_only",
-            }
+            parameters_json={"patient_record": tok_c, "intent": "admissions_only"}
         )
 
         def _snapshot(*, patient_record, **kwargs):  # noqa: ARG001
-            if patient_record == "SENT-PSK-BOUNDED-STOP-780":
+            if patient_record == tok_b:
                 raise SnapshotContainerMissingError("missing container")
             return []
 
@@ -5352,26 +5539,14 @@ class TestBoundedSanitization:
                     return_value=mock_adapter,
                 )
             )
-            for p in _patch_bounded_followups():
-                stack.enter_context(p)
             call_command(
                 "process_ingestion_runs_persistent_session",
+                real_handle=True,
                 validation_run_id=[run_a.pk, run_b.pk, run_c.pk],
                 max_runs=3,
             )
         captured = capsys.readouterr()
-        # The new stop message and summary carry no selected IDs or tokens.
-        stop_lines = [
-            line
-            for line in captured.err.splitlines() + captured.out.splitlines()
-            if "bounded sequence" in line or "Bounded validation" in line
-        ]
-        assert stop_lines, (captured.out, captured.err)
-        for line in stop_lines:
-            assert str(run_a.pk) not in line, line
-            assert str(run_b.pk) not in line, line
-            assert str(run_c.pk) not in line, line
-            assert sentinel not in line, line
+        self._assert_no_ids_or_source(captured, [tok_a, tok_b, tok_c])
         run_c.refresh_from_db()
         assert run_c.status == "queued"  # later selected row untouched
 

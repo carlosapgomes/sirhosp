@@ -149,16 +149,18 @@ succeeds.
 | --- | --- | --- |
 | stub | (no `--real-handle`) | all eligible |
 | single smoke | `--real-handle --run-id ID --max-runs 1` | one ID |
-| bounded | `--validation-run-id` x2-4 + cap | listed only |
+| bounded | `--real-handle` + `--validation-run-id` x2-4 + cap | listed only |
 | continuous | `--real-handle --loop --enable-real-queue` | enabled |
 
 Bounded validation is the intended PSW-S24 live-validation surface: an operator
-lists two through four queued run IDs in operator order with an exact `--max-runs`
-cap. Every listed row is preflichted (queued, retry-due, supported intent) before
-one adapter/bootstrap; the listed jobs reuse the same session; processing never
-falls through to an unlisted row; and a claim race, a job that does not finish
-as `succeeded`, or a restart/rebootstrap failure leaves every later selected row
-queued and untouched.
+lists two through four queued run IDs in operator order WITH `--real-handle`
+and an exact `--max-runs` cap. Every listed row is preflichted (queued,
+retry-due, supported intent) before one real adapter/bootstrap; the listed jobs
+reuse the same authenticated session; processing never falls through to an
+unlisted row; and a claim race, a job that does not finish as `succeeded`, or a
+restart/rebootstrap failure leaves every later selected row queued and
+untouched. Bounded output carries no run IDs or source data — only ordinal,
+count, stage, and normalized-reason information.
 
 ```bash
 # BOUNDED LIVE VALIDATION ONLY (placeholders; NOT rollout-ready):

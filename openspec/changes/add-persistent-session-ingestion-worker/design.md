@@ -273,11 +273,15 @@ any adapter/browser creation or run mutation:
 1. stub (no `--real-handle`): existing queue behavior unchanged;
 2. single real smoke: `--real-handle --run-id ID --max-runs 1`;
 3. bounded validation: repeatable `--validation-run-id` of two through four
-   distinct positive IDs in operator order, with `--max-runs` equal to the
-   count; every listed row is preflichted before one adapter/bootstrap, jobs
-   reuse the same session, processing never falls through to an unlisted row,
-   and a claim race, job failure, or restart failure leaves later selected rows
-   untouched;
+   distinct positive IDs in operator order, WITH `--real-handle` and
+   `--max-runs` equal to the count; every listed row is preflichted before
+   one real adapter/bootstrap, jobs reuse the same authenticated session,
+   processing never falls through to an unlisted row, a claim race, job
+   failure, or restart failure leaves later selected rows untouched, and all
+   bounded-mode output (success, failure, follow-up, retry, and terminal
+   branches for every supported intent) carries NO run primary keys (selected
+   or auto-enqueued follow-up) and NO source/patient data — only ordinal,
+   count, stage, and normalized-reason information;
 4. continuous real queue: `--real-handle --loop --enable-real-queue`, default
    off and forbidden with `--run-id`/`--validation-run-id`/`--max-runs`.
 

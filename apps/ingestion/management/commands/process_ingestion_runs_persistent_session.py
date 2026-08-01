@@ -93,11 +93,12 @@ PSW-S24-PRE status:
   1. stub (no ``--real-handle``): existing queue behavior unchanged;
   2. single real smoke: ``--real-handle --run-id ID --max-runs 1``;
   3. bounded validation: repeatable ``--validation-run-id`` (two through four
-     distinct positive IDs, operator order) with ``--max-runs`` equal to the
-     count; every listed row is preflichted before one adapter/bootstrap, runs
-     reuse the same session, processing never falls through to an unlisted row,
-     and a claim race, job failure, or restart failure leaves later selected
-     rows untouched;
+     distinct positive IDs, operator order) WITH ``--real-handle`` and
+     ``--max-runs`` equal to the count; every listed row is preflichted
+     before one real adapter/bootstrap, runs reuse the same authenticated
+     session, processing never falls through to an unlisted row, and a claim
+     race, job failure, or restart failure leaves later selected rows
+     untouched; bounded output carries no run IDs;
   4. continuous real queue: ``--real-handle --loop --enable-real-queue``;
      default-off and forbidden with ``--run-id``/``--validation-run-id``/
      ``--max-runs``. ``--real-handle --loop`` without the opt-in fails before
@@ -254,6 +255,10 @@ _REAL_LOOP_REQUIRES_ENABLE_REAL_QUEUE = (
 
 # Bounded validation mode messages (R1/R3/R4/R7/R9). No run IDs, patient
 # identifiers, or source data: ordinal/count information only.
+_BOUNDED_REQUIRES_REAL_HANDLE_MESSAGE = (
+    "Bounded validation requires --real-handle so the allow-list runs under "
+    "one real authenticated session."
+)
 _BOUNDED_FORBIDS_LOOP_RUN_ID = (
     "Bounded validation mode forbids --loop and --run-id."
 )
@@ -532,6 +537,9 @@ class Command(BaseCommand):
             options.get("validation_run_id") or []
         )
         self._enable_real_queue: bool = options["enable_real_queue"]
+        # PSW-S24-PRE-C1 R3: 1-based ordinal of the bounded row currently
+        # being processed, used to label bounded output without run PKs.
+        self._bounded_ordinal: int = 0
 
         # PSW-S19 R6: validate positive ranges before any claim (no browser,
         # no adapter, no run mutated). Invalid thresholds fail fast here.
@@ -621,8 +629,9 @@ class Command(BaseCommand):
 
         - stub: no ``--real-handle`` (existing behavior unchanged);
         - single real smoke: ``--real-handle --run-id ID --max-runs 1``;
-        - bounded validation: repeatable ``--validation-run-id`` (two through
-          four distinct positive IDs) with ``--max-runs`` equal to the count;
+        - bounded validation: repeatable ``--validation-run-id`` of two
+          through four distinct positive IDs in operator order WITH
+          ``--real-handle`` and ``--max-runs`` equal to the count.
         - continuous real queue: ``--real-handle --loop --enable-real-queue``.
 
         Every other combination fails before ``_create_adapter()`` and before
@@ -643,12 +652,9 @@ class Command(BaseCommand):
             self._mode = _MODE_CONTINUOUS_REAL
             return
 
-        if real and loop:
-            # --real-handle --loop without the explicit opt-in still fails
-            # before adapter/browser creation and before a claim.
-            raise CommandError(_REAL_LOOP_REQUIRES_ENABLE_REAL_QUEUE)
-
         if validation_ids:
+            if not real:
+                raise CommandError(_BOUNDED_REQUIRES_REAL_HANDLE_MESSAGE)
             if loop or run_id is not None:
                 raise CommandError(_BOUNDED_FORBIDS_LOOP_RUN_ID)
             if len(validation_ids) < 2 or len(validation_ids) > 4:
@@ -663,6 +669,11 @@ class Command(BaseCommand):
                 raise CommandError(_BOUNDED_MAX_RUNS_MISMATCH)
             self._mode = _MODE_BOUNDED
             return
+
+        if real and loop:
+            # --real-handle --loop without the explicit opt-in still fails
+            # before adapter/browser creation and before a claim.
+            raise CommandError(_REAL_LOOP_REQUIRES_ENABLE_REAL_QUEUE)
 
         if real:
             # Single real smoke: exactly one --run-id and --max-runs 1.
@@ -1139,6 +1150,24 @@ class Command(BaseCommand):
             .first()
         )
 
+    def _run_label(
+        self, run: IngestionRun, *, followup: bool = False
+    ) -> str:
+        """Return a sanitized run reference for command output (C1-R3).
+
+        Bounded mode never emits a primary key on any output surface:
+        selected runs use an ordinal label and auto-enqueued follow-ups use a
+        fixed sanitized phrase. Non-bounded modes keep the historical
+        operational ID (``Run #<pk>`` / ``run #<pk>``) unchanged so stub,
+        single-smoke, and continuous output stay backward compatible.
+        """
+        if getattr(self, "_mode", _MODE_STUB) == _MODE_BOUNDED:
+            if followup:
+                return "follow-up"
+            ordinal = getattr(self, "_bounded_ordinal", 0)
+            return f"Validation row {ordinal}" if ordinal else "Validation row"
+        return f"run #{run.pk}" if followup else f"Run #{run.pk}"
+
     def _process_bounded_sequence(
         self, adapter: PersistentExtractionAdapter
     ) -> None:
@@ -1166,6 +1195,7 @@ class Command(BaseCommand):
                 )
                 break
             selected_id = ids[index]
+            self._bounded_ordinal = index + 1
             with transaction.atomic():
                 run = self._claim_listed_run(selected_id)
                 if run is None:
@@ -1385,8 +1415,7 @@ class Command(BaseCommand):
             elif dispatch_action == "demographics_only":
                 self._process_demographics_only(run, adapter)
 
-    @staticmethod
-    def _reject_unsupported_intent(run: IngestionRun, intent: str) -> None:
+    def _reject_unsupported_intent(self, run: IngestionRun, intent: str) -> None:
         """Reject a run with unsupported intent without side effects.
 
         The run is NOT mutated — no status change, no attempt increment,
@@ -1400,13 +1429,10 @@ class Command(BaseCommand):
         """
         # Intentionally blank: no DB mutations, no adapter calls.
         # The run remains queued for the current worker.
-        import sys
-
-        print(
-            f"  Run #{run.pk}: unsupported intent {intent!r} — "
+        self.stderr.write(
+            f"  {self._run_label(run)}: unsupported intent {intent!r} — "
             f"persistent worker rejects. "
-            f"Keeping run queued for current worker.",
-            file=sys.stderr,
+            f"Keeping run queued for current worker."
         )
 
     # ------------------------------------------------------------------
@@ -1456,7 +1482,7 @@ class Command(BaseCommand):
             adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during admissions capture "
+                f"  {self._run_label(run)} failed during admissions capture "
                 f"(invalid JSON from persistent session, "
                 f"reason={self._classify_failure_reason(exc)[0]})"
             )
@@ -1472,7 +1498,7 @@ class Command(BaseCommand):
             adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during admissions capture "
+                f"  {self._run_label(run)} failed during admissions capture "
                 f"(snapshot data missing from persistent session, "
                 f"reason={self._classify_failure_reason(exc)[0]})"
             )
@@ -1488,7 +1514,7 @@ class Command(BaseCommand):
             adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during admissions capture "
+                f"  {self._run_label(run)} failed during admissions capture "
                 f"(persistent session, reason={self._classify_failure_reason(exc)[0]})"
             )
             return
@@ -1517,7 +1543,7 @@ class Command(BaseCommand):
             )
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during admissions persistence "
+                f"  {self._run_label(run)} failed during admissions persistence "
                 f"(reason={self._classify_failure_reason(exc)[0]})"
             )
             return
@@ -1554,7 +1580,7 @@ class Command(BaseCommand):
                 batch=None,
             )
             self.stdout.write(
-                f"  Auto-enqueued demographics_only run #{demo_run.pk} "
+                f"  Auto-enqueued demographics_only {self._run_label(demo_run, followup=True)} "
                 f"for the captured patient."
             )
             full_sync_run = enqueue_most_recent_admission_full_sync(
@@ -1562,7 +1588,7 @@ class Command(BaseCommand):
             )
             if full_sync_run is not None:
                 self.stdout.write(
-                    f"  Auto-enqueued full_sync run #{full_sync_run.pk} "
+                    f"  Auto-enqueued full_sync {self._run_label(full_sync_run, followup=True)} "
                     f"for most recent admission"
                 )
 
@@ -1570,7 +1596,7 @@ class Command(BaseCommand):
         self._try_close_batch(run.batch)
 
         self.stdout.write(
-            f"  Run #{run.pk} admissions-only succeeded (persistent session) "
+            f"  {self._run_label(run)} admissions-only succeeded (persistent session) "
             f"(admissions_seen={adm_metrics['seen']}, "
             f"admissions_created={adm_metrics['created']}, "
             f"admissions_updated={adm_metrics['updated']})"
@@ -1633,7 +1659,7 @@ class Command(BaseCommand):
             adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during demographics capture "
+                f"  {self._run_label(run)} failed during demographics capture "
                 f"(persistent session, reason={self._classify_failure_reason(exc)[0]})"
             )
             return
@@ -1647,7 +1673,7 @@ class Command(BaseCommand):
             adapter.cleanup_after_failure()
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during demographics capture "
+                f"  {self._run_label(run)} failed during demographics capture "
                 f"(persistent session, reason={self._classify_failure_reason(exc)[0]})"
             )
             return
@@ -1676,7 +1702,7 @@ class Command(BaseCommand):
             )
             self._mark_run_failed(run, identity_exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during demographics capture "
+                f"  {self._run_label(run)} failed during demographics capture "
                 f"(identity mismatch, reason={self._classify_failure_reason(identity_exc)[0]})"
             )
             return
@@ -1703,7 +1729,7 @@ class Command(BaseCommand):
             )
             self._mark_run_failed(run, exc)
             self.stderr.write(
-                f"  Run #{run.pk} failed during demographics persistence "
+                f"  {self._run_label(run)} failed during demographics persistence "
                 f"(reason={self._classify_failure_reason(exc)[0]})"
             )
             return
@@ -1733,7 +1759,7 @@ class Command(BaseCommand):
         self._try_close_batch(run.batch)
 
         self.stdout.write(
-            f"  Run #{run.pk} demographics-only succeeded "
+            f"  {self._run_label(run)} demographics-only succeeded "
             f"(persistent session) "
             f"(fields_populated={fields_populated})"
         )
@@ -1864,7 +1890,7 @@ class Command(BaseCommand):
             self._mark_latest_attempt_succeeded(run)
             self._try_close_batch(run.batch)
             self.stdout.write(
-                f"  Run #{run.pk} full-sync succeeded (persistent session) — "
+                f"  {self._run_label(run)} full-sync succeeded (persistent session) — "
                 f"skipped extraction (full coverage)."
             )
             return
@@ -1958,7 +1984,7 @@ class Command(BaseCommand):
         self._try_close_batch(run.batch)
 
         self.stdout.write(
-            f"  Run #{run.pk} full-sync succeeded (persistent session) "
+            f"  {self._run_label(run)} full-sync succeeded (persistent session) "
             f"(admissions_seen={adm_metrics['seen']}, "
             f"admissions_created={adm_metrics['created']}, "
             f"admissions_updated={adm_metrics['updated']}, "
@@ -2101,7 +2127,7 @@ class Command(BaseCommand):
                 ]
             )
             self.stdout.write(
-                f"  Run #{run.pk} failed (attempt {run.attempt_count}/"
+                f"  {self._run_label(run)} failed (attempt {run.attempt_count}/"
                 f"{run.max_attempts}), requeued at {run.next_retry_at}"
             )
         else:
@@ -2130,7 +2156,7 @@ class Command(BaseCommand):
             record_final_run_failure(run)
             self._try_close_batch(run.batch)
             self.stderr.write(
-                f"  Run #{run.pk} failed permanently "
+                f"  {self._run_label(run)} failed permanently "
                 f"(attempt {run.attempt_count}/{run.max_attempts}, "
                 f"reason={failure_reason})"
             )

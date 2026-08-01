@@ -262,16 +262,24 @@ PSW-S24 live validation succeeds.
 - **AND** the command rejects the smoke without `--run-id` or with `--max-runs`
   other than `1` before adapter creation
 
+#### Scenario: Bounded validation requires the real handle
+
+- **WHEN** an operator passes `--validation-run-id` values and `--max-runs`
+  without `--real-handle`
+- **THEN** the command raises a sanitized error before adapter/browser
+  creation and before any run mutation
+- **AND** the safe stub path never acquires a validation-list mode
+
 #### Scenario: Bounded validation processes an ordered allow-list
 
-- **WHEN** an operator passes two through four distinct positive
-  `--validation-run-id` values with `--max-runs` equal to the count
+- **WHEN** an operator passes `--real-handle` plus two through four distinct
+  positive `--validation-run-id` values with `--max-runs` equal to the count
 - **THEN** every listed row is preflichted (queued, retry-due, supported
-  intent, model/JSON agreement) before one adapter/bootstrap is created
+  intent, model/JSON agreement) before one real adapter/bootstrap is created
 - **AND** the listed rows are claimed in operator-supplied order under
   `select_for_update(skip_locked=True)`
 - **AND** the worker never claims an unlisted eligible row
-- **AND** the listed jobs reuse the same persistent adapter/session
+- **AND** the listed jobs reuse the same real persistent adapter/session
 - **AND** a claim race, a job that does not finish as `succeeded`, or a
   restart/rebootstrap failure stops the sequence and leaves every later
   selected row queued and untouched
@@ -300,13 +308,18 @@ PSW-S24 live validation succeeds.
 - **AND** the opt-in reuses the existing queue, locking, readiness, and shutdown
   paths without creating a new worker, queue, or deployment default
 
-#### Scenario: Bounded output is sanitized
+#### Scenario: Bounded output is sanitized across every surface
 
-- **WHEN** the bounded mode emits operational messages
-- **THEN** the dedicated bounded summary and stop messages use only
-  ordinal/count information and sanitized lifecycle messages
-- **AND** they contain no selected run IDs, patient identifiers, clinical
-  content, URLs, credentials, cookies, HTML, or PDF data
+- **WHEN** the bounded mode emits operational messages on any success or
+  failure branch (admissions, demographics, full-sync, persistence, retry,
+  terminal failure, follow-up, race, or unsupported intent)
+- **THEN** complete stdout and stderr use only ordinal labels, counts, stage
+  names, and normalized reasons
+- **AND** they contain NO selected run primary key and NO auto-enqueued
+  follow-up primary key (no `Run #<n>` or `run #<n>` label pattern)
+- **AND** they contain no patient/source identifiers, clinical content, URLs,
+  credentials, cookies, HTML, or PDF data
+- **AND** stub, single-smoke, and continuous-mode messages remain unchanged
 
 ### Requirement: Shared evolution ingestion service
 

@@ -655,6 +655,19 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
 - [x] 23A.5 Preserve frozen worker/extraction contracts, update only the allowed
   design/spec/rollout/task artifacts, run official validation, and create
   `/tmp/sirhosp-slice-PSW-S24-PRE-report.md`.
+- [x] 23A.6 PSW-S24-PRE-C1 corrective closure (authoritative): bounded
+  validation now requires `--real-handle` (rejected before adapter/mutation
+  otherwise); the heterogeneous proof runs admissions -> demographics ->
+  full_sync -> admissions through the REAL command startup (one real
+  adapter/controller over a faked browser/login/source-I/O boundary, never a
+  ready adapter injection) and proves one initial bootstrap, restart plus
+  rebootstrap (bootstrap total two), one shutdown, and the exact extraction
+  order; and every bounded stdout/stderr surface (success, failure, follow-up,
+  retry, terminal) is sanitized to carry no run primary keys (selected or
+  follow-up) and no source data. Official check, unit (2324), integration
+  (390), lint, typecheck, quality-gate, and strict OpenSpec pass; deployment
+  stays blocked pending PSW-S24 live validation, which remains unverified
+  against the real legacy UI.
 
 ## 24. PSW-S24: Guarded live validation and cutover readiness
 
