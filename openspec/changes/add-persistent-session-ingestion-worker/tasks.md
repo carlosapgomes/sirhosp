@@ -655,19 +655,24 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
 - [x] 23A.5 Preserve frozen worker/extraction contracts, update only the allowed
   design/spec/rollout/task artifacts, run official validation, and create
   `/tmp/sirhosp-slice-PSW-S24-PRE-report.md`.
-- [x] 23A.6 PSW-S24-PRE-C1 corrective closure (authoritative): bounded
-  validation now requires `--real-handle` (rejected before adapter/mutation
-  otherwise); the heterogeneous proof runs admissions -> demographics ->
-  full_sync -> admissions through the REAL command startup (one real
-  adapter/controller over a faked browser/login/source-I/O boundary, never a
-  ready adapter injection) and proves one initial bootstrap, restart plus
-  rebootstrap (bootstrap total two), one shutdown, and the exact extraction
-  order; and every bounded stdout/stderr surface (success, failure, follow-up,
-  retry, terminal) is sanitized to carry no run primary keys (selected or
-  follow-up) and no source data. Official check, unit (2324), integration
-  (390), lint, typecheck, quality-gate, and strict OpenSpec pass; deployment
-  stays blocked pending PSW-S24 live validation, which remains unverified
-  against the real legacy UI.
+- [x] 23A.6 PSW-S24-PRE-C2 corrective closure (authoritative; COMPLETE after
+  C2): the integrated real-startup proof now runs the exact intent sequence
+  admissions -> demographics -> full_sync -> admissions (job 3 uses
+  `full_sync`, not the `full_admission_sync` alias); command help describes all
+  three real modes (single smoke, bounded validation, continuous real queue)
+  and `--validation-run-id` explicitly requires `--real-handle`, with the stale
+  smoke-only claim removed; the synthetic real-session bridge records an
+  ordered cleanup/claim/restart/rebootstrap/shutdown trace proving a cleanup
+  checkpoint after every completed extraction (five for the successful
+  sequence: 1 + 1 + 2 for full_sync admissions+evolutions + 1), every job-3
+  cleanup before restart, restart plus rebootstrap before claim 4, the final
+  cleanup before the single shutdown, and a failed rebootstrap that prevents
+  claim 4 while still shutting down once. Bounded still requires
+  `--real-handle` and bounded stdout/stderr stay free of run primary keys and
+  source data (C1 preserved). Official check, unit (2325), integration (390),
+  lint, typecheck, quality-gate, and strict OpenSpec pass; deployment stays
+  blocked pending PSW-S24 live validation, which remains unverified against
+  the real legacy UI.
 
 ## 24. PSW-S24: Guarded live validation and cutover readiness
 

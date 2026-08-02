@@ -414,11 +414,12 @@ class Command(BaseCommand):
             action="store_true",
             help=(
                 "Use a real Playwright Chromium session handle wrapped in "
-                "RealHandleBridge instead of the safe stub. The bridge "
-                "extracts admission/evolution data from the real legacy DOM "
-                "and wraps it in synthetic containers for the adapter. "
-                "Requires --run-id and --max-runs 1 (manual smoke only); NOT "
-                "production-validated — keep guarded."
+                "RealHandleBridge instead of the safe stub. Selects the real "
+                "session for one of three guarded real modes: single smoke "
+                "(--run-id ID --max-runs 1), bounded live validation "
+                "(--validation-run-id IDs --max-runs N), or the explicitly "
+                "opted-in continuous real queue (--loop --enable-real-queue). "
+                "NOT production rollout-ready; keep guarded."
             ),
         )
         parser.add_argument(
@@ -427,8 +428,9 @@ class Command(BaseCommand):
             default=None,
             help=(
                 "Claim only this IngestionRun id (must be queued and "
-                "eligible). Required with --real-handle to avoid draining "
-                "the production queue during a manual smoke test."
+                "eligible). Required for the single real smoke "
+                "(--real-handle --max-runs 1) and forbidden in bounded and "
+                "continuous real modes."
             ),
         )
         parser.add_argument(
@@ -436,8 +438,10 @@ class Command(BaseCommand):
             type=int,
             default=None,
             help=(
-                "Stop after processing this many runs. Useful to bound "
-                "manual smoke tests (e.g. --max-runs 1)."
+                "Stop after processing this many runs. Equals 1 for the "
+                "single real smoke and the selected-ID count for bounded "
+                "validation. Useful to bound manual smoke tests "
+                "(e.g. --max-runs 1)."
             ),
         )
         # PSW-S19 R6: the closed lifecycle/headless configuration set, exposed
@@ -502,9 +506,9 @@ class Command(BaseCommand):
             default=None,
             help=(
                 "Operator-selected queued IngestionRun id for bounded live "
-                "validation. Repeat two through four times in operator order; "
-                "pair with --max-runs equal to the count. Forbids --loop, "
-                "--run-id, and --enable-real-queue."
+                "validation. Requires --real-handle. Repeat two through four "
+                "times in operator order; pair with --max-runs equal to the "
+                "count. Forbids --loop, --run-id, and --enable-real-queue."
             ),
         )
         parser.add_argument(

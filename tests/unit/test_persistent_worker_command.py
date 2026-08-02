@@ -4706,12 +4706,20 @@ def _synth_evolutions(pr: str) -> list[dict]:
     ]
 
 
+# PSW-S24-PRE-C2 R3: one shared ordered event trace for claims, extraction
+# actions, cleanup checkpoints, restart, bootstrap, and shutdown across the
+# REAL command startup. Reset by ``_patch_real_session_collaborators``.
+_REAL_SESSION_TRACE: list[str] = []
+
+
 class _FakeRealBridge:
     """Fake ``RealHandleBridge`` (login/DOM-translation boundary).
 
     Records the bootstrap/restart lifecycle and provides synthetic
     admissions/demographics/evolutions data so the REAL adapter + controller
-    can orchestrate extraction over it.
+    can orchestrate extraction over it. Also appends every observable event
+    (lifecycle, extraction, cleanup) into the shared ``_REAL_SESSION_TRACE``
+    so the integrated test can assert cleanup order and cardinality.
     """
 
     instances = 0
@@ -4742,11 +4750,15 @@ class _FakeRealBridge:
         pass
 
     def get_tab_classes(self) -> list[str]:
-        # Root-only tab state so cleanup is a safe no-op (ROOT_ONLY) and the
-        # controller does not force a recovery restart between jobs.
-        return ["tabs-first tabs-last tabs-selected"]
+        # Root anchor tab plus one operational tab so the controller's
+        # ``close_job_tab_if_present`` selects CLOSE_LAST_NON_ROOT and actually
+        # invokes ``close_last_non_root_tab`` (the safe cleanup checkpoint the
+        # C2-R3 trace records). The close still reports ROOT_ONLY (the tab
+        # disappeared), so no recovery restart is forced between jobs.
+        return ["tabs-first tabs-selected", "tabs-last"]
 
     def close_last_non_root_tab(self):
+        _REAL_SESSION_TRACE.append("cleanup")
         return TabCleanupOutcome.ROOT_ONLY
 
     def open_tab(self, url: str, *, timeout: int = 120) -> bool:  # noqa: ARG002
@@ -4760,11 +4772,14 @@ class _FakeRealBridge:
         ):
             raise RuntimeError("rebootstrap failed (synthetic)")
         self.lifecycle_log.append("bootstrap")
+        _REAL_SESSION_TRACE.append("bootstrap")
 
     def restart_browser(self) -> None:
         self.lifecycle_log.append("restart")
+        _REAL_SESSION_TRACE.append("restart")
 
     def shutdown(self) -> None:
+        _REAL_SESSION_TRACE.append("shutdown")
         self._handle.shutdown()
 
     # --- Extraction entry points (adapter contract) ---
@@ -4773,6 +4788,7 @@ class _FakeRealBridge:
 
     def navigate_to_admissions(self, patient_record: str) -> bool:
         self.extraction_log.append(("admissions", patient_record))
+        _REAL_SESSION_TRACE.append(f"extract:admissions:{patient_record}")
         self._current = _synth_admissions_container(patient_record)
         return True
 
@@ -4780,6 +4796,7 @@ class _FakeRealBridge:
         self, patient_record: str, timeout: int = 120  # noqa: ARG002
     ) -> dict:
         self.extraction_log.append(("demographics", patient_record))
+        _REAL_SESSION_TRACE.append(f"extract:demographics:{patient_record}")
         return _synth_demographics(patient_record)
 
     def extract_evolutions_via_legacy_actions(
@@ -4790,6 +4807,7 @@ class _FakeRealBridge:
         timeout: int = 120,  # noqa: ARG002
     ) -> list[dict]:
         self.extraction_log.append(("evolutions", patient_record))
+        _REAL_SESSION_TRACE.append(f"extract:evolutions:{patient_record}")
         return _synth_evolutions(patient_record)
 
 
@@ -4836,6 +4854,7 @@ def _patch_real_session_collaborators(*, fail_rebootstrap: bool = False):
     _FakeRealBridge.fail_next_rebootstrap = fail_rebootstrap
     _FakePlaywrightHandle.instances = 0
     _FakeBrowserProfile.instances = 0
+    _REAL_SESSION_TRACE.clear()
     templates = LegacyUrlTemplates(
         admissions_url_template="/admissions/{patient_record}",
         evolutions_url_template="/evolutions/{patient_record}",
@@ -4868,6 +4887,31 @@ def _patch_real_session_collaborators(*, fail_rebootstrap: bool = False):
     ]
 
 
+class TestRenderedHelp:
+    """C2-R1: rendered command help describes the closed real-handle matrix.
+
+    Asserts on the rendered ``format_help()`` output (behavior), not on
+    parser options/defaults/validation, which stay unchanged.
+    """
+
+    def test_help_describes_closed_real_handle_matrix(self):
+        command = PersistentWorkerCommand()
+        parser = command.create_parser(
+            "manage.py", "process_ingestion_runs_persistent_session"
+        )
+        help_text = parser.format_help()
+        lower = help_text.lower()
+        # The stale claim that --real-handle is single-smoke-only is gone.
+        assert "manual smoke only" not in help_text, help_text
+        # --real-handle describes all three real modes, not just one smoke.
+        assert "bounded" in lower, help_text
+        assert "continuous" in lower, help_text
+        # --validation-run-id explicitly requires --real-handle for bounded.
+        assert "requires --real-handle" in lower, help_text
+        # Real modes remain marked not production rollout-ready.
+        assert "not production" in lower, help_text
+
+
 @pytest.mark.django_db
 class TestBoundedValidationMode:
     """PSW-S24-PRE R1/R4/R5: bounded ordered allow-list of 2-4 selected runs.
@@ -4878,14 +4922,16 @@ class TestBoundedValidationMode:
     """
 
     def test_heterogeneous_four_jobs_one_real_session_lifecycle(self, capsys):
-        """C1-R2: admissions -> demographics -> full_sync -> admissions through
-        the REAL command startup.
+        """C2-R2/R3: admissions -> demographics -> full_sync -> admissions through
+        the REAL command startup, with exact ``full_sync`` intent at job 3 and
+        an ordered cleanup/claim/restart/rebootstrap trace.
 
         Exercises the production ``_validate_cli_mode``, ``_create_adapter``,
-        ``_process_bounded_sequence``, ordered claim, dispatch, controller,
-        restart, rebootstrap, and shutdown paths, faking ONLY the concrete
-        external browser/login/source-I/O collaborators at their import
-        boundary (no real Playwright, no ready adapter injected).
+        ``_process_bounded_sequence``, ordered claim (spied but still real DB
+        claim), dispatch, controller, restart, rebootstrap, and shutdown paths,
+        faking ONLY the concrete external browser/login/source-I/O
+        collaborators at their import boundary (no real Playwright, no ready
+        adapter injected).
         """
         r1 = _queue_admissions_run(
             parameters_json={"patient_record": "HETA", "intent": "admissions_only"}
@@ -4898,11 +4944,11 @@ class TestBoundedValidationMode:
         )
         r3 = IngestionRun.objects.create(
             status="queued",
-            intent="full_admission_sync",
+            intent="full_sync",
             max_attempts=1,
             parameters_json={
                 "patient_record": "HETC",
-                "intent": "full_admission_sync",
+                "intent": "full_sync",
             },
         )
         r4 = _queue_admissions_run(
@@ -4913,7 +4959,23 @@ class TestBoundedValidationMode:
         )
         order = [r1.pk, r2.pk, r3.pk, r4.pk]
 
+        # C2-R3: spy on the bounded claim WITHOUT bypassing it — wrap the real
+        # ``_claim_listed_run`` so row locking and real DB claim behavior stay
+        # exercised, while recording each claim into the shared event trace.
+        original_claim = PersistentWorkerCommand._claim_listed_run
+
+        def _spy_claim(run_id: int):
+            _REAL_SESSION_TRACE.append(f"claim:{run_id}")
+            return original_claim(run_id)
+
         with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_claim_listed_run",
+                    staticmethod(_spy_claim),
+                )
+            )
             for p in _patch_real_session_collaborators():
                 stack.enter_context(p)
             call_command(
@@ -4950,6 +5012,30 @@ class TestBoundedValidationMode:
             ("evolutions", "HETC"),
             ("admissions", "HETD"),
         ], bridge.extraction_log
+        # C2-R3: ordered cleanup/claim/restart/rebootstrap/shutdown trace.
+        # One cleanup checkpoint per extraction action: job 1 (1) + job 2 (1)
+        # + job 3 full_sync admissions+evolutions (2) + job 4 (1) = 5.
+        trace = list(_REAL_SESSION_TRACE)
+        cleanup_idx = [i for i, e in enumerate(trace) if e == "cleanup"]
+        claim_idx = [i for i, e in enumerate(trace) if e.startswith("claim:")]
+        assert len(claim_idx) == 4, trace
+        assert len(cleanup_idx) == 5, trace
+        # A cleanup follows every completed selected job before the next claim.
+        for k in range(len(claim_idx) - 1):
+            segment = trace[claim_idx[k]:claim_idx[k + 1]]
+            assert segment.count("cleanup") >= 1, segment
+        # After the final claim, a cleanup precedes shutdown (no next claim).
+        tail = trace[claim_idx[-1]:]
+        assert tail.count("cleanup") >= 1, tail
+        assert tail.index("cleanup") < tail.index("shutdown"), tail
+        # Every job-3 cleanup checkpoint completes before restart.
+        restart_idx = trace.index("restart")
+        assert cleanup_idx[3] < restart_idx, trace  # 4th cleanup = last job-3
+        # Restart plus rebootstrap complete before claim 4.
+        rebootstrap_idx = trace.index("bootstrap", restart_idx + 1)
+        assert rebootstrap_idx < trace.index(f"claim:{r4.pk}"), trace
+        # Shutdown occurs once, after the final cleanup.
+        assert trace.count("shutdown") == 1, trace
         # Complete bounded output: no run-ID label pattern, no run PK (selected
         # or follow-up), and no source/patient tokens on any surface.
         captured = capsys.readouterr()
@@ -5306,13 +5392,15 @@ class TestBoundedRestartBeforeLaterClaim:
     and a restart failure leaves the later selected row queued and untouched."""
 
     def test_failed_rebootstrap_leaves_fourth_row_queued(self, capsys):
-        """C1-R2: a failed rebootstrap after the restart boundary leaves the
+        """C2-R3: a failed rebootstrap after the restart boundary leaves the
         later selected row queued and untouched, with no source action on it.
 
         Runs through the REAL command startup (real ``_create_adapter``),
         faking only the concrete browser/login/source-I/O collaborators. The
         successful restart/rebootstrap case is covered by the heterogeneous
-        sequence test.
+        sequence test. Asserts cleanups for jobs 1-3 occur before restart,
+        rebootstrap fails, claim 4 never occurs, job 4 stays queued, and
+        shutdown still occurs once.
         """
         runs = [
             _queue_admissions_run(
@@ -5324,7 +5412,20 @@ class TestBoundedRestartBeforeLaterClaim:
             for i in range(4)
         ]
         order = [r.pk for r in runs]
+        original_claim = PersistentWorkerCommand._claim_listed_run
+
+        def _spy_claim(run_id: int):
+            _REAL_SESSION_TRACE.append(f"claim:{run_id}")
+            return original_claim(run_id)
+
         with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_claim_listed_run",
+                    staticmethod(_spy_claim),
+                )
+            )
             for p in _patch_real_session_collaborators(fail_rebootstrap=True):
                 stack.enter_context(p)
             call_command(
@@ -5348,6 +5449,15 @@ class TestBoundedRestartBeforeLaterClaim:
         assert all(pr != "RSF3" for _method, pr in bridge.extraction_log), (
             bridge.extraction_log
         )
+        # C2-R3: cleanups for jobs 1-3 occur before restart, claim 4 never
+        # occurs, and shutdown still runs once in the finally teardown.
+        trace = list(_REAL_SESSION_TRACE)
+        cleanup_idx = [i for i, e in enumerate(trace) if e == "cleanup"]
+        assert len(cleanup_idx) == 3, trace
+        restart_idx = trace.index("restart")
+        assert all(ci < restart_idx for ci in cleanup_idx), trace
+        assert f"claim:{runs[3].pk}" not in trace, trace
+        assert trace.count("shutdown") == 1, trace
         # Complete bounded output: no run-ID label pattern and no source token.
         captured = capsys.readouterr()
         assert "Run #" not in captured.out
