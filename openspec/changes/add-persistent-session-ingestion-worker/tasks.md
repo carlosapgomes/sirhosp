@@ -676,6 +676,13 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
 
 ## 24. PSW-S24: Guarded live validation and cutover readiness
 
+- [x] 24.0 PSW-S24-PROD-C1 production bootstrap hotfix: propagate the shared
+  optional `PLAYWRIGHT_PROXY_SERVER` configuration into the real persistent
+  Chromium context and enable HTTPS tolerance already used by production
+  legacy extractors. Regression tests cover configured-proxy and direct
+  environments without exposing connection details. Automated gates pass;
+  live bootstrap/login remains pending on deployment of the corrected image.
+
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,
   cleanup, and restart/rebootstrap.

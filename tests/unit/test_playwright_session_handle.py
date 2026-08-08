@@ -11,6 +11,7 @@ Tests prove:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -137,6 +138,72 @@ class TestExclusiveBrowserProfileWiring:
         user_data_dir = launch_kwargs.get("user_data_dir")
         assert user_data_dir is not None
         assert str(mock_browser_profile.path) in str(user_data_dir)
+
+    def test_launches_chromium_with_proxy_and_https_tolerance(
+        self,
+        mock_browser_profile: MagicMock,
+        playwright_inner_mock: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """Real persistent Chromium honors the production SOCKS5 proxy."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PLAYWRIGHT_PROXY_SERVER": (
+                        "socks5://sirhosp-tailscale-proxy:1055"
+                    )
+                },
+                clear=False,
+            ),
+            patch(
+                "playwright.sync_api.sync_playwright",
+                return_value=sync_playwright_mock,
+            ),
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+
+        launch_kwargs = (
+            playwright_inner_mock.chromium.launch_persistent_context
+            .call_args.kwargs
+        )
+        assert launch_kwargs["proxy"] == {
+            "server": "socks5://sirhosp-tailscale-proxy:1055"
+        }
+        assert launch_kwargs["ignore_https_errors"] is True
+
+    def test_launches_chromium_without_proxy_when_unconfigured(
+        self,
+        mock_browser_profile: MagicMock,
+        playwright_inner_mock: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """Direct environments keep working when no proxy is configured."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch(
+                "playwright.sync_api.sync_playwright",
+                return_value=sync_playwright_mock,
+            ),
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+
+        launch_kwargs = (
+            playwright_inner_mock.chromium.launch_persistent_context
+            .call_args.kwargs
+        )
+        assert "proxy" not in launch_kwargs
+        assert launch_kwargs["ignore_https_errors"] is True
 
     def test_release_on_shutdown(
         self,

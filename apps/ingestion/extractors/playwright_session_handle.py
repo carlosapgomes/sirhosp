@@ -33,6 +33,7 @@ from apps.ingestion.extractors.session_policy import (
     TabCleanupOutcome,
     decide_tab_cleanup,
 )
+from automation.source_system.proxy_config import get_playwright_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +93,12 @@ class PlaywrightSessionHandle:
 
         launch_kwargs: dict[str, Any] = {
             "headless": self._headless,
+            "ignore_https_errors": True,
             "user_data_dir": str(profile_path),
         }
+        proxy = get_playwright_proxy()
+        if proxy is not None:
+            launch_kwargs["proxy"] = proxy
         self._browser = self._playwright.chromium.launch_persistent_context(
             **launch_kwargs,
         )
