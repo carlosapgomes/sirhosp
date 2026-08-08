@@ -386,7 +386,7 @@ class PlaywrightSessionHandle:
         # Close old Playwright instance.
         if self._playwright is not None:
             try:
-                self._playwright.__exit__(None, None, None)
+                self._playwright.stop()
             except Exception:
                 logger.warning(
                     "Error stopping Playwright during restart (sanitized)"
@@ -396,8 +396,12 @@ class PlaywrightSessionHandle:
         self._playwright = sync_playwright().__enter__()
         launch_kwargs: dict[str, Any] = {
             "headless": self._headless,
+            "ignore_https_errors": True,
             "user_data_dir": str(profile_path),
         }
+        proxy = get_playwright_proxy()
+        if proxy is not None:
+            launch_kwargs["proxy"] = proxy
         self._browser = self._playwright.chromium.launch_persistent_context(
             **launch_kwargs,
         )

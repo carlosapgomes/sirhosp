@@ -710,6 +710,13 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   tries the exact production interaction first and retains the bounded normal
   click fallback. Regression coverage and automated gates pass; production
   single-run retest and bounded validation remain pending redeploy.
+- [x] 24.0e PSW-S24-PROD-C6 production restart-lifecycle correction:
+  admissions succeeded and naturally enqueued demographics plus `full_sync`,
+  but the bounded run stopped after row one because `restart_browser()` still
+  called invalid `__exit__()` on the public Playwright object. Restart now uses
+  `stop()` and preserves the configured proxy plus HTTPS tolerance on the fresh
+  context. Regression coverage and automated gates pass; production bounded
+  retest remains pending redeploy.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,

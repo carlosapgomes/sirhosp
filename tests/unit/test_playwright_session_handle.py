@@ -967,6 +967,49 @@ class TestTabOperations:
         mock_persistent_context.close.assert_called_once()
         mock_browser_profile.release_after_shutdown.assert_called_once()
         mock_browser_profile.acquire.assert_called_once()
+        playwright_inner_mock.stop.assert_called_once_with()
+        playwright_inner_mock.__exit__.assert_not_called()
+
+    def test_restart_browser_preserves_proxy_and_https_tolerance(
+        self,
+        mock_browser_profile: MagicMock,
+        playwright_inner_mock: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """Restarted Chromium retains the production launch configuration."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PLAYWRIGHT_PROXY_SERVER": (
+                        "socks5://sirhosp-tailscale-proxy:1055"
+                    )
+                },
+                clear=False,
+            ),
+            patch(
+                "playwright.sync_api.sync_playwright",
+                return_value=sync_playwright_mock,
+            ),
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            mock_browser_profile.is_in_use = True
+            handle.restart_browser()
+
+        launch_calls = (
+            playwright_inner_mock.chromium.launch_persistent_context.call_args_list
+        )
+        assert len(launch_calls) == 2
+        for launch_call in launch_calls:
+            assert launch_call.kwargs["proxy"] == {
+                "server": "socks5://sirhosp-tailscale-proxy:1055"
+            }
+            assert launch_call.kwargs["ignore_https_errors"] is True
 
 
 # ===========================================================================
