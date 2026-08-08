@@ -7,8 +7,8 @@ templates (admissions, evolutions, safe renewal) required by the
 
 Design (per PSW-S10 scope):
 
-- Reuse the canonical login selectors used by the project automation scripts
-  (``Nome de usuário`` / ``Senha`` / ``Entrar``).
+- Reuse the production-proven login selectors and password-Enter submission
+  from the legacy discharge extractor.
 - Wait for ``#tempoSessao`` as the authenticated-readiness signal.
 - Fail with **sanitized** messages: no password, cookie, username value, or
   raw page payload is ever included in exception strings or log records.
@@ -39,20 +39,17 @@ logger = logging.getLogger(__name__)
 # Canonical selectors — consistent with automation/source_system/medical_evolution
 # ---------------------------------------------------------------------------
 
-_USERNAME_FIELD_LABEL = "Nome de usuário"
-"""Accessible name of the legacy username field, matching the automation scripts."""
+_USERNAME_FIELD_SELECTOR = 'input[placeholder="Nome de usuário"]'
+"""CSS selector used by the production discharge extractor."""
 
-_PASSWORD_FIELD_LABEL = "Senha"
-"""Accessible name of the legacy password field, matching the automation scripts."""
-
-_LOGIN_BUTTON_LABEL = "Entrar"
-"""Accessible name of the legacy login submit button."""
+_PASSWORD_FIELD_SELECTOR = 'input[placeholder="Senha"]'
+"""Password selector used for both fill and Enter submission."""
 
 _AUTH_READINESS_SELECTOR = SEL_SESSION_COUNTER
 """CSS selector used as authenticated-readiness evidence (``#tempoSessao``)."""
 
-_DEFAULT_LOGIN_TIMEOUT_SECONDS = 60
-"""Default timeout (seconds) for each bootstrap navigation/wait step."""
+_DEFAULT_LOGIN_TIMEOUT_SECONDS = 180
+"""Production-proven timeout for every legacy login page action."""
 
 
 class LegacyBootstrapError(Exception):
@@ -122,13 +119,14 @@ def bootstrap_legacy_session(
 ) -> None:
     """Navigate to the source URL, log in, and wait for authenticated readiness.
 
-    Performs the canonical login flow used by the project automation:
+    Performs the production-proven discharge login flow:
 
-    1. Navigate to ``credentials.url`` once at startup.
-    2. Fill the ``Nome de usuário`` field.
-    3. Fill the ``Senha`` field.
-    4. Click the ``Entrar`` button.
-    5. Wait for ``#tempoSessao`` as authenticated-readiness evidence.
+    1. Apply the legacy 180-second default action timeout.
+    2. Navigate to ``credentials.url`` once at startup.
+    3. Fill the username by its exact placeholder selector.
+    4. Fill the password by its exact placeholder selector.
+    5. Press Enter in the password field.
+    6. Wait for ``#tempoSessao`` as authenticated-readiness evidence.
 
     All failures raise :class:`LegacyBootstrapError` with **sanitized**
     messages — no password, cookie, username value, or raw page payload is
@@ -136,10 +134,11 @@ def bootstrap_legacy_session(
 
     Args:
         page: A Playwright-like ``Page`` object (mocked in tests). Must expose
-            ``goto``, ``get_by_role``, and ``wait_for_selector``.
+            ``set_default_timeout``, ``goto``, ``locator``, and
+            ``wait_for_selector``.
         credentials: Resolved source-system credentials.
-        login_timeout: Maximum time in seconds for each navigation/wait step,
-            converted to milliseconds for the Playwright API.
+        login_timeout: Maximum time in seconds for every page action, converted
+            to milliseconds for the Playwright API.
 
     Raises:
         LegacyBootstrapError: If the page is missing, credentials are missing,
@@ -168,6 +167,7 @@ def bootstrap_legacy_session(
         )
 
     timeout_ms = max(1, int(login_timeout)) * 1000
+    _configure_timeout(page, timeout_ms)
 
     _navigate(page, credentials.url, timeout_ms)
     _fill_username(page, credentials.username)
@@ -192,38 +192,48 @@ def _navigate(page: Any, url: str, timeout_ms: int) -> None:
         ) from None
 
 
-def _fill_username(page: Any, username: str) -> None:
-    """Fill the username field using the canonical accessible name."""
+def _configure_timeout(page: Any, timeout_ms: int) -> None:
+    """Apply the production legacy timeout to every page action."""
     try:
-        page.get_by_role("textbox", name=_USERNAME_FIELD_LABEL).fill(username)
+        page.set_default_timeout(timeout_ms)
     except Exception:  # noqa: BLE001 - sanitized below
-        logger.warning("Legacy bootstrap: username field could not be filled (sanitized)")
+        logger.warning(
+            "Legacy bootstrap: page timeout could not be configured (sanitized)"
+        )
+        raise LegacyBootstrapError(
+            "Failed to configure the page timeout during legacy bootstrap"
+        ) from None
+
+def _fill_username(page: Any, username: str) -> None:
+    """Fill the username with the production-proven placeholder selector."""
+    try:
+        page.locator(_USERNAME_FIELD_SELECTOR).fill(username)
+    except Exception:  # noqa: BLE001 - sanitized below
+        logger.warning(
+            "Legacy bootstrap: username field could not be filled (sanitized)"
+        )
         raise LegacyBootstrapError(
             "Failed to fill the username field during legacy bootstrap"
         ) from None
 
 
 def _fill_password(page: Any, password: str) -> None:
-    """Fill the password field using the canonical accessible name."""
+    """Fill the password with the production-proven placeholder selector."""
     try:
-        page.get_by_role("textbox", name=_PASSWORD_FIELD_LABEL).fill(password)
+        page.locator(_PASSWORD_FIELD_SELECTOR).fill(password)
     except Exception:  # noqa: BLE001 - sanitized below
-        logger.warning("Legacy bootstrap: password field could not be filled (sanitized)")
+        logger.warning(
+            "Legacy bootstrap: password field could not be filled (sanitized)"
+        )
         raise LegacyBootstrapError(
             "Failed to fill the password field during legacy bootstrap"
         ) from None
 
 
 def _submit_login(page: Any) -> None:
-    """Submit login by button, falling back to password Enter."""
+    """Submit through password Enter, matching the proven production path."""
     try:
-        page.get_by_role("button", name=_LOGIN_BUTTON_LABEL).click()
-        return
-    except Exception:  # noqa: BLE001 - sanitized fallback boundary
-        pass
-
-    try:
-        page.get_by_role("textbox", name=_PASSWORD_FIELD_LABEL).press("Enter")
+        page.locator(_PASSWORD_FIELD_SELECTOR).press("Enter")
     except Exception:  # noqa: BLE001 - sanitized below
         logger.warning(
             "Legacy bootstrap: login form could not be submitted (sanitized)"

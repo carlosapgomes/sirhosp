@@ -190,8 +190,8 @@ _DEMOGRAPHICS_FIELD_COUNT_FIELDS: tuple[str, ...] = (
     "state", "postal_code",
 )
 
-_LOGIN_TIMEOUT_SECONDS = 60
-"""Default timeout (seconds) for each legacy bootstrap navigation/wait step."""
+_LOGIN_TIMEOUT_SECONDS = 180
+"""Production-proven timeout for every real legacy login page action."""
 
 # PSW-S17 post-cbf50c1 (D18/R2): constant sanitized messages for command
 # surfaces. No arbitrary ``str(exc)``, dynamic exception class, URL,

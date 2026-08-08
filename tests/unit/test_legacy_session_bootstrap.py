@@ -29,10 +29,9 @@ from apps.ingestion.historical_extraction import SourceCredentials
 _PASSWORD_VALUE = "super-secret-password-123"
 _COOKIE_VALUE = "JSESSIONID=abc-def-456"
 
-# Canonical login selectors, consistent with automation/source_system.
-_USERNAME_LABEL = "Nome de usuário"
-_PASSWORD_LABEL = "Senha"
-_LOGIN_BUTTON_LABEL = "Entrar"
+# Exact selectors used by the production discharge extractor.
+_USERNAME_SELECTOR = 'input[placeholder="Nome de usuário"]'
+_PASSWORD_SELECTOR = 'input[placeholder="Senha"]'
 
 
 def _make_credentials(**overrides) -> SourceCredentials:
@@ -129,71 +128,43 @@ class TestBootstrapSuccess:
         args, _ = page.goto.call_args
         assert args[0] == creds.url
 
-    def test_propagates_timeout_to_navigation(self) -> None:
+    def test_applies_explicit_timeout_to_all_page_actions(self) -> None:
         page = _make_page()
         creds = _make_credentials()
 
         bootstrap_legacy_session(page, credentials=creds, login_timeout=42)
 
+        page.set_default_timeout.assert_called_once_with(42_000)
         _, kwargs = page.goto.call_args
-        assert kwargs.get("timeout") == 42_000  # seconds -> ms
+        assert kwargs.get("timeout") == 42_000
 
-    def test_fills_username_with_canonical_selector(self) -> None:
+    def test_fills_username_with_proven_legacy_selector(self) -> None:
         page = _make_page()
         creds = _make_credentials()
 
         bootstrap_legacy_session(page, credentials=creds)
 
-        page.get_by_role.assert_any_call("textbox", name=_USERNAME_LABEL)
-        username_locator = page.get_by_role.return_value
-        username_locator.fill.assert_any_call(creds.username)
+        page.locator.assert_any_call(_USERNAME_SELECTOR)
+        page.locator.return_value.fill.assert_any_call(creds.username)
 
-    def test_fills_password_with_canonical_selector(self) -> None:
+    def test_fills_password_with_proven_legacy_selector(self) -> None:
         page = _make_page()
         creds = _make_credentials()
 
         bootstrap_legacy_session(page, credentials=creds)
 
-        page.get_by_role.assert_any_call("textbox", name=_PASSWORD_LABEL)
-        # The password locator fill receives the password value
-        page.get_by_role.return_value.fill.assert_any_call(_PASSWORD_VALUE)
+        page.locator.assert_any_call(_PASSWORD_SELECTOR)
+        page.locator.return_value.fill.assert_any_call(_PASSWORD_VALUE)
 
-    def test_submits_login_with_canonical_button(self) -> None:
+    def test_submits_login_with_password_enter(self) -> None:
         page = _make_page()
         creds = _make_credentials()
 
         bootstrap_legacy_session(page, credentials=creds)
 
-        page.get_by_role.assert_any_call("button", name=_LOGIN_BUTTON_LABEL)
-        page.get_by_role.return_value.click.assert_called()
-
-    def test_falls_back_to_password_enter_when_button_click_fails(
-        self,
-    ) -> None:
-        """The production password-Enter path submits when the button cannot."""
-        page = _make_page()
-        creds = _make_credentials()
-        username_locator = MagicMock()
-        password_locator = MagicMock()
-        button_locator = MagicMock()
-        button_locator.click.side_effect = RuntimeError("button unavailable")
-
-        def _locator_for(role: str, *, name: str):
-            if role == "textbox" and name == _USERNAME_LABEL:
-                return username_locator
-            if role == "textbox" and name == _PASSWORD_LABEL:
-                return password_locator
-            if role == "button" and name == _LOGIN_BUTTON_LABEL:
-                return button_locator
-            raise AssertionError((role, name))
-
-        page.get_by_role.side_effect = _locator_for
-
-        bootstrap_legacy_session(page, credentials=creds)
-
-        button_locator.click.assert_called_once_with()
-        password_locator.press.assert_called_once_with("Enter")
-        page.wait_for_selector.assert_called_once()
+        page.locator.assert_any_call(_PASSWORD_SELECTOR)
+        page.locator.return_value.press.assert_called_once_with("Enter")
+        page.get_by_role.assert_not_called()
 
     def test_waits_for_tempo_sessao_readiness(self) -> None:
         page = _make_page()
@@ -207,15 +178,15 @@ class TestBootstrapSuccess:
         _, kwargs = page.wait_for_selector.call_args
         assert kwargs.get("timeout") == 15_000
 
-    def test_default_login_timeout_is_used_when_omitted(self) -> None:
+    def test_default_legacy_timeout_is_used_when_omitted(self) -> None:
         page = _make_page()
         creds = _make_credentials()
 
         bootstrap_legacy_session(page, credentials=creds)
 
+        page.set_default_timeout.assert_called_once_with(180_000)
         _, kwargs = page.wait_for_selector.call_args
-        # Default 60s -> 60000ms
-        assert kwargs.get("timeout") == 60_000
+        assert kwargs.get("timeout") == 180_000
 
 
 # ===========================================================================
@@ -239,8 +210,8 @@ class TestBootstrapSanitizedFailures:
 
     def test_username_fill_failure_is_sanitized(self) -> None:
         page = _make_page()
-        page.get_by_role.return_value.fill.side_effect = (
-            RuntimeError(f"cannot fill {_PASSWORD_VALUE}")
+        page.locator.return_value.fill.side_effect = RuntimeError(
+            f"cannot fill {_PASSWORD_VALUE}"
         )
         creds = _make_credentials()
 
@@ -251,8 +222,7 @@ class TestBootstrapSanitizedFailures:
 
     def test_submit_failure_is_sanitized(self) -> None:
         page = _make_page()
-        page.get_by_role.return_value.click.side_effect = RuntimeError("no button")
-        page.get_by_role.return_value.press.side_effect = RuntimeError(
+        page.locator.return_value.press.side_effect = RuntimeError(
             f"cannot press Enter with {_PASSWORD_VALUE}"
         )
         creds = _make_credentials()
@@ -261,7 +231,6 @@ class TestBootstrapSanitizedFailures:
             bootstrap_legacy_session(page, credentials=creds)
 
         assert _PASSWORD_VALUE not in str(exc_info.value)
-        assert "no button" not in str(exc_info.value)
         assert "cannot press Enter" not in str(exc_info.value)
 
     def test_missing_tempo_sessao_is_sanitized(self) -> None:

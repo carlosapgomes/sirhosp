@@ -4735,6 +4735,7 @@ class _FakeRealBridge:
         type(self).instances += 1
         type(self).last = self
         self._handle = handle
+        self.login_timeout = login_timeout
         self.lifecycle_log: list[str] = []
         self.extraction_log: list[tuple[str, str]] = []
         self._current = ""
@@ -4998,6 +4999,7 @@ class TestBoundedValidationMode:
         assert _FakePlaywrightHandle.instances == 1
         assert _FakeRealBridge.instances == 1
         assert handle.start_calls == 1
+        assert bridge.login_timeout == 180
         # Initial bootstrap (1) + restart (1) + rebootstrap (1) => total 2.
         assert bridge.lifecycle_log == ["bootstrap", "restart", "bootstrap"], (
             bridge.lifecycle_log

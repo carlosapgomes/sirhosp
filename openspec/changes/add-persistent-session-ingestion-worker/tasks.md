@@ -688,6 +688,13 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   matching an existing production extractor. The authenticated boundary
   remains `#tempoSessao`; dual-path failure remains sanitized. Automated gates
   pass; real readiness remains pending deployment and production retest.
+- [x] 24.0b PSW-S24-PROD-C3 production-proven login correction
+  (authoritative): live evidence disproved the speculative C2 button/role
+  fallback, while the exact established discharge login path reached real
+  authenticated readiness. Bootstrap now applies the 180-second action timeout,
+  uses exact username/password placeholder selectors, submits with password
+  Enter, and still requires `#tempoSessao`. Automated gates pass; standard
+  bridge bootstrap and bounded validation remain pending production redeploy.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,
