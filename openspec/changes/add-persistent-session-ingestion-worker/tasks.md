@@ -703,6 +703,13 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   previous environment value, and stops the returned Playwright object through
   `stop()` rather than an invalid `__exit__()` call. Automated gates pass;
   production single-run retest and bounded validation remain pending redeploy.
+- [x] 24.0d PSW-S24-PROD-C5 production-proven POL navigation correction:
+  sanitized live probes showed the visible `#polMenu` timing out under
+  Playwright's normal actionability click while the established direct DOM
+  click immediately revealed `#prontuarioInput`. Persistent navigation now
+  tries the exact production interaction first and retains the bounded normal
+  click fallback. Regression coverage and automated gates pass; production
+  single-run retest and bounded validation remain pending redeploy.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,

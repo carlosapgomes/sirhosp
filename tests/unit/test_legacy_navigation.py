@@ -584,6 +584,37 @@ class TestEnsureSearchScreen:
         # Should have tried #polMenu as fallback
         assert "#polMenu" in page.locator_calls
 
+    def test_pol_menu_uses_dom_click_before_playwright_click(self) -> None:
+        """Production-proven DOM click opens POL when normal click times out."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            ensure_search_screen,
+        )
+
+        page = MagicMock()
+        prontuario = MagicMock()
+        prontuario.wait_for.side_effect = [
+            RuntimeError("not visible before POL"),
+            None,
+        ]
+        pol_menu = MagicMock()
+        pol_menu.count.return_value = 1
+        pol_menu.first.click.side_effect = PlaywrightTimeoutError(
+            "normal click would time out"
+        )
+        page.locator.side_effect = lambda selector: {
+            "#prontuarioInput": prontuario,
+            "#polMenu": pol_menu,
+        }[selector]
+
+        ensure_search_screen(page)
+
+        pol_menu.first.evaluate.assert_called_once_with(
+            "(element) => element.click()"
+        )
+        pol_menu.first.click.assert_not_called()
+
     def test_pol_menu_present_click_timeout_raises_typed(self) -> None:
         """D11: POL menu present but click raises Playwright timeout → typed."""
         import pytest

@@ -313,9 +313,14 @@ def ensure_search_screen(page: Any, *, timeout_ms: int | None = None) -> None:
     pol_menu = page.locator(SEL_POL_MENU)
     if _locator_count(pol_menu) > 0:
         try:
-            pol_menu.first.click(
-                **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
-            )
+            try:
+                # Production-proven legacy path: the PrimeFaces menu can be
+                # visible while Playwright's actionability click times out.
+                pol_menu.first.evaluate("(element) => element.click()")
+            except Exception:
+                pol_menu.first.click(
+                    **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
+                )
             page.wait_for_timeout(_bound_ms(deadline_s, 1800))
             try:
                 prontuario.wait_for(state="visible", timeout=_bound_ms(deadline_s, 6000))
