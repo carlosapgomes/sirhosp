@@ -48,6 +48,18 @@ _PASSWORD_FIELD_SELECTOR = 'input[placeholder="Senha"]'
 _AUTH_READINESS_SELECTOR = SEL_SESSION_COUNTER
 """CSS selector used as authenticated-readiness evidence (``#tempoSessao``)."""
 
+_AUTH_READINESS_EXPRESSION = """
+() => {
+  const counter = document.querySelector("#tempoSessao");
+  const values = counter
+    ? Array.from(counter.querySelectorAll("span"), (span) => span.textContent)
+    : [];
+  return values.length >= 3
+    && values.slice(0, 3).every((value) => /^\\s*\\d+\\s*$/.test(value || ""));
+}
+"""
+"""Browser predicate for a populated, parseable session countdown."""
+
 _DEFAULT_LOGIN_TIMEOUT_SECONDS = 180
 """Production-proven timeout for every legacy login page action."""
 
@@ -244,14 +256,19 @@ def _submit_login(page: Any) -> None:
 
 
 def _await_authenticated(page: Any, timeout_ms: int) -> None:
-    """Wait for ``#tempoSessao`` as evidence of authenticated readiness."""
+    """Wait for a populated ``#tempoSessao`` countdown."""
     try:
         page.wait_for_selector(_AUTH_READINESS_SELECTOR, timeout=timeout_ms)
+        page.wait_for_function(
+            _AUTH_READINESS_EXPRESSION,
+            timeout=timeout_ms,
+        )
     except Exception:  # noqa: BLE001 - sanitized below
         logger.warning(
             "Legacy bootstrap: authenticated readiness marker missing (sanitized)"
         )
         raise LegacyBootstrapError(
-            "Authenticated readiness marker (#tempoSessao) not found after "
-            "login — credentials may be invalid or the session did not start"
+            "Valid authenticated readiness marker (#tempoSessao) not observed "
+            "after login — credentials may be invalid or the session did not "
+            "start"
         ) from None

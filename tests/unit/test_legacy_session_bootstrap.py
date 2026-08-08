@@ -178,6 +178,19 @@ class TestBootstrapSuccess:
         _, kwargs = page.wait_for_selector.call_args
         assert kwargs.get("timeout") == 15_000
 
+    def test_waits_for_populated_countdown_after_marker(self) -> None:
+        """Attached marker alone is not authenticated readiness."""
+        page = _make_page()
+        creds = _make_credentials()
+
+        bootstrap_legacy_session(page, credentials=creds, login_timeout=15)
+
+        page.wait_for_function.assert_called_once()
+        args, kwargs = page.wait_for_function.call_args
+        assert "tempoSessao" in args[0]
+        assert "querySelectorAll" in args[0]
+        assert kwargs.get("timeout") == 15_000
+
     def test_default_legacy_timeout_is_used_when_omitted(self) -> None:
         page = _make_page()
         creds = _make_credentials()
@@ -243,6 +256,19 @@ class TestBootstrapSanitizedFailures:
 
         assert _PASSWORD_VALUE not in str(exc_info.value)
         assert "timeout" not in str(exc_info.value).lower()
+
+    def test_unpopulated_tempo_sessao_is_sanitized(self) -> None:
+        page = _make_page()
+        page.wait_for_function.side_effect = RuntimeError(
+            f"counter delayed {_PASSWORD_VALUE}"
+        )
+        creds = _make_credentials()
+
+        with pytest.raises(LegacyBootstrapError) as exc_info:
+            bootstrap_legacy_session(page, credentials=creds)
+
+        assert _PASSWORD_VALUE not in str(exc_info.value)
+        assert "counter delayed" not in str(exc_info.value)
 
     def test_missing_url_raises_sanitized_error(self) -> None:
         page = _make_page()

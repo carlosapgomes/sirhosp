@@ -723,6 +723,12 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   before controller readiness parsing. Restart now clears the obsolete page
   type only after the wrapped handle succeeds. Regression coverage passes;
   production bounded retest remains pending redeploy.
+- [x] 24.0g PSW-S24-PROD-C8 authenticated-readiness timing correction:
+  sanitized post-restart probing proved `#tempoSessao` was attached before its
+  three countdown spans were populated (`sample 0=False`, `sample 0.1=True`).
+  Bootstrap now waits on a bounded browser predicate for three numeric values
+  before returning, without arbitrary sleeps or weakened controller checks.
+  Regression coverage passes; production bounded retest remains pending.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,
