@@ -682,6 +682,12 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   legacy extractors. Regression tests cover configured-proxy and direct
   environments without exposing connection details. Automated gates pass;
   live bootstrap/login remains pending on deployment of the corrected image.
+- [x] 24.0a PSW-S24-PROD-C2 production login-submission hotfix: preserve the
+  canonical `Entrar` button as the first path and fall back to pressing Enter
+  in the already-filled password field when the real portal rejects that click,
+  matching an existing production extractor. The authenticated boundary
+  remains `#tempoSessao`; dual-path failure remains sanitized. Automated gates
+  pass; real readiness remains pending deployment and production retest.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,

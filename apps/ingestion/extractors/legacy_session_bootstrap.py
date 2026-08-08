@@ -215,11 +215,19 @@ def _fill_password(page: Any, password: str) -> None:
 
 
 def _submit_login(page: Any) -> None:
-    """Submit the login form by clicking the canonical button."""
+    """Submit login by button, falling back to password Enter."""
     try:
         page.get_by_role("button", name=_LOGIN_BUTTON_LABEL).click()
+        return
+    except Exception:  # noqa: BLE001 - sanitized fallback boundary
+        pass
+
+    try:
+        page.get_by_role("textbox", name=_PASSWORD_FIELD_LABEL).press("Enter")
     except Exception:  # noqa: BLE001 - sanitized below
-        logger.warning("Legacy bootstrap: login form could not be submitted (sanitized)")
+        logger.warning(
+            "Legacy bootstrap: login form could not be submitted (sanitized)"
+        )
         raise LegacyBootstrapError(
             "Failed to submit the login form during legacy bootstrap"
         ) from None

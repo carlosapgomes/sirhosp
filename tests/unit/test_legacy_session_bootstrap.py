@@ -167,6 +167,34 @@ class TestBootstrapSuccess:
         page.get_by_role.assert_any_call("button", name=_LOGIN_BUTTON_LABEL)
         page.get_by_role.return_value.click.assert_called()
 
+    def test_falls_back_to_password_enter_when_button_click_fails(
+        self,
+    ) -> None:
+        """The production password-Enter path submits when the button cannot."""
+        page = _make_page()
+        creds = _make_credentials()
+        username_locator = MagicMock()
+        password_locator = MagicMock()
+        button_locator = MagicMock()
+        button_locator.click.side_effect = RuntimeError("button unavailable")
+
+        def _locator_for(role: str, *, name: str):
+            if role == "textbox" and name == _USERNAME_LABEL:
+                return username_locator
+            if role == "textbox" and name == _PASSWORD_LABEL:
+                return password_locator
+            if role == "button" and name == _LOGIN_BUTTON_LABEL:
+                return button_locator
+            raise AssertionError((role, name))
+
+        page.get_by_role.side_effect = _locator_for
+
+        bootstrap_legacy_session(page, credentials=creds)
+
+        button_locator.click.assert_called_once_with()
+        password_locator.press.assert_called_once_with("Enter")
+        page.wait_for_selector.assert_called_once()
+
     def test_waits_for_tempo_sessao_readiness(self) -> None:
         page = _make_page()
         creds = _make_credentials()
@@ -224,6 +252,9 @@ class TestBootstrapSanitizedFailures:
     def test_submit_failure_is_sanitized(self) -> None:
         page = _make_page()
         page.get_by_role.return_value.click.side_effect = RuntimeError("no button")
+        page.get_by_role.return_value.press.side_effect = RuntimeError(
+            f"cannot press Enter with {_PASSWORD_VALUE}"
+        )
         creds = _make_credentials()
 
         with pytest.raises(LegacyBootstrapError) as exc_info:
@@ -231,6 +262,7 @@ class TestBootstrapSanitizedFailures:
 
         assert _PASSWORD_VALUE not in str(exc_info.value)
         assert "no button" not in str(exc_info.value)
+        assert "cannot press Enter" not in str(exc_info.value)
 
     def test_missing_tempo_sessao_is_sanitized(self) -> None:
         page = _make_page()
