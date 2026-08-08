@@ -513,8 +513,9 @@ class RealHandleBridge:
         return self._handle.close_last_non_root_tab()
 
     def restart_browser(self) -> None:
-        """Delegate to wrapped handle."""
+        """Restart the handle and discard page-type state from the old browser."""
         self._handle.restart_browser()
+        self._last_url = ""
 
     def shutdown(self) -> None:
         """Delegate shutdown to the wrapped handle if available."""

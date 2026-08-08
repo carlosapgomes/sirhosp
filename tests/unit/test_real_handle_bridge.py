@@ -552,6 +552,23 @@ class TestRealHandleBridgeDelegation:
         bridge.restart_browser()
         assert handle.restart_calls == 1
 
+    def test_restart_browser_clears_stale_page_type(self) -> None:
+        """A fresh browser must not inherit the previous page transformer."""
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        handle = FakePlaywrightHandle()
+        handle.set_html(MISSING_TABLE_HTML)
+        bridge = RealHandleBridge(handle)
+        bridge.open_tab("/consultarInternacoes.xhtml")
+
+        assert bridge.get_page_html() != MISSING_TABLE_HTML
+
+        bridge.restart_browser()
+
+        assert bridge.get_page_html() == MISSING_TABLE_HTML
+
     def test_bridge_delegates_shutdown(self) -> None:
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,

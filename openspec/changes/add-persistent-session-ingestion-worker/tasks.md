@@ -717,6 +717,12 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   `stop()` and preserves the configured proxy plus HTTPS tolerance on the fresh
   context. Regression coverage and automated gates pass; production bounded
   retest remains pending redeploy.
+- [x] 24.0f PSW-S24-PROD-C7 stale bridge page-state correction: after a
+  successful browser restart, `RealHandleBridge` still classified the fresh
+  post-login page using the previous admissions URL and transformed its HTML
+  before controller readiness parsing. Restart now clears the obsolete page
+  type only after the wrapped handle succeeds. Regression coverage passes;
+  production bounded retest remains pending redeploy.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,
