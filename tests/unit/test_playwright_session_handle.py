@@ -229,6 +229,28 @@ class TestExclusiveBrowserProfileWiring:
 
         mock_browser_profile.release_after_shutdown.assert_called_once()
 
+    def test_shutdown_stops_playwright_runtime(
+        self,
+        mock_browser_profile: MagicMock,
+        playwright_inner_mock: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """The Playwright object is stopped through its public API."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            handle.shutdown()
+
+        playwright_inner_mock.stop.assert_called_once_with()
+        playwright_inner_mock.__exit__.assert_not_called()
+
     def test_start_is_idempotent(
         self,
         mock_browser_profile: MagicMock,

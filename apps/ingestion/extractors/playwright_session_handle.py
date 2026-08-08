@@ -119,7 +119,10 @@ class PlaywrightSessionHandle:
 
         if self._playwright is not None:
             try:
-                self._playwright.__exit__(None, None, None)
+                # ``sync_playwright().__enter__()`` returns the public
+                # Playwright object. Its matching public teardown API is
+                # ``stop()``; the returned object is not the context manager.
+                self._playwright.stop()
             except Exception:
                 logger.warning("Error stopping Playwright (sanitized)")
             self._playwright = None

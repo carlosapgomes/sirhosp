@@ -695,6 +695,14 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   uses exact username/password placeholder selectors, submits with password
   Enter, and still requires `#tempoSessao`. Automated gates pass; standard
   bridge bootstrap and bounded validation remain pending production redeploy.
+- [x] 24.0c PSW-S24-PROD-C4 real Playwright/ORM lifecycle correction: live
+  single-run evidence exposed Django `SynchronousOnlyOperation` before claim
+  because Playwright's synchronous dispatcher loop remains active on the
+  command thread. Explicit real mode now scopes Django's documented synchronous
+  ORM escape hatch around serialized processing and teardown, restores the
+  previous environment value, and stops the returned Playwright object through
+  `stop()` rather than an invalid `__exit__()` call. Automated gates pass;
+  production single-run retest and bounded validation remain pending redeploy.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,

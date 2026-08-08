@@ -4966,10 +4966,18 @@ class TestBoundedValidationMode:
         original_claim = PersistentWorkerCommand._claim_listed_run
 
         def _spy_claim(run_id: int):
+            assert os.environ.get("DJANGO_ALLOW_ASYNC_UNSAFE") == "true"
             _REAL_SESSION_TRACE.append(f"claim:{run_id}")
             return original_claim(run_id)
 
         with ExitStack() as stack:
+            stack.enter_context(
+                patch.dict(
+                    os.environ,
+                    {"DJANGO_ALLOW_ASYNC_UNSAFE": ""},
+                    clear=False,
+                )
+            )
             stack.enter_context(
                 patch.object(
                     PersistentWorkerCommand,
@@ -4986,6 +4994,7 @@ class TestBoundedValidationMode:
                 max_runs=4,
                 max_jobs=3,
             )
+            assert os.environ.get("DJANGO_ALLOW_ASYNC_UNSAFE") == ""
 
         for run in (r1, r2, r3, r4):
             run.refresh_from_db()

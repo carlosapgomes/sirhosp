@@ -193,6 +193,9 @@ _DEMOGRAPHICS_FIELD_COUNT_FIELDS: tuple[str, ...] = (
 _LOGIN_TIMEOUT_SECONDS = 180
 """Production-proven timeout for every real legacy login page action."""
 
+_DJANGO_ALLOW_ASYNC_UNSAFE_ENV = "DJANGO_ALLOW_ASYNC_UNSAFE"
+"""Django guard required while Playwright's synchronous event loop is active."""
+
 # PSW-S17 post-cbf50c1 (D18/R2): constant sanitized messages for command
 # surfaces. No arbitrary ``str(exc)``, dynamic exception class, URL,
 # selector, credential, cookie, patient record, admission key, raw HTML,
@@ -565,12 +568,24 @@ class Command(BaseCommand):
             if not self._preflight_selected_run():
                 return
 
-        # The adapter (and its persistent browser/session) is created ONCE
-        # at startup and reused across all claimed runs. This is the core
-        # persistence guarantee of this worker (see design Decision 2 / spec
-        # "Browser and session reuse").
-        adapter = self._create_adapter()
+        guard_was_set = _DJANGO_ALLOW_ASYNC_UNSAFE_ENV in os.environ
+        guard_previous = os.environ.get(_DJANGO_ALLOW_ASYNC_UNSAFE_ENV)
+        if self._use_real_handle:
+            # Playwright's synchronous API keeps an asyncio dispatcher loop
+            # active on this dedicated command thread. Django therefore
+            # classifies otherwise synchronous ORM calls as async-unsafe.
+            # This command executes no concurrent async ORM work. Enable
+            # Django's documented escape hatch only while the explicit real
+            # handle, its synchronous ORM work, and its teardown are active.
+            os.environ[_DJANGO_ALLOW_ASYNC_UNSAFE_ENV] = "true"
+
+        adapter: PersistentExtractionAdapter | None = None
         try:
+            # The adapter (and its persistent browser/session) is created ONCE
+            # at startup and reused across all claimed runs. This is the core
+            # persistence guarantee of this worker (see design Decision 2 /
+            # spec "Browser and session reuse").
+            adapter = self._create_adapter()
             if self._mode == _MODE_BOUNDED:
                 self._process_bounded_sequence(adapter)
             elif self._loop:
@@ -579,7 +594,14 @@ class Command(BaseCommand):
             else:
                 self._process_once(adapter)
         finally:
-            self._shutdown_adapter(adapter)
+            if adapter is not None:
+                self._shutdown_adapter(adapter)
+            if self._use_real_handle:
+                if guard_was_set:
+                    assert guard_previous is not None
+                    os.environ[_DJANGO_ALLOW_ASYNC_UNSAFE_ENV] = guard_previous
+                else:
+                    os.environ.pop(_DJANGO_ALLOW_ASYNC_UNSAFE_ENV, None)
 
     def _shutdown_adapter(self, adapter: PersistentExtractionAdapter) -> None:
         """Tear down the persistent session after the run/loop ends.
