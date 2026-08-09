@@ -1,11 +1,11 @@
 # Persistent-Session Ingestion Worker — Runtime Rollout and A/B Observability
 
-> **Status: AUTHORIZED FOR CONTROLLED PRODUCTION CUTOVER (PSW-S24-PROD-C12).**
+> **Status: ACTIVE WITH ONE PRODUCTION REPLICA (PSW-S24-PROD-C12-R1).**
 >
 > The operator accepted the persistent-session worker as the production path
-> after the guarded PSW-S24 proof. A rollback rehearsal is not a cutover gate.
-> The legacy service definition remains available, but the authorized path is
-> forward operation plus production tuning.
+> after the guarded PSW-S24 proof. One corrected replica is now running; the
+> legacy consumer remains stopped. A rollback rehearsal is not a cutover gate,
+> and the authorized path is forward operation plus production tuning.
 >
 > Completed production evidence covers:
 >
@@ -14,9 +14,13 @@
 > 3. four ordered jobs through one session, including cleanup after each job;
 > 4. controlled restart and rebootstrap before a later claim;
 > 5. a 30-minute idle session, popup-scoped renewal, popup clearance, and
->    countdown advancement; and
+>    countdown advancement;
 > 6. terminal disposal of the 12 abandoned `running` rows, leaving zero stale
->    or running rows before cutover.
+>    or running rows before cutover;
+> 7. an initial continuous canary that exposed run primary keys in inherited
+>    command messages and was stopped by the output-safety guard; and
+> 8. the C12-R1 correction, followed by 11 successful jobs through one restarted
+>    replica with sanitized logs, no timeout, retry, restart, or OOM.
 >
 > Continuous real execution still requires two independent guards:
 >
@@ -28,6 +32,13 @@
 > duration, queue latency, RSS/CPU, shared memory, tmpfs/profile use, and log
 > growth. Do not expose run IDs, patient identifiers, source URLs, credentials,
 > cookies, HTML, PDFs, or clinical text.
+>
+> Latest C12-R1 observation: 22 successes (11 admissions and 11 demographics),
+> 12.68-second mean and 15.31-second maximum processing time, one attempt
+> maximum, zero timeouts, 251.1 MiB final RSS (309.1 MiB earlier observation),
+> 7 MiB final `/tmp`, empty profile/cache tmpfs, and zero container restarts.
+> The replica remained running; the queue moved from 1,332 to 1,329 while
+> admissions follow-ups were enqueued.
 
 ---
 
@@ -175,6 +186,10 @@ docker compose -f compose.yml -f compose.prod.yml \
 docker compose -f compose.yml -f compose.prod.yml \
   --profile persistent-worker ps
 ```
+
+The C12-R1 production start completed this exact one-replica procedure. The
+legacy consumer remained stopped. Do not start it concurrently unless an
+explicit operational decision changes the active consumer.
 
 The service executes:
 

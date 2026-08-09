@@ -769,10 +769,11 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   replica completed four runs successfully with bounded resource use and no
   timeout, restart, or OOM. The safety guard then stopped it because inherited
   continuous messages exposed run primary keys.
-- [ ] 24.0m PSW-S24-PROD-C12-R1 continuous output sanitization:
-  extend the bounded label boundary to real continuous success, failure,
-  retry, and follow-up messages; preserve stub and selected single-smoke
-  diagnostics; pass official gates; rebuild; and repeat the one-replica proof.
+- [x] 24.0m PSW-S24-PROD-C12-R1 continuous output sanitization:
+  the shared label boundary now sanitizes real continuous success, failure,
+  retry, and follow-up messages while preserving stub and selected single-smoke
+  diagnostics. Official gates passed. The rebuilt one-replica service completed
+  22 jobs with identifier-free output, no timeout, retry, restart, or OOM.
 
 - [x] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,
@@ -785,8 +786,9 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   remaining risks with observed results. Proposal/spec requirements remain
   satisfied; Decision 17, the production runbook, and the default-off
   `persistent_worker` Compose service record the authorized forward cutover.
-- [ ] 24.4 Complete replacement readiness after automated parity, guarded live
+- [x] 24.4 Complete replacement readiness after automated parity, guarded live
   validation, official gates, and one-replica production observability pass.
-  The operator explicitly waived rollback rehearsal as a cutover gate.
-- [ ] 24.5 Run final official validation and create
+  The operator explicitly waived rollback rehearsal as a cutover gate. One
+  corrected persistent replica is the active production consumer.
+- [x] 24.5 Run final official validation and create
   `/tmp/sirhosp-slice-PSW-S24-report.md`.
