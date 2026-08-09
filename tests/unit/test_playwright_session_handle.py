@@ -595,6 +595,35 @@ class TestTabOperations:
         mock_page.locator.assert_called_with(".my-button")
         locator_mock.click.assert_called_once()
 
+    def test_click_selector_uses_dom_fallback_after_actionability_failure(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_page: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """A non-timeout actionability failure gets one DOM-click fallback."""
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        locator_mock = MagicMock()
+        locator_mock.click.side_effect = RuntimeError("not actionable")
+        mock_page.locator.return_value = locator_mock
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            handle.click_selector(
+                "#casca_renovasession .ui-confirmdialog-yes"
+            )
+
+        locator_mock.evaluate.assert_called_once_with(
+            "(element) => element.click()"
+        )
+
     def test_get_tab_classes_with_multiple_pages(
         self,
         mock_browser_profile: MagicMock,
@@ -1202,6 +1231,8 @@ class TestSourceBoundaryTypedTimeouts:
             handle.start()
             with pytest.raises(ExtractionTimeoutError):
                 handle.click_selector(".my-button")
+
+        locator_mock.evaluate.assert_not_called()
 
     def test_get_tab_classes_timeout_raises_extraction_timeout(
         self,

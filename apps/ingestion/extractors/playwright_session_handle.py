@@ -186,8 +186,18 @@ class PlaywrightSessionHandle:
                 "Persistent session click_selector failed (sanitized)"
             )
             return
+        locator = page.locator(selector)
         try:
-            page.locator(selector).click()
+            locator.click()
+            return
+        except Exception as exc:
+            if is_playwright_timeout_error(exc):
+                raise ExtractionTimeoutError(
+                    "Persistent session selector click timed out."
+                ) from None
+
+        try:
+            locator.evaluate("(element) => element.click()")
         except Exception as exc:
             if is_playwright_timeout_error(exc):
                 raise ExtractionTimeoutError(

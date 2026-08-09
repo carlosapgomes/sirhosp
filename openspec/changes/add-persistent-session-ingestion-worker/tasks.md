@@ -737,6 +737,14 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   the report frame and its base URL. Regression coverage passes; production
   `full_sync` and bounded retests remain pending rebuild from the committed
   revision.
+- [x] 24.0i PSW-S24-PROD-C10 renewal-popup fail-closed correction:
+  a real session left idle showed the popup at minute 30; the unscoped
+  affirmative selector failed while the stale countdown made
+  `ensure_ready()` return true. Renewal now targets the popup-scoped button,
+  falls back once to the declared DOM click after non-timeout actionability
+  failure, and rejects readiness while the popup remains visible. Regression
+  coverage passes; the 30-minute production retest remains pending deployment
+  of the committed correction.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,

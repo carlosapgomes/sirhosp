@@ -13,12 +13,16 @@ from typing import Protocol, runtime_checkable
 
 from apps.ingestion.extractors.session_policy import (
     SEL_RENEWAL_BUTTON,
+    SEL_RENEWAL_POPUP,
     TabCleanupAction,
     TabCleanupOutcome,
     decide_tab_cleanup,
     is_renewal_popup_visible,
     parse_session_countdown,
 )
+
+_RENEWAL_ACTION_SELECTOR = f"{SEL_RENEWAL_POPUP} {SEL_RENEWAL_BUTTON}"
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -202,12 +206,11 @@ class PersistentSessionController:
             self._increment_failure()
             return False
 
-        # Defensive: handle visible popup before checking counter.
-        html = self._session.get_page_html()
-        if is_renewal_popup_visible(html):
-            self._session.click_selector(SEL_RENEWAL_BUTTON)
-            # After clicking, re-read the page HTML.
-            html = self._session.get_page_html()
+        html = self._dismiss_renewal_popup_if_visible(
+            self._session.get_page_html()
+        )
+        if html is None:
+            return False
 
         # Verify session counter is present.
         remaining = parse_session_countdown(html)
@@ -227,11 +230,11 @@ class PersistentSessionController:
         Returns:
             True if renewal succeeded or was unnecessary, False on failure.
         """
-        # Defensive: handle visible popup first.
-        html = self._session.get_page_html()
-        if is_renewal_popup_visible(html):
-            self._session.click_selector(SEL_RENEWAL_BUTTON)
-            html = self._session.get_page_html()
+        html = self._dismiss_renewal_popup_if_visible(
+            self._session.get_page_html()
+        )
+        if html is None:
+            return False
 
         remaining = parse_session_countdown(html)
 
@@ -240,6 +243,18 @@ class PersistentSessionController:
             return self.open_safe_renewal_tab()
 
         return True
+
+    def _dismiss_renewal_popup_if_visible(self, html: str) -> str | None:
+        """Dismiss a visible renewal popup and verify that it cleared."""
+        if not is_renewal_popup_visible(html):
+            return html
+
+        self._session.click_selector(_RENEWAL_ACTION_SELECTOR)
+        html_after = self._session.get_page_html()
+        if is_renewal_popup_visible(html_after):
+            self._increment_failure()
+            return None
+        return html_after
 
     def open_safe_renewal_tab(self) -> bool:
         """Open the configured safe renewal tab and verify counter reset.

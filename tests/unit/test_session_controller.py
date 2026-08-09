@@ -17,6 +17,7 @@ from apps.ingestion.extractors.session_controller import (
 )
 from apps.ingestion.extractors.session_policy import (
     SEL_RENEWAL_BUTTON,
+    SEL_RENEWAL_POPUP,
     TabCleanupOutcome,
 )
 
@@ -172,7 +173,21 @@ class TestEnsureReady:
 
         # Popup is visible, counter missing → should click and return False
         assert controller.ensure_ready() is False
-        assert SEL_RENEWAL_BUTTON in session.clicked_selectors
+        assert session.clicked_selectors == [
+            f"{SEL_RENEWAL_POPUP} {SEL_RENEWAL_BUTTON}"
+        ]
+
+    def test_visible_popup_with_valid_counter_fails_if_popup_remains(self) -> None:
+        """A stale countdown cannot hide a failed renewal-popup click."""
+        session = FakeSessionHandle()
+        session.set_html(VISIBLE_POPUP_HTML + VALID_COUNTER_HTML)
+        controller = PersistentSessionController(session)
+
+        assert controller.ensure_ready() is False
+        assert session.clicked_selectors == [
+            f"{SEL_RENEWAL_POPUP} {SEL_RENEWAL_BUTTON}"
+        ]
+        assert controller.consecutive_failures == 1
 
     def test_popup_then_valid_counter_returns_true(self) -> None:
         """Popup visible → click → counter present → True."""
@@ -261,6 +276,25 @@ class TestRenewIfNeeded:
         assert controller.renew_if_needed() is False
         assert controller.consecutive_failures == 1
 
+    def test_popup_with_valid_counter_fails_if_popup_remains(self) -> None:
+        """Renewal fails closed when the affirmative action has no effect."""
+        session = FakeSessionHandle()
+        session.set_html(VISIBLE_POPUP_HTML + VALID_COUNTER_HTML)
+        controller = PersistentSessionController(
+            session,
+            config=SessionControllerConfig(
+                renewal_threshold_seconds=600,
+                safe_renewal_tab_url="https://example.com/safe",
+            ),
+        )
+
+        assert controller.renew_if_needed() is False
+        assert session.clicked_selectors == [
+            f"{SEL_RENEWAL_POPUP} {SEL_RENEWAL_BUTTON}"
+        ]
+        assert session.opened_urls == []
+        assert controller.consecutive_failures == 1
+
     def test_renewal_handles_popup_first_then_opens_tab(self) -> None:
         """Popup visible → clicks renewal → opens safe tab → True."""
         session = FakeSessionHandle()
@@ -281,7 +315,7 @@ class TestRenewIfNeeded:
 
         def click_and_clear_popup(selector: str) -> None:
             original_click(selector)
-            session.set_html(VISIBLE_POPUP_HTML)  # keep showing for now
+            session.set_html("<html><body></body></html>")
 
         session.click_selector = click_and_clear_popup  # type: ignore[assignment]
 
@@ -294,7 +328,9 @@ class TestRenewIfNeeded:
         )
 
         assert controller.renew_if_needed() is True
-        assert SEL_RENEWAL_BUTTON in session.clicked_selectors
+        assert session.clicked_selectors == [
+            f"{SEL_RENEWAL_POPUP} {SEL_RENEWAL_BUTTON}"
+        ]
         assert "https://example.com/safe" in session.opened_urls
 
     def test_malformed_counter_opens_safe_tab_defensively(self) -> None:
