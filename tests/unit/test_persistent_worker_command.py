@@ -5576,6 +5576,56 @@ class TestContinuousRealQueueOptIn:
                 )
         mock_adapter.ensure_session_ready.assert_not_called()
 
+    @pytest.mark.django_db(transaction=True)
+    def test_continuous_success_and_followups_emit_no_identifiers(self, capsys):
+        """Real continuous output must be safe for production log collection."""
+        source_token = "SENT-CONTINUOUS-SOURCE"
+        _queue_admissions_run(
+            parameters_json={
+                "patient_record": source_token,
+                "intent": "admissions_only",
+            }
+        )
+        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        mock_adapter.ensure_session_ready.return_value = True
+        mock_adapter.controller.restart_required.return_value = False
+        cmd_path = (
+            "apps.ingestion.management.commands"
+            ".process_ingestion_runs_persistent_session"
+        )
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=mock_adapter,
+                )
+            )
+            stack.enter_context(
+                patch(f"{cmd_path}.time.sleep", side_effect=KeyboardInterrupt)
+            )
+            stack.enter_context(patch("signal.signal"))
+            with pytest.raises(KeyboardInterrupt):
+                call_command(
+                    "process_ingestion_runs_persistent_session",
+                    real_handle=True,
+                    loop=True,
+                    enable_real_queue=True,
+                    sleep_seconds=1,
+                )
+
+        captured = capsys.readouterr()
+        assert "Continuous run" in captured.out
+        assert "Run #" not in captured.out
+        assert "run #" not in captured.out
+        assert "Run #" not in captured.err
+        assert "run #" not in captured.err
+        assert source_token not in captured.out
+        assert source_token not in captured.err
+        for run in IngestionRun.objects.all():
+            assert f"#{run.pk}" not in captured.out, (run.pk, captured.out)
+            assert f"#{run.pk}" not in captured.err, (run.pk, captured.err)
+
 
 @pytest.mark.django_db
 class TestBoundedSanitization:

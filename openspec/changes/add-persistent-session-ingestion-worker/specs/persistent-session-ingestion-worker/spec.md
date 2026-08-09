@@ -308,18 +308,18 @@ PSW-S24 live validation succeeds.
 - **AND** the opt-in reuses the existing queue, locking, readiness, and shutdown
   paths without creating a new worker, queue, or deployment default
 
-#### Scenario: Bounded output is sanitized across every surface
+#### Scenario: Real multi-run output is sanitized across every surface
 
-- **WHEN** the bounded mode emits operational messages on any success or
-  failure branch (admissions, demographics, full-sync, persistence, retry,
-  terminal failure, follow-up, race, or unsupported intent)
-- **THEN** complete stdout and stderr use only ordinal labels, counts, stage
-  names, and normalized reasons
-- **AND** they contain NO selected run primary key and NO auto-enqueued
-  follow-up primary key (no `Run #<n>` or `run #<n>` label pattern)
+- **WHEN** bounded or continuous real mode emits operational messages on any
+  success or failure branch (admissions, demographics, full-sync, persistence,
+  retry, terminal failure, follow-up, race, or unsupported intent)
+- **THEN** complete stdout and stderr use only bounded ordinals or fixed
+  continuous labels, counts, stage names, and normalized reasons
+- **AND** they contain NO claimed run primary key and NO auto-enqueued follow-up
+  primary key (no `Run #<n>` or `run #<n>` label pattern)
 - **AND** they contain no patient/source identifiers, clinical content, URLs,
   credentials, cookies, HTML, or PDF data
-- **AND** stub, single-smoke, and continuous-mode messages remain unchanged
+- **AND** stub and explicitly selected single-smoke messages remain unchanged
 
 ### Requirement: Shared evolution ingestion service
 

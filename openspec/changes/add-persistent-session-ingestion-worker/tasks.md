@@ -764,6 +764,15 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   `running` rows; queued and succeeded counts remained unchanged. No production
   code change was needed because the existing transactional command already
   satisfied the authorized contract.
+- [x] 24.0l PSW-S24-PROD-C12 authorized one-replica cutover:
+  the default-off Compose service and official gates passed; one production
+  replica completed four runs successfully with bounded resource use and no
+  timeout, restart, or OOM. The safety guard then stopped it because inherited
+  continuous messages exposed run primary keys.
+- [ ] 24.0m PSW-S24-PROD-C12-R1 continuous output sanitization:
+  extend the bounded label boundary to real continuous success, failure,
+  retry, and follow-up messages; preserve stub and selected single-smoke
+  diagnostics; pass official gates; rebuild; and repeat the one-replica proof.
 
 - [x] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,

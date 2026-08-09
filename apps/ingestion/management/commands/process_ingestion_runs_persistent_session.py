@@ -1179,17 +1179,19 @@ class Command(BaseCommand):
     def _run_label(
         self, run: IngestionRun, *, followup: bool = False
     ) -> str:
-        """Return a sanitized run reference for command output (C1-R3).
+        """Return a mode-safe run reference for command output.
 
-        Bounded mode never emits a primary key on any output surface:
-        selected runs use an ordinal label and auto-enqueued follow-ups use a
-        fixed sanitized phrase. Non-bounded modes keep the historical
-        operational ID (``Run #<pk>`` / ``run #<pk>``) unchanged so stub,
-        single-smoke, and continuous output stay backward compatible.
+        Bounded and continuous real modes never emit a primary key. Bounded
+        selected runs use an ordinal; continuous runs use a fixed label; and
+        both modes use a fixed follow-up phrase. Stub and explicitly selected
+        single-smoke diagnostics preserve their historical operational ID.
         """
-        if getattr(self, "_mode", _MODE_STUB) == _MODE_BOUNDED:
+        mode = getattr(self, "_mode", _MODE_STUB)
+        if mode in {_MODE_BOUNDED, _MODE_CONTINUOUS_REAL}:
             if followup:
                 return "follow-up"
+            if mode == _MODE_CONTINUOUS_REAL:
+                return "Continuous run"
             ordinal = getattr(self, "_bounded_ordinal", 0)
             return f"Validation row {ordinal}" if ordinal else "Validation row"
         return f"run #{run.pk}" if followup else f"Run #{run.pk}"
