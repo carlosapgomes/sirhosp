@@ -772,9 +772,12 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
 - [x] 24.2 Run guarded validation within the approved concurrency limit. One
   process completed the four-intent allow-list, restart/rebootstrap boundary,
   and the independent 30-minute renewal proof without enabling continuous mode.
-- [ ] 24.3 Reconcile proposal, design, specs, tasks, rollout docs, defaults, and
-  remaining risks with observed results.
-- [ ] 24.4 Approve replacement readiness only if automated parity, live
-  validation, official gates, rollback, and observability criteria all pass.
+- [x] 24.3 Reconcile proposal, design, specs, tasks, rollout docs, defaults, and
+  remaining risks with observed results. Proposal/spec requirements remain
+  satisfied; Decision 17, the production runbook, and the default-off
+  `persistent_worker` Compose service record the authorized forward cutover.
+- [ ] 24.4 Complete replacement readiness after automated parity, guarded live
+  validation, official gates, and one-replica production observability pass.
+  The operator explicitly waived rollback rehearsal as a cutover gate.
 - [ ] 24.5 Run final official validation and create
   `/tmp/sirhosp-slice-PSW-S24-report.md`.

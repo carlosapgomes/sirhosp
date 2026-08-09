@@ -192,9 +192,9 @@ PSW-S9 owns the bridge/translation layer between the real legacy UI and the
 persistent extraction contract. The slice must not reintroduce subprocess-per-job
 execution or launch a fresh browser per job.
 
-Rationale: persistence parity is now solved, so the remaining rollout blocker is
-isolated to source-system extraction through the already-open persistent
-browser/session.
+Rationale at that stage: persistence parity was solved and source extraction
+through the already-open browser/session was the remaining blocker. PSW-S24
+later validated that boundary in production.
 
 ### Decision 11: Use action-based legacy navigation, not URL templates
 
@@ -219,9 +219,10 @@ preserving the no-subprocess/no-new-browser requirement.
 
 ### Decision 12: Target replacement readiness, not partial queue support
 
-The persistent worker is a candidate replacement for `process_ingestion_runs`.
-The current worker remains unchanged and available until the persistent worker
-has automated and live-validated parity for every supported queued intent.
+The persistent worker is the operator-approved replacement for
+`process_ingestion_runs` after automated and live-validated parity for every
+supported queued intent. The current service definition remains unchanged and
+available, but is not required to run beside the persistent worker.
 
 Rationale: side-by-side operation is a migration mechanism, not the final
 functional boundary. A worker sharing the queue cannot safely omit a supported
@@ -287,14 +288,33 @@ any adapter/browser creation or run mutation:
 
 `--real-handle --loop` without the explicit opt-in fails before adapter/browser
 creation. Every other combination fails before `_create_adapter()` and before
-any run mutation. Bounded and continuous real modes are command surface only:
-they do not create a new queue, claim algorithm, worker service, or deployment
-default. Rollout remains blocked pending authorized PSW-S24 live validation.
+any run mutation. The production `persistent_worker` service preserves a
+second default-off boundary through the explicit `persistent-worker` Compose
+profile.
 
-Rationale: the single-run smoke guard (PSW-S10) proved the command cannot yet
-run two jobs under one login, restart before a later claim, or start the
-documented continuous real queue. A closed matrix makes the real operational
-surface explicit and auditable without enabling deployment by default.
+Rationale: the closed matrix prevents an accidental real queue drain. The
+guarded PSW-S24 sequence subsequently proved multi-job session reuse,
+restart/rebootstrap, every supported intent, cleanup, and sanitized output.
+
+### Decision 17: Authorized forward cutover
+
+After the guarded production proof, the operator accepted the
+persistent-session worker as the production path and explicitly waived a
+rollback rehearsal as a cutover gate. Cutover starts with one replica behind
+the explicit Compose profile and command opt-in. The legacy service definition
+remains available but is not part of the acceptance decision.
+
+Production tuning is evidence-driven. Operators observe aggregate queue
+progress, attempts, duration, queue latency, heartbeat, session failures,
+RSS/CPU, shared memory, tmpfs/profile use, and log growth without exposing
+source or patient data. Authentication loops, stale heartbeats, repeated
+restarts, cleanup failures, retry amplification, resource exhaustion, or
+unsanitized output require an emergency stop and diagnosis.
+
+Rationale: real authentication, all supported intents, PDF extraction,
+restart/rebootstrap, renewal after a 30-minute idle interval, cleanup, and
+stale-run disposal have passed. Remaining uncertainty is operational tuning,
+which the operator chose to perform on the deployed production path.
 
 ## Risks / Trade-offs
 
@@ -316,15 +336,15 @@ surface explicit and auditable without enabling deployment by default.
   browser-launch calls.
 - Persistence duplication -> extract or reuse small shared services rather than
   copying command-local business logic.
-- Real handle contract mismatch -> keep rollout blocked until admissions,
-  demographics, and evolutions work through real action navigation.
+- Real handle contract drift -> monitor admissions, demographics, full-sync,
+  and evolutions through aggregate production outcomes.
 - Invalid URL-template assumption -> real legacy flows must use action-based
   JSP/PrimeFaces navigation modeled after the known working scripts.
 - Selector drift -> isolate selectors and validate them in guarded live smoke.
 - Popup detection drift -> parse attributes independently and verify popup
   disappearance before treating the page as ready.
-- Partial parity is mistaken for cutover readiness -> require the parity suite
-  and live-validation slice to complete before replacement approval.
+- Production tuning reveals a regression -> start with one explicit-profile
+  replica and stop on the Decision 17 safety conditions.
 
 ## Migration Plan
 
@@ -352,18 +372,18 @@ surface explicit and auditable without enabling deployment by default.
     multi-admission handling, and authenticated PDF form fallback.
 16. Run current-versus-persistent parity tests for all supported intents and a
     multi-job sequence through one authenticated handle.
-17. Do not start production side-by-side load until all automated blockers are
-    resolved and the official quality gates pass.
+17. Resolve automated blockers and pass the official quality gates before
+    continuous production use.
 18. Run guarded live validation within the project-approved concurrency limit.
-19. Compare run outcomes, persistence, retries, timeouts, resource use, and
-    stale recovery between groups.
-20. Approve cutover only when parity and rollback criteria pass; otherwise stop
-    persistent workers and keep or restore the current worker.
+19. Record the operator's explicit forward-cutover authorization without a
+    rollback-rehearsal gate.
+20. Deploy one default-off-profile persistent replica and compare aggregate run
+    outcomes, retries, timeouts, queue latency, resource use, and stale state.
+21. Tune lifecycle/resource parameters from observed production evidence and
+    scale only while health and resource headroom remain acceptable.
 
 ## Open Questions
 
-- What conservative max-jobs and max-lifetime values pass guarded live testing?
-- Which safe legacy action should renew an idle authenticated session?
-- What observation window and success thresholds are required for cutover?
-- Does the real `#printLinks` download require any environment-specific form
-  fields beyond those used by the known working script?
+- What lifecycle and resource values should change after the first continuous
+  production measurements?
+- What observation window supports scaling beyond one replica?

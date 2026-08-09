@@ -1,95 +1,57 @@
 # Persistent-Session Ingestion Worker — Runtime Rollout and A/B Observability
 
-> **⚠️ Status: NOT production rollout-ready (post-PSW-S11).**
+> **Status: AUTHORIZED FOR CONTROLLED PRODUCTION CUTOVER (PSW-S24-PROD-C12).**
 >
-> The persistent-session worker (`process_ingestion_runs_persistent_session`)
-> is implemented and unit-tested, including persistent full-sync persistence,
-> a ``RealHandleBridge`` that translates representative legacy DOM data into
-> the adapter's synthetic container contract, a guarded real-legacy bootstrap
-> and manual smoke path, and a persistent real evolution **PDF** extraction
-> flow.
+> The operator accepted the persistent-session worker as the production path
+> after the guarded PSW-S24 proof. A rollback rehearsal is not a cutover gate.
+> The legacy service definition remains available, but the authorized path is
+> forward operation plus production tuning.
 >
-> **New live-validation finding:** the real legacy system is Java/JSP and does
-> not expose reloadable patient/admission/evolution URLs. The PSW-S10 URL
-> template assumption must be replaced by action-based Playwright navigation
-> modeled after `automation/source_system/medical_evolution/path2.py` before
-> guarded real smoke testing.
+> Completed production evidence covers:
 >
-> **Progress:**
+> 1. real authentication and action-based JSP/PrimeFaces navigation;
+> 2. admissions, demographics, full-sync, and evolution/PDF extraction;
+> 3. four ordered jobs through one session, including cleanup after each job;
+> 4. controlled restart and rebootstrap before a later claim;
+> 5. a 30-minute idle session, popup-scoped renewal, popup clearance, and
+>    countdown advancement; and
+> 6. terminal disposal of the 12 abandoned `running` rows, leaving zero stale
+>    or running rows before cutover.
 >
-> 1. **PSW-S9 — real-handle container contract resolved in code** (not yet
->    production-validated). ``RealHandleBridge`` wraps the
->    ``PlaywrightSessionHandle`` and extracts admission data from the legacy
->    ``#tabelaInternacoes`` table rows and evolution data from
->    ``<script id="evolution-data-json">`` / ``<pre class="report-text">``
->    elements, rendering them inside ``<div id="admission-snapshot-data">``
->    and ``<div id="evolution-data">`` containers.
+> Continuous real execution still requires two independent guards:
 >
-> 2. **PSW-S10 — real bootstrap and guarded manual smoke.** ``--real-handle``
->    now resolves credentials and real URL templates, bootstraps an
->    authenticated legacy session (navigate, login, and wait for
->    ``#tempoSessao``), and requires ``--run-id`` and ``--max-runs 1`` so a
->    manual smoke processes exactly one selected run and cannot drain the
->    queue or enter an idle loop.
+> - the production Compose service is behind the explicit
+>   `persistent-worker` profile; and
+> - the command requires `--real-handle --loop --enable-real-queue`.
 >
-> 3. **PSW-S11 — persistent real evolution PDF flow.** When the PSW-S9
->    lightweight fast paths (``evolution-data-json`` script,
->    ``pre.report-text``) yield no events, the adapter delegates to
->    ``RealHandleBridge.extract_evolutions_pdf``, which reuses the
->    already-open persistent page/context to apply the date window, generate
->    the report, download the PDF, extract text with PyMuPDF, and normalise
->    it into the evolution contract. No subprocess, no ``path2.py`` shell-out,
->    no fresh browser per job. This path has been validated with synthetic
->    PDF/text and fake Playwright objects only.
->
-> 4. **Remaining prerequisites (blockers for production rollout):** replace
->    real-smoke URL-template navigation with action-based JSP/PrimeFaces
->    navigation (PSW-S12/PSW-S13), live validation of the bridge, bootstrap,
->    and PDF flow against the real legacy UI, and operational threshold tuning
->    (max-jobs, max-lifetime).
->
-> 5. **PSW-S24-PRE — guarded real multi-run command surface (NOT
->    rollout-ready).** The `--real-handle` path now exposes a closed CLI mode
->    matrix: the single-run smoke is preserved; a bounded, ordered
->    `--validation-run-id` allow-list (two through four runs, one session,
->    restart before a later claim) is the intended PSW-S24 live-validation
->    surface; and the existing continuous real queue loop is reachable only
->    through an explicit default-off `--enable-real-queue` opt-in. Both real
->    multi-run modes stay disabled until authorized PSW-S24 live validation
->    succeeds.
->
-> This document describes the **intended future rollout plan** and
-> **controlled lab/staging experiment guidance**. Do not apply the scaling or
-> side-by-side procedures in production until the prerequisites above are met.
+> Start with one replica. Measure aggregate queue progress, status, attempts,
+> duration, queue latency, RSS/CPU, shared memory, tmpfs/profile use, and log
+> growth. Do not expose run IDs, patient identifiers, source URLs, credentials,
+> cookies, HTML, PDFs, or clinical text.
 
 ---
 
 ## 1. Before you begin
 
-### 1.1 Prerequisites (not yet fully met)
+### 1.1 Satisfied prerequisites
 
-- ~~``PlaywrightSessionHandle`` able to extract real snapshot/evolution
-  containers from the legacy UI.~~ **Implemented (PSW-S9)**:
-  ``RealHandleBridge`` wraps the handle and translates legacy DOM data
-  into the adapter's synthetic container contract.
-- ~~Real-legacy bootstrap + guarded manual smoke.~~ **Implemented
-  (PSW-S10)**: ``--real-handle`` resolves credentials and real URL
-  templates, bootstraps an authenticated legacy session, and requires
-  ``--run-id`` + ``--max-runs 1``.
-- **Live validation against the real legacy UI** — not yet performed.
-  The bridge, bootstrap, and PDF flow have been tested with representative
-  HTML/PDF fakes and mocked Playwright only.
-- ~~**PSW-S11: persistent real evolution PDF flow** — not yet implemented.~~
-  **Implemented (PSW-S11)**: ``RealHandleBridge.extract_evolutions_pdf``
-  reuses the already-open persistent page/context to download and normalise
-  the real legacy evolution PDF, as a fallback after the PSW-S9 fast paths.
-- **Operational threshold tuning** (max-jobs, max-lifetime) — pending.
-- Containerized validation gate passing (`./scripts/test-in-container.sh quality-gate`).
+- `RealHandleBridge` translates the real legacy UI into the persistent
+  adapter contract.
+- Real bootstrap, authentication, action navigation, PDF download, and
+  extraction passed guarded production validation.
+- Admissions, demographics, full-sync, and evolutions passed through one
+  authenticated session.
+- Restart/rebootstrap, cleanup, renewal, and sanitized failure boundaries were
+  observed in production.
+- The official containerized quality gates passed for the committed runtime
+  corrections.
+- The operator explicitly authorized forward cutover and accepted production
+  tuning without a rollback rehearsal.
 
-Full-sync persistence is implemented through the shared
-`apps.ingestion.evolution_ingestion.ingest_evolutions` service. Production
-rollout remains blocked by the remaining prerequisites above (live
-validation, threshold tuning).
+Full-sync persistence uses the shared
+`apps.ingestion.evolution_ingestion.ingest_evolutions` service. Runtime
+thresholds begin at the tested defaults and may be adjusted from sanitized
+production measurements.
 
 ### 1.2 Lab/staging experiment (available now)
 
@@ -111,39 +73,21 @@ The worker defaults to the `_StubSessionHandle`, which returns empty results
 and never launches a browser. It is safe for integration experiments and
 command-line validation.
 
-To test with a real Chromium session (lab only, never production), use the
-**guarded manual smoke** path added in PSW-S10. ``--real-handle`` requires
-BOTH ``--run-id`` and ``--max-runs 1`` so a manual smoke processes exactly
-one selected queued run and cannot drain the queue or enter an idle loop. It
-also bootstraps a real authenticated legacy session (navigate + login + wait
-for ``#tempoSessao``) before any run is claimed.
+The real Chromium path is production-authorized. For a single selected smoke,
+use `--real-handle --run-id ID --max-runs 1`. For an ordered two-to-four-row
+proof, repeat `--validation-run-id` and set `--max-runs` to the exact count.
+The continuous service uses the separately guarded command documented below.
 
-**Do not run the real-handle smoke against production yet.** Manual
-validation confirmed that the real system does not support the URL-template
-navigation assumed by PSW-S10. PSW-S12/PSW-S13 must first replace that path
-with action-based Playwright navigation modeled after `path2.py`.
-
-After PSW-S12/PSW-S13, the operator will configure only the real credentials
-and any remaining safe-renewal setting required by the implemented path, then
-run a single selected queued `IngestionRun` with:
-
-```bash
-# MANUAL SMOKE ONLY AFTER PSW-S12/PSW-S13 (placeholders only):
-uv run python manage.py process_ingestion_runs_persistent_session \
-    --real-handle --run-id <INGESTION_RUN_ID> --max-runs 1
-```
-
-> This remains a **manual smoke only** path, NOT production rollout. Credentials
-> and passwords must never be logged. Bootstrap, navigation, and PDF-flow
-> failures must be sanitized. The bridge/PDF flow still require live validation
-> against the real legacy UI before any continuous worker rollout.
+All real modes bootstrap authentication before any claim. Credentials and
+passwords must never be logged. Bootstrap, navigation, renewal, and PDF-flow
+failures use sanitized messages.
 
 ### 1.3 Real-handle CLI mode matrix (PSW-S24-PRE)
 
-The `--real-handle` path now exposes a CLOSED CLI mode matrix, validated before
-any adapter/browser creation or run mutation. None of the real modes is
-rollout-ready; all stay disabled until authorized PSW-S24 live validation
-succeeds.
+The `--real-handle` path exposes a closed CLI mode matrix validated before any
+adapter/browser creation or run mutation. Guarded and continuous modes passed
+authorized PSW-S24 validation; the continuous mode additionally requires the
+explicit Compose profile and command opt-in.
 
 | Mode | Flags | Owns |
 | --- | --- | --- |
@@ -163,7 +107,7 @@ untouched. Bounded output carries no run IDs or source data — only ordinal,
 count, stage, and normalized-reason information.
 
 ```bash
-# BOUNDED LIVE VALIDATION ONLY (placeholders; NOT rollout-ready):
+# Bounded production diagnostic with operator-approved queued IDs:
 uv run python manage.py process_ingestion_runs_persistent_session \
     --real-handle \
     --validation-run-id <ID_1> --validation-run-id <ID_2> \
@@ -176,13 +120,12 @@ before adapter/browser creation. The opt-in is forbidden with `--run-id`,
 locking, readiness, and shutdown paths without creating a new worker, queue, or
 deployment default.
 
-> Bounded and continuous real modes are command surface only. They do NOT
-declare production rollout readiness. Real IDs, patient identifiers, clinical
-content, URLs, credentials, and cookies must never be logged.
+> Real IDs, patient identifiers, clinical content, URLs, credentials, cookies,
+> HTML, and PDFs must never be logged in any mode.
 
 ---
 
-## 2. Future production rollout plan
+## 2. Production cutover
 
 ### 2.1 Worker identity and labels
 
@@ -211,99 +154,61 @@ When `SIRHOSP_WORKER_LABEL` is not set, the current worker uses the
 built-in default and the persistent worker falls back to `persistent-worker`
 as its prefix.
 
-### 2.2 Side-by-side experiment (future, after prerequisites)
+### 2.2 Authorized one-replica start
 
-After the remaining prerequisites are met (live validation against the real
-legacy UI and threshold tuning), deploy an initial controlled experiment:
+The versioned `persistent_worker` service is part of `compose.prod.yml` but is
+excluded from normal startup by the `persistent-worker` profile. Starting it
+also passes the command-level `--enable-real-queue` opt-in.
 
 ```bash
 cd /opt/sirhosp
 
-# Current workers (6 replicas, already in production)
-docker compose -f compose.yml -f compose.prod.yml up -d --scale worker=6
+# Keep the legacy consumer stopped during the forward cutover.
+docker compose -f compose.yml -f compose.prod.yml stop worker
 
-# Persistent workers (6 replicas) — EXAMPLE ONLY, not yet rollout-ready
-# (blocked by live validation, PSW-S11, and threshold tuning).
-# docker compose -f compose.yml -f compose.persistent-worker.yml up -d \
-#   --scale persistent_worker=6
+# Build and start exactly one persistent replica.
+docker compose -f compose.yml -f compose.prod.yml \
+  --profile persistent-worker up -d --build \
+  --scale persistent_worker=1 persistent_worker
+
+# Confirm service cardinality and health.
+docker compose -f compose.yml -f compose.prod.yml \
+  --profile persistent-worker ps
 ```
 
-> A dedicated `compose.persistent-worker.yml` override is **not yet provided**
-> because the worker is not rollout-ready. When the blockers are resolved
-> (live validation, threshold tuning), create the override following
-> the same tmpfs/isolation patterns as the current `worker` service in
-> `compose.prod.yml`.
+The service executes:
 
-#### 2.2.1 Disabled example: `compose.persistent-worker.yml` (future reference)
-
-When prerequisites are met, the override would look like:
-
-```yaml
-# compose.persistent-worker.yml — DISABLED EXAMPLE
-# DO NOT DEPLOY until live validation and threshold tuning are done.
-services:
-  persistent_worker:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: prod
-    init: true
-    environment:
-      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:?required}
-      - DJANGO_DEBUG=false
-      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-localhost}
-      - POSTGRES_DB=${POSTGRES_DB:-sirhosp}
-      - POSTGRES_USER=${POSTGRES_USER:-sirhosp}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?required}
-      - POSTGRES_HOST=db
-      - POSTGRES_PORT=${POSTGRES_INTERNAL_PORT:-5432}
-      - SOURCE_SYSTEM_URL=${SOURCE_SYSTEM_URL:-}
-      - SOURCE_SYSTEM_USERNAME=${SOURCE_SYSTEM_USERNAME:-}
-      - SOURCE_SYSTEM_PASSWORD=${SOURCE_SYSTEM_PASSWORD:-}
-      - UV_PROJECT_ENVIRONMENT=/opt/venv
-      - UV_CACHE_DIR=/opt/.uv_cache
-      - UV_NO_CACHE=1
-      - PLAYWRIGHT_PROXY_SERVER=${PLAYWRIGHT_PROXY_SERVER:-socks5://sirhosp-tailscale-proxy:1055}
-      - TMPDIR=/tmp
-      - TEMP=/tmp
-      - TMP=/tmp
-      - XDG_CACHE_HOME=/tmp/xdg-cache
-      - XDG_CONFIG_HOME=/tmp/xdg-config
-      - SIRHOSP_WORKER_LABEL=persistent-worker
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      default:
-      hospital_edge:
-    command:
-      - uv
-      - run
-      - --no-sync
-      - python
-      - manage.py
-      - process_ingestion_runs_persistent_session
-      - --real-handle
-      - --loop
-      - --sleep-seconds
-      - "5"
-    restart: unless-stopped
-    shm_size: "${PERSISTENT_WORKER_SHM_SIZE:-512m}"
-    tmpfs:
-      - "/tmp:size=${PERSISTENT_WORKER_TMPFS_TMP_SIZE:-1g},mode=1777"
-      - "/var/tmp:size=${PERSISTENT_WORKER_TMPFS_VAR_TMP_SIZE:-128m},mode=1777"
-      - "/home/10001/.cache:size=${PERSISTENT_WORKER_TMPFS_CACHE_SIZE:-256m},uid=10001,gid=10001,mode=700"
-      - "/home/10001/.config:size=${PERSISTENT_WORKER_TMPFS_CONFIG_SIZE:-64m},uid=10001,gid=10001,mode=700"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+```text
+process_ingestion_runs_persistent_session --loop --sleep-seconds 5
+--real-handle --enable-real-queue
 ```
 
-> This example uses **distinct** `PERSISTENT_WORKER_*` sizing variables to
-> avoid collisions with the existing `WORKER_*` variables used by the legacy
-> worker. All tmpfs mounts are exclusive per container replica.
+It uses `SIRHOSP_WORKER_LABEL=persistent-worker`, isolated tmpfs mounts,
+bounded Docker log rotation, and a unique Chromium profile owned by the worker
+process. Default lifecycle parameters are:
+
+| Parameter | Initial value |
+| --- | ---: |
+| Maximum jobs per browser | 50 |
+| Maximum browser lifetime | 3,600 seconds |
+| Consecutive session failures | 3 |
+| Renewal threshold | 600 seconds |
+| Shared memory | 512 MiB |
+| `/tmp` limit | 1 GiB |
+| Cache limit | 256 MiB |
+
+Do not scale beyond one replica until aggregate evidence shows healthy queue
+progress, current heartbeats, bounded retries, no authentication/restart loop,
+and resource headroom. Scaling remains explicit:
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml \
+  --profile persistent-worker up -d \
+  --scale persistent_worker=2 persistent_worker
+```
+
+Every replica owns a separate container tmpfs and Chromium profile. Never share
+a mutable `user-data-dir` across replicas.
 
 ### 2.3 Profile isolation rules
 
@@ -577,14 +482,13 @@ docker stats --no-stream --format \
 # Legacy worker logs (last 100 lines)
 docker compose -f compose.yml -f compose.prod.yml logs --tail 100 worker
 
-# Persistent worker logs (when deployed)
-# docker compose -f compose.yml \
-#   -f compose.persistent-worker.yml \
-#   logs --tail 100 persistent_worker
+# Persistent worker logs
+docker compose -f compose.yml -f compose.prod.yml \
+  --profile persistent-worker logs --tail 100 persistent_worker
 
-# Follow logs in real time
-docker compose -f compose.yml -f compose.prod.yml logs -f worker
-```
+# Follow persistent logs in real time
+docker compose -f compose.yml -f compose.prod.yml \
+  --profile persistent-worker logs -f persistent_worker
 
 ### 4.4 Log growth monitoring
 
@@ -599,33 +503,33 @@ docker compose -f compose.yml -f compose.prod.yml exec worker \
 
 ---
 
-## 5. Rollback
+## 5. Emergency stop
 
-### 5.1 Stop persistent workers
-
-If persistent workers were deployed under a dedicated Compose override:
+Stopping the persistent consumer is an operational safety action, not a
+required rollback rehearsal or cutover gate.
 
 ```bash
 cd /opt/sirhosp
 
-# Stop and remove persistent worker containers
-docker compose -f compose.yml -f compose.persistent-worker.yml down
+# Stop only the persistent consumer; keep web and database running.
+docker compose -f compose.yml -f compose.prod.yml \
+  --profile persistent-worker stop persistent_worker
 
-# Verify only legacy workers remain
-docker compose -f compose.yml -f compose.prod.yml ps
+# Confirm no persistent replica remains active.
+docker compose -f compose.yml -f compose.prod.yml \
+  --profile persistent-worker ps
 ```
 
-If integrated into `compose.prod.yml` as a disabled service, simply ensure
-`--scale persistent_worker=0`.
+### 5.2 Optional legacy fallback
 
-### 5.2 Scale legacy workers back
+The operator accepted forward cutover without requiring this path. The legacy
+service definition remains available for an explicit operational decision:
 
 ```bash
-# Restore legacy worker count to pre-experiment level
-docker compose -f compose.yml -f compose.prod.yml up -d --scale worker=6
+docker compose -f compose.yml -f compose.prod.yml up -d --scale worker=1 worker
 ```
 
-### 5.3 Verify rollback
+### 5.3 Verify fallback
 
 ```bash
 # Confirm only legacy labels appear in recent runs
@@ -637,7 +541,7 @@ from datetime import timedelta
 cutoff = timezone.now() - timedelta(hours=1)
 runs = IngestionRun.objects.filter(
     worker_label__isnull=False,
-    created_at__gte=cutoff,
+    processing_started_at__gte=cutoff,
 ).values_list('worker_label', flat=True).distinct()
 for label in runs:
     print(label)
