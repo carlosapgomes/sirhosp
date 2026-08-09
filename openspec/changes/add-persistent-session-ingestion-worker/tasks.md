@@ -751,9 +751,11 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   returned false before the asynchronous PrimeFaces update completed. The
   concrete click now awaits the scoped control's hidden state with a bounded
   browser-native timeout and preserves sanitized typed timeout propagation.
-  Unit and quality gates pass. Integration was independently blocked twice
-  solely by OpenRouter shared-pool HTTP 429 responses in summary tests; the
-  production renewal retest remains pending.
+  Unit and quality gates pass. Integration was independently blocked on three
+  attempts solely by OpenRouter shared-pool HTTP 429 responses in summary
+  tests. The committed production retest observed the popup at minute 30;
+  handler readiness, popup clearance, and countdown advancement were all true.
+  Teardown and exit were clean, and no continuous worker was left running.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,
