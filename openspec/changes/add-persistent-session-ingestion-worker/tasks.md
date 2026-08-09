@@ -729,6 +729,14 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   Bootstrap now waits on a bounded browser predicate for three numeric values
   before returning, without arbitrary sleeps or weakened controller checks.
   Regression coverage passes; production bounded retest remains pending.
+- [x] 24.0h PSW-S24-PROD-C9 evolution-modal and framed-PDF correction:
+  sanitized production probes proved date-input actionability timeouts, a
+  Visualizar click that emitted no request, and a direct PDF object inside
+  `frame_pol`. Date focus now uses the proven DOM interaction, report generation
+  invokes the exact declared PrimeFaces action, and direct PDF resolution uses
+  the report frame and its base URL. Regression coverage passes; production
+  `full_sync` and bounded retests remain pending rebuild from the committed
+  revision.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,

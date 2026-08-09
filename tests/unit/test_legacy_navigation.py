@@ -1447,6 +1447,16 @@ class TestEvolutionNavigationHelpers:
             for c in frame._locator_calls
         )
 
+        # Production regression: these PrimeFaces mask-backed inputs remain
+        # visible while Playwright's actionability click times out. Focus via
+        # a direct DOM click, then fill normally.
+        assert frame.click_timeouts == []
+        assert len(frame.evaluate_calls) == 2
+        assert all(
+            "querySelector" in expression
+            for expression in frame.evaluate_calls
+        )
+
     def test_select_ascending_order_when_present(self) -> None:
         """select_ascending_order selects Crescente when the selector is present."""
         from apps.ingestion.extractors.legacy_navigation import (
@@ -1529,6 +1539,15 @@ class TestEvolutionNavigationHelpers:
         assert any(
             "bt_UltimosQuinzedias" in c
             for c in frame._locator_calls
+        )
+
+        # Production regression: the rendered button is visible but its
+        # PrimeFaces.bcn click path emits no request. Invoke the exact
+        # declarative Ajax action instead of a Playwright coordinate click.
+        assert frame.click_timeouts == []
+        assert any(
+            "PrimeFaces.ab" in expression
+            for expression in frame.evaluate_calls
         )
 
     def test_click_evolucao_wait_timeout_becomes_navigation_timeout(self) -> None:
@@ -2836,6 +2855,11 @@ class _EvolutionUiFrame:
     def get_by_role(self, role, *, name=None):  # noqa: ARG002
         key = f"role:{role}:{name}" if name else f"role:{role}"
         return _EvolutionUiLocator(self._state, "frame", key)
+
+    def evaluate(self, expression, arg=None):  # noqa: ANN001, ARG002
+        if "PrimeFaces.ab" in expression:
+            self._state.click("frame", _C1_VISUALIZAR_BUTTON)
+        return None
 
 
 class _EvolutionUiPage:

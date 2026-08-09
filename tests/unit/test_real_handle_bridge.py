@@ -1263,6 +1263,11 @@ class TestBridgeExtractEvolutionsViaLegacyActions:
         pdf_object_locator.first.get_attribute.return_value = (
             "https://example.com/report.pdf"
         )
+        frame.locator.side_effect = (
+            lambda selector, *a, **k: pdf_object_locator
+            if selector == _PDF_OBJECT_SELECTOR
+            else frame_locator
+        )
         page.locator.side_effect = (
             lambda selector, *a, **k: pdf_object_locator
             if selector == _PDF_OBJECT_SELECTOR
@@ -2780,6 +2785,43 @@ class TestBridgePdfBoundedUrlResolution:
     bounded locator operations governed by the caller deadline, and a real
     Playwright timeout from the bounded attribute read surfaces as
     EvolutionPdfTimeoutError."""
+
+    def test_resolve_pdf_url_reads_object_inside_report_frame(self) -> None:
+        """Production topology: the PDF object lives inside ``frame_pol``."""
+        from unittest.mock import MagicMock
+
+        from apps.ingestion.extractors.persistent_evolution_pdf import (
+            _deadline_s as _pdf_deadline_s,
+        )
+        from apps.ingestion.extractors.real_handle_bridge import RealHandleBridge
+
+        object_locator = MagicMock()
+        object_locator.count.return_value = 1
+        object_locator.first.get_attribute.return_value = (
+            "/legacy/dynamiccontent.properties.xhtml?token=synthetic"
+        )
+        report_frame = MagicMock()
+        report_frame.url = "https://legacy.example/reports/report.xhtml"
+        report_frame.locator.return_value = object_locator
+        page = MagicMock()
+        page.frame.return_value = report_frame
+        page.locator.side_effect = AssertionError(
+            "top-level page must not be queried for the framed PDF object"
+        )
+
+        bridge = RealHandleBridge.__new__(RealHandleBridge)
+        result = bridge._resolve_pdf_url_from_report_page(
+            page, _pdf_deadline_s(120)
+        )
+
+        assert result == (
+            "https://legacy.example/legacy/"
+            "dynamiccontent.properties.xhtml?token=synthetic"
+        )
+        page.frame.assert_called_once_with(name="frame_pol")
+        report_frame.locator.assert_called_once_with(
+            'object[type="application/pdf"]'
+        )
 
     def test_resolve_pdf_url_locator_timeout_raises_typed(self) -> None:
         """_resolve_pdf_url_from_report_page: object present but a bounded

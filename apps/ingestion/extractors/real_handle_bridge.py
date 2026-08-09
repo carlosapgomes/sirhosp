@@ -1157,11 +1157,11 @@ class RealHandleBridge:
     def _resolve_pdf_url_from_report_page(
         self, page: Any, deadline_s: float | None = None
     ) -> str | None:
-        """Resolve a PDF URL from the report page via bounded locator ops.
+        """Resolve a PDF URL from the report iframe via bounded locator ops.
 
-        PSW-S17 post-cbf50c1 (D17/R1): this MUST NOT call the unbounded
-        ``page.content()``. It delegates to the single shared resolver
-        (:func:`resolve_pdf_url_from_page`) which reads the PDF object
+        The legacy report and its PDF ``object`` live inside ``frame_pol``.
+        Resolve that frame first and delegate to the single shared resolver
+        (:func:`resolve_pdf_url_from_page`), which reads the PDF object
         ``data`` attribute with a bounded Playwright timeout and falls back
         to viewer frame URLs. A bounded timeout raises
         :class:`EvolutionPdfTimeoutError`.
@@ -1180,9 +1180,16 @@ class RealHandleBridge:
         """
         if deadline_s is None:
             deadline_s = _pdf_deadline_s(120)
-        base_url = self._safe_page_url(page)
+        report_owner = self._resolve_report_frame(page)
+        if report_owner is None:
+            # Preserve the standalone/top-level flow used by older source
+            # pages and deterministic fakes.
+            report_owner = page
+            base_url = self._safe_page_url(page)
+        else:
+            base_url = self._safe_frame_url(report_owner)
         return resolve_pdf_url_from_page(
-            page, deadline_s=deadline_s, base_url=base_url
+            report_owner, deadline_s=deadline_s, base_url=base_url
         )
 
     def _download_pdf(

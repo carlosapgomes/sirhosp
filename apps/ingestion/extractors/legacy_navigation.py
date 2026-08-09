@@ -919,7 +919,7 @@ def fill_evolution_dates(
 
     PSW-S17 R2 (second corrective closure): optional date inputs are probed
     for presence (``count()``); when an input is present, a Playwright
-    timeout from its ``wait_for``/``click``/``fill`` raises a typed
+    timeout from its ``wait_for``/DOM-focus/``fill`` path raises a typed
     :class:`NavigationTimeoutError` instead of being swallowed.
 
     PSW-S20 R4: returns ``True`` ONLY when BOTH the start and end date
@@ -954,8 +954,19 @@ def fill_evolution_dates(
     start_input = frame.locator(SEL_DATE_START)
     if _locator_count(start_input) > 0:
         try:
-            start_input.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 10000))
-            start_input.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+            start_input.first.wait_for(
+                state="visible", timeout=_bound_ms(deadline_s, 10000)
+            )
+            _remaining_ms(deadline_s)
+            frame.evaluate(
+                """(selector) => {
+                    const element = document.querySelector(selector);
+                    if (!element) throw new Error("date input unavailable");
+                    element.click();
+                }""",
+                SEL_DATE_START,
+            )
+            _remaining_ms(deadline_s)
             start_input.first.fill(
                 start_date_br,
                 **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS),
@@ -974,8 +985,19 @@ def fill_evolution_dates(
     end_input = frame.locator(SEL_DATE_END)
     if _locator_count(end_input) > 0:
         try:
-            end_input.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 10000))
-            end_input.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+            end_input.first.wait_for(
+                state="visible", timeout=_bound_ms(deadline_s, 10000)
+            )
+            _remaining_ms(deadline_s)
+            frame.evaluate(
+                """(selector) => {
+                    const element = document.querySelector(selector);
+                    if (!element) throw new Error("date input unavailable");
+                    element.click();
+                }""",
+                SEL_DATE_END,
+            )
+            _remaining_ms(deadline_s)
             end_input.first.fill(
                 end_date_br,
                 **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS),
@@ -1082,9 +1104,12 @@ def select_ascending_order(page: Any, *, timeout_ms: int | None = None) -> None:
 
 
 def click_visualizar_report(page: Any, *, timeout_ms: int | None = None) -> None:
-    """Click the 'UltimosQuinzedias' (visualize) button.
+    """Generate the evolution report through its declared PrimeFaces action.
 
-    Modeled after ``path2.click_visualizar_relatorio()``.
+    The production modal renders a visible button whose Playwright
+    actionability click can time out or emit no request. Calling the exact
+    ``PrimeFaces.ab`` action declared by that button avoids coordinate-click
+    ambiguity while preserving the same JSF source, form, and update target.
 
     Args:
         page: A Playwright ``Page`` object.
@@ -1103,12 +1128,23 @@ def click_visualizar_report(page: Any, *, timeout_ms: int | None = None) -> None
 
     button = frame.locator(SEL_VISUALIZAR_BUTTON)
     try:
-        button.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
-        button.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+        button.first.wait_for(
+            state="visible", timeout=_bound_ms(deadline_s, 15000)
+        )
+        _remaining_ms(deadline_s)
+        frame.evaluate(
+            """() => PrimeFaces.ab({
+                s: "bt_UltimosQuinzedias:button",
+                f: "formModalEvolucao",
+                u: "@(#formModalEvolucao)",
+                ps: false
+            })"""
+        )
+        _remaining_ms(deadline_s)
     except Exception as exc:
         _raise_required_action_error(
             exc,
-            fallback_message="Could not find or click the visualize button.",
+            fallback_message="Could not generate the evolution report.",
         )
 
     page.wait_for_timeout(_bound_ms(deadline_s, 1500))
