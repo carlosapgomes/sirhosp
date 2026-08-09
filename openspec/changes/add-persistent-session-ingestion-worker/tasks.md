@@ -745,6 +745,15 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   failure, and rejects readiness while the popup remains visible. Regression
   coverage passes; the 30-minute production retest remains pending deployment
   of the committed correction.
+- [x] 24.0j PSW-S24-PROD-C10-R1 renewal completion wait:
+  the first committed production retest proved the scoped DOM action worked
+  (`popup_cleared=True`, `counter_advanced=True`) but immediate verification
+  returned false before the asynchronous PrimeFaces update completed. The
+  concrete click now awaits the scoped control's hidden state with a bounded
+  browser-native timeout and preserves sanitized typed timeout propagation.
+  Unit and quality gates pass. Integration was independently blocked twice
+  solely by OpenRouter shared-pool HTTP 429 responses in summary tests; the
+  production renewal retest remains pending.
 
 - [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,

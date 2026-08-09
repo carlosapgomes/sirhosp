@@ -594,6 +594,10 @@ class TestTabOperations:
 
         mock_page.locator.assert_called_with(".my-button")
         locator_mock.click.assert_called_once()
+        locator_mock.wait_for.assert_called_once_with(
+            state="hidden",
+            timeout=10_000,
+        )
 
     def test_click_selector_uses_dom_fallback_after_actionability_failure(
         self,
@@ -622,6 +626,10 @@ class TestTabOperations:
 
         locator_mock.evaluate.assert_called_once_with(
             "(element) => element.click()"
+        )
+        locator_mock.wait_for.assert_called_once_with(
+            state="hidden",
+            timeout=10_000,
         )
 
     def test_get_tab_classes_with_multiple_pages(
@@ -1233,6 +1241,40 @@ class TestSourceBoundaryTypedTimeouts:
                 handle.click_selector(".my-button")
 
         locator_mock.evaluate.assert_not_called()
+        locator_mock.wait_for.assert_not_called()
+
+    def test_click_selector_completion_timeout_is_typed(
+        self,
+        mock_browser_profile: MagicMock,
+        mock_page: MagicMock,
+        sync_playwright_mock: MagicMock,
+    ) -> None:
+        """The bounded hidden-state wait preserves typed timeout semantics."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.errors import ExtractionTimeoutError
+        from apps.ingestion.extractors.playwright_session_handle import (
+            PlaywrightSessionHandle,
+        )
+
+        locator_mock = MagicMock()
+        locator_mock.wait_for.side_effect = PlaywrightTimeoutError(
+            f"Timeout at {SENSITIVE_URL_SENTINEL}"
+        )
+        mock_page.locator.return_value = locator_mock
+
+        with patch(
+            "playwright.sync_api.sync_playwright",
+            return_value=sync_playwright_mock,
+        ):
+            handle = PlaywrightSessionHandle(profile=mock_browser_profile)
+            handle.start()
+            with pytest.raises(ExtractionTimeoutError) as exc_info:
+                handle.click_selector(".my-button")
+
+        locator_mock.click.assert_called_once()
+        assert SENSITIVE_URL_SENTINEL not in str(exc_info.value)
 
     def test_get_tab_classes_timeout_raises_extraction_timeout(
         self,

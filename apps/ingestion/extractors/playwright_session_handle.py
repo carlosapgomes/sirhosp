@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 # Default timeout in seconds for navigation if none is provided
 _DEFAULT_NAVIGATION_TIMEOUT_SECONDS = 120
 
+# PrimeFaces renewal is asynchronous. The click contract returns only after
+# the scoped action is hidden, bounded by this browser-native wait.
+_CLICK_COMPLETION_TIMEOUT_MS = 10_000
+
 # PSW-S18 R4: bounded budget (seconds) to click the DOM close control and
 # verify the tab count decreased / root-only state was restored. Cleanup is
 # post-run housekeeping, so this stays short and bounded.
@@ -174,11 +178,12 @@ class PlaywrightSessionHandle:
             return False
 
     def click_selector(self, selector: str) -> None:
-        """Click the element matching the given CSS selector.
+        """Click the matching element and await its bounded hidden state.
 
-        PSW-S17 final closure (D3): a real Playwright timeout propagates
-        as a typed :class:`ExtractionTimeoutError`. Non-timeout failures
-        log a constant sanitized message (no selector or raw exception).
+        A real Playwright timeout from either the click or completion wait
+        propagates as a typed :class:`ExtractionTimeoutError`. Non-timeout
+        actionability failures receive one DOM-click fallback. All failures
+        use constant sanitized messages without selector or raw exception.
         """
         page = self._current_page()
         if page is None:
@@ -189,15 +194,28 @@ class PlaywrightSessionHandle:
         locator = page.locator(selector)
         try:
             locator.click()
-            return
         except Exception as exc:
             if is_playwright_timeout_error(exc):
                 raise ExtractionTimeoutError(
                     "Persistent session selector click timed out."
                 ) from None
+            try:
+                locator.evaluate("(element) => element.click()")
+            except Exception as fallback_exc:
+                if is_playwright_timeout_error(fallback_exc):
+                    raise ExtractionTimeoutError(
+                        "Persistent session selector click timed out."
+                    ) from None
+                logger.warning(
+                    "Persistent session click_selector failed (sanitized)"
+                )
+                return
 
         try:
-            locator.evaluate("(element) => element.click()")
+            locator.wait_for(
+                state="hidden",
+                timeout=_CLICK_COMPLETION_TIMEOUT_MS,
+            )
         except Exception as exc:
             if is_playwright_timeout_error(exc):
                 raise ExtractionTimeoutError(
