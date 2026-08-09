@@ -756,12 +756,22 @@ PSW-S17..PSW-S22 observable contracts are preserved and not re-audited.
   tests. The committed production retest observed the popup at minute 30;
   handler readiness, popup clearance, and countdown advancement were all true.
   Teardown and exit were clean, and no continuous worker was left running.
+- [x] 24.0k PSW-S24-PROD-C11 authorized stale disposal:
+  with all ingestion workers stopped, dry-run found exactly 12 abandoned
+  `running` rows from one batch. Apply used an exact 12-row circuit breaker
+  and terminally marked all 12 failed without requeue (`skipped=0`,
+  `closed_batches=1`). Post-flight found zero stale candidates and zero
+  `running` rows; queued and succeeded counts remained unchanged. No production
+  code change was needed because the existing transactional command already
+  satisfied the authorized contract.
 
-- [ ] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
+- [x] 24.1 Define sanitized operator-run evidence using the PSW-S24-PRE bounded
   allow-list for real admissions, demographics, chunked evolutions, renewal,
-  cleanup, and restart/rebootstrap.
-- [ ] 24.2 Run guarded validation within the approved concurrency limit, or mark
-  the slice blocked without changing rollout status when access is unavailable.
+  cleanup, and restart/rebootstrap. The production evidence matrix uses only
+  ordinal rows, aggregate counters, lifecycle outcomes, and sanitized paths.
+- [x] 24.2 Run guarded validation within the approved concurrency limit. One
+  process completed the four-intent allow-list, restart/rebootstrap boundary,
+  and the independent 30-minute renewal proof without enabling continuous mode.
 - [ ] 24.3 Reconcile proposal, design, specs, tasks, rollout docs, defaults, and
   remaining risks with observed results.
 - [ ] 24.4 Approve replacement readiness only if automated parity, live
