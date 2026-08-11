@@ -58,4 +58,4 @@
   focused Markdown lint.
 - [x] 4.7 Create `/tmp/sirhosp-slice-RHID-S1-C2-report.md` with complete
   credential-free evidence.
-- [ ] 4.8 Commit and push the correction branch for independent verification.
+- [x] 4.8 Commit and push the correction branch for independent verification.
