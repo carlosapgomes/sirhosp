@@ -50,3 +50,27 @@ is ambiguous, or produces an unknown outcome.
 - **WHEN** the one-shot command receives an outcome outside its known taxonomy
 - **THEN** it reports the unexpected outcome
 - **AND** it returns a nonzero process status
+
+## ADDED Requirements
+
+### Requirement: Census extractors share the proven authentication bootstrap
+
+The official and current census Playwright extractors SHALL use the same
+canonical source-system authentication bootstrap used by the persistent worker.
+
+#### Scenario: Census extractor starts an authenticated session
+
+- **WHEN** either census extractor starts a source-system session
+- **THEN** it fills the configured username and password
+- **AND** it submits the login by pressing Enter in the password field
+- **AND** it waits for `#tempoSessao` to contain at least three numeric parts
+  before continuing to census navigation
+- **AND** it does not infer authentication failure from the completion status
+  of the login button click
+
+#### Scenario: Hospital host has a direct route to the source system
+
+- **WHEN** the hospital host can reach the configured source-system URL directly
+- **THEN** census authentication does not require a proxy
+- **AND** optional existing proxy behavior remains available when explicitly
+  configured

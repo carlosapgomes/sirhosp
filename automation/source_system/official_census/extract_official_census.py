@@ -25,10 +25,17 @@ from playwright.sync_api import (
 
 _CURRENT_DIR = Path(__file__).resolve().parent
 _SOURCE_SYSTEM_DIR = _CURRENT_DIR.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_SOURCE_SYSTEM_DIR))
 
 from proxy_config import get_playwright_proxy  # noqa: E402
-from source_system import aguardar_pagina_estavel, fechar_dialogos_iniciais  # noqa: E402
+from source_system import fechar_dialogos_iniciais  # noqa: E402
+
+from apps.ingestion.extractors.legacy_session_bootstrap import (  # noqa: E402
+    LegacyLoginCredentials,
+    bootstrap_legacy_session,
+)
 
 DEFAULT_TIMEOUT_MS = 180000
 UI_TIMEOUT_MS = 60000
@@ -43,7 +50,6 @@ CENSUS_ICON_SELECTOR = '[id="_icon_img_405577"]'
 # Prefix of the internal TXT file we care about
 CENSUS_TXT_PREFIX = "arquivoCensoPacientesInternacao"
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DOWNLOADS_DIR = _PROJECT_ROOT / "downloads"
 DEBUG_DIR = _PROJECT_ROOT / "debug"
 
@@ -320,16 +326,17 @@ def run(
             )
             context = browser.new_context(ignore_https_errors=True)
             page = context.new_page()
-            page.set_default_timeout(DEFAULT_TIMEOUT_MS)
-
             print(f"[i] Acessando {source_url}...")
-            page.goto(source_url)
-
             print("[i] Login...")
-            page.get_by_role("textbox", name="Nome de usuário").fill(username)
-            page.get_by_role("textbox", name="Senha").fill(password)
-            page.get_by_role("button", name="Entrar").click()
-            aguardar_pagina_estavel(page)
+            bootstrap_legacy_session(
+                page,
+                credentials=LegacyLoginCredentials(
+                    url=source_url,
+                    username=username,
+                    password=password,
+                ),
+                login_timeout=DEFAULT_TIMEOUT_MS // 1000,
+            )
 
             print("[i] Fechando diálogos iniciais...")
             fechar_dialogos_iniciais(page)

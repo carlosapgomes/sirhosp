@@ -86,3 +86,17 @@
   `/tmp/sirhosp-slice-RHID-S1-C5-report.md`.
 - [x] 6.6 Commit and push the correction before publishing a new immutable
   prerelease.
+
+## 7. Corrective Slice RHID-S1-C6 - Reuse canonical census login
+
+- [x] 7.1 Read `slice-prompts/SLICE-RHID-S1-C6.md` and reconcile the direct
+  `eon` probes with the duplicated census login paths.
+- [x] 7.2 Add failing behavioral regressions for password-Enter submission and
+  authenticated `#tempoSessao` readiness in both census scripts.
+- [x] 7.3 Make the proven bootstrap standalone-safe and reuse it in the official
+  and current census extractors without changing later extraction behavior.
+- [x] 7.4 Add the production-proven census authentication delta requirement.
+- [x] 7.5 Run focused and official gates and create
+  `/tmp/sirhosp-slice-RHID-S1-C6-report.md`.
+- [x] 7.6 Commit and push the correction before publishing a new immutable
+  prerelease.

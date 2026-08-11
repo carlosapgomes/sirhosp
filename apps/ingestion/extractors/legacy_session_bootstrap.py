@@ -25,13 +25,12 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 
 from django.conf import settings as django_settings
 
 from apps.ingestion.extractors.session_policy import SEL_SESSION_COUNTER
-from apps.ingestion.historical_extraction import SourceCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +61,28 @@ _AUTH_READINESS_EXPRESSION = """
 
 _DEFAULT_LOGIN_TIMEOUT_SECONDS = 180
 """Production-proven timeout for every legacy login page action."""
+
+
+class _CredentialValues(Protocol):
+    """Structural credential contract shared with standalone automations."""
+
+    @property
+    def url(self) -> str: ...
+
+    @property
+    def username(self) -> str: ...
+
+    @property
+    def password(self) -> str: ...
+
+
+@dataclass(frozen=True)
+class LegacyLoginCredentials:
+    """Standalone-safe credentials accepted by the canonical login helper."""
+
+    url: str
+    username: str
+    password: str = field(repr=False)
 
 
 class LegacyBootstrapError(Exception):
@@ -126,7 +147,7 @@ def resolve_legacy_url_templates() -> LegacyUrlTemplates:
 def bootstrap_legacy_session(
     page: Any,
     *,
-    credentials: SourceCredentials,
+    credentials: _CredentialValues,
     login_timeout: int = _DEFAULT_LOGIN_TIMEOUT_SECONDS,
 ) -> None:
     """Navigate to the source URL, log in, and wait for authenticated readiness.

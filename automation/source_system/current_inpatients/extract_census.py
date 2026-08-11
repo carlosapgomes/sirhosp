@@ -21,7 +21,6 @@ import argparse
 import csv
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -30,19 +29,25 @@ from typing import Any
 from openpyxl import load_workbook
 from playwright.sync_api import Frame, Page, sync_playwright
 
-# Add parent automation/source_system so we can import shared helpers
+# Add project and automation roots for shared helpers in standalone subprocesses.
 _CURRENT_DIR = Path(__file__).resolve().parent
 _SOURCE_SYSTEM_DIR = _CURRENT_DIR.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+sys.path.insert(0, str(_PROJECT_ROOT))
 sys.path.insert(0, str(_SOURCE_SYSTEM_DIR))
 
 from proxy_config import get_playwright_proxy  # noqa: E402
-from source_system import aguardar_pagina_estavel, fechar_dialogos_iniciais  # noqa: E402
+from source_system import fechar_dialogos_iniciais  # noqa: E402
+
+from apps.ingestion.extractors.legacy_session_bootstrap import (  # noqa: E402
+    LegacyLoginCredentials,
+    bootstrap_legacy_session,
+)
 
 DEFAULT_TIMEOUT_MS = 180000
 
 CENSO_FRAME_NAME = "i_frame_censo_diário_dos_pacientes"
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 DOWNLOADS_DIR = _PROJECT_ROOT / "downloads"
 DEBUG_DIR = _PROJECT_ROOT / "debug"
 
@@ -686,16 +691,17 @@ def run(
             browser = pw.chromium.launch(**_launch_kwargs)
             context = browser.new_context(ignore_https_errors=True)
             page = context.new_page()
-            page.set_default_timeout(DEFAULT_TIMEOUT_MS)
-
             print(f"[i] Acessando {source_system_url}...")
-            page.goto(source_system_url)
-
             print("[i] Login...")
-            page.get_by_role("textbox", name="Nome de usuário").fill(username)
-            page.get_by_role("textbox", name="Senha").fill(password)
-            page.get_by_role("button", name="Entrar").click()
-            aguardar_pagina_estavel(page)
+            bootstrap_legacy_session(
+                page,
+                credentials=LegacyLoginCredentials(
+                    url=source_system_url,
+                    username=username,
+                    password=password,
+                ),
+                login_timeout=DEFAULT_TIMEOUT_MS // 1000,
+            )
 
             print("[i] Fechando diálogos iniciais...")
             fechar_dialogos_iniciais(page)
