@@ -74,3 +74,32 @@ canonical source-system authentication bootstrap used by the persistent worker.
 - **THEN** census authentication does not require a proxy
 - **AND** optional existing proxy behavior remains available when explicitly
   configured
+
+### Requirement: Current census consumes only fresh search results
+
+The current-census extractor SHALL distinguish each newly rendered JSF search
+result from the prior sector's result before classifying or exporting it.
+
+#### Scenario: Previous sector displayed an explicit empty result
+
+- **WHEN** the operator selects another sector and triggers `Pesquisar`
+- **AND** the prior explicit empty row remains visible while the AJAX response
+  is pending
+- **THEN** the extractor ignores that stale row
+- **AND** it waits for a structurally fresh, settled result table
+- **AND** it exports the XLSX when the refreshed table contains patient rows
+
+#### Scenario: Search result does not refresh
+
+- **WHEN** the result table does not become fresh and stable before the timeout
+- **THEN** the sector attempt fails
+- **AND** the extractor does not classify the stale table as the new result
+- **AND** the existing retry and completeness policies remain in force
+
+#### Scenario: Result freshness is observed safely
+
+- **WHEN** the extractor observes the result-table transition
+- **THEN** it uses only structural counts, loading state and a non-reversible
+  in-browser signature
+- **AND** it does not return, log or persist table text, HTML, patient values,
+  credentials or cookies as freshness evidence

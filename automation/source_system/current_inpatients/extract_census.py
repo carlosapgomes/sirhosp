@@ -168,6 +168,194 @@ def wait_ajax_idle(frame: Frame, page: Page, timeout_ms: int = 30000) -> bool:
     return False
 
 
+def census_result_state(
+    frame: Frame,
+    *,
+    arm: bool = False,
+) -> dict[str, Any]:
+    """Return a sanitized structural state for the current-census result."""
+    return frame.evaluate(
+        """
+        ({ arm }) => {
+            const resultSelector =
+                '[id$="resultList"], [id$="resultList_data"]';
+            const isVisible = (element) => {
+                if (!element) return false;
+                const style = window.getComputedStyle(element);
+                const rect = element.getBoundingClientRect();
+                const ariaHidden = (
+                    element.getAttribute('aria-hidden') || ''
+                ).toLowerCase() === 'true';
+                return (
+                    !ariaHidden
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden'
+                    && rect.width > 0
+                    && rect.height > 0
+                );
+            };
+            const isRelevant = (node) => {
+                const element = (
+                    node instanceof Element
+                        ? node
+                        : node.parentElement
+                );
+                return Boolean(
+                    element
+                    && (
+                        element.matches(resultSelector)
+                        || element.closest(resultSelector)
+                        || element.querySelector(resultSelector)
+                        || element.matches('#form_loading')
+                        || element.closest('#form_loading')
+                    )
+                );
+            };
+
+            if (arm) {
+                window.__sirhospCensusResultWatch?.observer?.disconnect();
+                const watch = { revision: 0, observer: null };
+                watch.observer = new MutationObserver((mutations) => {
+                    if (
+                        mutations.some((mutation) => (
+                            isRelevant(mutation.target)
+                            || Array.from(mutation.addedNodes).some(isRelevant)
+                            || Array.from(mutation.removedNodes).some(isRelevant)
+                        ))
+                    ) {
+                        watch.revision += 1;
+                    }
+                });
+                watch.observer.observe(document.documentElement, {
+                    subtree: true,
+                    childList: true,
+                    characterData: true,
+                    attributes: true,
+                    attributeFilter: ['class', 'style', 'aria-hidden'],
+                });
+                window.__sirhospCensusResultWatch = watch;
+            }
+
+            const tbody = document.querySelector(
+                '[id$="resultList_data"]'
+            );
+            const rows = tbody ? Array.from(tbody.querySelectorAll('tr')) : [];
+            const firstRowCellCount = rows[0]
+                ? rows[0].querySelectorAll('td').length
+                : 0;
+            const normalizedText = (
+                tbody?.textContent || ''
+            ).replace(/\\s+/g, ' ').trim();
+            let contentHash = 2166136261;
+            for (let index = 0; index < normalizedText.length; index += 1) {
+                contentHash ^= normalizedText.charCodeAt(index);
+                contentHash = Math.imul(contentHash, 16777619);
+            }
+            const emptyMessage = normalizedText.includes('Nenhum registro');
+            const hasPatientRows = (
+                rows.length > 0
+                && firstRowCellCount > 1
+                && !emptyMessage
+            );
+            const loading = document.querySelector('#form_loading');
+            let queueEmpty = true;
+            try {
+                const queue = window.PrimeFaces?.ajax?.Queue;
+                if (typeof queue?.isEmpty === 'function') {
+                    queueEmpty = queue.isEmpty();
+                } else if (Array.isArray(queue?.requests)) {
+                    queueEmpty = queue.requests.length === 0;
+                }
+            } catch (_) {}
+
+            return {
+                tbody_exists: Boolean(tbody),
+                row_count: rows.length,
+                first_row_cell_count: firstRowCellCount,
+                content_hash: contentHash >>> 0,
+                revision: (
+                    window.__sirhospCensusResultWatch?.revision || 0
+                ),
+                queue_empty: queueEmpty,
+                loading_visible: isVisible(loading),
+                empty_message: emptyMessage,
+                has_patient_rows: hasPatientRows,
+            };
+        }
+        """,
+        {"arm": arm},
+    )
+
+
+def _census_result_signature(state: dict[str, Any]) -> tuple[object, ...]:
+    return (
+        state.get("revision"),
+        state.get("tbody_exists"),
+        state.get("row_count"),
+        state.get("first_row_cell_count"),
+        state.get("content_hash"),
+        state.get("empty_message"),
+        state.get("has_patient_rows"),
+    )
+
+
+def wait_for_census_result_refresh(
+    frame: Frame,
+    page: Page,
+    before: dict[str, Any],
+    *,
+    timeout_ms: int = 60_000,
+    stable_ms: int = 750,
+) -> dict[str, Any]:
+    """Wait for a fresh, settled result instead of accepting stale rows."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    before_signature = _census_result_signature(before)
+    fresh_seen = False
+    stable_signature: tuple[object, ...] | None = None
+    stable_since = 0.0
+
+    while time.monotonic() < deadline:
+        state = census_result_state(frame)
+        signature = _census_result_signature(state)
+        if signature != before_signature:
+            fresh_seen = True
+
+        settled = (
+            state.get("queue_empty", True)
+            and not state.get("loading_visible")
+            and state.get("tbody_exists")
+            and (
+                state.get("has_patient_rows")
+                or state.get("empty_message")
+            )
+        )
+        if fresh_seen and settled:
+            now = time.monotonic()
+            if signature != stable_signature:
+                stable_signature = signature
+                stable_since = now
+            elif (now - stable_since) * 1000 >= stable_ms:
+                return state
+            if stable_ms == 0:
+                return state
+        else:
+            stable_signature = None
+
+        page.wait_for_timeout(250)
+
+    raise RuntimeError(
+        "Timeout aguardando resultado atualizado do setor."
+    )
+
+
+def _result_has_patients(state: dict[str, Any]) -> bool:
+    if state.get("has_patient_rows"):
+        return True
+    if state.get("empty_message"):
+        return False
+    raise RuntimeError("Tabela censitária atualizada sem resultado reconhecível.")
+
+
 def click_censo_icon(page: Page) -> None:
     icon = page.locator('[id="_icon_img_20323"]')
     if not safe_click(icon, "ícone do Censo", timeout=15000):
@@ -749,8 +937,16 @@ def run(
                         setor_codigo = ""
                         setor_nome_completo = setor
 
+                        previous_result = census_result_state(frame, arm=True)
                         if not click_pesquisar(frame):
                             raise RuntimeError("falha no clique de pesquisar")
+
+                        refreshed_result = wait_for_census_result_refresh(
+                            frame,
+                            page,
+                            previous_result,
+                            timeout_ms=60000,
+                        )
 
                         # Extrair código e nome completo após pesquisar
                         setor_info = get_current_setor_info(frame)
@@ -759,57 +955,8 @@ def run(
                             setor_info.get("nome") or setor
                         )
 
-                        # Aguarda a tabela carregar completamente
-                        wait_ajax_idle(frame, page, timeout_ms=60000)
-
-                        # Aguarda o tbody ter conteúdo real
-                        try:
-                            frame.wait_for_function(
-                                """
-                                () => {
-                                    const tbody = document.querySelector(
-                                        '[id$="resultList_data"]'
-                                    );
-                                    if (!tbody) return false;
-                                    return (
-                                        (
-                                            tbody.textContent || ''
-                                        ).trim().length > 0
-                                    );
-                                }
-                                """,
-                                timeout=45000,
-                            )
-                        except Exception:
-                            page.wait_for_timeout(3000)
-
-                        # Verifica se o setor tem pacientes
-                        tem_pacientes = frame.evaluate(
-                            """
-                            () => {
-                                const tbody = document.querySelector(
-                                    '[id$="resultList_data"]'
-                                );
-                                if (!tbody) return false;
-                                const txt = (
-                                    tbody.textContent || ''
-                                ).trim();
-                                if (txt.includes('Nenhum registro'))
-                                    return false;
-                                const rows = tbody.querySelectorAll('tr');
-                                if (rows.length === 0) return false;
-                                for (const row of rows) {
-                                    const td = row.querySelector('td');
-                                    if (
-                                        td
-                                        && td.textContent.trim().length > 0
-                                    ) {
-                                        return true;
-                                    }
-                                }
-                                return false;
-                            }
-                            """
+                        tem_pacientes = _result_has_patients(
+                            refreshed_result
                         )
                         if not tem_pacientes:
                             print(f"    setor vazio — pulando")

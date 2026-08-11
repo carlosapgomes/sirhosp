@@ -100,3 +100,17 @@
   `/tmp/sirhosp-slice-RHID-S1-C6-report.md`.
 - [x] 7.6 Commit and push the correction before publishing a new immutable
   prerelease.
+
+## 8. Corrective Slice RHID-S1-C7 - Await fresh current-census results
+
+- [x] 8.1 Read `slice-prompts/SLICE-RHID-S1-C7.md` and reconcile the RC4
+  adaptive-cycle failure with the sanitized live DOM and XLSX probes.
+- [x] 8.2 Add failing regressions for stale empty-table rejection and refreshed
+  result use before export.
+- [x] 8.3 Add sanitized result signatures and await a fresh, stable table after
+  every current-census search.
+- [x] 8.4 Add the current-census result-freshness delta requirement.
+- [x] 8.5 Run focused and official gates and create
+  `/tmp/sirhosp-slice-RHID-S1-C7-report.md`.
+- [x] 8.6 Commit and push the correction before publishing a new immutable
+  prerelease.

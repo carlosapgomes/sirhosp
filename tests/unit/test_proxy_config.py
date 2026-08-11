@@ -68,6 +68,28 @@ def test_extract_census_passes_proxy_to_chromium_launch(tmp_path: Path) -> None:
             patch.object(ec, "select_setor", return_value=True),
             patch.object(ec, "clear_setor"),
             patch.object(ec, "click_pesquisar", return_value=True),
+            patch.object(
+                ec,
+                "census_result_state",
+                return_value=_census_result_state(
+                    row_count=1,
+                    first_row_cell_count=1,
+                    content_hash=101,
+                    view_state_hash=201,
+                    empty_message=True,
+                ),
+            ),
+            patch.object(
+                ec,
+                "wait_for_census_result_refresh",
+                return_value=_census_result_state(
+                    row_count=1,
+                    first_row_cell_count=1,
+                    content_hash=202,
+                    view_state_hash=202,
+                    empty_message=True,
+                ),
+            ),
             patch.object(ec, "get_current_setor_info", return_value={}),
             patch.object(ec, "_click_export_button"),
             patch.object(ec, "_click_xls_tudo"),
@@ -129,6 +151,28 @@ def test_extract_census_does_not_pass_proxy_when_env_absent(tmp_path: Path) -> N
             patch.object(ec, "select_setor", return_value=True),
             patch.object(ec, "clear_setor"),
             patch.object(ec, "click_pesquisar", return_value=True),
+            patch.object(
+                ec,
+                "census_result_state",
+                return_value=_census_result_state(
+                    row_count=1,
+                    first_row_cell_count=1,
+                    content_hash=101,
+                    view_state_hash=201,
+                    empty_message=True,
+                ),
+            ),
+            patch.object(
+                ec,
+                "wait_for_census_result_refresh",
+                return_value=_census_result_state(
+                    row_count=1,
+                    first_row_cell_count=1,
+                    content_hash=202,
+                    view_state_hash=202,
+                    empty_message=True,
+                ),
+            ),
             patch.object(ec, "get_current_setor_info", return_value={}),
             patch.object(ec, "_click_export_button"),
             patch.object(ec, "_click_xls_tudo"),
@@ -288,3 +332,156 @@ def test_legacy_bootstrap_import_does_not_initialize_django_apps() -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def _census_result_state(
+    *,
+    row_count: int,
+    first_row_cell_count: int,
+    content_hash: int,
+    view_state_hash: int,
+    loading_visible: bool = False,
+    empty_message: bool = False,
+    has_patient_rows: bool = False,
+) -> dict[str, object]:
+    return {
+        "tbody_exists": True,
+        "row_count": row_count,
+        "first_row_cell_count": first_row_cell_count,
+        "content_hash": content_hash,
+        "view_state_hash": view_state_hash,
+        "loading_visible": loading_visible,
+        "empty_message": empty_message,
+        "has_patient_rows": has_patient_rows,
+    }
+
+
+def test_current_census_wait_ignores_stale_empty_result() -> None:
+    """A stale empty row cannot decide the next sector's result."""
+    from automation.source_system.current_inpatients import extract_census as ec
+
+    stale_empty = _census_result_state(
+        row_count=1,
+        first_row_cell_count=1,
+        content_hash=101,
+        view_state_hash=201,
+        empty_message=True,
+    )
+    loading = {
+        **stale_empty,
+        "loading_visible": True,
+        "view_state_hash": 202,
+    }
+    refreshed = _census_result_state(
+        row_count=32,
+        first_row_cell_count=18,
+        content_hash=303,
+        view_state_hash=203,
+        has_patient_rows=True,
+    )
+    frame = MagicMock()
+    frame.evaluate.side_effect = [stale_empty, loading, refreshed]
+    page = MagicMock()
+
+    result = ec.wait_for_census_result_refresh(
+        frame,
+        page,
+        stale_empty,
+        timeout_ms=1_000,
+        stable_ms=0,
+    )
+
+    assert result == refreshed
+    assert frame.evaluate.call_count == 3
+    assert page.wait_for_timeout.call_count == 2
+
+
+def test_current_census_run_uses_refreshed_result_before_export(
+    tmp_path: Path,
+) -> None:
+    """The run exports only after the post-search table state is fresh."""
+    from automation.source_system.current_inpatients import extract_census as ec
+
+    stale_empty = _census_result_state(
+        row_count=1,
+        first_row_cell_count=1,
+        content_hash=101,
+        view_state_hash=201,
+        empty_message=True,
+    )
+    refreshed = _census_result_state(
+        row_count=32,
+        first_row_cell_count=18,
+        content_hash=303,
+        view_state_hash=203,
+        has_patient_rows=True,
+    )
+    fake_xlsx = tmp_path / "current-census.xlsx"
+    fake_xlsx.touch()
+    page = MagicMock()
+    context = MagicMock()
+    context.new_page.return_value = page
+    browser = MagicMock()
+    browser.new_context.return_value = context
+    playwright = MagicMock()
+    playwright.chromium.launch.return_value = browser
+    manager = MagicMock()
+    manager.__enter__.return_value = playwright
+    manager.__exit__.return_value = False
+    frame = MagicMock()
+
+    with (
+        patch.object(ec, "sync_playwright", return_value=manager),
+        patch.object(ec, "bootstrap_legacy_session"),
+        patch.object(ec, "fechar_dialogos_iniciais"),
+        patch.object(ec, "click_censo_icon"),
+        patch.object(ec, "get_censo_frame", return_value=frame),
+        patch.object(ec, "wait_ajax_idle"),
+        patch.object(ec, "extract_setores", return_value=["synthetic-sector"]),
+        patch.object(ec, "select_setor", return_value=True),
+        patch.object(ec, "click_pesquisar", return_value=True),
+        patch.object(ec, "census_result_state", return_value=stale_empty),
+        patch.object(
+            ec,
+            "wait_for_census_result_refresh",
+            return_value=refreshed,
+        ) as wait_refresh,
+        patch.object(
+            ec,
+            "get_current_setor_info",
+            return_value={"codigo": "123", "nome": "synthetic-sector"},
+        ),
+        patch.object(ec, "export_setor_xlsx", return_value=fake_xlsx) as export,
+        patch.object(
+            ec,
+            "parse_setor_xlsx",
+            return_value=[
+                {
+                    "qrt_leito": "A-01",
+                    "prontuario": "100001",
+                    "nome": "PATIENT SYNTHETIC",
+                }
+            ],
+        ),
+        patch.object(
+            ec,
+            "save_results",
+            return_value=("/tmp/fake.json", "/tmp/fake.csv"),
+        ),
+    ):
+        ec.run(
+            source_system_url="https://source.invalid/login",
+            username="synthetic-user",
+            password="synthetic-password",
+            headless=True,
+            max_setores=0,
+            pause_ms=0,
+        )
+
+    wait_refresh.assert_called_once_with(
+        frame,
+        page,
+        stale_empty,
+        timeout_ms=60_000,
+    )
+    export.assert_called_once_with(frame, page)
