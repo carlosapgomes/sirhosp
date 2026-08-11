@@ -3,6 +3,208 @@
 Instruções para deploy em produção, ativação do worker contínuo e do
 orquestrador adaptativo de censo.
 
+## Deployment hospitalar por imagem de release
+
+O servidor definitivo dentro do hospital usa somente:
+
+- `compose.hospital.yml`, baixado do release correspondente;
+- um `.env` local com permissões restritas;
+- imagens versionadas de `ghcr.io/carlosapgomes/sirhosp`.
+
+Não é necessário clonar o repositório, executar `git pull`, manter toolchain de
+build ou executar `docker compose build`. O runtime doméstico descrito nas
+demais seções continua separado para desenvolvimento e validação.
+
+### Publicação da imagem
+
+Ao publicar um release ou pré-release no GitHub, o workflow
+`Publish Release Image`:
+
+1. faz checkout da tag exata;
+2. executa `./scripts/test-in-container.sh quality-gate`;
+3. constrói o target `prod` do `Dockerfile`;
+4. publica a imagem no GHCR;
+5. anexa `compose.hospital.yml` ao release.
+
+Um release estável publica a tag exata e atualiza `latest`. Um pré-release
+publica a tag exata e atualiza `prerelease`, sem alterar `latest`. O deployment
+de produção sempre usa a tag exata; não use os canais móveis no `.env`.
+
+### Pré-requisitos do servidor hospitalar
+
+- Linux com Docker Engine e Docker Compose v2;
+- acesso HTTPS de saída ao GitHub e ao GHCR;
+- acesso direto do host ao sistema legado do hospital;
+- DNS ou endereço estável para o portal;
+- firewall permitindo a porta do portal somente para a rede autorizada;
+- espaço protegido para backups do PostgreSQL.
+
+O Compose hospitalar não contém Tailscale nem Cloudflared. Ele não publica a
+porta do PostgreSQL; somente o portal publica uma porta no host.
+
+### Instalação inicial
+
+Crie o diretório operacional:
+
+```bash
+sudo install -d -m 0750 -o "$USER" -g "$USER" /opt/sirhosp
+cd /opt/sirhosp
+```
+
+Escolha a tag exata já publicada, por exemplo uma tag sintética
+`v1.0.0-rc.1`, e baixe o Compose anexado ao mesmo release:
+
+```bash
+export SIRHOSP_VERSION=v1.0.0-rc.1
+curl -fL \
+  -o compose.hospital.yml \
+  "https://github.com/carlosapgomes/sirhosp/releases/download/${SIRHOSP_VERSION}/compose.hospital.yml"
+```
+
+Se o pacote GHCR estiver privado, crie um token GitHub somente com
+`read:packages` e autentique o Docker. Não grave esse token no `.env` da
+aplicação:
+
+```bash
+printf '%s' "$GHCR_TOKEN" | \
+  docker login ghcr.io -u SEU_USUARIO_GITHUB --password-stdin
+unset GHCR_TOKEN
+```
+
+Crie `/opt/sirhosp/.env` com valores reais somente no servidor. Este exemplo
+contém apenas placeholders:
+
+```text
+SIRHOSP_VERSION=v1.0.0-rc.1
+SIRHOSP_BIND_ADDRESS=0.0.0.0
+DJANGO_PORT=8000
+DJANGO_SECRET_KEY=SUBSTITUIR
+DJANGO_ALLOWED_HOSTS=sirhosp.hospital.local
+POSTGRES_DB=sirhosp
+POSTGRES_USER=sirhosp
+POSTGRES_PASSWORD=SUBSTITUIR
+SOURCE_SYSTEM_URL=https://sistema-legado.interno/
+SOURCE_SYSTEM_USERNAME=SUBSTITUIR
+SOURCE_SYSTEM_PASSWORD=SUBSTITUIR
+```
+
+Adicione as variáveis de LLM já usadas pelo ambiente somente quando
+necessárias. Restrinja o arquivo:
+
+```bash
+chmod 600 /opt/sirhosp/.env
+```
+
+Valide interpolação, estrutura e campos obrigatórios sem imprimir a configuração
+renderizada:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml config --quiet
+```
+
+### Primeiro start e migrations
+
+Baixe todas as imagens e inicie o banco:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml pull
+docker compose --env-file .env -f compose.hospital.yml up -d db
+```
+
+Execute migrations em um container one-shot da versão selecionada:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml run --rm web \
+  uv run --no-sync python manage.py migrate --noinput
+```
+
+Inicie a topologia completa:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml \
+  up -d --remove-orphans
+```
+
+Verifique containers e saúde HTTP:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml ps
+curl -fsS http://127.0.0.1:8000/health/
+```
+
+### Atualização para um novo release
+
+Antes da migration, garanta que o banco esteja saudável e crie um backup local
+com timestamp:
+
+```bash
+mkdir -p backups
+chmod 700 backups
+docker compose --env-file .env -f compose.hospital.yml up -d db
+docker compose --env-file .env -f compose.hospital.yml exec -T db \
+  sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom' \
+  > "backups/sirhosp-$(date -u +%Y%m%dT%H%M%SZ).dump"
+```
+
+Confirme que o arquivo não está vazio. Depois altere somente
+`SIRHOSP_VERSION` no `.env` para a nova tag exata e execute:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml config --quiet
+docker compose --env-file .env -f compose.hospital.yml pull
+docker compose --env-file .env -f compose.hospital.yml run --rm web \
+  uv run --no-sync python manage.py migrate --noinput
+docker compose --env-file .env -f compose.hospital.yml \
+  up -d --remove-orphans
+docker compose --env-file .env -f compose.hospital.yml ps
+curl -fsS http://127.0.0.1:8000/health/
+```
+
+Não use `down -v`: a opção `-v` remove o volume PostgreSQL.
+
+### Escala do worker persistente
+
+O primeiro `up` inicia uma réplica. Para usar a concorrência validada pelo
+hospital:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml \
+  up -d --scale persistent_worker=15 persistent_worker
+```
+
+Repita o `--scale` após atualizações caso o Compose tenha convergido para uma
+réplica. Observe status e consumo:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml ps
+docker stats --no-stream
+```
+
+### Retorno para uma versão anterior
+
+Para retornar somente a aplicação, altere `SIRHOSP_VERSION` para a tag exata
+anterior, valide, faça pull e recrie os serviços:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml config --quiet
+docker compose --env-file .env -f compose.hospital.yml pull
+docker compose --env-file .env -f compose.hospital.yml \
+  up -d --remove-orphans
+```
+
+Isso é seguro somente quando a versão anterior é compatível com o schema já
+migrado. Se a migration nova não for retrocompatível, interrompa os serviços
+mutantes e faça uma restauração coordenada do backup correspondente; não tente
+reverter automaticamente migrations em produção.
+
+### Inspeção e logs
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml ps
+docker compose --env-file .env -f compose.hospital.yml \
+  logs --tail 200 web persistent_worker census_orchestrator summary_worker
+```
+
 ---
 
 ## 1. Pré-requisitos
