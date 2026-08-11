@@ -36,9 +36,9 @@
 - [x] 3.2 Preserve the four gateway cost assertions while supplying complete
   synthetic phase-1 configuration with inherited environment cleared.
 - [x] 3.3 Run the focused tests and official quality gate.
-- [ ] 3.4 Commit, merge and push the correction to `master`.
-- [ ] 3.5 Publish immutable prerelease `v0.1.0-rc.2` without altering RC1.
-- [ ] 3.6 Verify successful workflow, exact/prerelease GHCR tags, absent or
+- [x] 3.4 Commit, merge and push the correction to `master`.
+- [x] 3.5 Publish immutable prerelease `v0.1.0-rc.2` without altering RC1.
+- [x] 3.6 Verify successful workflow, exact/prerelease GHCR tags, absent or
   unchanged `latest`, and byte-identical Compose release asset.
-- [ ] 3.7 Create `/tmp/sirhosp-slice-RHID-S1-C1-report.md` with complete
+- [x] 3.7 Create `/tmp/sirhosp-slice-RHID-S1-C1-report.md` with complete
   corrective evidence.
