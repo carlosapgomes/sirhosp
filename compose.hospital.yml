@@ -64,7 +64,8 @@ x-app-service: &app-service
     db:
       condition: service_healthy
   networks:
-    - internal
+    internal:
+    hospital_edge:
   logging:
     driver: json-file
     options:
@@ -108,6 +109,11 @@ services:
     <<: *app-service
     ports:
       - "${SIRHOSP_BIND_ADDRESS:-0.0.0.0}:${DJANGO_PORT:-8000}:8000"
+    networks:
+      internal:
+      hospital_edge:
+        aliases:
+          - prisma
     healthcheck:
       test:
         - CMD-SHELL
@@ -169,3 +175,5 @@ volumes:
 networks:
   internal:
     driver: bridge
+  hospital_edge:
+    external: true

@@ -81,7 +81,6 @@ def test_hospital_compose_is_standalone_and_version_pinned() -> None:
     assert "/app:" not in compose
     assert "tailscale" not in compose.lower()
     assert "cloudflare" not in compose.lower()
-    assert "external: true" not in compose
     assert (
         "image: ghcr.io/carlosapgomes/sirhosp:"
         "${SIRHOSP_VERSION:?Set SIRHOSP_VERSION to an exact release tag}"
@@ -100,6 +99,21 @@ def test_hospital_compose_is_standalone_and_version_pinned() -> None:
         "SOURCE_SYSTEM_PASSWORD",
     ):
         assert f"${{{required}:?" in compose
+
+
+def test_hospital_compose_joins_existing_cloudflared_edge_network() -> None:
+    compose = _compose_text()
+    app_service = compose.split(
+        "x-app-service: &app-service",
+        maxsplit=1,
+    )[1].split("x-playwright-service:", maxsplit=1)[0]
+    db = _service_block(compose, "db")
+    web = _service_block(compose, "web")
+
+    assert "\n  hospital_edge:\n    external: true\n" in compose
+    assert "    internal:\n    hospital_edge:\n" in app_service
+    assert "    - internal\n" in db
+    assert "      hospital_edge:\n        aliases:\n          - prisma\n" in web
 
 
 def test_hospital_compose_runs_the_complete_current_topology() -> None:

@@ -57,8 +57,11 @@ image builds.
 - **AND** only the web service publishes an application port on the host
 - **AND** web, persistent ingestion, census orchestration and summary processing
   use the selected application image
-- **AND** the topology has no Tailscale, Cloudflared or external-network
-  dependency
+- **AND** every Django service joins the pre-existing external
+  `hospital_edge` network
+- **AND** web is reachable there through the `prisma` alias while PostgreSQL
+  remains restricted to the internal network
+- **AND** the topology does not bundle Tailscale or Cloudflared containers
 
 ### Requirement: Each release distributes its matching Compose
 

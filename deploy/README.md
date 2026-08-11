@@ -35,12 +35,15 @@ de produção sempre usa a tag exata; não use os canais móveis no `.env`.
 - Linux com Docker Engine e Docker Compose v2;
 - acesso HTTPS de saída ao GitHub e ao GHCR;
 - acesso direto do host ao sistema legado do hospital;
-- DNS ou endereço estável para o portal;
+- container Cloudflared já conectado à rede Docker externa `hospital_edge`;
+- ingress do FQDN configurado com origem `http://prisma:8000`;
 - firewall permitindo a porta do portal somente para a rede autorizada;
 - espaço protegido para backups do PostgreSQL.
 
-O Compose hospitalar não contém Tailscale nem Cloudflared. Ele não publica a
-porta do PostgreSQL; somente o portal publica uma porta no host.
+O Compose hospitalar não cria containers Tailscale ou Cloudflared. Ele reutiliza
+a rede externa `hospital_edge`, conecta nela os serviços Django e fornece ao
+serviço `web` o alias `prisma`. O PostgreSQL permanece somente na rede interna e
+sem porta publicada; somente o portal publica uma porta no host.
 
 ### Instalação inicial
 
@@ -94,6 +97,17 @@ necessárias. Restrinja o arquivo:
 ```bash
 chmod 600 /opt/sirhosp/.env
 ```
+
+Confirme que a rede externa já existe e que o container Cloudflared aparece
+entre os participantes:
+
+```bash
+docker network inspect hospital_edge --format '{{json .Containers}}'
+```
+
+Se a rede não existir ou o Cloudflared não aparecer, corrija primeiro o runtime
+do túnel. Não execute `docker compose up`: o Compose hospitalar referencia essa
+rede como externa e não deve criar uma rede paralela.
 
 Valide interpolação, estrutura e campos obrigatórios sem imprimir a configuração
 renderizada:

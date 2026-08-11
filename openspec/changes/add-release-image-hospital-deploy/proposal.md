@@ -46,8 +46,9 @@ empacotamento e deployment.
   `read:packages`.
 - Banco: volume nomeado persistente; migrations continuam explícitas e precedidas
   por backup operacional.
-- Rede: não inclui Tailscale nem Cloudflared; o servidor hospitalar acessa o
-  sistema legado diretamente e publica somente a porta configurada do portal.
+- Rede: não inclui containers Tailscale ou Cloudflared; reutiliza a rede Docker
+  externa `hospital_edge`, já compartilhada com o Cloudflared hospitalar, e
+  expõe o portal nessa rede pelo alias `prisma`.
 - Segurança: nenhuma credencial entra na imagem, no workflow ou no Compose
   versionado.
 - Não objetivos: deployment remoto automático, armazenamento de secrets no

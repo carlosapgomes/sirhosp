@@ -3,9 +3,10 @@
 ## Context
 
 O runtime doméstico atual combina `compose.yml` e `compose.prod.yml`, constrói a
-imagem no próprio host e acrescenta Tailscale/Cloudflared para alcançar e expor
-o ambiente. O host hospitalar não precisa dessas pontes e não deve depender de
-Git, Dockerfile, lockfile ou compilação local.
+imagem no próprio host e inclui serviços Tailscale/Cloudflared. O host hospitalar
+não deve empacotar essas pontes nem depender de Git, Dockerfile, lockfile ou
+compilação local, mas deve reutilizar a rede externa `hospital_edge` já usada
+pelo container Cloudflared do hospital.
 
 O repositório é público, mas pacotes GHCR podem continuar privados até sua
 visibilidade ser alterada. Por isso o procedimento de produção admite login no
@@ -62,8 +63,11 @@ Serviços incluídos:
 - `census_orchestrator`;
 - `summary_worker`.
 
-O arquivo não contém Tailscale, Cloudflared nem rede externa. Um bridge interno
-isola banco e processos; apenas `web` publica porta no host.
+O arquivo não contém serviços Tailscale ou Cloudflared. Todos os serviços Django
+usam o bridge interno e a rede Docker externa preexistente `hospital_edge`, em
+paridade com `compose.prod.yml`; `web` também recebe o alias `prisma` usado como
+origem pelo Cloudflared. O PostgreSQL permanece somente no bridge interno e sem
+porta publicada.
 
 ### Decision 3: Secrets remain host-local
 
@@ -79,13 +83,15 @@ O procedimento operacional é:
 1. selecionar uma tag exata em `SIRHOSP_VERSION`;
 2. autenticar no GHCR se necessário;
 3. baixar o Compose anexado ao release;
-4. validar `docker compose config --quiet`;
-5. executar backup PostgreSQL;
-6. executar `docker compose pull`;
-7. garantir `db` saudável;
-8. executar migration one-shot com a nova imagem;
-9. executar `up -d --remove-orphans`;
-10. verificar containers e endpoint `/health/`.
+4. confirmar que a rede externa `hospital_edge` existe e contém o Cloudflared;
+5. validar `docker compose config --quiet`;
+6. executar backup PostgreSQL;
+7. executar `docker compose pull`;
+8. garantir `db` saudável;
+9. executar migration one-shot com a nova imagem;
+10. executar `up -d --remove-orphans`;
+11. verificar containers, endpoint `/health/` e rota Cloudflared para
+    `http://prisma:8000`.
 
 A imagem anterior permanece no registry. Retorno de aplicação altera
 `SIRHOSP_VERSION` para a tag anterior. Se migrations não forem compatíveis com a
@@ -111,6 +117,8 @@ condicionais de rede e build que tornariam os dois ambientes ambíguos.
   provenance permite relacionar imagem, workflow e commit.
 - Imagem e Compose incompatíveis: ambos saem do mesmo release; o operador deve
   baixar o Compose correspondente à tag selecionada.
+- Rede externa ausente ou Cloudflared desconectado: o preflight inspeciona
+  `hospital_edge` antes de criar containers; o portal mantém o alias `prisma`.
 
 ## Alternatives Rejected
 

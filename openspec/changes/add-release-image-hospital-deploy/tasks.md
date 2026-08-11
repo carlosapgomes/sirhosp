@@ -42,3 +42,20 @@
   unchanged `latest`, and byte-identical Compose release asset.
 - [x] 3.7 Create `/tmp/sirhosp-slice-RHID-S1-C1-report.md` with complete
   corrective evidence.
+
+## 4. Corrective Slice RHID-S1-C2 - Reuse hospital edge network
+
+- [x] 4.1 Read `slice-prompts/SLICE-RHID-S1-C2.md` and the production network
+  topology.
+- [x] 4.2 Add a failing contract test for external `hospital_edge` and the
+  `prisma` web alias.
+- [x] 4.3 Attach Django services to `hospital_edge`, keep PostgreSQL internal,
+  and preserve the web host port.
+- [x] 4.4 Replace obsolete no-external-network assertions in OpenSpec and the
+  deployment runbook.
+- [x] 4.5 Prove focused tests and synthetic Compose rendering.
+- [x] 4.6 Run official checks, tests, lint, typecheck, strict OpenSpec and
+  focused Markdown lint.
+- [x] 4.7 Create `/tmp/sirhosp-slice-RHID-S1-C2-report.md` with complete
+  credential-free evidence.
+- [ ] 4.8 Commit and push the correction branch for independent verification.
