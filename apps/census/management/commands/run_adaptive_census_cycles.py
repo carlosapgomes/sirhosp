@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import signal
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from apps.census.orchestration import (
     compute_orchestrator_state,
@@ -190,22 +190,16 @@ class Command(BaseCommand):
                 msg += f" Batch: {batch_id}."
             self.stdout.write(self.style.SUCCESS(msg))
         elif outcome == "extraction_failed":
-            self.stdout.write(
-                self.style.ERROR(
-                    f"EXTRACTION FAILED: {result.get('error', '')}"
-                )
+            raise CommandError(
+                f"EXTRACTION FAILED: {result.get('error', '')}"
             )
         elif outcome == "ambiguous_runs":
-            self.stdout.write(
-                self.style.WARNING(
-                    f"AMBIGUOUS RUNS: {result.get('message', '')}"
-                )
+            raise CommandError(
+                f"AMBIGUOUS RUNS: {result.get('message', '')}"
             )
         else:
-            self.stdout.write(
-                self.style.ERROR(
-                    f"UNEXPECTED OUTCOME: {result.get('message', outcome)}"
-                )
+            raise CommandError(
+                f"UNEXPECTED OUTCOME: {result.get('message', outcome)}"
             )
 
     def _handle_loop(

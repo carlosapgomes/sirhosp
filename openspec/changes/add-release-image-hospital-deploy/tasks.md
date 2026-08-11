@@ -72,3 +72,17 @@
   matching Compose asset, and hospital edge topology.
 - [x] 5.6 Create `/tmp/sirhosp-slice-RHID-S1-C3-report.md`, validate evidence,
   commit the final task state, and push `master`.
+
+## 6. Corrective Slice RHID-S1-C5 - Propagate one-shot census failure
+
+- [x] 6.1 Read `slice-prompts/SLICE-RHID-S1-C5.md` and characterize the observed
+  false-success exit status.
+- [x] 6.2 Add failing management-command tests for failed, ambiguous and unknown
+  one-shot outcomes.
+- [x] 6.3 Return nonzero through `CommandError` for those outcomes while keeping
+  success, blocked, lock-held, dry-run and loop behavior unchanged.
+- [x] 6.4 Add the adaptive-census exit-status delta requirement.
+- [x] 6.5 Run focused and official gates and create
+  `/tmp/sirhosp-slice-RHID-S1-C5-report.md`.
+- [x] 6.6 Commit and push the correction before publishing a new immutable
+  prerelease.

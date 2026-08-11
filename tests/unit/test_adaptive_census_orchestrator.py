@@ -16,7 +16,7 @@ from datetime import timedelta
 from unittest import mock
 
 import pytest
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from django.utils import timezone
 
 from apps.census.orchestration import OrchestratorDecision, compute_orchestrator_state
@@ -950,24 +950,52 @@ class TestCommandOnceMode:
             output = out.getvalue()
             assert "blocked" in output.lower()
 
-    def test_once_mode_extraction_failure_output(self):
-        """Output reports extraction failure."""
-        from io import StringIO
-
+    @pytest.mark.parametrize(
+        ("result", "expected_message"),
+        [
+            (
+                {
+                    "cycle_executed": True,
+                    "outcome": "extraction_failed",
+                    "error": "RuntimeError: Extraction failed",
+                    "message": "Census extraction failed.",
+                },
+                "EXTRACTION FAILED: RuntimeError: Extraction failed",
+            ),
+            (
+                {
+                    "cycle_executed": True,
+                    "outcome": "ambiguous_runs",
+                    "message": "No new extraction run was identified.",
+                },
+                "AMBIGUOUS RUNS: No new extraction run was identified.",
+            ),
+            (
+                {
+                    "cycle_executed": True,
+                    "outcome": "unknown_outcome",
+                    "message": "Unexpected cycle state.",
+                },
+                "UNEXPECTED OUTCOME: Unexpected cycle state.",
+            ),
+        ],
+    )
+    def test_once_mode_failure_returns_nonzero(
+        self,
+        result,
+        expected_message,
+    ):
+        """Failed one-shot outcomes raise CommandError for a nonzero CLI exit."""
         cmd_module = self._mock_cmd_module()
         with mock.patch.object(
-            cmd_module, "run_single_cycle",
-            return_value={
-                "cycle_executed": True,
-                "outcome": "extraction_failed",
-                "error": "RuntimeError: Extraction failed",
-                "message": "Census extraction failed.",
-            },
+            cmd_module,
+            "run_single_cycle",
+            return_value=result,
         ):
-            out = StringIO()
-            call_command("run_adaptive_census_cycles", stdout=out)
-            output = out.getvalue()
-            assert "fail" in output.lower()
+            with pytest.raises(CommandError) as exc_info:
+                call_command("run_adaptive_census_cycles")
+
+        assert str(exc_info.value) == expected_message
 
     def test_once_mode_success_output(self):
         """Output reports successful cycle."""
