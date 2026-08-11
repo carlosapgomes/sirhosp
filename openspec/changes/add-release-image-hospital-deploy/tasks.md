@@ -59,3 +59,16 @@
 - [x] 4.7 Create `/tmp/sirhosp-slice-RHID-S1-C2-report.md` with complete
   credential-free evidence.
 - [x] 4.8 Commit and push the correction branch for independent verification.
+
+## 5. Integration Slice RHID-S1-C3 - Merge and publish RC3
+
+- [x] 5.1 Read `slice-prompts/SLICE-RHID-S1-C3.md`, verify the correction
+  branch, and confirm RC3 is the next immutable prerelease.
+- [ ] 5.2 Fast-forward the correction into `master` and push the default branch.
+- [ ] 5.3 Run the official quality gate on the exact integrated commit.
+- [ ] 5.4 Publish immutable prerelease `v0.1.0-rc.3` without changing RC1 or
+  RC2.
+- [ ] 5.5 Verify the successful release workflow, image tags, `latest` safety,
+  matching Compose asset, and hospital edge topology.
+- [ ] 5.6 Create `/tmp/sirhosp-slice-RHID-S1-C3-report.md`, validate evidence,
+  commit the final task state, and push `master`.
