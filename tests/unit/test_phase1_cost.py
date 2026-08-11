@@ -50,6 +50,16 @@ def _stub_gateway_completion(
 # ---------------------------------------------------------------------------
 
 
+@patch.dict(
+    "os.environ",
+    {
+        "SUMMARY_PHASE1_PROVIDER": "openai",
+        "SUMMARY_PHASE1_MODEL": "gpt-4o",
+        "SUMMARY_PHASE1_BASE_URL": "https://api.openai.com/v1",
+        "SUMMARY_PHASE1_API_KEY": "synthetic-test-key",
+    },
+    clear=True,
+)
 class TestCallLlmGatewayCost:
     """call_llm_gateway returns token and cost data."""
 
