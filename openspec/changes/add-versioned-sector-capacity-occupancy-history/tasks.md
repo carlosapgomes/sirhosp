@@ -22,21 +22,21 @@
 
 ## 2. Slice SCOH-S2 - Materialize one census occupancy measurement
 
-- [ ] 2.1 Read `slice-prompts/SLICE-SCOH-S2.md` completely and verify SCOH-S1
+- [x] 2.1 Read `slice-prompts/SLICE-SCOH-S2.md` completely and verify SCOH-S1
   is complete before editing.
-- [ ] 2.2 Add failing tests for post-activation, pre-activation, idempotent and
+- [x] 2.2 Add failing tests for post-activation, pre-activation, idempotent and
   privacy-safe measurement materialization.
-- [ ] 2.3 Add the minimal immutable measurement models, constraints and additive
+- [x] 2.3 Add the minimal immutable measurement models, constraints and additive
   migration.
-- [ ] 2.4 Implement `occupancy-v1` for simple/shared groups, raw legacy
+- [x] 2.4 Implement `occupancy-v1` for simple/shared groups, raw legacy
   occupants, deterministic rounding, source-name mismatch and aggregate status
   snapshots.
-- [ ] 2.5 Implement pending, unrated and unmapped states plus hospital totals
+- [x] 2.5 Implement pending, unrated and unmapped states plus hospital totals
   and dual coverage, without approximating Obstetrícia 3A.
-- [ ] 2.6 Add the explicit run-scoped recovery command without scan or backfill.
-- [ ] 2.7 Prove RED, GREEN and REFACTOR, run inspection checks and all official
+- [x] 2.6 Add the explicit run-scoped recovery command without scan or backfill.
+- [x] 2.7 Prove RED, GREEN and REFACTOR, run inspection checks and all official
   gates required by the slice prompt.
-- [ ] 2.8 Create `/tmp/sirhosp-slice-SCOH-S2-report.md` with complete evidence
+- [x] 2.8 Create `/tmp/sirhosp-slice-SCOH-S2-report.md` with complete evidence
   and verifier handoff.
 
 ## 3. Slice SCOH-S3 - Integrate accepted censuses and daily summaries

@@ -148,6 +148,129 @@ class CapacitySectorMembership(models.Model):
         return f"{self.source_code} -> {self.group.stable_key} @ {self.catalog}"
 
 
+class OccupancyCalculationStatus(models.TextChoices):
+    CALCULATED = "calculated", "Calculated"
+    LINKED_SLOTS_PENDING = "linked_slots_pending", "Linked slots pending"
+    UNRATED = "unrated", "Unrated"
+    UNMAPPED = "unmapped", "Unmapped"
+
+
+class OccupancyMeasurement(models.Model):
+    """Immutable aggregate occupancy evidence for one census extraction run."""
+
+    census_run = models.OneToOneField(
+        "ingestion.IngestionRun",
+        on_delete=models.PROTECT,
+        related_name="occupancy_measurement",
+    )
+    catalog = models.ForeignKey(
+        CapacityCatalogVersion,
+        on_delete=models.PROTECT,
+        related_name="occupancy_measurements",
+    )
+    captured_at = models.DateTimeField()
+    local_date = models.DateField()
+    algorithm_version = models.CharField(max_length=30)
+    observed_sector_count = models.PositiveIntegerField()
+    capacity_covered_sector_count = models.PositiveIntegerField()
+    calculable_sector_count = models.PositiveIntegerField()
+    known_capacity = models.PositiveIntegerField()
+    calculable_capacity = models.PositiveIntegerField()
+    occupied_for_rate = models.PositiveIntegerField()
+    occupancy_percentage = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    exceeded_by = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    capacity_covered_sector_count__lte=models.F(
+                        "observed_sector_count"
+                    ),
+                    calculable_sector_count__lte=models.F(
+                        "observed_sector_count"
+                    ),
+                ),
+                name="ck_occupancy_coverage_within_observed",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(occupancy_percentage__gte=0)
+                | models.Q(occupancy_percentage__isnull=True),
+                name="ck_occupancy_percentage_nonnegative",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["local_date", "captured_at"],
+                name="occupancy_local_capture_idx",
+            ),
+        ]
+        ordering = ["captured_at", "pk"]
+        verbose_name = "Occupancy Measurement"
+        verbose_name_plural = "Occupancy Measurements"
+
+    def __str__(self) -> str:
+        return f"OccupancyMeasurement run={self.census_run_id} @ {self.captured_at}"
+
+
+class OccupancyGroupMeasurement(models.Model):
+    """Resolved historical group values copied from one applicable catalog."""
+
+    measurement = models.ForeignKey(
+        OccupancyMeasurement,
+        on_delete=models.CASCADE,
+        related_name="groups",
+    )
+    stable_key = models.CharField(max_length=100)
+    display_name = models.CharField(max_length=255)
+    calculation_policy = models.CharField(max_length=30, blank=True, default="")
+    calculation_status = models.CharField(
+        max_length=30,
+        choices=OccupancyCalculationStatus.choices,
+    )
+    official_capacity = models.PositiveIntegerField(null=True, blank=True)
+    occupied_count = models.PositiveIntegerField(null=True, blank=True)
+    occupancy_percentage = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    exceeded_by = models.PositiveIntegerField(null=True, blank=True)
+    status_counts_json = models.JSONField(default=dict)
+    components_json = models.JSONField(default=list)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["measurement", "stable_key"],
+                name="uq_occupancy_group_measurement_key",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(official_capacity__gt=0)
+                | models.Q(official_capacity__isnull=True),
+                name="ck_occupancy_group_capacity_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(occupancy_percentage__gte=0)
+                | models.Q(occupancy_percentage__isnull=True),
+                name="ck_occupancy_group_percentage_nonnegative",
+            ),
+        ]
+        ordering = ["measurement", "stable_key"]
+        verbose_name = "Occupancy Group Measurement"
+        verbose_name_plural = "Occupancy Group Measurements"
+
+    def __str__(self) -> str:
+        return f"{self.stable_key} @ measurement {self.measurement_id}"
+
+
 class PatientMovement(models.Model):
     patient = models.ForeignKey(
         "patients.Patient", on_delete=models.CASCADE,
