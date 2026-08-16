@@ -1,0 +1,389 @@
+{
+  "schema_version": "1.0",
+  "source_reference": "Capacidades oficiais da diretoria (planilha setores-leitos, sintetizada) - baseline aprovada 2025-08-16; leitos-dia e pares cama-berço da 3A excluídos da capacidade calculavel",
+  "groups": [
+    {
+      "stable_key": "CHD",
+      "display_name": "Cardiologia - HGRS",
+      "official_capacity": 13,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "728", "configured_source_name": "Cardiologia"}
+      ]
+    },
+    {
+      "stable_key": "GASTRO",
+      "display_name": "Gastroenterologia",
+      "official_capacity": 12,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "2702", "configured_source_name": "Gastroenterologia"}
+      ]
+    },
+    {
+      "stable_key": "UAVC",
+      "display_name": "Unidade AVC",
+      "official_capacity": 14,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "637", "configured_source_name": "Unidade AVC"}
+      ]
+    },
+    {
+      "stable_key": "UTI-CARDIO",
+      "display_name": "UTI Cardiologia",
+      "official_capacity": 28,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "628", "configured_source_name": "UTI Cardiologia"}
+      ]
+    },
+    {
+      "stable_key": "UTI-CIR",
+      "display_name": "UTI Cirúrgica",
+      "official_capacity": 10,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "630", "configured_source_name": "UTI Cirúrgica"}
+      ]
+    },
+    {
+      "stable_key": "UTI-G1",
+      "display_name": "UTI Geral 1",
+      "official_capacity": 20,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "633", "configured_source_name": "UTI Geral 1"}
+      ]
+    },
+    {
+      "stable_key": "UTI-G2",
+      "display_name": "UTI Geral 2",
+      "official_capacity": 9,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "634", "configured_source_name": "UTI Geral 2"}
+      ]
+    },
+    {
+      "stable_key": "UTI-NEURO",
+      "display_name": "UTI Neuro",
+      "official_capacity": 10,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "629", "configured_source_name": "UTI Neuro"}
+      ]
+    },
+    {
+      "stable_key": "UTI-PED",
+      "display_name": "UTI Pediátrica",
+      "official_capacity": 16,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "631", "configured_source_name": "UTI Pediátrica"}
+      ]
+    },
+    {
+      "stable_key": "UTI-NEO",
+      "display_name": "UTI Neonatal",
+      "official_capacity": 17,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "636", "configured_source_name": "UTI Neonatal"}
+      ]
+    },
+    {
+      "stable_key": "UTI-ONCO",
+      "display_name": "UTI Oncológica",
+      "official_capacity": 5,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "1926", "configured_source_name": "UTI Oncológica"}
+      ]
+    },
+    {
+      "stable_key": "UCINCA",
+      "display_name": "UCINCA",
+      "official_capacity": 10,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "655", "configured_source_name": "UCINCA"}
+      ]
+    },
+    {
+      "stable_key": "UCINCO",
+      "display_name": "UCINCO",
+      "official_capacity": 23,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "635", "configured_source_name": "UCINCO"}
+      ]
+    },
+    {
+      "stable_key": "INT-B",
+      "display_name": "Internacao B",
+      "official_capacity": 30,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "720", "configured_source_name": "Internacao B"}
+      ]
+    },
+    {
+      "stable_key": "INT-C",
+      "display_name": "Internacao C",
+      "official_capacity": 30,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "721", "configured_source_name": "Internacao C"}
+      ]
+    },
+    {
+      "stable_key": "ENF-1A",
+      "display_name": "Enfermaria 1A",
+      "official_capacity": 36,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "640", "configured_source_name": "Enfermaria 1A"}
+      ]
+    },
+    {
+      "stable_key": "ENF-1B",
+      "display_name": "Enfermaria 1B",
+      "official_capacity": 30,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "642", "configured_source_name": "Enfermaria 1B"}
+      ]
+    },
+    {
+      "stable_key": "ENF-1C",
+      "display_name": "Enfermaria 1C",
+      "official_capacity": 30,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "644", "configured_source_name": "Enfermaria 1C"}
+      ]
+    },
+    {
+      "stable_key": "ENF-2A-HEMA",
+      "display_name": "Enfermaria 2A Hematologia",
+      "official_capacity": 20,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "643", "configured_source_name": "Enfermaria 2A Hematologia"}
+      ]
+    },
+    {
+      "stable_key": "ENF-2A-ISO",
+      "display_name": "Enfermaria 2A Isolamento",
+      "official_capacity": 6,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "2155", "configured_source_name": "Enfermaria 2A Isolamento"}
+      ]
+    },
+    {
+      "stable_key": "ENF-2B-CARD",
+      "display_name": "Enfermaria 2B Cardiologia",
+      "official_capacity": 15,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "719", "configured_source_name": "Cardiologia 719"},
+        {"source_code": "2156", "configured_source_name": "Cardiologia 2156"}
+      ]
+    },
+    {
+      "stable_key": "ENF-2B-NEURO",
+      "display_name": "Enfermaria 2B Neuro",
+      "official_capacity": 24,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "651", "configured_source_name": "Enfermaria 2B Neuro"}
+      ]
+    },
+    {
+      "stable_key": "ENF-2C-CLIN",
+      "display_name": "Enfermaria 2C Clínica",
+      "official_capacity": 28,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "652", "configured_source_name": "Enfermaria 2C Clínica"}
+      ]
+    },
+    {
+      "stable_key": "ENF-2C-ENDO",
+      "display_name": "Enfermaria 2C Endócrino",
+      "official_capacity": 6,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "2158", "configured_source_name": "Enfermaria 2C Endócrino"}
+      ]
+    },
+    {
+      "stable_key": "OBST-3A",
+      "display_name": "Obstetrícia 3A",
+      "official_capacity": 32,
+      "calculation_policy": "linked_slots_pending",
+      "source_codes": [
+        {"source_code": "654", "configured_source_name": "Obstetrícia 3A"}
+      ]
+    },
+    {
+      "stable_key": "OBST-3B",
+      "display_name": "Obstetrícia 3B",
+      "official_capacity": 28,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "653", "configured_source_name": "Obstetrícia 3B"}
+      ]
+    },
+    {
+      "stable_key": "ENF-4A",
+      "display_name": "Enfermaria 4A",
+      "official_capacity": 14,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "656", "configured_source_name": "Enfermaria 4A"}
+      ]
+    },
+    {
+      "stable_key": "ENF-4B",
+      "display_name": "Enfermaria 4B",
+      "official_capacity": 30,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "658", "configured_source_name": "Enfermaria 4B"}
+      ]
+    },
+    {
+      "stable_key": "ENF-4C",
+      "display_name": "Enfermaria 4C",
+      "official_capacity": 45,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "659", "configured_source_name": "Enfermaria 4C"}
+      ]
+    },
+    {
+      "stable_key": "EM-ADULTO-AMAR",
+      "display_name": "Emergencia Adulto Amarela",
+      "official_capacity": 13,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "731", "configured_source_name": "Emergencia Adulto Amarela"}
+      ]
+    },
+    {
+      "stable_key": "EM-ADULTO-LAR",
+      "display_name": "Emergencia Adulto Laranja",
+      "official_capacity": 16,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "745", "configured_source_name": "Emergencia Adulto Laranja"}
+      ]
+    },
+    {
+      "stable_key": "EM-ADULTO-VERM",
+      "display_name": "Emergencia Adulto Vermelha",
+      "official_capacity": 3,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "729", "configured_source_name": "Emergencia Adulto Vermelha"}
+      ]
+    },
+    {
+      "stable_key": "EM-ADULTO-PROC",
+      "display_name": "Emergencia Adulto Procedimentos",
+      "official_capacity": 2,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "751", "configured_source_name": "Emergencia Adulto Procedimentos"}
+      ]
+    },
+    {
+      "stable_key": "EM-ADULTO-OBS",
+      "display_name": "Emergencia Adulto Observação",
+      "official_capacity": 1,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "954", "configured_source_name": "Emergencia Adulto Observação"}
+      ]
+    },
+    {
+      "stable_key": "EM-PED-AMAR",
+      "display_name": "Emergencia Pediátrica Amarela",
+      "official_capacity": 15,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "738", "configured_source_name": "Emergencia Pediátrica Amarela"}
+      ]
+    },
+    {
+      "stable_key": "EM-PED-LAR",
+      "display_name": "Emergencia Pediátrica Laranja",
+      "official_capacity": 4,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "1004", "configured_source_name": "Emergencia Pediátrica Laranja"}
+      ]
+    },
+    {
+      "stable_key": "EM-PED-VERM",
+      "display_name": "Emergencia Pediátrica Vermelha",
+      "official_capacity": 3,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "732", "configured_source_name": "Emergencia Pediátrica Vermelha"}
+      ]
+    },
+    {
+      "stable_key": "EM-PED-OBS",
+      "display_name": "Emergencia Pediátrica Observação",
+      "official_capacity": 2,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "747", "configured_source_name": "Emergencia Pediátrica Observação"}
+      ]
+    },
+    {
+      "stable_key": "CO",
+      "display_name": "Centro Obstetrico",
+      "official_capacity": 8,
+      "calculation_policy": "standard",
+      "source_codes": [
+        {"source_code": "20", "configured_source_name": "Centro Obstetrico 20"},
+        {"source_code": "1110", "configured_source_name": "Centro Obstetrico 1110"},
+        {"source_code": "1112", "configured_source_name": "Centro Obstetrico 1112"},
+        {"source_code": "1114", "configured_source_name": "Centro Obstetrico 1114"},
+        {"source_code": "1116", "configured_source_name": "Centro Obstetrico 1116"}
+      ]
+    },
+    {
+      "stable_key": "UNRATED-CRPA-HGRS",
+      "display_name": "CRPA HGRS",
+      "official_capacity": null,
+      "calculation_policy": "unrated",
+      "source_codes": [
+        {"source_code": "733", "configured_source_name": "CRPA HGRS"}
+      ]
+    },
+    {
+      "stable_key": "UNRATED-CRPA-HOMEM",
+      "display_name": "CRPA Homem",
+      "official_capacity": null,
+      "calculation_policy": "unrated",
+      "source_codes": [
+        {"source_code": "1522", "configured_source_name": "CRPA Homem"}
+      ]
+    },
+    {
+      "stable_key": "UNRATED-MED-PED",
+      "display_name": "Medicina Pediátrica",
+      "official_capacity": null,
+      "calculation_policy": "unrated",
+      "source_codes": [
+        {"source_code": "1002", "configured_source_name": "Medicina Pediátrica"}
+      ]
+    }
+  ]
+}

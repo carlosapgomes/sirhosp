@@ -3,6 +3,150 @@ from __future__ import annotations
 from django.db import models
 
 
+class CalculationPolicy(models.TextChoices):
+    STANDARD = "standard", "Standard"
+    LINKED_SLOTS_PENDING = "linked_slots_pending", "Linked slots pending"
+    UNRATED = "unrated", "Unrated"
+
+
+class CapacityCatalogVersion(models.Model):
+    """Immutable complete capacity catalog snapshot for one local date.
+
+    Published only for future local dates in ``America/Bahia`` through the
+    ``activate_sector_capacity_catalog`` command. One version per effective
+    date; changes require a new future version.
+    """
+
+    effective_from = models.DateField(
+        unique=True,
+        help_text="First local calendar date (America/Bahia) this catalog applies",
+    )
+    source_reference = models.CharField(
+        max_length=255,
+        help_text="Human-readable provenance of the published document",
+    )
+    source_sha256 = models.CharField(
+        max_length=64,
+        help_text="SHA-256 of the input JSON document",
+    )
+    schema_version = models.CharField(
+        max_length=20,
+        help_text="Version of the catalog document schema",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["effective_from"]
+        verbose_name = "Capacity Catalog Version"
+        verbose_name_plural = "Capacity Catalog Versions"
+
+    def __str__(self) -> str:
+        return (
+            f"CapacityCatalogVersion {self.effective_from}"
+            f" ({self.source_sha256[:12]})"
+        )
+
+
+class CapacityGroupDefinition(models.Model):
+    """One official capacity group inside a catalog version."""
+
+    catalog = models.ForeignKey(
+        CapacityCatalogVersion,
+        on_delete=models.PROTECT,
+        related_name="groups",
+    )
+    stable_key = models.CharField(
+        max_length=100,
+        help_text="Official identity of the sector series within the version",
+    )
+    display_name = models.CharField(
+        max_length=255,
+        help_text="Official display name resolved at publication time",
+    )
+    official_capacity = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Official capacity; null only for unrated groups",
+    )
+    calculation_policy = models.CharField(
+        max_length=30,
+        choices=CalculationPolicy.choices,
+        help_text="How occupancy is calculated for this group",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["catalog", "stable_key"],
+                name="uq_capacity_group_catalog_stable_key",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(official_capacity__gt=0)
+                | models.Q(official_capacity__isnull=True),
+                name="ck_capacity_group_capacity_positive_or_null",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        calculation_policy=CalculationPolicy.UNRATED,
+                        official_capacity__isnull=True,
+                    )
+                    | models.Q(
+                        calculation_policy__in=[
+                            CalculationPolicy.STANDARD,
+                            CalculationPolicy.LINKED_SLOTS_PENDING,
+                        ],
+                        official_capacity__gt=0,
+                    )
+                ),
+                name="ck_capacity_group_policy_capacity",
+            ),
+        ]
+        ordering = ["catalog", "stable_key"]
+        verbose_name = "Capacity Group Definition"
+        verbose_name_plural = "Capacity Group Definitions"
+
+    def __str__(self) -> str:
+        return f"{self.stable_key} ({self.calculation_policy}) @ {self.catalog}"
+
+
+class CapacitySectorMembership(models.Model):
+    """Associates one source code with a capacity group within one version."""
+
+    catalog = models.ForeignKey(
+        CapacityCatalogVersion,
+        on_delete=models.PROTECT,
+        related_name="memberships",
+    )
+    group = models.ForeignKey(
+        CapacityGroupDefinition,
+        on_delete=models.PROTECT,
+        related_name="memberships",
+    )
+    source_code = models.CharField(
+        max_length=50,
+        help_text="Numeric source code from the legacy system census",
+    )
+    configured_source_name = models.CharField(
+        max_length=255,
+        help_text="Sector name configured for this code in this version",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["catalog", "source_code"],
+                name="uq_capacity_member_catalog_source_code",
+            ),
+        ]
+        ordering = ["catalog", "source_code"]
+        verbose_name = "Capacity Sector Membership"
+        verbose_name_plural = "Capacity Sector Memberships"
+
+    def __str__(self) -> str:
+        return f"{self.source_code} -> {self.group.stable_key} @ {self.catalog}"
+
+
 class PatientMovement(models.Model):
     patient = models.ForeignKey(
         "patients.Patient", on_delete=models.CASCADE,
