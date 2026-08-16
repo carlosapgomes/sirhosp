@@ -1,41 +1,41 @@
 {
   "schema_version": "1.0",
-  "source_reference": "Capacidades oficiais da diretoria (planilha setores-leitos, sintetizada) - baseline aprovada 2025-08-16; leitos-dia e pares cama-berço da 3A excluídos da capacidade calculavel",
+  "source_reference": "Planilha administrativa setores-leitos.xls (SHA-256 fa5c4e95941794b4a90f2011d0584ae9eb5d4a5178e7e4022debeef4db8ca4dd; ultima gravacao 29/07/2026); baseline aprovada em 16/08/2026; sintese versionada sem dados de pacientes",
   "groups": [
     {
       "stable_key": "CHD",
-      "display_name": "Cardiologia - HGRS",
+      "display_name": "CHD",
       "official_capacity": 13,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "728", "configured_source_name": "Cardiologia"}
+        {"source_code": "728", "configured_source_name": "0 0 - CHD - HGRS"}
       ]
     },
     {
       "stable_key": "GASTRO",
-      "display_name": "Gastroenterologia",
+      "display_name": "Enfermaria Gastroenterologia",
       "official_capacity": 12,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "2702", "configured_source_name": "Gastroenterologia"}
+        {"source_code": "2702", "configured_source_name": "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS"}
       ]
     },
     {
       "stable_key": "UAVC",
-      "display_name": "Unidade AVC",
+      "display_name": "Unidade de AVC",
       "official_capacity": 14,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "637", "configured_source_name": "Unidade AVC"}
+        {"source_code": "637", "configured_source_name": "0 T - UNIDADE DE AVC - HGRS"}
       ]
     },
     {
       "stable_key": "UTI-CARDIO",
-      "display_name": "UTI Cardiologia",
+      "display_name": "UTI Cardiovascular",
       "official_capacity": 28,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "628", "configured_source_name": "UTI Cardiologia"}
+        {"source_code": "628", "configured_source_name": "0 T - UTI CARDIOVASCULAR - HGRS"}
       ]
     },
     {
@@ -44,34 +44,34 @@
       "official_capacity": 10,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "630", "configured_source_name": "UTI Cirúrgica"}
+        {"source_code": "630", "configured_source_name": "0 T - UTI CIRÚRGICA - HGRS"}
       ]
     },
     {
       "stable_key": "UTI-G1",
-      "display_name": "UTI Geral 1",
+      "display_name": "UTI Geral Adulto 1",
       "official_capacity": 20,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "633", "configured_source_name": "UTI Geral 1"}
+        {"source_code": "633", "configured_source_name": "0 T - UTI GERAL ADULTO 1 - HGRS"}
       ]
     },
     {
       "stable_key": "UTI-G2",
-      "display_name": "UTI Geral 2",
+      "display_name": "UTI Geral Adulto 2",
       "official_capacity": 9,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "634", "configured_source_name": "UTI Geral 2"}
+        {"source_code": "634", "configured_source_name": "0 T - UTI GERAL ADULTO 2 - HGRS"}
       ]
     },
     {
       "stable_key": "UTI-NEURO",
-      "display_name": "UTI Neuro",
+      "display_name": "UTI Neurológica",
       "official_capacity": 10,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "629", "configured_source_name": "UTI Neuro"}
+        {"source_code": "629", "configured_source_name": "0 T - UTI NEUROLÓGICA - HGRS"}
       ]
     },
     {
@@ -80,7 +80,7 @@
       "official_capacity": 16,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "631", "configured_source_name": "UTI Pediátrica"}
+        {"source_code": "631", "configured_source_name": "0 T - UTI PEDIATRICA - HGRS"}
       ]
     },
     {
@@ -89,61 +89,61 @@
       "official_capacity": 17,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "636", "configured_source_name": "UTI Neonatal"}
+        {"source_code": "636", "configured_source_name": "3 8 - 3C - UTI NEONATAL (UTIN) - HGRS"}
       ]
     },
     {
       "stable_key": "UTI-ONCO",
-      "display_name": "UTI Oncológica",
+      "display_name": "UTI Oncohematologia",
       "official_capacity": 5,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "1926", "configured_source_name": "UTI Oncológica"}
+        {"source_code": "1926", "configured_source_name": "4 6 - UTI ONCOHEMATO - HGRS"}
       ]
     },
     {
       "stable_key": "UCINCA",
-      "display_name": "UCINCA",
+      "display_name": "Cuidado Intermediário Neonatal Canguru",
       "official_capacity": 10,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "655", "configured_source_name": "UCINCA"}
+        {"source_code": "655", "configured_source_name": "3 8 - 3C - UNID. CUIDADOS INTERM. NEONATAL CANGURU (UCINCA) - HGRS"}
       ]
     },
     {
       "stable_key": "UCINCO",
-      "display_name": "UCINCO",
+      "display_name": "Cuidado Intermediário Neonatal Convencional",
       "official_capacity": 23,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "635", "configured_source_name": "UCINCO"}
+        {"source_code": "635", "configured_source_name": "3 8 - 3C - UNID. CUIDADOS INTERM. NEONATAL CONV. (UCINCO) - HGRS"}
       ]
     },
     {
       "stable_key": "INT-B",
-      "display_name": "Internacao B",
+      "display_name": "Intermediário Ala B",
       "official_capacity": 30,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "720", "configured_source_name": "Internacao B"}
+        {"source_code": "720", "configured_source_name": "0 S - INTERMEDIÁRIO ALA B - HGRS"}
       ]
     },
     {
       "stable_key": "INT-C",
-      "display_name": "Internacao C",
+      "display_name": "Intermediário Ala C",
       "official_capacity": 30,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "721", "configured_source_name": "Internacao C"}
+        {"source_code": "721", "configured_source_name": "0 L - INTERMEDIARIO ALA C - HGRS"}
       ]
     },
     {
       "stable_key": "ENF-1A",
-      "display_name": "Enfermaria 1A",
+      "display_name": "Enfermaria 1A Cirurgia Geral",
       "official_capacity": 36,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "640", "configured_source_name": "Enfermaria 1A"}
+        {"source_code": "640", "configured_source_name": "1 6 - 1A - CIRURGIA GERAL - HGRS"}
       ]
     },
     {
@@ -152,25 +152,25 @@
       "official_capacity": 30,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "642", "configured_source_name": "Enfermaria 1B"}
+        {"source_code": "642", "configured_source_name": "1 7 - 1B - HGRS"}
       ]
     },
     {
       "stable_key": "ENF-1C",
-      "display_name": "Enfermaria 1C",
+      "display_name": "Enfermaria 1C Cirurgias Eletivas",
       "official_capacity": 30,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "644", "configured_source_name": "Enfermaria 1C"}
+        {"source_code": "644", "configured_source_name": "1 8 - 1C - CIRURGIAS ELETIVAS - HGRS"}
       ]
     },
     {
       "stable_key": "ENF-2A-HEMA",
-      "display_name": "Enfermaria 2A Hematologia",
+      "display_name": "Enfermaria 2A Oncohemato",
       "official_capacity": 20,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "643", "configured_source_name": "Enfermaria 2A Hematologia"}
+        {"source_code": "643", "configured_source_name": "2 6 - 2A - ONCOHEMATO - HGRS"}
       ]
     },
     {
@@ -179,35 +179,35 @@
       "official_capacity": 6,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "2155", "configured_source_name": "Enfermaria 2A Isolamento"}
+        {"source_code": "2155", "configured_source_name": "2 6 - 2A - CLINICA ISOLAMENTO"}
       ]
     },
     {
       "stable_key": "ENF-2B-CARD",
-      "display_name": "Enfermaria 2B Cardiologia",
+      "display_name": "Cardioclinica / Enfermaria 2B Cardio",
       "official_capacity": 15,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "719", "configured_source_name": "Cardiologia 719"},
-        {"source_code": "2156", "configured_source_name": "Cardiologia 2156"}
+        {"source_code": "719", "configured_source_name": "0 N - CARDIOCLINICA"},
+        {"source_code": "2156", "configured_source_name": "2 7 - 2B - CARDIO - HGRS"}
       ]
     },
     {
       "stable_key": "ENF-2B-NEURO",
-      "display_name": "Enfermaria 2B Neuro",
+      "display_name": "Enfermaria 2B Neuroclínica",
       "official_capacity": 24,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "651", "configured_source_name": "Enfermaria 2B Neuro"}
+        {"source_code": "651", "configured_source_name": "2 7 - 2B - NEUROCLINICA - HGRS"}
       ]
     },
     {
       "stable_key": "ENF-2C-CLIN",
-      "display_name": "Enfermaria 2C Clínica",
+      "display_name": "Enfermaria 2C Clínica Médica",
       "official_capacity": 28,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "652", "configured_source_name": "Enfermaria 2C Clínica"}
+        {"source_code": "652", "configured_source_name": "2 8 - 2C - CLINICA MÉDICA - HGRS"}
       ]
     },
     {
@@ -216,146 +216,146 @@
       "official_capacity": 6,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "2158", "configured_source_name": "Enfermaria 2C Endócrino"}
+        {"source_code": "2158", "configured_source_name": "2 8 - 2C - ENDOCRINO - HGRS"}
       ]
     },
     {
       "stable_key": "OBST-3A",
-      "display_name": "Obstetrícia 3A",
+      "display_name": "Enfermaria 3A Obstetrícia Clínica",
       "official_capacity": 32,
       "calculation_policy": "linked_slots_pending",
       "source_codes": [
-        {"source_code": "654", "configured_source_name": "Obstetrícia 3A"}
+        {"source_code": "654", "configured_source_name": "3 6 - 3A - OBSTETRÍCIA CLÍNICA - HGRS"}
       ]
     },
     {
       "stable_key": "OBST-3B",
-      "display_name": "Obstetrícia 3B",
+      "display_name": "Enfermaria 3B Obstetrícia Cirúrgica",
       "official_capacity": 28,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "653", "configured_source_name": "Obstetrícia 3B"}
+        {"source_code": "653", "configured_source_name": "3 7 - 3B - OBSTETRÍCIA CIRÚRGICA - HGRS"}
       ]
     },
     {
       "stable_key": "ENF-4A",
-      "display_name": "Enfermaria 4A",
+      "display_name": "Enfermaria 4A Oncohematologia",
       "official_capacity": 14,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "656", "configured_source_name": "Enfermaria 4A"}
+        {"source_code": "656", "configured_source_name": "4 6 - 4A - ONCOHEMATOLOGIA - HGRS"}
       ]
     },
     {
       "stable_key": "ENF-4B",
-      "display_name": "Enfermaria 4B",
+      "display_name": "Enfermaria 4B Neurocirurgia",
       "official_capacity": 30,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "658", "configured_source_name": "Enfermaria 4B"}
+        {"source_code": "658", "configured_source_name": "4 7 - 4B - NEUROCIRURGIA - HGRS"}
       ]
     },
     {
       "stable_key": "ENF-4C",
-      "display_name": "Enfermaria 4C",
+      "display_name": "Enfermaria 4C Pediatria",
       "official_capacity": 45,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "659", "configured_source_name": "Enfermaria 4C"}
+        {"source_code": "659", "configured_source_name": "4 8 - 4C - CLINICA MÉDICA PEDIÁTRICA - HGRS"}
       ]
     },
     {
       "stable_key": "EM-ADULTO-AMAR",
-      "display_name": "Emergencia Adulto Amarela",
+      "display_name": "Sala Amarela Adulto",
       "official_capacity": 13,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "731", "configured_source_name": "Emergencia Adulto Amarela"}
+        {"source_code": "731", "configured_source_name": "0 T - SALA AMARELA ADULTO HGRS"}
       ]
     },
     {
       "stable_key": "EM-ADULTO-LAR",
-      "display_name": "Emergencia Adulto Laranja",
+      "display_name": "Sala Laranja Adulto",
       "official_capacity": 16,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "745", "configured_source_name": "Emergencia Adulto Laranja"}
+        {"source_code": "745", "configured_source_name": "0 T - SALA LARANJA ADULTO HGRS"}
       ]
     },
     {
       "stable_key": "EM-ADULTO-VERM",
-      "display_name": "Emergencia Adulto Vermelha",
+      "display_name": "Sala Vermelha Adulto",
       "official_capacity": 3,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "729", "configured_source_name": "Emergencia Adulto Vermelha"}
+        {"source_code": "729", "configured_source_name": "0 T - SALA VERMELHA ADULTO HGRS"}
       ]
     },
     {
       "stable_key": "EM-ADULTO-PROC",
-      "display_name": "Emergencia Adulto Procedimentos",
+      "display_name": "Sala de Procedimento Adulto",
       "official_capacity": 2,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "751", "configured_source_name": "Emergencia Adulto Procedimentos"}
+        {"source_code": "751", "configured_source_name": "0 - SALA DE PROCEDIMENTO ADULTO HGRS"}
       ]
     },
     {
       "stable_key": "EM-ADULTO-OBS",
-      "display_name": "Emergencia Adulto Observação",
+      "display_name": "Sala de Observação Adulto",
       "official_capacity": 1,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "954", "configured_source_name": "Emergencia Adulto Observação"}
+        {"source_code": "954", "configured_source_name": "0 T - SALA DE OBSERVACAO ADULTO HGRS"}
       ]
     },
     {
       "stable_key": "EM-PED-AMAR",
-      "display_name": "Emergencia Pediátrica Amarela",
+      "display_name": "Sala Amarela Pediátrica",
       "official_capacity": 15,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "738", "configured_source_name": "Emergencia Pediátrica Amarela"}
+        {"source_code": "738", "configured_source_name": "0 T - SALA AMARELA PED HGRS"}
       ]
     },
     {
       "stable_key": "EM-PED-LAR",
-      "display_name": "Emergencia Pediátrica Laranja",
+      "display_name": "Sala Laranja Pediátrica",
       "official_capacity": 4,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "1004", "configured_source_name": "Emergencia Pediátrica Laranja"}
+        {"source_code": "1004", "configured_source_name": "0 T - SALA LARANJA PED HGRS"}
       ]
     },
     {
       "stable_key": "EM-PED-VERM",
-      "display_name": "Emergencia Pediátrica Vermelha",
+      "display_name": "Sala Vermelha Pediátrica",
       "official_capacity": 3,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "732", "configured_source_name": "Emergencia Pediátrica Vermelha"}
+        {"source_code": "732", "configured_source_name": "0 T - SALA VERMELHA PED HGRS"}
       ]
     },
     {
       "stable_key": "EM-PED-OBS",
-      "display_name": "Emergencia Pediátrica Observação",
+      "display_name": "Sala de Observação Pediátrica",
       "official_capacity": 2,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "747", "configured_source_name": "Emergencia Pediátrica Observação"}
+        {"source_code": "747", "configured_source_name": "0 T - SALA DE OBSERVACAO PED HGRS"}
       ]
     },
     {
       "stable_key": "CO",
-      "display_name": "Centro Obstetrico",
+      "display_name": "Centro Obstétrico",
       "official_capacity": 8,
       "calculation_policy": "standard",
       "source_codes": [
-        {"source_code": "20", "configured_source_name": "Centro Obstetrico 20"},
-        {"source_code": "1110", "configured_source_name": "Centro Obstetrico 1110"},
-        {"source_code": "1112", "configured_source_name": "Centro Obstetrico 1112"},
-        {"source_code": "1114", "configured_source_name": "Centro Obstetrico 1114"},
-        {"source_code": "1116", "configured_source_name": "Centro Obstetrico 1116"}
+        {"source_code": "20", "configured_source_name": "0 T - CENTRO OBSTETRICO (CO) - HGRS"},
+        {"source_code": "1110", "configured_source_name": "0 T - SALA DE OBSERVACAO GINECOLOGICA"},
+        {"source_code": "1112", "configured_source_name": "0 T - SALA DE MEDICACAO - OBSERVACAO CO"},
+        {"source_code": "1114", "configured_source_name": "0 T - SALA DE ESTABILIZAÇÃO CO (RN)"},
+        {"source_code": "1116", "configured_source_name": "0 T - INTERNAÇÃO CENTRO OBSTETRICO"}
       ]
     },
     {
@@ -364,25 +364,25 @@
       "official_capacity": null,
       "calculation_policy": "unrated",
       "source_codes": [
-        {"source_code": "733", "configured_source_name": "CRPA HGRS"}
+        {"source_code": "733", "configured_source_name": "0 T - CRPA - HGRS"}
       ]
     },
     {
       "stable_key": "UNRATED-CRPA-HOMEM",
-      "display_name": "CRPA Homem",
+      "display_name": "CRPA Hospital do Homem",
       "official_capacity": null,
       "calculation_policy": "unrated",
       "source_codes": [
-        {"source_code": "1522", "configured_source_name": "CRPA Homem"}
+        {"source_code": "1522", "configured_source_name": "0 T - CRPA - HH"}
       ]
     },
     {
       "stable_key": "UNRATED-MED-PED",
-      "display_name": "Medicina Pediátrica",
+      "display_name": "Sala de Medicação Pediátrica",
       "official_capacity": null,
       "calculation_policy": "unrated",
       "source_codes": [
-        {"source_code": "1002", "configured_source_name": "Medicina Pediátrica"}
+        {"source_code": "1002", "configured_source_name": "0 T - SALA DE MEDICACAO PED HGRS"}
       ]
     }
   ]

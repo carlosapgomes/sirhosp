@@ -96,10 +96,11 @@ class CapacityGroupDefinition(models.Model):
                             CalculationPolicy.STANDARD,
                             CalculationPolicy.LINKED_SLOTS_PENDING,
                         ],
+                        official_capacity__isnull=False,
                         official_capacity__gt=0,
                     )
                 ),
-                name="ck_capacity_group_policy_capacity",
+                name="ck_capacity_group_policy_capacity_v2",
             ),
         ]
         ordering = ["catalog", "stable_key"]

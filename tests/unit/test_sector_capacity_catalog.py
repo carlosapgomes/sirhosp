@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ from django.core.management.base import CommandError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from apps.census import capacity_catalog as catalog_module
 from apps.census.capacity_catalog import (
     CatalogConflictError,
     CatalogValidationError,
@@ -32,6 +34,111 @@ INITIAL_CATALOG = (
     / "data"
     / "initial_sector_capacity_catalog.json"
 )
+
+# C1: nomes exatos esperados no sistema fonte (CensusSnapshot.setor).
+EXPECTED_SOURCE_NAMES = {
+    "751": "0 - SALA DE PROCEDIMENTO ADULTO HGRS",
+    "728": "0 0 - CHD - HGRS",
+    "721": "0 L - INTERMEDIARIO ALA C - HGRS",
+    "719": "0 N - CARDIOCLINICA",
+    "720": "0 S - INTERMEDIÁRIO ALA B - HGRS",
+    "20": "0 T - CENTRO OBSTETRICO (CO) - HGRS",
+    "733": "0 T - CRPA - HGRS",
+    "1522": "0 T - CRPA - HH",
+    "2702": "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS",
+    "1116": "0 T - INTERNAÇÃO CENTRO OBSTETRICO",
+    "731": "0 T - SALA AMARELA ADULTO HGRS",
+    "738": "0 T - SALA AMARELA PED HGRS",
+    "1114": "0 T - SALA DE ESTABILIZAÇÃO CO (RN)",
+    "1112": "0 T - SALA DE MEDICACAO - OBSERVACAO CO",
+    "1002": "0 T - SALA DE MEDICACAO PED HGRS",
+    "954": "0 T - SALA DE OBSERVACAO ADULTO HGRS",
+    "1110": "0 T - SALA DE OBSERVACAO GINECOLOGICA",
+    "747": "0 T - SALA DE OBSERVACAO PED HGRS",
+    "745": "0 T - SALA LARANJA ADULTO HGRS",
+    "1004": "0 T - SALA LARANJA PED HGRS",
+    "729": "0 T - SALA VERMELHA ADULTO HGRS",
+    "732": "0 T - SALA VERMELHA PED HGRS",
+    "637": "0 T - UNIDADE DE AVC - HGRS",
+    "628": "0 T - UTI CARDIOVASCULAR - HGRS",
+    "630": "0 T - UTI CIRÚRGICA - HGRS",
+    "633": "0 T - UTI GERAL ADULTO 1 - HGRS",
+    "634": "0 T - UTI GERAL ADULTO 2 - HGRS",
+    "629": "0 T - UTI NEUROLÓGICA - HGRS",
+    "631": "0 T - UTI PEDIATRICA - HGRS",
+    "640": "1 6 - 1A - CIRURGIA GERAL - HGRS",
+    "642": "1 7 - 1B - HGRS",
+    "644": "1 8 - 1C - CIRURGIAS ELETIVAS - HGRS",
+    "2155": "2 6 - 2A - CLINICA ISOLAMENTO",
+    "643": "2 6 - 2A - ONCOHEMATO - HGRS",
+    "2156": "2 7 - 2B - CARDIO - HGRS",
+    "651": "2 7 - 2B - NEUROCLINICA - HGRS",
+    "652": "2 8 - 2C - CLINICA MÉDICA - HGRS",
+    "2158": "2 8 - 2C - ENDOCRINO - HGRS",
+    "654": "3 6 - 3A - OBSTETRÍCIA CLÍNICA - HGRS",
+    "653": "3 7 - 3B - OBSTETRÍCIA CIRÚRGICA - HGRS",
+    "655": "3 8 - 3C - UNID. CUIDADOS INTERM. NEONATAL CANGURU (UCINCA) - HGRS",
+    "635": "3 8 - 3C - UNID. CUIDADOS INTERM. NEONATAL CONV. (UCINCO) - HGRS",
+    "636": "3 8 - 3C - UTI NEONATAL (UTIN) - HGRS",
+    "656": "4 6 - 4A - ONCOHEMATOLOGIA - HGRS",
+    "1926": "4 6 - UTI ONCOHEMATO - HGRS",
+    "658": "4 7 - 4B - NEUROCIRURGIA - HGRS",
+    "659": "4 8 - 4C - CLINICA MÉDICA PEDIÁTRICA - HGRS",
+}
+
+# C1: rótulos resumidos aprovados para exibição (correspondência oficial).
+EXPECTED_DISPLAY_NAMES = {
+    "CHD": "CHD",
+    "GASTRO": "Enfermaria Gastroenterologia",
+    "UAVC": "Unidade de AVC",
+    "UTI-CARDIO": "UTI Cardiovascular",
+    "UTI-CIR": "UTI Cirúrgica",
+    "UTI-G1": "UTI Geral Adulto 1",
+    "UTI-G2": "UTI Geral Adulto 2",
+    "UTI-NEURO": "UTI Neurológica",
+    "UTI-PED": "UTI Pediátrica",
+    "UTI-NEO": "UTI Neonatal",
+    "UTI-ONCO": "UTI Oncohematologia",
+    "UCINCA": "Cuidado Intermediário Neonatal Canguru",
+    "UCINCO": "Cuidado Intermediário Neonatal Convencional",
+    "INT-B": "Intermediário Ala B",
+    "INT-C": "Intermediário Ala C",
+    "ENF-1A": "Enfermaria 1A Cirurgia Geral",
+    "ENF-1B": "Enfermaria 1B",
+    "ENF-1C": "Enfermaria 1C Cirurgias Eletivas",
+    "ENF-2A-HEMA": "Enfermaria 2A Oncohemato",
+    "ENF-2A-ISO": "Enfermaria 2A Isolamento",
+    "ENF-2B-CARD": "Cardioclinica / Enfermaria 2B Cardio",
+    "ENF-2B-NEURO": "Enfermaria 2B Neuroclínica",
+    "ENF-2C-CLIN": "Enfermaria 2C Clínica Médica",
+    "ENF-2C-ENDO": "Enfermaria 2C Endócrino",
+    "OBST-3A": "Enfermaria 3A Obstetrícia Clínica",
+    "OBST-3B": "Enfermaria 3B Obstetrícia Cirúrgica",
+    "ENF-4A": "Enfermaria 4A Oncohematologia",
+    "ENF-4B": "Enfermaria 4B Neurocirurgia",
+    "ENF-4C": "Enfermaria 4C Pediatria",
+    "EM-ADULTO-AMAR": "Sala Amarela Adulto",
+    "EM-ADULTO-LAR": "Sala Laranja Adulto",
+    "EM-ADULTO-VERM": "Sala Vermelha Adulto",
+    "EM-ADULTO-PROC": "Sala de Procedimento Adulto",
+    "EM-ADULTO-OBS": "Sala de Observação Adulto",
+    "EM-PED-AMAR": "Sala Amarela Pediátrica",
+    "EM-PED-LAR": "Sala Laranja Pediátrica",
+    "EM-PED-VERM": "Sala Vermelha Pediátrica",
+    "EM-PED-OBS": "Sala de Observação Pediátrica",
+    "CO": "Centro Obstétrico",
+    "UNRATED-CRPA-HGRS": "CRPA HGRS",
+    "UNRATED-CRPA-HOMEM": "CRPA Hospital do Homem",
+    "UNRATED-MED-PED": "Sala de Medicação Pediátrica",
+}
+
+
+def _set_nested(document: dict, path: list, value: object) -> None:
+    """Set a value at a nested path (int indexes lists)."""
+    node = document
+    for key in path[:-1]:
+        node = node[key]
+    node[path[-1]] = value
 
 
 def _future_date(days: int = 1) -> str:
@@ -127,6 +234,29 @@ class TestSchemaConstraints:
                     official_capacity=0,
                     calculation_policy=CalculationPolicy.STANDARD,
                 )
+
+    @pytest.mark.django_db
+    def test_db_null_capacity_rejected_for_calculable_policies(self):
+        """C3: NULL capacity must be rejected for calculable policies."""
+        version = CapacityCatalogVersion.objects.create(
+            effective_from="2030-01-04",
+            source_reference="r",
+            source_sha256="c" * 64,
+            schema_version="1.0",
+        )
+        for policy in (
+            CalculationPolicy.STANDARD,
+            CalculationPolicy.LINKED_SLOTS_PENDING,
+        ):
+            with pytest.raises(IntegrityError):
+                with transaction.atomic():
+                    CapacityGroupDefinition.objects.create(
+                        catalog=version,
+                        stable_key=f"NULL-CAP-{policy}",
+                        display_name="X",
+                        official_capacity=None,
+                        calculation_policy=policy,
+                    )
 
     @pytest.mark.django_db
     def test_db_duplicate_stable_key_and_source_code_rejected(self):
@@ -300,6 +430,42 @@ class TestInitialCatalog:
             for m in group["source_codes"]
         ]
         assert len(codes) == len(set(codes)) == 47
+
+    def test_initial_catalog_configured_source_names_exact(self):
+        """C1: full 47-code dictionary matches the source system names."""
+        document = _initial_document()
+        configured = {
+            m["source_code"]: m["configured_source_name"]
+            for group in document["groups"]
+            for m in group["source_codes"]
+        }
+        assert len(EXPECTED_SOURCE_NAMES) == 47
+        assert configured == EXPECTED_SOURCE_NAMES
+
+    def test_initial_catalog_display_names_approved(self):
+        """C1: display_name labels match the approved summarized names."""
+        document = _initial_document()
+        configured = {
+            group["stable_key"]: group["display_name"]
+            for group in document["groups"]
+        }
+        assert len(EXPECTED_DISPLAY_NAMES) == 42
+        assert configured == EXPECTED_DISPLAY_NAMES
+
+    def test_initial_catalog_provenance(self):
+        """C2: provenance identifies source file, hash and 2026 dates."""
+        document = _initial_document()
+        reference = document["source_reference"]
+        assert len(reference) <= 255
+        assert "setores-leitos.xls" in reference
+        assert (
+            "fa5c4e95941794b4a90f2011d0584ae9eb5d4a5178e7e4022debeef4db8ca4dd"
+            in reference
+        )
+        assert "29/07/2026" in reference
+        assert "16/08/2026" in reference
+        assert "2025" not in reference
+        assert "sem dados de pacientes" in reference
 
 
 class TestControlledActivation:
@@ -521,3 +687,205 @@ class TestInitialCatalogCommand:
         assert CapacityCatalogVersion.objects.count() == 1
         assert CapacityGroupDefinition.objects.count() == 42
         assert CapacitySectorMembership.objects.count() == 47
+
+
+class TestStrictDateFormat:
+    """C7: only strict YYYY-MM-DD with a real, future local date is accepted."""
+
+    @pytest.mark.parametrize(
+        "raw_date",
+        [
+            "20270915",
+            "2027-W37-3",
+            "2026/08/17",
+            "17-08-2026",
+            "2026-13-01",
+            "2026-02-30",
+            "abc",
+            "2026-8-17",
+        ],
+    )
+    @pytest.mark.django_db
+    def test_activation_rejects_non_iso_dates(self, tmp_path: Path, raw_date: str):
+        path = _write_document(tmp_path, _valid_document())
+        with pytest.raises(CatalogValidationError):
+            activate_sector_capacity_catalog(path, raw_date)
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_activation_accepts_exact_iso_date_format(self, tmp_path: Path):
+        path = _write_document(tmp_path, _valid_document())
+        effective = (timezone.localdate() + timedelta(days=10)).isoformat()
+        result = activate_sector_capacity_catalog(path, effective)
+        assert result.created is True
+        assert CapacityCatalogVersion.objects.count() == 1
+
+
+class TestFieldLimits:
+    """C6: dry-run validation rejects fields above the persisted max_length."""
+
+    @pytest.mark.parametrize(
+        ("path_keys", "limit"),
+        [
+            (["schema_version"], 20),
+            (["source_reference"], 255),
+            (["groups", 0, "stable_key"], 100),
+            (["groups", 0, "display_name"], 255),
+            (["groups", 0, "source_codes", 0, "source_code"], 50),
+            (["groups", 0, "source_codes", 0, "configured_source_name"], 255),
+        ],
+    )
+    @pytest.mark.django_db
+    def test_validation_rejects_overlong_fields(
+        self, tmp_path: Path, path_keys: list, limit: int
+    ):
+        document = _valid_document()
+        _set_nested(document, path_keys, "x" * (limit + 1))
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError) as excinfo:
+            activate_sector_capacity_catalog(path, _future_date(), dry_run=True)
+        message = str(excinfo.value)
+        assert '"groups"' not in message
+        assert "source_codes" not in message
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_command_dry_run_rejects_overlong_schema_version(
+        self, tmp_path: Path, capsys
+    ):
+        document = _valid_document()
+        document["schema_version"] = "x" * 21
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CommandError):
+            call_command(
+                "activate_sector_capacity_catalog",
+                "--input",
+                str(path),
+                "--effective-from",
+                _future_date(),
+                "--dry-run",
+            )
+        assert CapacityCatalogVersion.objects.count() == 0
+
+
+class _NoWinnerQuerySet:
+    """Fake queryset that hides the winning row (concurrent race simulation)."""
+
+    def filter(self, **kwargs) -> "_NoWinnerQuerySet":
+        return self
+
+    def first(self) -> None:
+        return None
+
+
+class TestConcurrentRecovery:
+    """C4: recovery after IntegrityError re-reads the winner by hash."""
+
+    def _hide_winner(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            CapacityCatalogVersion.objects,
+            "select_for_update",
+            lambda: _NoWinnerQuerySet(),
+        )
+
+    def _simulate_lost_insert(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise_integrity(*args, **kwargs):
+            raise IntegrityError("unique constraint violation")
+
+        monkeypatch.setattr(catalog_module, "_persist_catalog", _raise_integrity)
+
+    @pytest.mark.django_db
+    def test_same_hash_race_recovers_as_idempotent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        document = _valid_document()
+        path = _write_document(tmp_path, document)
+        effective = _future_date()
+        winner_hash = hashlib.sha256(
+            json.dumps(document).encode("utf-8")
+        ).hexdigest()
+        CapacityCatalogVersion.objects.create(
+            effective_from=effective,
+            source_reference="winner",
+            source_sha256=winner_hash,
+            schema_version="1.0",
+        )
+        self._hide_winner(monkeypatch)
+        self._simulate_lost_insert(monkeypatch)
+        result = activate_sector_capacity_catalog(path, effective)
+        assert result.created is False
+        assert result.document_sha256 == winner_hash
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert CapacityGroupDefinition.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_different_hash_race_recovers_as_conflict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        document = _valid_document()
+        path = _write_document(tmp_path, document)
+        effective = _future_date()
+        CapacityCatalogVersion.objects.create(
+            effective_from=effective,
+            source_reference="winner",
+            source_sha256="f" * 64,
+            schema_version="1.0",
+        )
+        self._hide_winner(monkeypatch)
+        self._simulate_lost_insert(monkeypatch)
+        with pytest.raises(CatalogConflictError):
+            activate_sector_capacity_catalog(path, effective)
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert (
+            CapacityCatalogVersion.objects.get(effective_from=effective)
+            .source_sha256
+            == "f" * 64
+        )
+        assert CapacityGroupDefinition.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_lost_race_without_winner_raises_safe_conflict(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        path = _write_document(tmp_path, _valid_document())
+        effective = _future_date()
+        self._hide_winner(monkeypatch)
+        self._simulate_lost_insert(monkeypatch)
+        with pytest.raises(CatalogConflictError) as excinfo:
+            activate_sector_capacity_catalog(path, effective)
+        message = str(excinfo.value)
+        assert "corrida" in message or "concorrente" in message
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+
+class TestSingleRead:
+    """C5: activation reads the payload exactly once; hash comes from it."""
+
+    @pytest.mark.django_db
+    def test_activation_reads_payload_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        document = _valid_document()
+        path = _write_document(tmp_path, document)
+        expected_hash = hashlib.sha256(
+            json.dumps(document).encode("utf-8")
+        ).hexdigest()
+        real_read_bytes = Path.read_bytes
+        calls = {"n": 0}
+
+        def counting_read_bytes(self) -> bytes:
+            calls["n"] += 1
+            return real_read_bytes(self)
+
+        monkeypatch.setattr(catalog_module.Path, "read_bytes", counting_read_bytes)
+        result = activate_sector_capacity_catalog(path, _future_date())
+        assert calls["n"] == 1
+        assert result.document_sha256 == expected_hash
+        version = CapacityCatalogVersion.objects.get()
+        assert version.source_sha256 == expected_hash

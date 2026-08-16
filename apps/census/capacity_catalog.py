@@ -4,18 +4,23 @@ Cohesive parsing, whole-document validation and controlled activation of a
 complete capacity catalog published for a strictly future local date in
 ``America/Bahia``. Persistence is atomic and immutable: a version can never be
 edited or deleted, and the same date accepts only the same document hash.
+
+The input payload is read exactly once; parsing, validation and the SHA-256
+derive from the same immutable byte buffer. After a lost concurrent insert the
+winner is re-read by effective date and compared by hash.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
 from apps.census.models import (
@@ -23,6 +28,29 @@ from apps.census.models import (
     CapacityCatalogVersion,
     CapacityGroupDefinition,
     CapacitySectorMembership,
+)
+
+_ISO_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _field_max_length(model: type[models.Model], field_name: str) -> int:
+    field = model._meta.get_field(field_name)
+    assert isinstance(field, models.Field), field_name
+    limit = field.max_length
+    assert limit is not None, f"{field_name} precisa de max_length"
+    return limit
+
+
+# Limites persistíveis derivados dos campos Django (DRY: sem duplicar números).
+MAX_SCHEMA_VERSION = _field_max_length(CapacityCatalogVersion, "schema_version")
+MAX_SOURCE_REFERENCE = _field_max_length(
+    CapacityCatalogVersion, "source_reference"
+)
+MAX_STABLE_KEY = _field_max_length(CapacityGroupDefinition, "stable_key")
+MAX_DISPLAY_NAME = _field_max_length(CapacityGroupDefinition, "display_name")
+MAX_SOURCE_CODE = _field_max_length(CapacitySectorMembership, "source_code")
+MAX_CONFIGURED_SOURCE_NAME = _field_max_length(
+    CapacitySectorMembership, "configured_source_name"
 )
 
 
@@ -126,21 +154,12 @@ _ALLOWED_POLICIES = frozenset(
 )
 
 
-def load_catalog_document(input_path: str | Path) -> dict[str, Any]:
-    """Read and parse the JSON catalog document."""
-    path = Path(input_path)
+def parse_catalog_document(raw_document: bytes) -> dict[str, Any]:
+    """Decode and parse the JSON catalog document from a single buffer."""
     try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise CatalogValidationError(
-            f"Não foi possível ler '{path.name}'."
-        ) from exc
-    try:
-        document = json.loads(raw.decode("utf-8"))
+        document = json.loads(raw_document.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CatalogValidationError(
-            f"JSON inválido em '{path.name}'."
-        ) from exc
+        raise CatalogValidationError("JSON inválido.") from exc
     if not isinstance(document, dict):
         raise CatalogValidationError("Documento JSON deve ser um objeto.")
     return document
@@ -150,8 +169,9 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
     """Validate the whole document before any persistence.
 
     Rejects duplicate stable keys, duplicate source codes, cross-catalog
-    ambiguity, invalid policy/capacity combinations and missing required
-    names/codes. Raises :class:`CatalogValidationError` on the first problem.
+    ambiguity, invalid policy/capacity combinations, missing required
+    names/codes and fields that exceed the persisted ``max_length``.
+    Raises :class:`CatalogValidationError` on the first problem.
     """
     schema_version = document.get("schema_version")
     source_reference = document.get("source_reference")
@@ -161,10 +181,16 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
         raise CatalogValidationError(
             "Campo 'schema_version' ausente ou vazio."
         )
+    _reject_overlong(
+        schema_version, "schema_version", MAX_SCHEMA_VERSION
+    )
     if not isinstance(source_reference, str) or not source_reference.strip():
         raise CatalogValidationError(
             "Campo 'source_reference' ausente ou vazio."
         )
+    _reject_overlong(
+        source_reference, "source_reference", MAX_SOURCE_REFERENCE
+    )
     if not isinstance(raw_groups, list) or not raw_groups:
         raise CatalogValidationError("Campo 'groups' ausente ou vazio.")
 
@@ -205,16 +231,24 @@ def activate_sector_capacity_catalog(
     ``activate_sector_capacity_catalog --input <arquivo-json>
     --effective-from YYYY-MM-DD [--dry-run]``.
 
-    - the date must be strictly after ``timezone.localdate()``;
+    - the payload is read once; parse, validation and hash share the buffer;
+    - the date must be strictly after ``timezone.localdate()`` and formatted
+      exactly ``YYYY-MM-DD``;
     - the document is fully validated and hashed before any write;
     - persistence happens in one atomic transaction;
-    - the same date/hash is an idempotent no-op;
+    - the same date/hash is an idempotent no-op, even after a lost race;
     - the same date/different hash raises :class:`CatalogConflictError`;
     - ``--dry-run`` never persists.
     """
     path = Path(input_path)
-    document = load_catalog_document(path)
-    document_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    try:
+        raw_document = path.read_bytes()
+    except OSError as exc:
+        raise CatalogValidationError(
+            f"Não foi possível ler '{path.name}'."
+        ) from exc
+    document = parse_catalog_document(raw_document)
+    document_sha256 = hashlib.sha256(raw_document).hexdigest()
     validated = validate_catalog_document(document)
     effective_date = _parse_future_date(effective_from)
 
@@ -233,11 +267,7 @@ def activate_sector_capacity_catalog(
 
     try:
         with transaction.atomic():
-            existing = (
-                CapacityCatalogVersion.objects.select_for_update()
-                .filter(effective_from=effective_date)
-                .first()
-            )
+            existing = _find_locked_version(effective_date)
             if existing is not None:
                 if existing.source_sha256 == document_sha256:
                     return base_result
@@ -248,18 +278,57 @@ def activate_sector_capacity_catalog(
             _persist_catalog(validated, effective_date, document_sha256)
             return replace(base_result, created=True)
     except IntegrityError as exc:
+        return _recover_from_lost_race(
+            effective_date, document_sha256, base_result, exc
+        )
+
+
+def _find_locked_version(
+    effective_date: date,
+) -> CapacityCatalogVersion | None:
+    """Select the existing version for update inside the transaction."""
+    return (
+        CapacityCatalogVersion.objects.select_for_update()
+        .filter(effective_from=effective_date)
+        .first()
+    )
+
+
+def _recover_from_lost_race(
+    effective_date: date,
+    document_sha256: str,
+    base_result: ActivationResult,
+    cause: IntegrityError,
+) -> ActivationResult:
+    """Re-read the winner after an IntegrityError and resolve by hash."""
+    winner = CapacityCatalogVersion.objects.filter(
+        effective_from=effective_date
+    ).first()
+    if winner is None:
         raise CatalogConflictError(
-            f"Data {effective_date} já possui catálogo publicado."
-        ) from exc
+            f"Não foi possível publicar o catálogo para {effective_date} "
+            "em corrida concorrente."
+        ) from cause
+    if winner.source_sha256 == document_sha256:
+        return base_result
+    raise CatalogConflictError(
+        f"Data {effective_date} já possui catálogo com hash diferente."
+    ) from cause
 
 
 def _parse_future_date(value: str | date) -> date:
     if not isinstance(value, date):
+        if _ISO_DATE_PATTERN.fullmatch(value) is None:
+            raise CatalogValidationError(
+                f"Data efetiva inválida: '{value}' "
+                "(esperado YYYY-MM-DD)."
+            )
         try:
             effective_date = date.fromisoformat(value)
         except ValueError as exc:
             raise CatalogValidationError(
-                f"Data efetiva inválida: '{value}' (esperado YYYY-MM-DD)."
+                f"Data efetiva inválida: '{value}' "
+                "(esperado YYYY-MM-DD)."
             ) from exc
     else:
         effective_date = value
@@ -270,6 +339,19 @@ def _parse_future_date(value: str | date) -> date:
             f"posterior a hoje ({today})."
         )
     return effective_date
+
+
+def _reject_overlong(
+    value: str,
+    field_name: str,
+    max_length: int,
+    context: str = "",
+) -> None:
+    if len(value) > max_length:
+        prefix = f"{context}: " if context else ""
+        raise CatalogValidationError(
+            f"{prefix}'{field_name}' excede {max_length} caracteres."
+        )
 
 
 def _validate_group(raw_group: Any, index: int) -> GroupSpec:
@@ -285,10 +367,16 @@ def _validate_group(raw_group: Any, index: int) -> GroupSpec:
         raise CatalogValidationError(
             f"Grupo {index}: 'stable_key' ausente ou vazio."
         )
+    _reject_overlong(
+        stable_key, "stable_key", MAX_STABLE_KEY, f"Grupo {index}"
+    )
     if not isinstance(display_name, str) or not display_name.strip():
         raise CatalogValidationError(
             f"Grupo {index}: 'display_name' ausente ou vazio."
         )
+    _reject_overlong(
+        display_name, "display_name", MAX_DISPLAY_NAME, f"Grupo {index}"
+    )
     if policy not in _ALLOWED_POLICIES:
         raise CatalogValidationError(
             f"Grupo {index}: política '{policy}' não permitida."
@@ -354,10 +442,22 @@ def _validate_membership(raw_code: Any, group_index: int) -> MembershipSpec:
         raise CatalogValidationError(
             f"Grupo {group_index}: 'source_code' ausente ou vazio."
         )
+    _reject_overlong(
+        source_code,
+        "source_code",
+        MAX_SOURCE_CODE,
+        f"Grupo {group_index}",
+    )
     if not isinstance(configured_name, str) or not configured_name.strip():
         raise CatalogValidationError(
             f"Grupo {group_index}: 'configured_source_name' ausente ou vazio."
         )
+    _reject_overlong(
+        configured_name,
+        "configured_source_name",
+        MAX_CONFIGURED_SOURCE_NAME,
+        f"Grupo {group_index}",
+    )
     return MembershipSpec(
         source_code=source_code.strip(),
         configured_source_name=configured_name.strip(),
