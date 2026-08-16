@@ -127,5 +127,5 @@
   release immutability.
 - [x] 9.5 Run focused and official gates, strict OpenSpec and Markdown lint, then
   create `/tmp/sirhosp-slice-RHID-S1-C8-report.md`.
-- [ ] 9.6 Commit and push the corrected workflow before enabling repository
+- [x] 9.6 Commit and push the corrected workflow before enabling repository
   immutable releases; verify `enabled=true` without modifying RC1-RC5.
