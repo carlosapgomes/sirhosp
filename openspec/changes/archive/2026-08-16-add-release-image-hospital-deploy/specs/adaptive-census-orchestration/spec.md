@@ -5,15 +5,17 @@
 ### Requirement: Orchestrator executes one safe census cycle
 
 The orchestrator SHALL execute a safe census cycle by running census extraction
-and then processing the snapshot produced by that extraction. The one-shot
-management command SHALL return a nonzero process status when the cycle fails,
-is ambiguous, or produces an unknown outcome.
+and then processing the snapshot produced by that extraction only when the
+extraction is complete enough for operational use. The one-shot management
+command SHALL return a nonzero process status when the cycle fails, is
+incomplete, is ambiguous, or produces an unknown outcome.
 
 #### Scenario: Successful single cycle
 
 - **WHEN** the orchestrator is asked to run one cycle
 - **AND** the queue is drained
 - **AND** the cooldown interval has elapsed
+- **AND** `extract_census` completes with at least 40 distinct sectors
 - **THEN** it runs `extract_census`
 - **AND** it identifies exactly one new successful `census_extraction` run
 - **AND** it runs `process_census_snapshot` with that run id
@@ -27,6 +29,15 @@ is ambiguous, or produces an unknown outcome.
 - **THEN** it MUST NOT run `process_census_snapshot`
 - **AND** the one-shot command reports the failure and returns a nonzero process
   status without enqueuing a new census batch
+
+#### Scenario: Extraction is incomplete
+
+- **WHEN** the orchestrator runs one cycle
+- **AND** `extract_census` detects fewer than 40 distinct sectors
+- **THEN** it MUST treat the cycle as an extraction failure
+- **AND** it MUST NOT run `process_census_snapshot`
+- **AND** the one-shot command reports incomplete coverage and returns a nonzero
+  process status
 
 #### Scenario: Extraction run is ambiguous
 
