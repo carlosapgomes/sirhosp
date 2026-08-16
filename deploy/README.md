@@ -17,18 +17,44 @@ demais seções continua separado para desenvolvimento e validação.
 
 ### Publicação da imagem
 
-Ao publicar um release ou pré-release no GitHub, o workflow
-`Publish Release Image`:
+Releases futuras são criadas pelo workflow manual `Publish Release Image`. Não
+publique primeiro uma release pela interface do GitHub: com releases imutáveis,
+a tag e os assets são bloqueados no momento da publicação.
 
-1. faz checkout da tag exata;
-2. executa `./scripts/test-in-container.sh quality-gate`;
-3. constrói o target `prod` do `Dockerfile`;
-4. publica a imagem no GHCR;
-5. anexa `compose.hospital.yml` ao release.
+Crie e envie uma nova tag exata, nunca reutilizando uma anterior:
 
-Um release estável publica a tag exata e atualiza `latest`. Um pré-release
-publica a tag exata e atualiza `prerelease`, sem alterar `latest`. O deployment
-de produção sempre usa a tag exata; não use os canais móveis no `.env`.
+```bash
+git tag v1.0.0-rc.2 <commit-validado>
+git push origin v1.0.0-rc.2
+```
+
+Dispare o workflow na branch padrão, indicando a tag e se ela é pré-release:
+
+```bash
+gh workflow run publish-release-image.yml \
+  -f release_tag=v1.0.0-rc.2 \
+  -f prerelease=true
+```
+
+O workflow:
+
+1. resolve a tag exata e executa
+   `./scripts/test-in-container.sh quality-gate`;
+2. confirma que releases imutáveis estão habilitadas no repositório;
+3. recusa uma tag exata de imagem que já exista no GHCR;
+4. cria um draft e anexa `compose.hospital.yml` antes da publicação;
+5. constrói e publica o target `prod` do `Dockerfile`;
+6. publica o draft e confirma que o GitHub marcou a release como imutável.
+
+Para um release estável, use `prerelease=false`. Ele publica a tag exata e
+atualiza `latest`. Um pré-release publica a tag exata e atualiza `prerelease`,
+sem alterar `latest`. Produção sempre usa a tag exata; não use os canais móveis
+no `.env`.
+
+Depois de publicada, uma release não pode ter sua tag ou seus assets alterados.
+Toda correção recebe uma nova tag. Se o workflow falhar e deixar um draft, não o
+publique manualmente sem confirmar que quality gate, imagem e asset concluíram;
+inspecione a execução e o draft antes de decidir entre concluir ou descartá-lo.
 
 ### Pré-requisitos do servidor hospitalar
 
@@ -369,25 +395,24 @@ docker compose -f compose.yml -f compose.prod.yml up -d --force-recreate worker
 
 ---
 
-## 4c. Persistent-session ingestion worker (NOT rollout-ready)
+## 4c. Persistent-session ingestion worker
 
-> **⚠️ Status: NOT production rollout-ready.**
+> **Status: ativo em produção hospitalar desde a RC5.**
 >
-> Um worker alternativo de ingestão com sessão persistente
-> (`process_ingestion_runs_persistent_session`) está implementado e testado
-> em unidade, com persistência full-sync via serviço compartilhado, mas
-> **não pode servir tráfego de produção**.
+> O runtime hospitalar usa
+> `process_ingestion_runs_persistent_session --loop --real-handle
+> --enable-real-queue`. A `RealHandleBridge` foi validada contra a interface
+> real, incluindo autenticação, admissões, demografia, full-sync, evoluções,
+> renovação de sessão, restart e saída sanitizada.
 >
-> Bloqueador restante:
+> O cutover da RC5 ativou quatro réplicas no servidor hospitalar. A quantidade
+> de réplicas continua sendo uma decisão operacional: após cada atualização,
+> reaplique explicitamente `--scale persistent_worker=<quantidade>` e monitore
+> fila, heartbeat, estados finais, CPU, memória, tmpfs e logs. O Compose inicia
+> uma réplica quando nenhuma escala é informada.
 >
-> - **Validação contra a UI real:** a `RealHandleBridge` (opt-in via
->   `--real-handle`) traduz o DOM legado (`#tabelaInternacoes`, script/pre
->   de evolução) para os containers sintéticos esperados pelo adapter em
->   nível de código, mas **ainda não foi validada contra a UI real** do
->   sistema legado em ambiente vivo/staging.
->
-> Plano de rollout futuro e experimentos controlados de lab/staging:
-> `docs/operations/persistent-worker-rollout.md`
+> Histórico de rollout, guardas do modo real, observabilidade e rollback:
+> `docs/operations/persistent-worker-rollout.md`.
 
 ---
 

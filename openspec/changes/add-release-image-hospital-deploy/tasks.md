@@ -114,3 +114,18 @@
   `/tmp/sirhosp-slice-RHID-S1-C7-report.md`.
 - [x] 8.6 Commit and push the correction before publishing a new immutable
   prerelease.
+
+## 9. Corrective Slice RHID-S1-C8 - Publish immutable releases draft-first
+
+- [x] 9.1 Add RED workflow contracts for manual exact-tag dispatch, draft-first
+  asset assembly and immutable publication.
+- [x] 9.2 Replace the post-publication workflow with validated draft-first
+  publication and reject reuse of an exact GHCR image tag.
+- [x] 9.3 Correct the persistent-worker production status and document the
+  immutable release operator procedure.
+- [x] 9.4 Update proposal, design and specification for repository-enforced
+  release immutability.
+- [x] 9.5 Run focused and official gates, strict OpenSpec and Markdown lint, then
+  create `/tmp/sirhosp-slice-RHID-S1-C8-report.md`.
+- [ ] 9.6 Commit and push the corrected workflow before enabling repository
+  immutable releases; verify `enabled=true` without modifying RC1-RC5.

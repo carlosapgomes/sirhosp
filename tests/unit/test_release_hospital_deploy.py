@@ -31,47 +31,60 @@ def _service_block(compose: str, service: str) -> str:
     return match.group("body")
 
 
-def test_published_release_is_validated_before_image_publication() -> None:
+def test_release_is_assembled_as_draft_after_exact_tag_validation() -> None:
     workflow = _workflow_text()
+    normalized = " ".join(workflow.split())
 
-    assert "release:\n    types: [published]" in workflow
-    assert workflow.count("ref: ${{ github.event.release.tag_name }}") == 2
+    assert "workflow_dispatch:" in workflow
+    assert "release_tag:" in workflow
+    assert "prerelease:" in workflow
+    assert "release:\n    types: [published]" not in workflow
+    assert "ref: ${{ inputs.release_tag }}" in workflow
+    assert "commit_sha: ${{ steps.release.outputs.commit_sha }}" in workflow
+    assert "ref: ${{ needs.validate.outputs.commit_sha }}" in workflow
     assert "./scripts/test-in-container.sh quality-gate" in workflow
     assert "publish:\n    needs: validate" in workflow
     assert workflow.index("validate:") < workflow.index("publish:")
     assert "contents: write" in workflow
     assert "packages: write" in workflow
 
+    create = 'gh release create "$RELEASE_TAG" compose.hospital.yml'
+    build = "uses: docker/build-push-action@"
+    publish = 'gh release edit "$RELEASE_TAG" --draft=false'
+    assert create in normalized
+    assert "--draft" in normalized
+    assert normalized.index(create) < normalized.index(build)
+    assert normalized.index(build) < normalized.index(publish)
 
-def test_release_image_uses_exact_and_separate_channel_tags() -> None:
+
+def test_release_image_and_release_are_immutable_and_channel_safe() -> None:
     workflow = _workflow_text()
+    normalized = " ".join(workflow.split())
 
     assert "registry: ghcr.io" in workflow
     assert "username: ${{ github.actor }}" in workflow
     assert "password: ${{ secrets.GITHUB_TOKEN }}" in workflow
     assert "images: ghcr.io/${{ github.repository }}" in workflow
-    assert "type=raw,value=${{ github.event.release.tag_name }}" in workflow
+    assert "type=raw,value=${{ inputs.release_tag }}" in workflow
     assert (
-        "type=raw,value=latest,"
-        "enable=${{ github.event.release.prerelease == false }}" in workflow
+        "type=raw,value=latest,enable=${{ inputs.prerelease == false }}"
+        in workflow
     )
     assert (
-        "type=raw,value=prerelease,"
-        "enable=${{ github.event.release.prerelease == true }}" in workflow
+        "type=raw,value=prerelease,enable=${{ inputs.prerelease == true }}"
+        in workflow
     )
+    assert "repos/${{ github.repository }}/immutable-releases" in workflow
+    assert "docker buildx imagetools inspect" in workflow
+    assert "exact image tag already exists" in workflow
     assert "target: prod" in workflow
     assert "push: true" in workflow
     assert "sbom: true" in workflow
     assert "provenance: mode=max" in workflow
-    upload = (
-        'gh release upload "${{ github.event.release.tag_name }}" '
-        "compose.hospital.yml --clobber"
-    )
-    normalized_workflow = " ".join(workflow.split())
-    assert upload in normalized_workflow
-    assert normalized_workflow.index(
-        "uses: docker/build-push-action@"
-    ) < normalized_workflow.index(upload)
+    assert "--clobber" not in workflow
+    assert 'gh release edit "$RELEASE_TAG" --draft=false' in normalized
+    assert '"repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}"' in workflow
+    assert "--jq .immutable" in workflow
 
 
 def test_hospital_compose_is_standalone_and_version_pinned() -> None:

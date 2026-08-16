@@ -14,32 +14,43 @@ registro sem tornar essa autenticação parte do Compose.
 
 ## Goals
 
-1. Construir exatamente o commit associado ao release publicado.
-2. Impedir publicação quando o quality gate oficial falhar.
-3. Tornar release estável e pré-release distinguíveis sem sobrescrever `latest`
+1. Construir exatamente o commit associado a uma tag de release existente.
+2. Impedir criação de draft, imagem ou publicação quando o quality gate oficial
+   falhar.
+3. Anexar todos os assets antes de publicar e bloquear tag e assets com releases
+   imutáveis do GitHub.
+4. Tornar release estável e pré-release distinguíveis sem sobrescrever `latest`
    com código de pré-release.
-4. Permitir instalação e atualização hospitalar com um único Compose, `.env` e
+5. Permitir instalação e atualização hospitalar com um único Compose, `.env` e
    comandos Docker, sem checkout do repositório.
-5. Manter migrations, backup e seleção de versão como ações explícitas do
+6. Manter migrations, backup e seleção de versão como ações explícitas do
    operador.
 
 ## Decisions
 
-### Decision 1: GHCR and release-published trigger
+### Decision 1: Draft-first immutable release workflow
 
-Um workflow dedicado reage a `release` com tipo `published`, que cobre releases
-estáveis e pré-releases publicados, mas não drafts. O checkout usa
-`github.event.release.tag_name`; o target `prod` do `Dockerfile` é publicado em
-`ghcr.io/${{ github.repository }}` somente após o quality gate oficial.
+Um workflow dedicado usa `workflow_dispatch` com uma tag Git exata existente e
+um booleano de pré-release. O job de validação resolve o commit da tag e executa
+o quality gate oficial. O job de publicação usa esse SHA validado, confirma que
+a tag continua no mesmo commit e exige que releases imutáveis estejam
+habilitadas no repositório.
 
-Tags publicadas:
+Antes de qualquer publicação, o workflow recusa uma tag exata que já exista no
+GHCR e cria um draft contendo `compose.hospital.yml`. Em seguida publica o target
+`prod` do `Dockerfile`, publica o draft e verifica `immutable=true` pela API do
+GitHub. Assets nunca são anexados ou substituídos depois da publicação.
 
-- nome exato da tag do release, para deployment e rollback reproduzíveis;
+Tags de imagem publicadas:
+
+- nome exato da tag do release, nunca reutilizado, para deployment e rollback
+  reproduzíveis;
 - `latest`, somente quando `prerelease` for falso;
 - `prerelease`, somente quando `prerelease` for verdadeiro.
 
-A imagem inclui metadata OCI, SBOM e provenance do BuildKit. O Compose também é
-anexado ao release para que o servidor não precise baixar o repositório.
+A imagem inclui metadata OCI, SBOM e provenance do BuildKit. Imutabilidade de
+release bloqueia a Git tag e os assets; a recusa prévia da tag exata protege o
+canal versionado da imagem contra sobrescrita pelo workflow.
 
 ### Decision 2: One standalone hospital Compose
 
@@ -106,15 +117,18 @@ condicionais de rede e build que tornariam os dois ambientes ambíguos.
 
 ## Risks and Mitigations
 
-- Release publicado com commit inválido: job de validação bloqueia a publicação
-  da imagem e do Compose.
+- Tag com commit inválido: o job de validação bloqueia draft, imagem e release.
+- Imutabilidade habilitada com fluxo antigo: o fluxo draft-first anexa o Compose
+  antes da publicação e verifica a proteção depois dela.
+- Tag exata de imagem já existente: o workflow falha antes de criar o draft ou
+  sobrescrever o artefato versionado; correções recebem nova tag.
 - Pré-release substitui produção estável: `latest` nunca é atualizado por
   pré-release; produção usa tag exata.
 - Pacote GHCR privado: runbook exige token somente `read:packages` no host.
 - Perda de dados: volume nomeado não é removido no update e backup antecede
   migration.
-- Tag alterada ou removida: releases operacionais devem ser imutáveis; a
-  provenance permite relacionar imagem, workflow e commit.
+- Tag alterada ou asset substituído: releases imutáveis bloqueiam ambas as
+  operações após publicação; a provenance relaciona imagem, workflow e commit.
 - Imagem e Compose incompatíveis: ambos saem do mesmo release; o operador deve
   baixar o Compose correspondente à tag selecionada.
 - Rede externa ausente ou Cloudflared desconectado: o preflight inspeciona

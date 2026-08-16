@@ -9,13 +9,15 @@ GitHub, sem toolchain de build nem cópia do código-fonte.
 
 ## What Changes
 
-- Publicar a imagem `prod` no GitHub Container Registry (GHCR) quando um release
-  ou pré-release for publicado.
-- Executar o quality gate oficial sobre o commit da tag antes de publicar a
-  imagem.
-- Publicar uma tag imutável correspondente ao nome do release e canais móveis
-  separados para release estável e pré-release.
-- Anexar ao release um único `compose.hospital.yml` autônomo, sem `build:` e sem
+- Publicar a imagem `prod` no GitHub Container Registry (GHCR) por um workflow
+  manual que recebe uma tag exata ainda não publicada como release.
+- Executar o quality gate oficial sobre o commit da tag antes de criar ou
+  publicar qualquer release.
+- Montar a release como draft com seu Compose e publicá-la somente depois da
+  imagem, sob a proteção de releases imutáveis do GitHub.
+- Publicar uma tag exata de imagem nunca reutilizada e canais móveis separados
+  para release estável e pré-release.
+- Anexar ao draft um único `compose.hospital.yml` autônomo, sem `build:` e sem
   dependência de checkout do repositório.
 - Executar PostgreSQL, portal, worker persistente de ingestão, orquestrador de
   censo e worker de sumários a partir desse Compose.
@@ -38,7 +40,8 @@ empacotamento e deployment.
 
 ## Impact
 
-- GitHub Actions: novo workflow disparado por `release.published`.
+- GitHub Actions: workflow manual `workflow_dispatch` que valida uma tag exata,
+  cria o draft, publica a imagem e só então publica a release imutável.
 - Registro: `ghcr.io/carlosapgomes/sirhosp` com tag exata do release, `latest`
   apenas para release estável e `prerelease` apenas para pré-release.
 - Servidor hospitalar: requer Docker Engine, Docker Compose, um `.env` local e,
@@ -50,7 +53,8 @@ empacotamento e deployment.
   externa `hospital_edge`, já compartilhada com o Cloudflared hospitalar, e
   expõe o portal nessa rede pelo alias `prisma`.
 - Segurança: nenhuma credencial entra na imagem, no workflow ou no Compose
-  versionado.
+  versionado; Git tags e assets de releases futuras ficam bloqueados após a
+  publicação, e uma tag exata de imagem existente é recusada.
 - Não objetivos: deployment remoto automático, armazenamento de secrets no
   GitHub, Kubernetes/Swarm, múltiplas arquiteturas, proxy TLS interno, rollback
   automático ou alteração da topologia doméstica atual.
