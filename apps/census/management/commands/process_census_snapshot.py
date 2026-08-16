@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 from django.core.management.base import BaseCommand
 
 from apps.census.services import process_census_snapshot, upsert_patient_movements
@@ -20,6 +22,18 @@ class Command(BaseCommand):
         run_id: int | None = options["run_id"]
 
         result = process_census_snapshot(run_id=run_id)
+
+        if result.get("rejected"):
+            self.stderr.write(
+                self.style.ERROR(
+                    f"Census snapshot processing rejected: "
+                    f"{result['sector_count']} distinct sectors found, "
+                    f"minimum required is "
+                    f"{result['minimum_required_sectors']}. "
+                    f"No batch created and no patient ingestion runs enqueued."
+                )
+            )
+            sys.exit(1)
 
         self.stdout.write(
             self.style.SUCCESS(

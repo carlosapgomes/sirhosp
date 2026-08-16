@@ -14,6 +14,34 @@ from apps.ingestion.models import CensusExecutionBatch, IngestionRun
 from apps.patients.models import Patient
 
 
+def _add_filler_snapshots(
+    *,
+    captured_at,
+    run=None,
+    exclude: set[str] | None = None,
+    sector_count: int = 40,
+) -> None:
+    """Add empty-bed snapshots so a captured_at group reaches the minimum sector count.
+
+    The GCEC-S2 completeness guard rejects snapshot sets with fewer than 40
+    distinct sectors. Filler rows are empty beds (no prontuario) and never
+    create patients or ingestion runs.
+    """
+    existing = set(exclude or set())
+    missing = max(0, sector_count - len(existing))
+    for i in range(missing):
+        CensusSnapshot.objects.create(
+            captured_at=captured_at,
+            ingestion_run=run,
+            setor=f"SETOR FILLER {i:03d}",
+            leito=f"FL{i:03d}",
+            prontuario="",
+            nome="DESOCUPADO",
+            especialidade="",
+            bed_status=BedStatus.EMPTY,
+        )
+
+
 @pytest.mark.django_db
 class TestProcessCensusSnapshotCreatesBatch:
     """RED tests for batch creation during census snapshot processing."""
@@ -21,9 +49,15 @@ class TestProcessCensusSnapshotCreatesBatch:
     def _create_snapshot_with_patient(
         self, prontuario: str = "14160147", nome: str = "FULANO DE TAL"
     ):
-        """Helper to create an occupied census snapshot."""
+        """Helper to create an occupied census snapshot on a complete set.
+
+        The snapshot set needs at least 40 distinct sectors for the GCEC-S2
+        completeness guard, so empty-bed fillers are added to the same
+        captured_at group.
+        """
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             setor="UTI A",
             leito="UG01A",
             prontuario=prontuario,
@@ -31,6 +65,7 @@ class TestProcessCensusSnapshotCreatesBatch:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, exclude={"UTI A"})
 
     def test_creates_batch_when_enqueuing_runs(self):
         """process_census_snapshot creates a CensusExecutionBatch(status=running)."""
@@ -69,6 +104,9 @@ class TestProcessCensusSnapshotCreatesBatch:
             nome="FULANO DOIS",
             especialidade="CME",
             bed_status=BedStatus.OCCUPIED,
+        )
+        _add_filler_snapshots(
+            captured_at=now, exclude={"UTI A", "UTI B"}
         )
 
         result = process_census_snapshot()
@@ -122,8 +160,9 @@ class TestProcessCensusSnapshotCreatesBatch:
 
     def test_batch_not_created_when_no_occupied_beds(self):
         """When no occupied beds with prontuario exist, no batch is created."""
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             setor="A",
             leito="01",
             prontuario="",
@@ -131,6 +170,7 @@ class TestProcessCensusSnapshotCreatesBatch:
             especialidade="",
             bed_status=BedStatus.EMPTY,
         )
+        _add_filler_snapshots(captured_at=now, exclude={"A"})
 
         result = process_census_snapshot()
 
@@ -197,8 +237,9 @@ class TestQueueFunctionsAcceptBatch:
 
     def test_patients_created_by_census_have_correct_batch(self):
         """Patients created during census processing get runs with batch."""
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             setor="UTI",
             leito="01",
             prontuario="55555",
@@ -206,6 +247,7 @@ class TestQueueFunctionsAcceptBatch:
             especialidade="CME",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, exclude={"UTI"})
 
         result = process_census_snapshot()
         batch_id = result["batch_id"]

@@ -2099,3 +2099,47 @@ class TestManagementCommandStaleRecoveryFlags:
         mock_recovery.assert_not_called()
         mock_run_loop.assert_not_called()
         mock_decision.assert_called_once()
+
+
+# ===========================================================================
+# Slice GCEC-S2: incomplete extraction regression
+# ===========================================================================
+
+
+@pytest.mark.django_db(transaction=True)
+class TestRunSingleCycleIncompleteExtraction:
+    """GCEC-S2: incomplete census extraction must fail the cycle safely.
+
+    The GCEC-S1 completeness gate makes ``extract_census`` signal failure via
+    ``sys.exit(1)`` (SystemExit) when fewer than 40 distinct sectors are
+    parsed. The orchestrator must treat that as an extraction failure and
+    MUST NOT call ``process_census_snapshot``.
+    """
+
+    def test_incomplete_extraction_is_failure_and_skips_processing(self):
+        """SystemExit from the completeness gate -> extraction_failed, no processing."""
+        from apps.census.orchestration import run_single_cycle
+
+        with mock.patch("apps.census.orchestration.call_command") as mock_call:
+            def side_effect(command, **kwargs):
+                if command == "extract_census":
+                    # Mirrors the GCEC-S1 gate (sys.exit(1) for <40 sectors).
+                    raise SystemExit(1)
+                return None
+            mock_call.side_effect = side_effect
+
+            result = run_single_cycle()
+
+        assert result["cycle_executed"] is True
+        assert result["outcome"] == "extraction_failed"
+        assert result["batch_id"] is None
+        assert "SystemExit" in result["error"]
+
+        process_calls = [
+            c for c in mock_call.call_args_list
+            if "process_census_snapshot" in str(c)
+        ]
+        assert len(process_calls) == 0
+
+        # A rejected cycle enqueues no census batch.
+        assert CensusExecutionBatch.objects.count() == 0

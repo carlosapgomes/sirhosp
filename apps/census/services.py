@@ -84,6 +84,46 @@ def validate_census_completeness(
     }
 
 
+def validate_snapshot_completeness(snapshots_qs) -> dict:
+    """Validate a CensusSnapshot queryset has sufficient sector coverage.
+
+    Counts distinct non-empty sectors among all rows of the queryset and
+    compares against ``MINIMUM_CENSUS_SECTORS``. This is the
+    processing-side counterpart of :func:`validate_census_completeness`
+    (GCEC-S1) and provides defense in depth for direct calls to
+    :func:`process_census_snapshot`.
+
+    Args:
+        snapshots_qs: Queryset of :class:`CensusSnapshot` rows selected for
+            processing (explicit run or latest captured_at).
+
+    Returns:
+        A dict with:
+        - ``accepted``: True if sector count >= minimum.
+        - ``sector_count``: Number of distinct non-empty sectors.
+        - ``row_count``: Total snapshot rows in the queryset.
+        - ``minimum_required_sectors``: The threshold used.
+        - ``completeness_status``: ``"accepted"`` or ``"rejected"``.
+    """
+    distinct_sectors: set[str] = set()
+    for sector in snapshots_qs.values_list("setor", flat=True):
+        cleaned = (sector or "").strip()
+        if cleaned:
+            distinct_sectors.add(cleaned)
+
+    sector_count = len(distinct_sectors)
+    row_count = snapshots_qs.count()
+    accepted = sector_count >= MINIMUM_CENSUS_SECTORS
+
+    return {
+        "accepted": accepted,
+        "sector_count": sector_count,
+        "row_count": row_count,
+        "minimum_required_sectors": MINIMUM_CENSUS_SECTORS,
+        "completeness_status": "accepted" if accepted else "rejected",
+    }
+
+
 
 def classify_bed_status(prontuario: str, nome: str) -> str:
     """Classify bed status from census row data.
@@ -342,8 +382,37 @@ def process_census_snapshot(
                 "patients_skipped": 0,
                 "patients_skipped_no_pront": 0,
                 "patients_skipped_duplicate": 0,
+                "rejected": False,
             }
         snapshots = CensusSnapshot.objects.filter(captured_at=latest_captured)
+
+    # Completeness guard (GCEC-S2): refuse incomplete snapshot sets before
+    # creating any batch or enqueuing patient runs.
+    coverage = validate_snapshot_completeness(snapshots)
+    if not coverage["accepted"]:
+        logger.warning(
+            "Census snapshot processing rejected: %d distinct sectors found, "
+            "minimum required is %d. No batch created.",
+            coverage["sector_count"],
+            coverage["minimum_required_sectors"],
+        )
+        return {
+            "batch_id": None,
+            "patients_total": 0,
+            "patients_new": 0,
+            "patients_updated": 0,
+            "runs_enqueued": 0,
+            "demographics_runs_enqueued": 0,
+            "patients_skipped": 0,
+            "patients_skipped_no_pront": 0,
+            "patients_skipped_duplicate": 0,
+            "rejected": True,
+            "rejection_reason": "incomplete_snapshot",
+            "sector_count": coverage["sector_count"],
+            "minimum_required_sectors": coverage[
+                "minimum_required_sectors"
+            ],
+        }
 
     # Filter only occupied beds
     occupied = snapshots.filter(bed_status=BedStatus.OCCUPIED)
@@ -392,6 +461,7 @@ def process_census_snapshot(
             "patients_skipped": no_pront_skipped + dup_skipped,
             "patients_skipped_no_pront": no_pront_skipped,
             "patients_skipped_duplicate": dup_skipped,
+            "rejected": False,
         }
 
     # Create execution batch for this census cycle
@@ -461,6 +531,7 @@ def process_census_snapshot(
         "patients_skipped": total_skipped,
         "patients_skipped_no_pront": no_pront_skipped,
         "patients_skipped_duplicate": dup_skipped,
+        "rejected": False,
     }
 
 

@@ -8,8 +8,45 @@ from apps.census.services import (
     _sync_admission_ward_bed,
     process_census_snapshot,
 )
-from apps.ingestion.models import IngestionRun
+from apps.ingestion.models import CensusExecutionBatch, IngestionRun
 from apps.patients.models import Admission, Patient
+
+
+def _add_filler_snapshots(
+    *,
+    captured_at,
+    run=None,
+    exclude: set[str] | None = None,
+    sector_count: int = 40,
+) -> None:
+    """Add empty-bed snapshots so a group reaches the minimum sector count.
+
+    The GCEC-S2 completeness guard rejects snapshot sets with fewer than 40
+    distinct sectors. Tests exercising the happy path build complete sets
+    with empty-bed filler rows, which never create patients or ingestion
+    runs.
+
+    Args:
+        captured_at: Timestamp shared with the scenario snapshots so the
+            latest-captured-at group stays complete.
+        run: Optional ingestion run to link filler rows to (required when
+            exercising the explicit ``run_id`` path).
+        exclude: Sector names already used by the scenario snapshots.
+        sector_count: Target distinct-sector count (default 40).
+    """
+    existing = set(exclude or set())
+    missing = max(0, sector_count - len(existing))
+    for i in range(missing):
+        CensusSnapshot.objects.create(
+            captured_at=captured_at,
+            ingestion_run=run,
+            setor=f"SETOR FILLER {i:03d}",
+            leito=f"FL{i:03d}",
+            prontuario="",
+            nome="DESOCUPADO",
+            especialidade="",
+            bed_status=BedStatus.EMPTY,
+        )
 
 
 @pytest.mark.django_db
@@ -23,12 +60,13 @@ class TestProcessCensusSnapshot:
         assert result["demographics_runs_enqueued"] == 0
 
     def test_only_empty_beds_no_patients(self):
-        """Beds without prontuario are skipped."""
+        """Beds without prontuario are skipped (complete snapshot set)."""
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="01",
@@ -37,6 +75,7 @@ class TestProcessCensusSnapshot:
             especialidade="",
             bed_status=BedStatus.EMPTY,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
         result = process_census_snapshot()
         assert result["patients_total"] == 0
         assert result["runs_enqueued"] == 0
@@ -48,8 +87,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="UG01A",
@@ -58,6 +98,7 @@ class TestProcessCensusSnapshot:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
         result = process_census_snapshot()
         assert result["patients_new"] == 1
         assert result["patients_total"] == 1
@@ -86,8 +127,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="UG01A",
@@ -96,6 +138,7 @@ class TestProcessCensusSnapshot:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
         result = process_census_snapshot()
         assert result["patients_new"] == 0
         assert result["patients_updated"] == 0
@@ -113,8 +156,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="UG01A",
@@ -123,6 +167,7 @@ class TestProcessCensusSnapshot:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
         result = process_census_snapshot()
         assert result["patients_updated"] == 1
         assert result["runs_enqueued"] == 1
@@ -153,11 +198,14 @@ class TestProcessCensusSnapshot:
             captured_at=snap_time,
             ingestion_run=run,
             setor="UTI A",
-            leito="UG01A",
+            leito="UG01B",
             prontuario="14160147",
             nome="JOSE MERCES UPDATED",
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
+        )
+        _add_filler_snapshots(
+            captured_at=snap_time, run=run, exclude={"UTI A"}
         )
         result = process_census_snapshot()
         assert result["runs_enqueued"] == 1
@@ -166,12 +214,16 @@ class TestProcessCensusSnapshot:
         assert result["patients_skipped_duplicate"] == 1
         assert result["patients_skipped_no_pront"] == 0
 
-        # Name should be from the LAST occurrence (both have equal esp)
+        # Name should be from the LAST occupied occurrence (both have equal esp)
         patient = Patient.objects.get(
             source_system="tasy", patient_source_key="14160147"
         )
-        last_snap = CensusSnapshot.objects.order_by("-pk").first()
-        assert patient.name == last_snap.nome
+        last_occupied = (
+            CensusSnapshot.objects.filter(bed_status=BedStatus.OCCUPIED)
+            .order_by("-pk")
+            .first()
+        )
+        assert patient.name == last_occupied.nome
 
     def test_duplicate_prontuario_prefers_non_empty_especialidade(self):
         """When duplicate prontuario exists, prefer the entry with
@@ -196,11 +248,14 @@ class TestProcessCensusSnapshot:
             captured_at=snap_time,
             ingestion_run=run,
             setor="OBSTETRICIA",
-            leito="302AD",
+            leito="302AE",
             prontuario="19673094",
             nome="RN NOEMI SILVA PEREIRA",
             especialidade="NEO",
             bed_status=BedStatus.OCCUPIED,
+        )
+        _add_filler_snapshots(
+            captured_at=snap_time, run=run, exclude={"OBSTETRICIA"}
         )
         result = process_census_snapshot()
         assert result["runs_enqueued"] == 1
@@ -221,8 +276,9 @@ class TestProcessCensusSnapshot:
         run1 = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        old_now = timezone.now() - timezone.timedelta(hours=2)
         CensusSnapshot.objects.create(
-            captured_at=timezone.now() - timezone.timedelta(hours=2),
+            captured_at=old_now,
             ingestion_run=run1,
             setor="OLD",
             leito="01",
@@ -231,6 +287,7 @@ class TestProcessCensusSnapshot:
             especialidade="TST",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=old_now, run=run1, exclude={"OLD"})
 
         run2 = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
@@ -266,13 +323,18 @@ class TestProcessCensusSnapshot:
             CensusSnapshot.objects.create(
                 captured_at=now,
                 ingestion_run=run,
-                setor="UTI",
+                setor=f"UTI {i}",
                 leito=f"L{i}",
                 prontuario=pront,
                 nome=nome,
                 especialidade="TST",
                 bed_status=BedStatus.OCCUPIED,
             )
+        _add_filler_snapshots(
+            captured_at=now,
+            run=run,
+            exclude={"UTI 0", "UTI 1", "UTI 2"},
+        )
         result = process_census_snapshot()
         assert result["patients_total"] == 3
         assert result["patients_new"] == 3
@@ -288,8 +350,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="UG01A",
@@ -298,6 +361,7 @@ class TestProcessCensusSnapshot:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
         result = process_census_snapshot()
 
         assert result["demographics_runs_enqueued"] == 1
@@ -325,8 +389,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="UG01A",
@@ -335,6 +400,7 @@ class TestProcessCensusSnapshot:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
         result = process_census_snapshot()
 
         # Demographics run should be enqueued even for existing patients
@@ -355,13 +421,18 @@ class TestProcessCensusSnapshot:
             CensusSnapshot.objects.create(
                 captured_at=now,
                 ingestion_run=run,
-                setor="UTI",
+                setor=f"UTI {i}",
                 leito=f"L{i}",
                 prontuario=pront,
                 nome=nome,
                 especialidade="TST",
                 bed_status=BedStatus.OCCUPIED,
             )
+        _add_filler_snapshots(
+            captured_at=now,
+            run=run,
+            exclude={"UTI 0", "UTI 1", "UTI 2"},
+        )
         result = process_census_snapshot()
         assert result["demographics_runs_enqueued"] == 3
         assert result["runs_enqueued"] == 3  # admissions runs
@@ -374,8 +445,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="01",
@@ -384,6 +456,7 @@ class TestProcessCensusSnapshot:
             especialidade="",
             bed_status=BedStatus.EMPTY,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
         result = process_census_snapshot()
         assert result["demographics_runs_enqueued"] == 0
         assert not IngestionRun.objects.filter(
@@ -412,8 +485,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="UG01A",
@@ -422,6 +496,7 @@ class TestProcessCensusSnapshot:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
 
         process_census_snapshot()
 
@@ -449,8 +524,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI A",
             leito="UG01A",
@@ -459,6 +535,7 @@ class TestProcessCensusSnapshot:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI A"})
 
         process_census_snapshot()
 
@@ -530,8 +607,9 @@ class TestProcessCensusSnapshot:
         run = IngestionRun.objects.create(
             status="succeeded", intent="census_extraction"
         )
+        now = timezone.now()
         CensusSnapshot.objects.create(
-            captured_at=timezone.now(),
+            captured_at=now,
             ingestion_run=run,
             setor="UTI B",
             leito="L02",
@@ -540,6 +618,7 @@ class TestProcessCensusSnapshot:
             especialidade="NEF",
             bed_status=BedStatus.OCCUPIED,
         )
+        _add_filler_snapshots(captured_at=now, run=run, exclude={"UTI B"})
 
         process_census_snapshot()
 
@@ -551,3 +630,151 @@ class TestProcessCensusSnapshot:
         # Most recent active admission SHOULD get updated
         assert new_adm.ward == "UTI B"
         assert new_adm.bed == "L02"
+
+
+# ---------------------------------------------------------------------------
+# GCEC-S2: completeness guard on snapshot processing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestProcessCensusSnapshotCompletenessGuard:
+    """Snapshot processing must refuse incomplete (<40 sectors) census data.
+
+    The guard is defense in depth on top of the GCEC-S1 ``extract_census``
+    gate: even if incomplete snapshots were already persisted, direct
+    processing must not create a batch or enqueue patient runs from them.
+    """
+
+    def _make_run_with_sectors(self, sector_count: int) -> IngestionRun:
+        """Create a census run with ``sector_count`` distinct sectors."""
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        _add_filler_snapshots(
+            captured_at=now,
+            run=run,
+            exclude={"UTI A"},
+            sector_count=sector_count,
+        )
+        return run
+
+    def test_run_id_with_39_sectors_rejected(self):
+        """Explicit run_id with 39 distinct sectors rejects processing."""
+        run = self._make_run_with_sectors(sector_count=39)
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        assert result["rejected"] is True
+        assert result["rejection_reason"] == "incomplete_snapshot"
+        assert result["sector_count"] == 39
+        assert result["minimum_required_sectors"] == 40
+        assert result["batch_id"] is None
+        assert result["runs_enqueued"] == 0
+        assert result["demographics_runs_enqueued"] == 0
+
+    def test_rejected_run_id_creates_no_batch(self):
+        """Rejected explicit-run path creates no CensusExecutionBatch."""
+        run = self._make_run_with_sectors(sector_count=39)
+
+        process_census_snapshot(run_id=run.pk)
+
+        assert CensusExecutionBatch.objects.count() == 0
+
+    def test_rejected_run_id_enqueues_no_patient_runs(self):
+        """Rejected explicit-run path enqueues no admissions/demographics runs."""
+        run = self._make_run_with_sectors(sector_count=39)
+
+        process_census_snapshot(run_id=run.pk)
+
+        assert IngestionRun.objects.filter(status="queued").count() == 0
+        assert not IngestionRun.objects.filter(
+            intent="admissions_only"
+        ).exists()
+        assert not IngestionRun.objects.filter(
+            intent="demographics_only"
+        ).exists()
+        assert Patient.objects.count() == 0
+
+    def test_latest_path_with_39_sectors_rejected(self):
+        """Latest-snapshot path applies the same guard without run_id."""
+        self._make_run_with_sectors(sector_count=39)
+
+        result = process_census_snapshot()
+
+        assert result["rejected"] is True
+        assert result["sector_count"] == 39
+        assert result["batch_id"] is None
+        assert CensusExecutionBatch.objects.count() == 0
+
+    def test_complete_snapshot_happy_path_unchanged(self):
+        """A snapshot set with at least 40 sectors keeps the happy path."""
+        run = self._make_run_with_sectors(sector_count=40)
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        assert result["rejected"] is False
+        assert result["patients_total"] == 1
+        assert result["patients_new"] == 1
+        assert result["batch_id"] is not None
+        assert result["runs_enqueued"] == 1
+        assert result["demographics_runs_enqueued"] == 1
+
+    def test_command_reports_rejection_and_exits_nonzero(self):
+        """Management command reports sector coverage and exits non-zero."""
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        run = self._make_run_with_sectors(sector_count=39)
+        out = StringIO()
+        err = StringIO()
+
+        with pytest.raises(SystemExit) as exc_info:
+            call_command(
+                "process_census_snapshot",
+                "--run-id",
+                str(run.pk),
+                stdout=out,
+                stderr=err,
+            )
+
+        assert exc_info.value.code == 1
+        message = err.getvalue()
+        assert "rejected" in message.lower()
+        assert "39" in message
+        assert "40" in message
+        assert "No batch created" in message
+        assert CensusExecutionBatch.objects.count() == 0
+
+    def test_command_succeeds_for_complete_snapshot(self):
+        """Management command succeeds when the snapshot set is complete."""
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        run = self._make_run_with_sectors(sector_count=40)
+        out = StringIO()
+        err = StringIO()
+
+        call_command(
+            "process_census_snapshot",
+            "--run-id",
+            str(run.pk),
+            stdout=out,
+            stderr=err,
+        )
+
+        assert "Census snapshot processed" in out.getvalue()
+        assert CensusExecutionBatch.objects.count() == 1
