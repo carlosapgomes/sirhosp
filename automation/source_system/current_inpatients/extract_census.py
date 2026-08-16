@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,9 @@ from apps.ingestion.extractors.legacy_session_bootstrap import (  # noqa: E402
 DEFAULT_TIMEOUT_MS = 180000
 
 CENSO_FRAME_NAME = "i_frame_censo_diário_dos_pacientes"
+
+# Bounded number of dropdown scroll+read rounds while collecting sectors.
+MAX_SETOR_PANEL_SCROLLS = 20
 
 DOWNLOADS_DIR = _PROJECT_ROOT / "downloads"
 DEBUG_DIR = _PROJECT_ROOT / "debug"
@@ -362,15 +366,79 @@ def click_censo_icon(page: Page) -> None:
         raise RuntimeError("Não foi possível abrir o Censo.")
 
 
-def extract_setores(frame: Frame, page: Page) -> list[str]:
-    print("[i] Extraindo setores...")
-    btn = frame.locator('[id="unidadeFuncional:unidadeFuncional:suggestion_button"]')
-    if not safe_click(btn, "abrir dropdown de setores"):
-        raise RuntimeError("Falha ao abrir dropdown de setores.")
+def _close_setor_dropdown(frame: Frame) -> None:
+    """Close the sector dropdown by clicking outside of it."""
+    try:
+        frame.locator("body").click(position={"x": 2, "y": 2}, timeout=1000)
+    except Exception:
+        pass
 
-    wait_ajax_idle(frame, page, timeout_ms=12000)
-    page.wait_for_timeout(500)
 
+def normalize_setor_label(label: str | None) -> str:
+    """Normalize a sector label: strip and collapse internal whitespace."""
+    if not isinstance(label, str):
+        return ""
+    return " ".join(label.split())
+
+
+def dedupe_setores(labels: Iterable[str | None]) -> list[str]:
+    """Normalize and deduplicate sector labels keeping first occurrence order.
+
+    Blank labels are dropped. Order is stable so the caller processes
+    sectors in the same order the source system presented them.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for label in labels:
+        normalized = normalize_setor_label(label)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def summarize_sector_results(
+    discovered: int,
+    results: Iterable[dict[str, Any]],
+) -> dict[str, int]:
+    """Return safe aggregate sector counters for the terminal summary.
+
+    Counters are operational aggregates only: they never include patient
+    names, prontuários, credentials or clinical text.
+    """
+    processed = 0
+    empty = 0
+    failed = 0
+    for result in results:
+        processed += 1
+        if result.get("erro"):
+            failed += 1
+        elif not result.get("pacientes"):
+            empty += 1
+    return {
+        "setores_found": int(discovered),
+        "setores_processed": processed,
+        "setores_empty": empty,
+        "setores_with_error": failed,
+    }
+
+
+def format_sector_summary(counters: dict[str, int]) -> str:
+    """Format the aggregate sector counters for the terminal summary."""
+    return "\n".join(
+        f"{label}: {counters.get(key, 0)}"
+        for key, label in (
+            ("setores_found", "Setores encontrados"),
+            ("setores_processed", "Setores processados"),
+            ("setores_empty", "Setores sem pacientes"),
+            ("setores_with_error", "Setores com erro"),
+        )
+    )
+
+
+def _read_setores_from_dom(frame: Frame) -> list[str]:
+    """Read sector labels currently present in the dropdown DOM."""
     setores = frame.evaluate(
         """
         () => {
@@ -394,14 +462,84 @@ def extract_setores(frame: Frame, page: Page) -> list[str]:
         }
         """
     )
-
-    # Fecha dropdown clicando fora
-    try:
-        frame.locator("body").click(position={"x": 2, "y": 2}, timeout=1000)
-    except Exception:
-        pass
-
     return [s for s in setores if isinstance(s, str)]
+
+
+def _scroll_setor_panel(frame: Frame, page: Page) -> bool:
+    """Scroll the suggestion panel one bounded step; True when at the bottom.
+
+    PrimeFaces suggestion panels can render rows lazily as the user
+    scrolls. Each call advances the scrollable container by a fixed step
+    so repeated reads collect the full list without a broad sleep.
+    """
+    at_bottom = frame.evaluate(
+        """
+        () => {
+            const panel = document.querySelector(
+                '[id="unidadeFuncional:unidadeFuncional:suggestion_panel"]');
+            if (!panel) return true;
+            const candidates = [panel, ...panel.querySelectorAll('*')];
+            let target = null;
+            for (const el of candidates) {
+                const style = window.getComputedStyle(el);
+                const overflowY = style.overflowY;
+                const scrollable = (
+                    el.scrollHeight > el.clientHeight + 1
+                    && (overflowY === 'auto' || overflowY === 'scroll')
+                );
+                if (scrollable) {
+                    target = el;
+                    break;
+                }
+            }
+            if (!target) return true;
+            const remaining = target.scrollHeight - target.scrollTop - target.clientHeight;
+            if (remaining <= 1) return true;
+            target.scrollTop += Math.min(800, remaining);
+            return false;
+        }
+        """
+    )
+    if at_bottom:
+        return True
+    page.wait_for_timeout(150)
+    return False
+
+
+def extract_setores(frame: Frame, page: Page) -> list[str]:
+    print("[i] Extraindo setores...")
+    btn = frame.locator('[id="unidadeFuncional:unidadeFuncional:suggestion_button"]')
+    if not safe_click(btn, "abrir dropdown de setores"):
+        raise RuntimeError("Falha ao abrir dropdown de setores.")
+
+    wait_ajax_idle(frame, page, timeout_ms=12000)
+    page.wait_for_timeout(500)
+
+    setores = dedupe_setores(_read_setores_from_dom(frame))
+    if not setores:
+        _close_setor_dropdown(frame)
+        return []
+
+    # Some panels render rows lazily on scroll; collect the full list by
+    # scrolling in bounded steps and merging every read.
+    stale_reads = 0
+    for _ in range(MAX_SETOR_PANEL_SCROLLS):
+        if _scroll_setor_panel(frame, page):
+            break
+        more = dedupe_setores(_read_setores_from_dom(frame))
+        before = len(setores)
+        for label in more:
+            if label not in setores:
+                setores.append(label)
+        if len(setores) == before:
+            stale_reads += 1
+            if stale_reads >= 2:
+                break
+        else:
+            stale_reads = 0
+
+    _close_setor_dropdown(frame)
+    return setores
 
 
 def clear_setor(frame: Frame, page: Page) -> None:
@@ -903,6 +1041,7 @@ def run(
             if not setores:
                 raise RuntimeError("Nenhum setor encontrado.")
 
+            discovered_count = len(setores)
             if max_setores > 0:
                 setores = setores[:max_setores]
 
@@ -1003,10 +1142,15 @@ def run(
             json_path, csv_path = save_results(results, csv_only=csv_only)
 
             total_pacientes = sum(len(r.get("pacientes", [])) for r in results)
-            setores_erro = sum(1 for r in results if r.get("erro"))
             print("\n" + "=" * 70)
-            print(f"Setores processados: {len(results)}")
-            print(f"Setores com erro:   {setores_erro}")
+            print(
+                format_sector_summary(
+                    summarize_sector_results(
+                        discovered=discovered_count,
+                        results=results,
+                    )
+                )
+            )
             if _retried:
                 print(
                     f"Setores recuperados após retry:"
