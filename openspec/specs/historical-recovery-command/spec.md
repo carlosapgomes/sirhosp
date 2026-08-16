@@ -4,7 +4,9 @@
 
 Define deterministic historical data recovery over date ranges, including
 service orchestration, dry-run behavior, failure aggregation, and retry handling.
+
 ## Requirements
+
 ### Requirement: Historical recovery command plans deterministic date ranges
 
 The system SHALL provide a `recover_historical_data` Django management command
@@ -180,4 +182,3 @@ production `historical_recovery` batch runtime.
 - **WHEN** an operator runs the dedicated runtime with `--dry-run`
 - **THEN** the command prints the planned dates and extractors
 - **AND** no extractor service is called
-

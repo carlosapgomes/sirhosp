@@ -9,12 +9,19 @@
 # Ativar todas as regras default.
 default: true
 
-# MD013/line-length — manter linhas com no máximo 80 colunas para melhorar a
-# legibilidade em revisão, terminal e editor.
-MD013: true
+# MD013/line-length — desabilitada (restauração da política compatível
+# anterior a 10/06/2026). Justificativa: documentos técnicos em português,
+# tabelas, URLs e paths frequentemente excedem 80 colunas; requebrar 1610
+# linhas históricas não adiciona segurança ou correção; arquivos em
+# `apps/summaries/prompts/` são payloads de LLM que não podem ser
+# reformatados. As demais regras permanecem ativas e comentários
+# `markdownlint-disable` continuam proibidos.
+MD013: false
 
-# MD041/first-line-heading — todo documento Markdown deve começar com H1.
-MD041: true
+# MD041/first-line-heading — desabilitada pela mesma política: specs delta
+# OpenSpec podem começar em H2 por convenção e payloads de prompt LLM não
+# devem ganhar H1 sintético que altere o texto enviado ao modelo.
+MD041: false
 
 # MD033/no-inline-html — permitido para diagramas ASCII em code blocks e
 # templates (ex: ADR template com placeholders).

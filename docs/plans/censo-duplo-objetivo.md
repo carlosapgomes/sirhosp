@@ -55,8 +55,8 @@ Após a limpeza dos 72h, ainda restam 11 pacientes com `discharge_date` preenchi
 
 ### Censo
 
-| Comando                   | O que faz                                                                                              | Quando roda             |
-| ------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------- |
+| Comando                   | O que faz                                                                                              | Quando roda                              |
+| --------------------------| -------------------------------------------------------------------------------------------------------| -----------------------------------------|
 | `extract_census`          | Varre o sistema fonte via Playwright e persiste todas as linhas do censo em `CensusSnapshot`           | Orquestrador adaptativo (ver nota acima) |
 | `process_census_snapshot` | Lê o último `CensusSnapshot`, cria/atualiza `Patient` e enfileira runs de admissão (`admissions_only`) | Após `extract_census`                    |
 | `sync_current_inpatients` | Não implementado (reservado)                                                                           | —                                        |

@@ -1,8 +1,11 @@
 # production-historical-recovery-runtime Specification
 
 ## Purpose
+
 TBD - created by archiving change dedicated-historical-recovery-runtime. Update Purpose after archive.
+
 ## Requirements
+
 ### Requirement: Historical recovery has a dedicated batch runtime
 
 The production Docker Compose configuration SHALL provide a dedicated
@@ -129,4 +132,3 @@ roll back the dedicated historical recovery runtime without exposing secrets.
 - **AND** it warns operators not to commit rendered Compose output or secrets
 - **AND** it warns against running multiple heavy historical recovery batches in
   parallel without an explicit operational decision
-
