@@ -41,23 +41,23 @@
 
 ## 3. Slice SCOH-S3 - Integrate accepted censuses and daily summaries
 
-- [ ] 3.1 Read `slice-prompts/SLICE-SCOH-S3.md` completely and verify both
+- [x] 3.1 Read `slice-prompts/SLICE-SCOH-S3.md` completely and verify both
   SCOH-S2 and dependency GCEC-S2 are complete before editing.
-- [ ] 3.2 Add failing tests for daily creation/update, equal-weight arithmetic,
+- [x] 3.2 Add failing tests for daily creation/update, equal-weight arithmetic,
   delayed measurements, non-calculable groups and idempotent reruns.
-- [ ] 3.3 Add minimal daily parent/group summary models, constraints and an
+- [x] 3.3 Add minimal daily parent/group summary models, constraints and an
   additive migration.
-- [ ] 3.4 Refresh the local-date summary transactionally after a new
+- [x] 3.4 Refresh the local-date summary transactionally after a new
   measurement, without scheduler or retroactive rebuild command.
-- [ ] 3.5 Add failing integration tests proving the completeness gate precedes
+- [x] 3.5 Add failing integration tests proving the completeness gate precedes
   materialization, zero-occupied runs are measured and capacity gaps do not
   block clinical processing.
-- [ ] 3.6 Integrate materialization into `process_census_snapshot` before
+- [x] 3.6 Integrate materialization into `process_census_snapshot` before
   clinical side effects while preserving pre-activation and missing-provenance
   behavior.
-- [ ] 3.7 Prove RED, GREEN and REFACTOR, run inspection checks and all official
+- [x] 3.7 Prove RED, GREEN and REFACTOR, run inspection checks and all official
   gates required by the slice prompt.
-- [ ] 3.8 Create `/tmp/sirhosp-slice-SCOH-S3-report.md` with complete evidence
+- [x] 3.8 Create `/tmp/sirhosp-slice-SCOH-S3-report.md` with complete evidence
   and verifier handoff.
 
 ## 4. Slice SCOH-S4 - Enrich `/beds` with official occupancy

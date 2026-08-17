@@ -3,7 +3,16 @@ from __future__ import annotations
 import pytest
 from django.utils import timezone
 
-from apps.census.models import BedStatus, CensusSnapshot
+from apps.census.models import (
+    BedStatus,
+    CapacityCatalogVersion,
+    CapacityGroupDefinition,
+    CapacitySectorMembership,
+    CensusSnapshot,
+    DailyOccupancySummary,
+    OccupancyMeasurement,
+)
+from apps.census.occupancy import OccupancyMaterializationError
 from apps.census.services import (
     _sync_admission_ward_bed,
     process_census_snapshot,
@@ -778,3 +787,273 @@ class TestProcessCensusSnapshotCompletenessGuard:
 
         assert "Census snapshot processed" in out.getvalue()
         assert CensusExecutionBatch.objects.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# SCOH-S3: occupancy materialization integration
+# ---------------------------------------------------------------------------
+
+
+def _scoh3_catalog(capture_date):
+    """Create one standard capacity group (code 100, capacity 10)."""
+    catalog = CapacityCatalogVersion.objects.create(
+        effective_from=capture_date,
+        source_reference="synthetic scoh-s3 test catalog",
+        source_sha256=(f"{capture_date:%Y%m%d}" + "b" * 64)[:64],
+        schema_version="1.0",
+    )
+    group = CapacityGroupDefinition.objects.create(
+        catalog=catalog,
+        stable_key="A",
+        display_name="Group A",
+        official_capacity=10,
+        calculation_policy="standard",
+    )
+    CapacitySectorMembership.objects.create(
+        catalog=catalog,
+        group=group,
+        source_code="100",
+        configured_source_name="Sector A",
+    )
+    return catalog
+
+
+@pytest.mark.django_db
+class TestSCOH3OccupancyIntegration:
+    """Materialization must run after the GCEC guard and before clinical effects."""
+
+    def _complete_run(self, sector_count: int = 40, occupied_code: str = "100"):
+        """Create a complete census run with one occupied patient."""
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+            setor_codigo=occupied_code,
+        )
+        _add_filler_snapshots(
+            captured_at=now,
+            run=run,
+            exclude={"UTI A"},
+            sector_count=sector_count,
+        )
+        return run
+
+    def test_complete_explicit_post_activation_run_materializes_before_batch(self):
+        _scoh3_catalog(timezone.localdate())
+        run = self._complete_run()
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        assert OccupancyMeasurement.objects.filter(census_run=run).exists()
+        measurement = OccupancyMeasurement.objects.get(census_run=run)
+        assert result.get("materialization_status") == "created"
+        assert result.get("occupancy_measurement_id") == measurement.pk
+        assert DailyOccupancySummary.objects.filter(
+            local_date=timezone.localdate()
+        ).exists()
+        assert result.get("batch_id") is not None
+        assert result["patients_total"] == 1
+
+    def test_materialization_failure_leaves_zero_clinical_side_effects(self):
+        from unittest import mock
+
+        _scoh3_catalog(timezone.localdate())
+        run = self._complete_run()
+
+        with mock.patch(
+            "apps.census.services.materialize_occupancy_measurement",
+            create=True,
+            side_effect=OccupancyMaterializationError(
+                "synthetic structural failure"
+            ),
+        ):
+            with pytest.raises(OccupancyMaterializationError):
+                process_census_snapshot(run_id=run.pk)
+
+        assert CensusExecutionBatch.objects.count() == 0
+        assert IngestionRun.objects.filter(status="queued").count() == 0
+        assert Patient.objects.count() == 0
+        assert OccupancyMeasurement.objects.count() == 0
+        assert DailyOccupancySummary.objects.count() == 0
+
+    def test_complete_zero_occupied_run_still_gets_measurement_and_no_batch(self):
+        _scoh3_catalog(timezone.localdate())
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        now = timezone.now()
+        _add_filler_snapshots(captured_at=now, run=run, sector_count=40)
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        assert OccupancyMeasurement.objects.filter(census_run=run).exists()
+        assert DailyOccupancySummary.objects.filter(
+            local_date=timezone.localdate()
+        ).exists()
+        assert result.get("materialization_status") == "created"
+        assert result.get("batch_id") is None
+        assert result["patients_total"] == 0
+
+    def test_pre_activation_run_has_no_measurement_and_preserves_clinical_processing(self):
+        run = self._complete_run()
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        assert OccupancyMeasurement.objects.count() == 0
+        assert DailyOccupancySummary.objects.count() == 0
+        assert result.get("materialization_status") == "pre_activation"
+        assert result.get("batch_id") is not None
+        assert result["patients_total"] == 1
+
+    def test_unknown_sector_does_not_block_clinical_processing(self):
+        _scoh3_catalog(timezone.localdate())
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+            setor_codigo="100",
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="UNKNOWN SECTOR",
+            leito="UG02A",
+            prontuario="22222222",
+            nome="PACIENTE DESCONHECIDO",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+            setor_codigo="999",
+        )
+        _add_filler_snapshots(
+            captured_at=now,
+            run=run,
+            exclude={"UTI A", "UNKNOWN SECTOR"},
+        )
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        assert OccupancyMeasurement.objects.filter(census_run=run).exists()
+        measurement = OccupancyMeasurement.objects.get(census_run=run)
+        assert measurement.groups.filter(calculation_status="unmapped").exists()
+        assert result.get("batch_id") is not None
+        assert result["patients_total"] == 2
+
+    def test_explicit_39_sector_run_never_invokes_materialization(self):
+        _scoh3_catalog(timezone.localdate())
+        run = self._complete_run(sector_count=39)
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        assert result["rejected"] is True
+        assert result.get("materialization_status") is None
+        assert OccupancyMeasurement.objects.count() == 0
+        assert DailyOccupancySummary.objects.count() == 0
+        assert CensusExecutionBatch.objects.count() == 0
+
+    def test_legacy_39_sector_path_never_invokes_materialization(self):
+        _scoh3_catalog(timezone.localdate())
+        self._complete_run(sector_count=39)
+
+        result = process_census_snapshot()
+
+        assert result["rejected"] is True
+        assert result.get("materialization_status") is None
+        assert OccupancyMeasurement.objects.count() == 0
+        assert DailyOccupancySummary.objects.count() == 0
+        assert CensusExecutionBatch.objects.count() == 0
+
+    def test_legacy_latest_set_with_one_run_materializes_by_that_run(self):
+        _scoh3_catalog(timezone.localdate())
+        run = self._complete_run()
+
+        result = process_census_snapshot()
+
+        assert OccupancyMeasurement.objects.filter(census_run=run).exists()
+        measurement = OccupancyMeasurement.objects.get(census_run=run)
+        assert result.get("materialization_status") == "created"
+        assert result.get("occupancy_measurement_id") == measurement.pk
+        assert DailyOccupancySummary.objects.filter(
+            local_date=timezone.localdate()
+        ).exists()
+        assert result.get("batch_id") is not None
+
+    def test_missing_provenance_skips_history_and_preserves_legacy_processing(self):
+        _scoh3_catalog(timezone.localdate())
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        _add_filler_snapshots(captured_at=now, exclude={"UTI A"})
+
+        result = process_census_snapshot()
+
+        assert result.get("materialization_status") == "missing_provenance"
+        assert OccupancyMeasurement.objects.count() == 0
+        assert DailyOccupancySummary.objects.count() == 0
+        assert result.get("batch_id") is not None
+        assert result["patients_total"] == 1
+
+    def test_ambiguous_provenance_skips_history_and_preserves_legacy_processing(self):
+        _scoh3_catalog(timezone.localdate())
+        now = timezone.now()
+        run_a = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        run_b = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run_a,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run_b,
+            setor="UTI B",
+            leito="UG01B",
+            prontuario="22222222",
+            nome="PACIENTE B",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        _add_filler_snapshots(
+            captured_at=now, exclude={"UTI A", "UTI B"}
+        )
+
+        result = process_census_snapshot()
+
+        assert result.get("materialization_status") == "missing_provenance"
+        assert OccupancyMeasurement.objects.count() == 0
+        assert DailyOccupancySummary.objects.count() == 0
+        assert result.get("batch_id") is not None
+        assert result["patients_total"] == 2

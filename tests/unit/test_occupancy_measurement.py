@@ -779,3 +779,439 @@ class TestSchemaCommandAndAtomicity:
 
         assert parent_model.objects.count() == 0
         assert child_model.objects.count() == 0
+
+
+@pytest.mark.django_db
+class TestDailyOccupancySummary:
+    """SCOH-S3 daily summary aggregation from immutable measurements."""
+
+    def _daily_models(self):
+        models_module = importlib.import_module("apps.census.models")
+        parent = getattr(models_module, "DailyOccupancySummary", None)
+        child = getattr(models_module, "DailyGroupOccupancySummary", None)
+        if parent is None or child is None:
+            pytest.fail("daily occupancy summary schema is missing")
+        return parent, child
+
+    def test_daily_behavior_is_a_real_assertion_red(self):
+        self._daily_models()
+        domain = _domain()
+        assert hasattr(domain, "refresh_daily_occupancy_summary"), (
+            "daily occupancy summary refresh behavior is not implemented"
+        )
+
+    def test_first_measurement_creates_one_parent_and_group_summaries(self):
+        parent_model, child_model = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, [_standard_group(capacity=10)])
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(today, 8),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-001",
+        )
+
+        result = _materialize(run.pk)
+
+        assert result.status == "created"
+        assert parent_model.objects.count() == 1
+        summary = parent_model.objects.get(local_date=today)
+        assert summary.measurement_count == 1
+        assert summary.first_captured_at == _at(today, 8)
+        assert summary.last_captured_at == _at(today, 8)
+        assert child_model.objects.filter(daily_summary=summary).count() == 1
+        group = child_model.objects.get(daily_summary=summary, stable_key="A")
+        assert group.measurement_count == 1
+
+    def test_second_same_day_measurement_updates_instead_of_duplicates(self):
+        parent_model, child_model = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, [_standard_group(capacity=10)])
+        run_a = _run()
+        run_b = _run()
+        _snapshot(
+            run_a,
+            captured_at=_at(today, 8),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-001",
+        )
+        _snapshot(
+            run_b,
+            captured_at=_at(today, 20),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-002",
+        )
+
+        _materialize(run_a.pk)
+        _materialize(run_b.pk)
+
+        assert parent_model.objects.count() == 1
+        summary = parent_model.objects.get(local_date=today)
+        assert summary.measurement_count == 2
+        assert summary.first_captured_at == _at(today, 8)
+        assert summary.last_captured_at == _at(today, 20)
+        assert child_model.objects.filter(daily_summary=summary).count() == 1
+        group = child_model.objects.get(daily_summary=summary, stable_key="A")
+        assert group.measurement_count == 2
+
+    def test_arithmetic_mean_min_max_first_last_and_exceeded_by_are_exact(self):
+        _, child_model = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, [_standard_group(capacity=8)])
+        run_a = _run()
+        run_b = _run()
+        for index in range(5):
+            _snapshot(
+                run_a,
+                captured_at=_at(today, 8),
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"A-{index}",
+            )
+        for index in range(10):
+            _snapshot(
+                run_b,
+                captured_at=_at(today, 20),
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"B-{index}",
+            )
+
+        _materialize(run_a.pk)
+        _materialize(run_b.pk)
+        summary = self._daily_models()[0].objects.get(local_date=today)
+
+        assert summary.measurement_count == 2
+        assert summary.first_captured_at == _at(today, 8)
+        assert summary.last_captured_at == _at(today, 20)
+        assert summary.mean_occupied == Decimal("7.50")
+        assert summary.min_occupied == 5
+        assert summary.max_occupied == 10
+        assert summary.mean_percentage == Decimal("93.75")
+        assert summary.min_percentage == Decimal("62.50")
+        assert summary.max_percentage == Decimal("125.00")
+        assert summary.max_exceeded_by == 2
+        group = child_model.objects.get(daily_summary=summary, stable_key="A")
+        assert group.mean_occupied == Decimal("7.50")
+        assert group.min_occupied == 5
+        assert group.max_occupied == 10
+        assert group.mean_percentage == Decimal("93.75")
+        assert group.min_percentage == Decimal("62.50")
+        assert group.max_percentage == Decimal("125.00")
+        assert group.max_exceeded_by == 2
+
+    def test_unequal_intervals_still_have_equal_weights(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, [_standard_group(capacity=6)])
+        for hour, marker in [(8, "MORNING"), (9, "EARLY-NOON"), (23, "NIGHT")]:
+            run = _run()
+            for index in range(3):
+                _snapshot(
+                    run,
+                    captured_at=_at(today, hour),
+                    code="100",
+                    sector="Sector A",
+                    status=BedStatus.OCCUPIED,
+                    index=index,
+                    patient_marker=f"{marker}-{index}",
+                )
+            _materialize(run.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+
+        assert summary.measurement_count == 3
+        assert summary.mean_occupied == Decimal("3.00")
+        assert summary.min_occupied == 3
+        assert summary.max_occupied == 3
+        assert summary.mean_percentage == Decimal("50.00")
+
+    def test_mean_uses_exact_numerators_and_rounds_final_with_half_up(self):
+        parent_model, child_model = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, [_standard_group(capacity=3)])
+        run_a = _run()
+        run_b = _run()
+        _snapshot(
+            run_a,
+            captured_at=_at(today, 8),
+            code="100",
+            sector="Sector A",
+        )
+        for index in range(2):
+            _snapshot(
+                run_b,
+                captured_at=_at(today, 20),
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"B-{index}",
+            )
+
+        _materialize(run_a.pk)
+        _materialize(run_b.pk)
+        summary = parent_model.objects.get(local_date=today)
+        group = child_model.objects.get(daily_summary=summary, stable_key="A")
+
+        # Exact percentages are 0.000 and 66.666... -> exact mean 33.333...
+        # rounds to 33.33. Averaging the stored 0.00/66.67 would give 33.34.
+        assert summary.mean_percentage == Decimal("33.33")
+        assert group.mean_percentage == Decimal("33.33")
+
+    def test_delayed_measurement_updates_its_original_local_date(self):
+        parent_model, _ = self._daily_models()
+        yesterday = timezone.localdate() - timedelta(days=1)
+        _catalog(yesterday, [_standard_group(capacity=6)])
+        run_a = _run()
+        run_b = _run()
+        _snapshot(
+            run_a,
+            captured_at=_at(yesterday, 8),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-A",
+        )
+        for index in range(3):
+            _snapshot(
+                run_b,
+                captured_at=_at(yesterday, 23),
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"SYN-B-{index}",
+            )
+
+        # Materialized now (delayed): summary must belong to the capture date.
+        _materialize(run_a.pk)
+        _materialize(run_b.pk)
+
+        assert parent_model.objects.count() == 1
+        summary = parent_model.objects.get(local_date=yesterday)
+        assert summary.measurement_count == 2
+        assert summary.first_captured_at == _at(yesterday, 8)
+        assert summary.last_captured_at == _at(yesterday, 23)
+        assert summary.mean_occupied == Decimal("2.00")
+        assert not parent_model.objects.filter(local_date=timezone.localdate()).exists()
+
+    def test_repeated_existing_measurement_does_not_rewrite_summary(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, [_standard_group(capacity=6)])
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(today, 8),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-001",
+        )
+
+        first = _materialize(run.pk)
+        summary = parent_model.objects.get(local_date=today)
+        original = (summary.measurement_count, summary.mean_occupied)
+
+        _snapshot(
+            run,
+            captured_at=_at(today, 8),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=2,
+            patient_marker="SYN-002",
+        )
+        second = _materialize(run.pk)
+        summary.refresh_from_db()
+
+        assert first.status == "created"
+        assert second.status == "existing"
+        assert second.created is False
+        assert (summary.measurement_count, summary.mean_occupied) == original
+
+    def test_pending_unrated_and_unmapped_groups_keep_raw_statistics_and_null_rates(self):
+        parent_model, child_model = self._daily_models()
+        today = timezone.localdate()
+        _catalog(
+            today,
+            [
+                _standard_group(capacity=10),
+                {
+                    "stable_key": "PENDING",
+                    "display_name": "Pending",
+                    "capacity": 32,
+                    "policy": CalculationPolicy.LINKED_SLOTS_PENDING,
+                    "members": (("200", "Pending Sector"),),
+                },
+                {
+                    "stable_key": "UNRATED",
+                    "display_name": "Unrated",
+                    "capacity": None,
+                    "policy": CalculationPolicy.UNRATED,
+                    "members": (("300", "Unrated Sector"),),
+                },
+            ],
+        )
+        runs = [_run(), _run()]
+        for index, run in enumerate(runs):
+            occupied_standard = 2 if index == 0 else 4
+            occupied_pending = 1 if index == 0 else 3
+            occupied_unrated = 1 if index == 0 else 2
+            for i in range(occupied_standard):
+                _snapshot(
+                    run,
+                    captured_at=_at(today, 8 + index * 12),
+                    code="100",
+                    sector="Sector A",
+                    status=BedStatus.OCCUPIED,
+                    index=i,
+                    patient_marker=f"S-{index}-{i}",
+                )
+            for i in range(occupied_pending):
+                _snapshot(
+                    run,
+                    captured_at=_at(today, 8 + index * 12),
+                    code="200",
+                    sector="Pending Sector",
+                    status=BedStatus.OCCUPIED,
+                    index=i,
+                    patient_marker=f"P-{index}-{i}",
+                )
+            for i in range(occupied_unrated):
+                _snapshot(
+                    run,
+                    captured_at=_at(today, 8 + index * 12),
+                    code="300",
+                    sector="Unrated Sector",
+                    status=BedStatus.OCCUPIED,
+                    index=i,
+                    patient_marker=f"U-{index}-{i}",
+                )
+            _materialize(run.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+        pending = child_model.objects.get(daily_summary=summary, stable_key="PENDING")
+        unrated = child_model.objects.get(daily_summary=summary, stable_key="UNRATED")
+        standard = child_model.objects.get(daily_summary=summary, stable_key="A")
+
+        assert pending.measurement_count == 2
+        assert pending.mean_occupied == Decimal("2.00")
+        assert pending.min_occupied == 1
+        assert pending.max_occupied == 3
+        assert pending.mean_percentage is None
+        assert pending.min_percentage is None
+        assert pending.max_percentage is None
+        assert pending.official_capacity == 32
+        assert unrated.measurement_count == 2
+        assert unrated.mean_occupied == Decimal("1.50")
+        assert unrated.min_occupied == 1
+        assert unrated.max_occupied == 2
+        assert unrated.mean_percentage is None
+        assert unrated.official_capacity is None
+        assert standard.mean_percentage is not None
+        assert summary.mean_percentage is not None
+
+    def test_changing_intraday_coverage_preserves_min_max_evidence(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, [_standard_group()])
+        run_a = _run()
+        run_b = _run()
+        _snapshot(
+            run_a,
+            captured_at=_at(today, 8),
+            code="100",
+            sector="Sector A",
+        )
+        _snapshot(
+            run_a,
+            captured_at=_at(today, 8),
+            code="999",
+            sector="Unknown",
+            index=1,
+        )
+        _snapshot(
+            run_b,
+            captured_at=_at(today, 20),
+            code="100",
+            sector="Sector A",
+        )
+
+        _materialize(run_a.pk)
+        _materialize(run_b.pk)
+        summary = parent_model.objects.get(local_date=today)
+
+        assert summary.min_observed_sector_count == 1
+        assert summary.max_observed_sector_count == 2
+        assert summary.min_capacity_covered_sector_count == 1
+        assert summary.max_capacity_covered_sector_count == 1
+        assert summary.min_calculable_sector_count == 1
+        assert summary.max_calculable_sector_count == 1
+
+    def test_day_without_measurement_has_no_fabricated_summary(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today + timedelta(days=1), [_standard_group()])
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(today),
+            code="100",
+            sector="Sector A",
+        )
+
+        result = _materialize(run.pk)
+
+        assert result.status == "pre_activation"
+        assert parent_model.objects.count() == 0
+
+    def test_later_catalog_does_not_rebuild_prior_summary(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        first_catalog = _catalog(today, [_standard_group(capacity=10)])
+        run_a = _run()
+        _snapshot(
+            run_a,
+            captured_at=_at(today, 8),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-A",
+        )
+        _materialize(run_a.pk)
+        summary = parent_model.objects.get(local_date=today)
+
+        second_catalog = _catalog(
+            today + timedelta(days=1), [_standard_group(capacity=99)]
+        )
+        run_b = _run()
+        _snapshot(
+            run_b,
+            captured_at=_at(today + timedelta(days=1), 8),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-B",
+        )
+        _materialize(run_b.pk)
+
+        summary.refresh_from_db()
+        assert summary.catalog_id == first_catalog.pk
+        assert summary.known_capacity == 10
+        assert summary.algorithm_version == "occupancy-v1"
+        later = parent_model.objects.get(local_date=today + timedelta(days=1))
+        assert later.catalog_id == second_catalog.pk
+        assert later.known_capacity == 99

@@ -20,6 +20,8 @@ from apps.census.models import (
     CapacityGroupDefinition,
     CapacitySectorMembership,
     CensusSnapshot,
+    DailyGroupOccupancySummary,
+    DailyOccupancySummary,
     OccupancyCalculationStatus,
     OccupancyGroupMeasurement,
     OccupancyMeasurement,
@@ -112,7 +114,197 @@ def materialize_occupancy_measurement(*, run_id: int) -> MaterializationResult:
                 for values in group_values
             ]
         )
+        refresh_daily_occupancy_summary(local_date=local_date)
         return MaterializationResult("created", measurement, True)
+
+
+def refresh_daily_occupancy_summary(*, local_date: date) -> None:
+    """Rebuild the deterministic daily summary for one local date.
+
+    Derives the parent and the complete group-child set from every immutable
+    measurement of that local date. Each census contributes one equal
+    observation; means are computed from exact numerators/capacities and only
+    the final stored decimal is rounded with ``ROUND_HALF_UP``. No time
+    weighting, interpolation or projection is applied. Must be called inside
+    the measurement creation transaction.
+
+    A local date without measurements produces no row.
+    """
+    measurements = list(
+        OccupancyMeasurement.objects.filter(local_date=local_date)
+        .order_by("captured_at", "pk")
+        .prefetch_related(
+            Prefetch(
+                "groups",
+                queryset=OccupancyGroupMeasurement.objects.order_by(
+                    "stable_key", "pk"
+                ),
+            )
+        )
+    )
+    if not measurements:
+        return
+
+    parent, _ = DailyOccupancySummary.objects.update_or_create(
+        local_date=local_date,
+        defaults=_daily_parent_values(measurements),
+    )
+    for values in _daily_group_values(measurements):
+        DailyGroupOccupancySummary.objects.update_or_create(
+            daily_summary=parent,
+            stable_key=values["stable_key"],
+            defaults=values,
+        )
+
+
+def _daily_parent_values(
+    measurements: list[OccupancyMeasurement],
+) -> dict[str, object]:
+    """Aggregate hospital-level daily statistics from day measurements."""
+    reference = measurements[0]
+    occupied = [measurement.occupied_for_rate for measurement in measurements]
+    exact_percentages = [
+        _exact_percentage(
+            measurement.occupied_for_rate, measurement.calculable_capacity
+        )
+        for measurement in measurements
+        if measurement.calculable_capacity > 0
+    ]
+    return {
+        "catalog": reference.catalog,
+        "algorithm_version": reference.algorithm_version,
+        "measurement_count": len(measurements),
+        "first_captured_at": measurements[0].captured_at,
+        "last_captured_at": measurements[-1].captured_at,
+        "known_capacity": reference.known_capacity,
+        "calculable_capacity": reference.calculable_capacity,
+        "mean_occupied": _rounded_mean(occupied),
+        "min_occupied": min(occupied),
+        "max_occupied": max(occupied),
+        "mean_percentage": (
+            _rounded_mean(exact_percentages) if exact_percentages else None
+        ),
+        "min_percentage": (
+            _rounded_decimal(min(exact_percentages))
+            if exact_percentages
+            else None
+        ),
+        "max_percentage": (
+            _rounded_decimal(max(exact_percentages))
+            if exact_percentages
+            else None
+        ),
+        "max_exceeded_by": max(
+            measurement.exceeded_by for measurement in measurements
+        ),
+        "min_observed_sector_count": min(
+            measurement.observed_sector_count for measurement in measurements
+        ),
+        "max_observed_sector_count": max(
+            measurement.observed_sector_count for measurement in measurements
+        ),
+        "min_capacity_covered_sector_count": min(
+            measurement.capacity_covered_sector_count
+            for measurement in measurements
+        ),
+        "max_capacity_covered_sector_count": max(
+            measurement.capacity_covered_sector_count
+            for measurement in measurements
+        ),
+        "min_calculable_sector_count": min(
+            measurement.calculable_sector_count for measurement in measurements
+        ),
+        "max_calculable_sector_count": max(
+            measurement.calculable_sector_count for measurement in measurements
+        ),
+    }
+
+
+def _daily_group_values(
+    measurements: list[OccupancyMeasurement],
+) -> list[dict[str, object]]:
+    """Aggregate per-group daily statistics from day measurements."""
+    by_key: dict[str, list[tuple[datetime, OccupancyGroupMeasurement]]] = (
+        defaultdict(list)
+    )
+    for measurement in measurements:
+        captured_at = measurement.captured_at
+        for child in measurement.groups.all():
+            by_key[child.stable_key].append((captured_at, child))
+
+    values: list[dict[str, object]] = []
+    for stable_key in sorted(by_key):
+        entries = sorted(
+            by_key[stable_key], key=lambda entry: (entry[0], entry[1].pk)
+        )
+        reference = entries[0][1]
+        occupied = [
+            child.occupied_count
+            if child.occupied_count is not None
+            else child.status_counts_json.get("occupied", 0)
+            for _, child in entries
+        ]
+        exact_percentages = [
+            _exact_percentage(child.occupied_count, child.official_capacity)
+            for _, child in entries
+            if child.official_capacity is not None
+            and child.occupied_count is not None
+        ]
+        exceeded = [
+            child.exceeded_by for _, child in entries if child.exceeded_by is not None
+        ]
+        values.append(
+            {
+                "stable_key": stable_key,
+                "display_name": reference.display_name,
+                "calculation_policy": reference.calculation_policy,
+                "calculation_status": reference.calculation_status,
+                "official_capacity": reference.official_capacity,
+                "measurement_count": len(entries),
+                "first_captured_at": entries[0][0],
+                "last_captured_at": entries[-1][0],
+                "mean_occupied": (
+                    _rounded_mean(occupied) if occupied else None
+                ),
+                "min_occupied": min(occupied) if occupied else None,
+                "max_occupied": max(occupied) if occupied else None,
+                "mean_percentage": (
+                    _rounded_mean(exact_percentages)
+                    if exact_percentages
+                    else None
+                ),
+                "min_percentage": (
+                    _rounded_decimal(min(exact_percentages))
+                    if exact_percentages
+                    else None
+                ),
+                "max_percentage": (
+                    _rounded_decimal(max(exact_percentages))
+                    if exact_percentages
+                    else None
+                ),
+                "max_exceeded_by": max(exceeded) if exceeded else None,
+            }
+        )
+    return values
+
+
+def _exact_percentage(occupied: int, capacity: int) -> Decimal:
+    """Exact unrounded occupancy percentage for exact-value aggregation."""
+    return Decimal(occupied) * Decimal(100) / Decimal(capacity)
+
+
+def _rounded_mean(values: Iterable[int | Decimal]) -> Decimal:
+    """Equal-weight mean rounded once with ``ROUND_HALF_UP``."""
+    decimals = [Decimal(value) for value in values]
+    return (
+        sum(decimals, Decimal("0")) / Decimal(len(decimals))
+    ).quantize(_PERCENT_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def _rounded_decimal(value: Decimal) -> Decimal:
+    """Round a single exact decimal once with ``ROUND_HALF_UP``."""
+    return value.quantize(_PERCENT_QUANTUM, rounding=ROUND_HALF_UP)
 
 
 def _get_locked_census_run(run_id: int) -> IngestionRun:

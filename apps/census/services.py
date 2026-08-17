@@ -16,6 +16,7 @@ from django.db.models import Max
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord, PatientMovement
+from apps.census.occupancy import materialize_occupancy_measurement
 from apps.ingestion.extractors.subprocess_utils import (
     SubprocessTimeoutError,
     run_subprocess,
@@ -123,6 +124,23 @@ def validate_snapshot_completeness(snapshots_qs) -> dict:
         "completeness_status": "accepted" if accepted else "rejected",
     }
 
+
+def _resolve_single_census_run(snapshots_qs) -> int | None:
+    """Resolve the unique non-null census run of a snapshot queryset.
+
+    Returns the run id only when every row of the queryset resolves to the
+    same non-null census ``IngestionRun``; otherwise returns ``None`` for
+    missing or ambiguous provenance. ``captured_at`` is never used as a
+    synthetic idempotency key.
+    """
+    run_ids = set(
+        snapshots_qs.order_by()
+        .values_list("ingestion_run_id", flat=True)
+        .distinct()
+    )
+    if len(run_ids) == 1 and None not in run_ids:
+        return run_ids.pop()
+    return None
 
 
 def classify_bed_status(prontuario: str, nome: str) -> str:
@@ -340,7 +358,7 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
 
 def process_census_snapshot(
     run_id: int | None = None,
-) -> dict[str, int | None]:
+) -> dict[str, int | str | bool | None]:
     """Process the most recent census snapshot and enqueue patient sync runs.
 
     For each occupied bed with a prontuario, creates or updates the
@@ -382,6 +400,8 @@ def process_census_snapshot(
                 "patients_skipped": 0,
                 "patients_skipped_no_pront": 0,
                 "patients_skipped_duplicate": 0,
+                "materialization_status": None,
+                "occupancy_measurement_id": None,
                 "rejected": False,
             }
         snapshots = CensusSnapshot.objects.filter(captured_at=latest_captured)
@@ -406,6 +426,8 @@ def process_census_snapshot(
             "patients_skipped": 0,
             "patients_skipped_no_pront": 0,
             "patients_skipped_duplicate": 0,
+            "materialization_status": None,
+            "occupancy_measurement_id": None,
             "rejected": True,
             "rejection_reason": "incomplete_snapshot",
             "sector_count": coverage["sector_count"],
@@ -413,6 +435,35 @@ def process_census_snapshot(
                 "minimum_required_sectors"
             ],
         }
+
+    # Occupancy materialization (SCOH-S3): after the GCEC-S2 completeness
+    # guard and before any clinical batch or patient queue side effect. A
+    # structurally invalid catalog or persistence failure propagates before
+    # any clinical effect; unknown sectors, missing capacities and name
+    # mismatches are valid measurement states and never block processing.
+    if run_id is not None:
+        occupancy = materialize_occupancy_measurement(run_id=run_id)
+        materialization_status: str | None = occupancy.status
+        occupancy_measurement_id: int | None = (
+            occupancy.measurement.pk
+            if occupancy.measurement is not None
+            else None
+        )
+    else:
+        provenance_run_id = _resolve_single_census_run(snapshots)
+        if provenance_run_id is None:
+            materialization_status = "missing_provenance"
+            occupancy_measurement_id = None
+        else:
+            occupancy = materialize_occupancy_measurement(
+                run_id=provenance_run_id
+            )
+            materialization_status = occupancy.status
+            occupancy_measurement_id = (
+                occupancy.measurement.pk
+                if occupancy.measurement is not None
+                else None
+            )
 
     # Filter only occupied beds
     occupied = snapshots.filter(bed_status=BedStatus.OCCUPIED)
@@ -461,6 +512,8 @@ def process_census_snapshot(
             "patients_skipped": no_pront_skipped + dup_skipped,
             "patients_skipped_no_pront": no_pront_skipped,
             "patients_skipped_duplicate": dup_skipped,
+            "materialization_status": materialization_status,
+            "occupancy_measurement_id": occupancy_measurement_id,
             "rejected": False,
         }
 
@@ -531,6 +584,8 @@ def process_census_snapshot(
         "patients_skipped": total_skipped,
         "patients_skipped_no_pront": no_pront_skipped,
         "patients_skipped_duplicate": dup_skipped,
+        "materialization_status": materialization_status,
+        "occupancy_measurement_id": occupancy_measurement_id,
         "rejected": False,
     }
 

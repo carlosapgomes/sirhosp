@@ -271,6 +271,224 @@ class OccupancyGroupMeasurement(models.Model):
         return f"{self.stable_key} @ measurement {self.measurement_id}"
 
 
+class DailyOccupancySummary(models.Model):
+    """Deterministic hospital occupancy summary for one local date.
+
+    Rebuilt from every immutable :class:`OccupancyMeasurement` of the same
+    local date whenever a new measurement is persisted. Each census has one
+    equal observation; means are computed from exact numerators/capacities
+    and only the final stored decimal is rounded.
+    """
+
+    local_date = models.DateField(
+        unique=True,
+        help_text="Local calendar date (America/Bahia) of the summarized measurements",
+    )
+    catalog = models.ForeignKey(
+        CapacityCatalogVersion,
+        on_delete=models.PROTECT,
+        related_name="daily_summaries",
+    )
+    algorithm_version = models.CharField(max_length=30)
+    measurement_count = models.PositiveIntegerField()
+    first_captured_at = models.DateTimeField()
+    last_captured_at = models.DateTimeField()
+    known_capacity = models.PositiveIntegerField()
+    calculable_capacity = models.PositiveIntegerField()
+    mean_occupied = models.DecimalField(max_digits=12, decimal_places=2)
+    min_occupied = models.PositiveIntegerField()
+    max_occupied = models.PositiveIntegerField()
+    mean_percentage = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    min_percentage = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    max_percentage = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    max_exceeded_by = models.PositiveIntegerField(null=True, blank=True)
+    min_observed_sector_count = models.PositiveIntegerField()
+    max_observed_sector_count = models.PositiveIntegerField()
+    min_capacity_covered_sector_count = models.PositiveIntegerField()
+    max_capacity_covered_sector_count = models.PositiveIntegerField()
+    min_calculable_sector_count = models.PositiveIntegerField()
+    max_calculable_sector_count = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(
+                    first_captured_at__lte=models.F("last_captured_at")
+                ),
+                name="ck_daily_summary_capture_bounds_ordered",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        min_observed_sector_count__lte=models.F(
+                            "max_observed_sector_count"
+                        )
+                    )
+                    & models.Q(
+                        min_capacity_covered_sector_count__lte=models.F(
+                            "max_capacity_covered_sector_count"
+                        )
+                    )
+                    & models.Q(
+                        min_calculable_sector_count__lte=models.F(
+                            "max_calculable_sector_count"
+                        )
+                    )
+                ),
+                name="ck_daily_summary_coverage_bounds_ordered",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(mean_occupied__gte=0),
+                name="ck_daily_summary_mean_occupied_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(mean_percentage__gte=0)
+                    | models.Q(mean_percentage__isnull=True)
+                )
+                & (
+                    models.Q(min_percentage__gte=0)
+                    | models.Q(min_percentage__isnull=True)
+                )
+                & (
+                    models.Q(max_percentage__gte=0)
+                    | models.Q(max_percentage__isnull=True)
+                ),
+                name="ck_daily_summary_percentages_valid",
+            ),
+        ]
+        ordering = ["local_date"]
+        verbose_name = "Daily Occupancy Summary"
+        verbose_name_plural = "Daily Occupancy Summaries"
+
+    def __str__(self) -> str:
+        return f"DailyOccupancySummary {self.local_date}"
+
+
+class DailyGroupOccupancySummary(models.Model):
+    """Deterministic per-group daily occupancy statistics.
+
+    One row per stable group key represented by the day's measurements.
+    Non-calculable groups keep raw occupied statistics and null rate fields.
+    """
+
+    daily_summary = models.ForeignKey(
+        DailyOccupancySummary,
+        on_delete=models.CASCADE,
+        related_name="groups",
+    )
+    stable_key = models.CharField(max_length=100)
+    display_name = models.CharField(max_length=255)
+    calculation_policy = models.CharField(max_length=30, blank=True, default="")
+    calculation_status = models.CharField(
+        max_length=30,
+        choices=OccupancyCalculationStatus.choices,
+    )
+    official_capacity = models.PositiveIntegerField(null=True, blank=True)
+    measurement_count = models.PositiveIntegerField()
+    first_captured_at = models.DateTimeField()
+    last_captured_at = models.DateTimeField()
+    mean_occupied = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    min_occupied = models.PositiveIntegerField(null=True, blank=True)
+    max_occupied = models.PositiveIntegerField(null=True, blank=True)
+    mean_percentage = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    min_percentage = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    max_percentage = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    max_exceeded_by = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["daily_summary", "stable_key"],
+                name="uq_daily_group_summary_key",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    first_captured_at__lte=models.F("last_captured_at")
+                ),
+                name="ck_daily_group_capture_bounds_ordered",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(mean_occupied__gte=0)
+                    | models.Q(mean_occupied__isnull=True)
+                )
+                & (
+                    models.Q(min_occupied__gte=0)
+                    | models.Q(min_occupied__isnull=True)
+                )
+                & (
+                    models.Q(max_occupied__gte=0)
+                    | models.Q(max_occupied__isnull=True)
+                ),
+                name="ck_daily_group_occupied_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(mean_percentage__gte=0)
+                    | models.Q(mean_percentage__isnull=True)
+                )
+                & (
+                    models.Q(min_percentage__gte=0)
+                    | models.Q(min_percentage__isnull=True)
+                )
+                & (
+                    models.Q(max_percentage__gte=0)
+                    | models.Q(max_percentage__isnull=True)
+                ),
+                name="ck_daily_group_percentages_valid",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(official_capacity__gt=0)
+                | models.Q(official_capacity__isnull=True),
+                name="ck_daily_group_capacity_positive",
+            ),
+        ]
+        ordering = ["daily_summary", "stable_key"]
+        verbose_name = "Daily Group Occupancy Summary"
+        verbose_name_plural = "Daily Group Occupancy Summaries"
+
+    def __str__(self) -> str:
+        return f"{self.stable_key} @ daily {self.daily_summary_id}"
+
+
 class PatientMovement(models.Model):
     patient = models.ForeignKey(
         "patients.Patient", on_delete=models.CASCADE,
