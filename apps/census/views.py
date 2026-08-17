@@ -10,6 +10,10 @@ from django.shortcuts import render
 
 from apps.census.flow_service import compute_hospital_flow, list_sectors
 from apps.census.models import BedStatus, CensusSnapshot
+from apps.census.occupancy import (
+    build_official_group_rows,
+    resolve_exact_measurement,
+)
 from apps.patients.models import Patient
 
 
@@ -128,7 +132,42 @@ def bed_status_view(request):
         if status in totals:
             totals[status] = row["count"]
 
-    # Aggregate by sector and status
+    # Official occupancy statistics (SCOH-S4): the latest census is selected
+    # exactly as before, and statistics are only presented when every row of
+    # that set identifies one non-null ingestion run and that exact run owns
+    # one persisted measurement. Older measurements, current-catalog
+    # calculations and raw percentage inference are never used here.
+    measurement = resolve_exact_measurement(snapshots)
+
+    bed_details = snapshots.order_by("leito")
+
+    # Look up internal Patient IDs for direct linking to admission_list
+    prontuarios = [b.prontuario for b in bed_details if b.prontuario]
+    patient_map: dict[str, int] = {}
+    if prontuarios:
+        patient_map = {
+            p.patient_source_key: p.pk
+            for p in Patient.objects.filter(patient_source_key__in=prontuarios)
+        }
+
+    context = {
+        "page_title": "Leitos",
+        "sectors": [],
+        "captured_at": latest_captured,
+        "totals": totals,
+        "measurement": measurement,
+        "measured_groups": [],
+    }
+
+    if measurement is not None:
+        context["measured_groups"] = build_official_group_rows(
+            measurement=measurement,
+            snapshots=bed_details,
+            patient_map=patient_map,
+        )
+        return render(request, "census/bed_status.html", context)
+
+    # Raw fallback: aggregate by sector and status (current behavior preserved)
     sectors_raw = (
         snapshots.values("setor", "bed_status")
         .annotate(count=Count("id"))
@@ -157,18 +196,6 @@ def bed_status_view(request):
         sectors[setor][status] = count
         sectors[setor]["total"] += count
 
-    # Add individual bed details
-    bed_details = snapshots.order_by("leito")
-
-    # Look up internal Patient IDs for direct linking to admission_list
-    prontuarios = [b.prontuario for b in bed_details if b.prontuario]
-    patient_map: dict[str, int] = {}
-    if prontuarios:
-        patient_map = {
-            p.patient_source_key: p.pk
-            for p in Patient.objects.filter(patient_source_key__in=prontuarios)
-        }
-
     for bed in bed_details:
         if bed.setor in sectors:
             sectors[bed.setor]["beds"].append({
@@ -182,12 +209,5 @@ def bed_status_view(request):
                 "patient_id": patient_map.get(bed.prontuario),
             })
 
-    # Sort sectors by name
-    sorted_sectors = sorted(sectors.values(), key=lambda s: s["name"])
-
-    return render(request, "census/bed_status.html", {
-        "page_title": "Leitos",
-        "sectors": sorted_sectors,
-        "captured_at": latest_captured,
-        "totals": totals,
-    })
+    context["sectors"] = sorted(sectors.values(), key=lambda s: s["name"])
+    return render(request, "census/bed_status.html", context)

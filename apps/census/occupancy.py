@@ -10,7 +10,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Iterable
 
 from django.db import transaction
-from django.db.models import Prefetch
+from django.db.models import Prefetch, QuerySet
 from django.utils import timezone
 
 from apps.census.models import (
@@ -618,3 +618,155 @@ def _percentage(occupied: int, capacity: int) -> Decimal | None:
     return (
         Decimal(occupied) * Decimal(100) / Decimal(capacity)
     ).quantize(_PERCENT_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+# ---------------------------------------------------------------------------
+# SCOH-S4: /beds presentation helpers.
+#
+# These helpers assemble template-ready rows for the authenticated ``/beds``
+# page. They consume only persisted measurement values and the raw beds of
+# the exact latest census; they never select a measurement independently,
+# never reuse an older measurement and never recalculate rates, coverage or
+# adjusted occupancy in the view or template.
+# ---------------------------------------------------------------------------
+
+
+def resolve_exact_measurement(
+    snapshots: QuerySet[CensusSnapshot],
+) -> OccupancyMeasurement | None:
+    """Return the measurement owned by the exact run of a latest census.
+
+    The latest census is selected exactly as before; official statistics are
+    only available when every row of that set resolves to one non-null
+    ``IngestionRun`` and that exact run owns a persisted measurement. A
+    runless census, an ambiguous multi-run set and an older measurement never
+    produce statistics here.
+    """
+    run_ids = set(snapshots.values_list("ingestion_run_id", flat=True))
+    if len(run_ids) != 1 or None in run_ids:
+        return None
+    run_id = run_ids.pop()
+    assert run_id is not None
+    return (
+        OccupancyMeasurement.objects.filter(census_run_id=run_id)
+        .select_related("catalog")
+        .prefetch_related("groups")
+        .first()
+    )
+
+
+@dataclass
+class _PresentationGroupRow:
+    """Template-ready official group row assembled from persisted values."""
+
+    stable_key: str
+    display_name: str
+    calculation_status: str
+    official_capacity: int | None
+    occupied_count: int | None
+    occupancy_percentage: Decimal | None
+    exceeded_by: int | None
+    status_counts: dict[str, int]
+    source_sectors: list[str]
+    beds: list[dict[str, object]]
+    name_mismatch: bool
+
+    @property
+    def total(self) -> int:
+        return sum(self.status_counts.values())
+
+    @property
+    def over_capacity(self) -> bool:
+        return (
+            self.occupancy_percentage is not None
+            and self.occupancy_percentage > Decimal("100.00")
+        )
+
+
+def build_official_group_rows(
+    *,
+    measurement: OccupancyMeasurement,
+    snapshots: Iterable[CensusSnapshot],
+    patient_map: dict[str, int] | None = None,
+) -> list[_PresentationGroupRow]:
+    """Group the exact latest-census beds under the persisted group rows.
+
+    Consumes only persisted measurement values (display names, capacities,
+    status counts, percentages, exceeded-by and calculation states) and the
+    raw beds of the same census. Beds are matched to the official group whose
+    component carries their observed code (or observed name when the code is
+    blank); a shared group therefore appears once with combined counts while
+    every contributing source sector and bed stays inside its expansion. No
+    rate, coverage or adjusted occupancy value is computed here.
+    """
+    groups = list(measurement.groups.all())
+    code_to_group: dict[str, OccupancyGroupMeasurement] = {}
+    blank_name_to_group: dict[str, OccupancyGroupMeasurement] = {}
+    for group in groups:
+        for component in group.components_json:
+            observed_code = str(component.get("observed_code") or "").strip()
+            if observed_code:
+                code_to_group[observed_code] = group
+            else:
+                observed_name = str(
+                    component.get("observed_name") or ""
+                ).strip()
+                blank_name_to_group[observed_name] = group
+
+    rows: dict[str, _PresentationGroupRow] = {
+        group.stable_key: _PresentationGroupRow(
+            stable_key=group.stable_key,
+            display_name=group.display_name,
+            calculation_status=group.calculation_status,
+            official_capacity=group.official_capacity,
+            occupied_count=group.occupied_count,
+            occupancy_percentage=group.occupancy_percentage,
+            exceeded_by=group.exceeded_by,
+            status_counts=dict(group.status_counts_json),
+            source_sectors=[],
+            beds=[],
+            name_mismatch=any(
+                bool(component.get("source_name_mismatch"))
+                for component in group.components_json
+            ),
+        )
+        for group in groups
+    }
+    source_sector_sets: dict[str, set[str]] = defaultdict(set)
+    for bed in snapshots:
+        code = (bed.setor_codigo or "").strip()
+        if code:
+            matched_group = code_to_group.get(code)
+        else:
+            matched_group = blank_name_to_group.get(
+                (bed.setor or "").strip()
+            )
+        if matched_group is None:
+            continue
+        rows[matched_group.stable_key].beds.append(
+            _bed_presentation_row(bed, patient_map or {})
+        )
+        source_sector_sets[matched_group.stable_key].add(bed.setor or "")
+
+    result: list[_PresentationGroupRow] = []
+    for group in groups:
+        row = rows[group.stable_key]
+        row.source_sectors = sorted(
+            name for name in source_sector_sets[group.stable_key] if name
+        )
+        result.append(row)
+    return result
+
+
+def _bed_presentation_row(
+    bed: CensusSnapshot, patient_map: dict[str, int]
+) -> dict[str, object]:
+    """Present one census bed exactly like the legacy raw table does."""
+    return {
+        "leito": bed.leito,
+        "status": bed.bed_status,
+        "status_label": BedStatus(bed.bed_status).label,
+        "nome": bed.nome if bed.bed_status == BedStatus.OCCUPIED else "",
+        "prontuario": bed.prontuario,
+        "patient_id": patient_map.get(bed.prontuario),
+    }

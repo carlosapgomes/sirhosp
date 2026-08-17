@@ -18,7 +18,79 @@
   {% else %}
     <p class="text-muted mb-3 small">
       Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}
+      {% if measurement %}
+        &middot; Configuração vigente desde: {{ measurement.catalog.effective_from|date:"d/m/Y" }}
+      {% endif %}
     </p>
+
+    {% if measurement %}
+      <!-- ====== ESTATÍSTICAS OFICIAIS (medição exata do censo) ====== -->
+      <div class="row g-2 mb-3">
+        <div class="col-6 col-md-3">
+          <div class="card border-0 shadow-sm text-center h-100 bg-info bg-opacity-10">
+            <div class="card-body py-3">
+              <div class="fs-5 fw-bold text-info">
+                {{ measurement.capacity_covered_sector_count }} de {{ measurement.observed_sector_count }}
+              </div>
+              <div class="small text-muted">setores com capacidade cadastrada</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="card border-0 shadow-sm text-center h-100 bg-success bg-opacity-10">
+            <div class="card-body py-3">
+              <div class="fs-5 fw-bold text-success">
+                {{ measurement.calculable_sector_count }} de {{ measurement.observed_sector_count }}
+              </div>
+              <div class="small text-muted">setores com lotação calculável</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="card border-0 shadow-sm text-center h-100">
+            <div class="card-body py-3">
+              <div class="fs-6 fw-bold" style="color: var(--sirhosp-sidebar-bg);">Capacidade conhecida: {{ measurement.known_capacity }}</div>
+              <div class="small text-muted">unidades oficiais</div>
+            </div>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="card border-0 shadow-sm text-center h-100">
+            <div class="card-body py-3">
+              <div class="fs-6 fw-bold" style="color: var(--sirhosp-sidebar-bg);">Capacidade calculável: {{ measurement.calculable_capacity }}</div>
+              <div class="small text-muted">grupos com cálculo</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card border-0 shadow-sm mb-3">
+        <div class="card-body py-3">
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <div class="d-flex flex-column">
+              <span class="fw-bold">Ocupação hospitalar</span>
+              <span class="text-muted small">Lotação registrada no sistema legado</span>
+            </div>
+            <div class="d-flex flex-wrap gap-2 align-items-center">
+              <span class="badge bg-primary">{{ measurement.occupied_for_rate }} ocupados</span>
+              {% if measurement.occupancy_percentage is not None %}
+              <span class="badge bg-dark">{{ measurement.occupancy_percentage|floatformat:2 }}%</span>
+              {% else %}
+              <span class="badge bg-light text-dark">Não calculável</span>
+              {% endif %}
+              {% if measurement.exceeded_by > 0 %}
+              <span class="badge bg-danger">Excedente: {{ measurement.exceeded_by }}</span>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+    {% else %}
+      <div class="alert alert-secondary small mb-3" role="alert">
+        Estatísticas oficiais de capacidade: <strong>Pendente</strong> — a
+        medição de lotação ainda não está disponível para este censo.
+      </div>
+    {% endif %}
 
     <!-- ====== TOTALIZAÇÃO (cards de resumo) ====== -->
     <div class="row g-2 mb-4">
@@ -72,85 +144,198 @@
       </div>
     </div>
 
-    <!-- ====== LISTA DE SETORES (cards com collapse) ====== -->
-    <div class="row g-3">
-      {% for sector in sectors %}
-      <div class="col-12">
-        <div class="card border-0 shadow-sm">
-          <!-- Cabeçalho do card (sempre visível, clicável) -->
-          <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2"
-               data-bs-toggle="collapse"
-               data-bs-target="#sector-detail-{{ forloop.counter }}"
-               role="button"
-               aria-expanded="false"
-               style="cursor: pointer;">
-            <h3 class="h6 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
-              <i class="bi bi-chevron-right me-2 collapse-icon"></i>
-              {{ sector.name }}
-            </h3>
-            <div class="d-flex flex-wrap gap-1">
-              {% if sector.occupied %}
-              <span class="badge bg-primary">{{ sector.occupied }} ocupados</span>
-              {% endif %}
-              {% if sector.empty %}
-              <span class="badge bg-success">{{ sector.empty }} vagos</span>
-              {% endif %}
-              {% if sector.maintenance %}
-              <span class="badge bg-secondary">{{ sector.maintenance }} manut.</span>
-              {% endif %}
-              {% if sector.reserved %}
-              <span class="badge bg-warning text-dark">{{ sector.reserved }} reserv.</span>
-              {% endif %}
-              {% if sector.isolation %}
-              <span class="badge bg-danger">{{ sector.isolation }} isolam.</span>
-              {% endif %}
-              <span class="badge bg-light text-dark">{{ sector.total }} total</span>
+    {% if measurement %}
+      <!-- ====== SETORES OFICIAIS (grupos da medição) ====== -->
+      <div class="row g-3">
+        {% for row in measured_groups %}
+        <div class="col-12">
+          <div class="card border-0 shadow-sm{% if row.over_capacity %} border-danger{% endif %}">
+            <!-- Cabeçalho do card (sempre visível, clicável) -->
+            <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2{% if row.over_capacity %} bg-danger bg-opacity-10{% endif %}"
+                 data-bs-toggle="collapse"
+                 data-bs-target="#group-detail-{{ forloop.counter }}"
+                 role="button"
+                 aria-expanded="false"
+                 style="cursor: pointer;">
+              <h3 class="h6 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+                <i class="bi bi-chevron-right me-2 collapse-icon"></i>
+                {{ row.display_name }}
+                {% if row.name_mismatch %}
+                <span class="badge bg-warning text-dark ms-1" title="Nome observado diverge do configurado no catálogo oficial">
+                  Nome divergente
+                </span>
+                {% endif %}
+              </h3>
+              <div class="d-flex flex-wrap gap-1 align-items-center">
+                {% if row.official_capacity %}
+                <span class="badge bg-light text-dark">Capacidade: {{ row.official_capacity }}</span>
+                {% else %}
+                <span class="badge bg-light text-dark">Capacidade não cadastrada</span>
+                {% endif %}
+                {% if row.occupancy_percentage is not None %}
+                <span class="badge bg-dark">{{ row.occupancy_percentage|floatformat:2 }}%</span>
+                {% elif row.calculation_status == "linked_slots_pending" %}
+                <span class="badge bg-light text-dark">Aguardando mapeamento cama-berço</span>
+                {% else %}
+                <span class="badge bg-light text-dark">Não calculável</span>
+                {% endif %}
+                {% if row.status_counts.occupied %}
+                <span class="badge bg-primary">{{ row.status_counts.occupied }} ocupados</span>
+                {% endif %}
+                {% if row.status_counts.empty %}
+                <span class="badge bg-success">{{ row.status_counts.empty }} vagos</span>
+                {% endif %}
+                {% if row.status_counts.maintenance %}
+                <span class="badge bg-secondary">{{ row.status_counts.maintenance }} manut.</span>
+                {% endif %}
+                {% if row.status_counts.reserved %}
+                <span class="badge bg-warning text-dark">{{ row.status_counts.reserved }} reserv.</span>
+                {% endif %}
+                {% if row.status_counts.isolation %}
+                <span class="badge bg-danger">{{ row.status_counts.isolation }} isolam.</span>
+                {% endif %}
+                <span class="badge bg-light text-dark">{{ row.total }} total</span>
+              </div>
             </div>
-          </div>
 
-          <!-- Corpo colapsável: lista de leitos -->
-          <div class="collapse" id="sector-detail-{{ forloop.counter }}">
-            <div class="card-body p-0">
-              <div class="list-group list-group-flush">
-                {% for bed in sector.beds %}
-                <div class="list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2 py-2 px-3">
-                  <div class="d-flex align-items-center gap-2">
-                    <code class="small">{{ bed.leito }}</code>
-                    <span class="badge
-                      {% if bed.status == 'occupied' %}bg-primary
-                      {% elif bed.status == 'empty' %}bg-success
-                      {% elif bed.status == 'maintenance' %}bg-secondary
-                      {% elif bed.status == 'reserved' %}bg-warning text-dark
-                      {% else %}bg-danger{% endif %}">
-                      {{ bed.status_label }}
-                    </span>
-                  </div>
-                  <div class="text-end small">
-                    {% if bed.prontuario %}
-                      {% if bed.patient_id %}
-                      <a href="{% url 'patients:admission_list' bed.patient_id %}" class="text-decoration-none">
-                        {{ bed.nome }}
-                        <span class="text-muted">({{ bed.prontuario }})</span>
-                      </a>
-                      {% else %}
-                      <a href="{% url 'patients:patient_list' %}?q={{ bed.prontuario }}" class="text-decoration-none">
-                        {{ bed.nome }}
-                        <span class="text-muted">({{ bed.prontuario }})</span>
-                      </a>
-                      {% endif %}
-                    {% else %}
-                      <span class="text-muted">—</span>
-                    {% endif %}
-                  </div>
+            <!-- Corpo colapsável: setores de origem + leitos -->
+            <div class="collapse" id="group-detail-{{ forloop.counter }}">
+              <div class="card-body p-0">
+                {% if row.source_sectors %}
+                <div class="d-flex flex-wrap gap-1 align-items-center px-3 pt-3 pb-1">
+                  <span class="small text-muted me-1">Setores de origem:</span>
+                  {% for source in row.source_sectors %}
+                  <span class="badge bg-light text-dark border">{{ source }}</span>
+                  {% endfor %}
                 </div>
-                {% endfor %}
+                {% endif %}
+                {% if row.over_capacity %}
+                <div class="alert alert-danger py-2 mx-3 mt-2 mb-0 small d-flex flex-wrap justify-content-between align-items-center gap-2" role="alert">
+                  <span class="fw-bold"><i class="bi bi-exclamation-triangle-fill me-1"></i>Acima da capacidade</span>
+                  <span class="fw-bold">Excedente: {{ row.exceeded_by }} leitos</span>
+                </div>
+                {% endif %}
+                <div class="list-group list-group-flush">
+                  {% for bed in row.beds %}
+                  <div class="list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2 py-2 px-3">
+                    <div class="d-flex align-items-center gap-2">
+                      <code class="small">{{ bed.leito }}</code>
+                      <span class="badge
+                        {% if bed.status == 'occupied' %}bg-primary
+                        {% elif bed.status == 'empty' %}bg-success
+                        {% elif bed.status == 'maintenance' %}bg-secondary
+                        {% elif bed.status == 'reserved' %}bg-warning text-dark
+                        {% else %}bg-danger{% endif %}">
+                        {{ bed.status_label }}
+                      </span>
+                    </div>
+                    <div class="text-end small">
+                      {% if bed.prontuario %}
+                        {% if bed.patient_id %}
+                        <a href="{% url 'patients:admission_list' bed.patient_id %}" class="text-decoration-none">
+                          {{ bed.nome }}
+                          <span class="text-muted">({{ bed.prontuario }})</span>
+                        </a>
+                        {% else %}
+                        <a href="{% url 'patients:patient_list' %}?q={{ bed.prontuario }}" class="text-decoration-none">
+                          {{ bed.nome }}
+                          <span class="text-muted">({{ bed.prontuario }})</span>
+                        </a>
+                        {% endif %}
+                      {% else %}
+                        <span class="text-muted">—</span>
+                      {% endif %}
+                    </div>
+                  </div>
+                  {% endfor %}
+                </div>
               </div>
             </div>
           </div>
         </div>
+        {% endfor %}
       </div>
-      {% endfor %}
-    </div>
+    {% else %}
+      <!-- ====== LISTA DE SETORES (cards com collapse) — fallback cru ====== -->
+      <div class="row g-3">
+        {% for sector in sectors %}
+        <div class="col-12">
+          <div class="card border-0 shadow-sm">
+            <!-- Cabeçalho do card (sempre visível, clicável) -->
+            <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2"
+                 data-bs-toggle="collapse"
+                 data-bs-target="#sector-detail-{{ forloop.counter }}"
+                 role="button"
+                 aria-expanded="false"
+                 style="cursor: pointer;">
+              <h3 class="h6 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+                <i class="bi bi-chevron-right me-2 collapse-icon"></i>
+                {{ sector.name }}
+              </h3>
+              <div class="d-flex flex-wrap gap-1">
+                {% if sector.occupied %}
+                <span class="badge bg-primary">{{ sector.occupied }} ocupados</span>
+                {% endif %}
+                {% if sector.empty %}
+                <span class="badge bg-success">{{ sector.empty }} vagos</span>
+                {% endif %}
+                {% if sector.maintenance %}
+                <span class="badge bg-secondary">{{ sector.maintenance }} manut.</span>
+                {% endif %}
+                {% if sector.reserved %}
+                <span class="badge bg-warning text-dark">{{ sector.reserved }} reserv.</span>
+                {% endif %}
+                {% if sector.isolation %}
+                <span class="badge bg-danger">{{ sector.isolation }} isolam.</span>
+                {% endif %}
+                <span class="badge bg-light text-dark">{{ sector.total }} total</span>
+              </div>
+            </div>
+
+            <!-- Corpo colapsável: lista de leitos -->
+            <div class="collapse" id="sector-detail-{{ forloop.counter }}">
+              <div class="card-body p-0">
+                <div class="list-group list-group-flush">
+                  {% for bed in sector.beds %}
+                  <div class="list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2 py-2 px-3">
+                    <div class="d-flex align-items-center gap-2">
+                      <code class="small">{{ bed.leito }}</code>
+                      <span class="badge
+                        {% if bed.status == 'occupied' %}bg-primary
+                        {% elif bed.status == 'empty' %}bg-success
+                        {% elif bed.status == 'maintenance' %}bg-secondary
+                        {% elif bed.status == 'reserved' %}bg-warning text-dark
+                        {% else %}bg-danger{% endif %}">
+                        {{ bed.status_label }}
+                      </span>
+                    </div>
+                    <div class="text-end small">
+                      {% if bed.prontuario %}
+                        {% if bed.patient_id %}
+                        <a href="{% url 'patients:admission_list' bed.patient_id %}" class="text-decoration-none">
+                          {{ bed.nome }}
+                          <span class="text-muted">({{ bed.prontuario }})</span>
+                        </a>
+                        {% else %}
+                        <a href="{% url 'patients:patient_list' %}?q={{ bed.prontuario }}" class="text-decoration-none">
+                          {{ bed.nome }}
+                          <span class="text-muted">({{ bed.prontuario }})</span>
+                        </a>
+                        {% endif %}
+                      {% else %}
+                        <span class="text-muted">—</span>
+                      {% endif %}
+                    </div>
+                  </div>
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    {% endif %}
   {% endif %}
 </div>
 {% endblock %}

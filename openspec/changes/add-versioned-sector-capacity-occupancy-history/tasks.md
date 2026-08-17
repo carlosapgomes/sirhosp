@@ -62,19 +62,19 @@
 
 ## 4. Slice SCOH-S4 - Enrich `/beds` with official occupancy
 
-- [ ] 4.1 Read `slice-prompts/SLICE-SCOH-S4.md` completely and verify SCOH-S3
+- [x] 4.1 Read `slice-prompts/SLICE-SCOH-S4.md` completely and verify SCOH-S3
   is complete before editing.
-- [ ] 4.2 Add failing view/template tests for exact-measurement selection,
+- [x] 4.2 Add failing view/template tests for exact-measurement selection,
   pending fallback, grouped rows, dual coverage and existing authentication.
-- [ ] 4.3 Present capacity, registered legacy occupancy, exceeded-by and
+- [x] 4.3 Present capacity, registered legacy occupancy, exceeded-by and
   accessible over-capacity warnings without business calculation in the view.
-- [ ] 4.4 Preserve expandable source-sector, bed-status and authorized patient
+- [x] 4.4 Preserve expandable source-sector, bed-status and authorized patient
   details, including shared groups and unmapped sectors.
-- [ ] 4.5 Show Obstetrícia 3A, unrated sectors and hospital known/calculable
+- [x] 4.5 Show Obstetrícia 3A, unrated sectors and hospital known/calculable
   totals without approximate percentages.
-- [ ] 4.6 Prove RED, GREEN and REFACTOR, run inspection checks and all official
+- [x] 4.6 Prove RED, GREEN and REFACTOR, run inspection checks and all official
   gates required by the slice prompt.
-- [ ] 4.7 Create `/tmp/sirhosp-slice-SCOH-S4-report.md` with complete evidence
+- [x] 4.7 Create `/tmp/sirhosp-slice-SCOH-S4-report.md` with complete evidence
   and verifier handoff.
 
 ## 5. Final verification and governance
