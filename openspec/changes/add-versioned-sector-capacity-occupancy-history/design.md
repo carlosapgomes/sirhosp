@@ -53,6 +53,13 @@ As estatísticas não podem transformar ausência de evolução em alta presumid
 
 ## Decisions
 
+> **Nota de governança:** as decisões abaixo estão registradas de forma
+> auditável na
+> [ADR-0003 — Catálogo temporal de capacidade e materialização imutável de
+> ocupação](../../../docs/adr/ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel.md),
+> criada antes do arquivamento deste change conforme exigido pela tarefa
+> 5.1. Nenhuma delas altera requisitos funcionais das specs.
+
 ### 1. Versionar o catálogo inteiro por data efetiva
 
 Cada publicação cria uma fotografia completa do catálogo para uma
@@ -478,6 +485,8 @@ trabalho futuro:
 - obter os 16 pares cama-berço da Obstetrícia 3A;
 - decidir se leitos-dia terão indicador próprio;
 - criar UI histórica para as medições e resumos persistidos;
-- substituir o limiar fixo de completude por catálogo esperado de setores;
-- criar o ADR de catálogo temporal e materialização imutável antes de arquivar
-  este change.
+- substituir o limiar fixo de completude por catálogo esperado de setores.
+
+A pendência de criar o ADR de catálogo temporal e materialização imutável foi
+atendida: ver
+[ADR-0003](../../../docs/adr/ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel.md).

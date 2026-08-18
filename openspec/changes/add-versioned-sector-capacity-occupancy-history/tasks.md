@@ -79,16 +79,16 @@
 
 ## 5. Final verification and governance
 
-- [ ] 5.1 Create or confirm the required ADR for temporal catalog and immutable
+- [x] 5.1 Create or confirm the required ADR for temporal catalog and immutable
   occupancy materialization before archiving this CRITICAL/HIGH-ARCH change.
-- [ ] 5.2 Run `openspec validate add-versioned-sector-capacity-occupancy-history
+- [x] 5.2 Run `openspec validate add-versioned-sector-capacity-occupancy-history
   --type change --strict`.
-- [ ] 5.3 Run `./scripts/test-in-container.sh quality-gate`.
-- [ ] 5.4 Run `./scripts/test-in-container.sh integration`.
-- [ ] 5.5 Run `./scripts/markdown-lint.sh` with zero errors.
-- [ ] 5.6 Verify no real patient data, credentials, PDFs or production dumps
+- [x] 5.3 Run `./scripts/test-in-container.sh quality-gate`.
+- [x] 5.4 Run `./scripts/test-in-container.sh integration`.
+- [x] 5.5 Run `./scripts/markdown-lint.sh` with zero errors.
+- [x] 5.6 Verify no real patient data, credentials, PDFs or production dumps
   appear in the diff or temporary reports.
-- [ ] 5.7 Create `/tmp/sirhosp-slice-SCOH-FINAL-report.md` with command output,
+- [x] 5.7 Create `/tmp/sirhosp-slice-SCOH-FINAL-report.md` with command output,
   rollback readiness, unresolved risks and verifier handoff.
-- [ ] 5.8 Stop after final review; do not activate a catalog in production and
+- [x] 5.8 Stop after final review; do not activate a catalog in production and
   do not archive the change without explicit operator approval.
