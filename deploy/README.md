@@ -21,6 +21,11 @@ Releases futuras são criadas pelo workflow manual `Publish Release Image`. Não
 publique primeiro uma release pela interface do GitHub: com releases imutáveis,
 a tag e os assets são bloqueados no momento da publicação.
 
+Antes da tag, crie e valide o runbook específico da versão em
+`docs/releases/<release-tag>-upgrade.md`. O workflow exige esse arquivo e o
+anexa à release junto com o Compose; como a release é imutável, ele não pode ser
+acrescentado depois.
+
 Crie e envie uma nova tag exata, nunca reutilizando uma anterior:
 
 ```bash
@@ -42,9 +47,11 @@ O workflow:
    `./scripts/test-in-container.sh quality-gate`;
 2. confirma que releases imutáveis estão habilitadas no repositório;
 3. recusa uma tag exata de imagem que já exista no GHCR;
-4. cria um draft e anexa `compose.hospital.yml` antes da publicação;
-5. constrói e publica o target `prod` do `Dockerfile`;
-6. publica o draft e confirma que o GitHub marcou a release como imutável.
+4. exige `docs/releases/<release-tag>-upgrade.md`;
+5. cria um draft e anexa `compose.hospital.yml` e o runbook antes da
+   publicação;
+6. constrói e publica o target `prod` do `Dockerfile`;
+7. publica o draft e confirma que o GitHub marcou a release como imutável.
 
 Para um release estável, use `prerelease=false`. Ele publica a tag exata e
 atualiza `latest`. Um pré-release publica a tag exata e atualiza `prerelease`,
@@ -173,6 +180,16 @@ curl -fsS http://127.0.0.1:8000/health/
 ```
 
 ### Atualização para um novo release
+
+Baixe e leia o runbook anexado à mesma tag antes de iniciar. Ele contém
+migrations, ativações e smoke tests específicos da versão. Por exemplo:
+
+```bash
+export NEW_VERSION=v1.0.0-rc.2
+curl -fL \
+  -o upgrade.md \
+  "https://github.com/carlosapgomes/sirhosp/releases/download/${NEW_VERSION}/${NEW_VERSION}-upgrade.md"
+```
 
 Antes da migration, garanta que o banco esteja saudável e crie um backup local
 com timestamp:

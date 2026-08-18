@@ -57,6 +57,24 @@ def test_release_is_assembled_as_draft_after_exact_tag_validation() -> None:
     assert normalized.index(build) < normalized.index(publish)
 
 
+def test_release_attaches_version_specific_upgrade_runbook() -> None:
+    workflow = _workflow_text()
+    normalized = " ".join(workflow.split())
+
+    assert 'UPGRADE_ASSET="docs/releases/${RELEASE_TAG}-upgrade.md"' in workflow
+    require_asset = 'test -f "${UPGRADE_ASSET}"'
+    create = (
+        'gh release create "$RELEASE_TAG" compose.hospital.yml '
+        '"${UPGRADE_ASSET}"'
+    )
+    assert require_asset in workflow
+    assert create in normalized
+    assert normalized.index(require_asset) < normalized.index(create)
+    assert normalized.index(require_asset) < normalized.index(
+        "uses: docker/build-push-action@"
+    )
+
+
 def test_release_image_and_release_are_immutable_and_channel_safe() -> None:
     workflow = _workflow_text()
     normalized = " ".join(workflow.split())

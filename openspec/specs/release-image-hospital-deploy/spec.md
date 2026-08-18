@@ -11,8 +11,8 @@ deployment from exact GHCR image tags using a standalone Docker Compose file.
 
 The system SHALL build and publish the Dockerfile `prod` target from an exact
 existing Git tag only after the official quality gate succeeds. It SHALL attach
-the hospital Compose to a draft and publish that release under GitHub immutable
-release protection.
+the hospital Compose and the version-specific upgrade runbook to a draft and
+publish that release under GitHub immutable release protection.
 
 #### Scenario: Stable release is requested
 
@@ -20,7 +20,8 @@ release protection.
 - **THEN** the workflow resolves and validates the exact tag commit
 - **AND** runs `./scripts/test-in-container.sh quality-gate`
 - **AND** requires repository immutable releases to be enabled
-- **AND** creates a draft containing `compose.hospital.yml`
+- **AND** requires `docs/releases/<release-tag>-upgrade.md`
+- **AND** creates a draft containing `compose.hospital.yml` and that runbook
 - **AND** pushes `ghcr.io/carlosapgomes/sirhosp:<release-tag>`
 - **AND** updates `ghcr.io/carlosapgomes/sirhosp:latest`
 - **AND** does not update the `prerelease` channel
@@ -40,7 +41,14 @@ release protection.
 - **WHEN** the exact tag fails the official quality gate
 - **THEN** no draft release is created
 - **AND** no image tag is pushed
-- **AND** no hospital Compose is attached by that workflow run
+- **AND** no hospital Compose or upgrade runbook is attached by that workflow
+  run
+
+#### Scenario: Version-specific upgrade runbook is absent
+
+- **WHEN** the exact tag has no `docs/releases/<release-tag>-upgrade.md`
+- **THEN** the workflow stops before creating a draft
+- **AND** it does not publish an image or partial release
 
 #### Scenario: Exact image tag already exists
 
@@ -81,18 +89,19 @@ image builds.
   remains restricted to the internal network
 - **AND** the topology does not bundle Tailscale or Cloudflared containers
 
-### Requirement: Each release distributes its matching Compose
+### Requirement: Each release distributes its matching deployment assets
 
-The system SHALL attach `compose.hospital.yml` while the GitHub release or
-prerelease is still a draft and SHALL make no asset mutation after publication.
+The system SHALL attach `compose.hospital.yml` and the version-specific upgrade
+runbook while the GitHub release or prerelease is still a draft and SHALL make
+no asset mutation after publication.
 
 #### Scenario: Operator installs without repository checkout
 
 - **WHEN** the release workflow finishes successfully
-- **THEN** the immutable release contains `compose.hospital.yml` as a
-  downloadable asset
-- **AND** the operator can deploy using that file, a host-local `.env` and Docker
-  Compose
+- **THEN** the immutable release contains `compose.hospital.yml` and
+  `<release-tag>-upgrade.md` as downloadable assets
+- **AND** the operator can deploy using those files, a host-local `.env` and
+  Docker Compose
 - **AND** no Git clone, source bind mount or Docker build is required
 - **AND** the release tag and Compose asset cannot be changed after publication
 

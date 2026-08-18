@@ -115,6 +115,8 @@ jobs:
           IS_PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -euo pipefail
+          UPGRADE_ASSET="docs/releases/${RELEASE_TAG}-upgrade.md"
+          test -f "${UPGRADE_ASSET}"
           release_args=(
             --verify-tag
             --draft
@@ -124,7 +126,7 @@ jobs:
           if [[ "${IS_PRERELEASE}" = "true" ]]; then
             release_args+=(--prerelease)
           fi
-          gh release create "$RELEASE_TAG" compose.hospital.yml \
+          gh release create "$RELEASE_TAG" compose.hospital.yml "${UPGRADE_ASSET}" \
             "${release_args[@]}"
 
       - name: Generate image metadata
