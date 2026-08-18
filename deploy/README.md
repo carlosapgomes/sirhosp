@@ -21,6 +21,12 @@ Releases futuras são criadas pelo workflow manual `Publish Release Image`. Não
 publique primeiro uma release pela interface do GitHub: com releases imutáveis,
 a tag e os assets são bloqueados no momento da publicação.
 
+O repositório deve possuir o secret de Actions
+`IMMUTABLE_RELEASES_TOKEN`, com acesso administrativo somente ao necessário
+para consultar a configuração de releases imutáveis. O `GITHUB_TOKEN` padrão
+não acessa esse endpoint. Nunca coloque esse token no código, no Compose ou no
+`.env` hospitalar.
+
 Antes da tag, crie e valide o runbook específico da versão em
 `docs/releases/<release-tag>-upgrade.md`. O workflow exige esse arquivo e o
 anexa à release junto com o Compose; como a release é imutável, ele não pode ser

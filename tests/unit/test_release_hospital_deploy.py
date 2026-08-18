@@ -93,6 +93,8 @@ def test_release_image_and_release_are_immutable_and_channel_safe() -> None:
         in workflow
     )
     assert "repos/${{ github.repository }}/immutable-releases" in workflow
+    assert "secrets.IMMUTABLE_RELEASES_TOKEN" in workflow
+    assert 'test -n "${GH_TOKEN}"' in workflow
     assert "docker buildx imagetools inspect" in workflow
     assert "exact image tag already exists" in workflow
     assert "target: prod" in workflow

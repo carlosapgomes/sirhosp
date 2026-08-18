@@ -10,8 +10,9 @@ deployment from exact GHCR image tags using a standalone Docker Compose file.
 ### Requirement: Validated tags produce immutable releases and GHCR images
 
 The system SHALL build and publish the Dockerfile `prod` target from an exact
-existing Git tag only after the official quality gate succeeds. It SHALL attach
-the hospital Compose and the version-specific upgrade runbook to a draft and
+existing Git tag only after the official quality gate succeeds. It SHALL verify
+immutable-release protection through a dedicated repository secret, attach the
+hospital Compose and the version-specific upgrade runbook to a draft, and
 publish that release under GitHub immutable release protection.
 
 #### Scenario: Stable release is requested
@@ -19,7 +20,8 @@ publish that release under GitHub immutable release protection.
 - **WHEN** an operator dispatches the workflow for an exact tag as stable
 - **THEN** the workflow resolves and validates the exact tag commit
 - **AND** runs `./scripts/test-in-container.sh quality-gate`
-- **AND** requires repository immutable releases to be enabled
+- **AND** uses the `IMMUTABLE_RELEASES_TOKEN` repository secret to require
+  immutable releases to be enabled
 - **AND** requires `docs/releases/<release-tag>-upgrade.md`
 - **AND** creates a draft containing `compose.hospital.yml` and that runbook
 - **AND** pushes `ghcr.io/carlosapgomes/sirhosp:<release-tag>`

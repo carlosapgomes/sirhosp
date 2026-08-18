@@ -77,9 +77,10 @@ jobs:
 
       - name: Require immutable GitHub releases
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.IMMUTABLE_RELEASES_TOKEN }}
         run: |
           set -euo pipefail
+          test -n "${GH_TOKEN}"
           enabled="$(
             gh api \
               "repos/${{ github.repository }}/immutable-releases" \
