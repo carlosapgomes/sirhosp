@@ -34,6 +34,13 @@ INITIAL_CATALOG = (
     / "data"
     / "initial_sector_capacity_catalog.json"
 )
+CORRECTED_CATALOG = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "census"
+    / "data"
+    / "corrected_sector_capacity_catalog.json"
+)
 
 
 def _domain():
@@ -71,6 +78,7 @@ def _snapshot(
     status: str = BedStatus.EMPTY,
     index: int = 0,
     patient_marker: str = "",
+    age_band: str | None = None,
 ) -> CensusSnapshot:
     return CensusSnapshot.objects.create(
         ingestion_run=run,
@@ -86,6 +94,11 @@ def _snapshot(
         ),
         especialidade="SYN",
         bed_status=status,
+        age_band=(
+            age_band
+            if age_band is not None
+            else ("not_applicable" if status != BedStatus.OCCUPIED else "unknown")
+        ),
     )
 
 
@@ -104,12 +117,16 @@ def _catalog(effective_from: date, groups: list[dict]) -> CapacityCatalogVersion
             official_capacity=raw_group.get("capacity"),
             calculation_policy=raw_group["policy"],
         )
-        for code, configured_name in raw_group["members"]:
+        for member in raw_group["members"]:
+            code = member[0]
+            configured_name = member[1]
+            selector = member[2] if len(member) > 2 else "all"
             CapacitySectorMembership.objects.create(
                 catalog=catalog,
                 group=group,
                 source_code=code,
                 configured_source_name=configured_name,
+                age_selector=selector,
             )
     return catalog
 
@@ -118,7 +135,7 @@ def _standard_group(
     *,
     key: str = "A",
     capacity: int = 10,
-    members: tuple[tuple[str, str], ...] = (("100", "Sector A"),),
+    members: tuple[tuple[str, ...], ...] = (("100", "Sector A"),),
 ) -> dict:
     return {
         "stable_key": key,
@@ -1215,3 +1232,619 @@ class TestDailyOccupancySummary:
         later = parent_model.objects.get(local_date=today + timedelta(days=1))
         assert later.catalog_id == second_catalog.pk
         assert later.known_capacity == 99
+
+
+def _partitioned_3a_catalog() -> list[dict]:
+    """Corrected-style catalog: 654 split exclusively into Adulto/Infantil."""
+    return [
+        _standard_group(
+            key="OBST-3A-ADULTO",
+            capacity=32,
+            members=(("654", "3A Source", "age_12_or_over"),),
+        ),
+        _standard_group(
+            key="OBST-3A-INFANTIL",
+            capacity=16,
+            members=(("654", "3A Source", "under_12"),),
+        ),
+    ]
+
+
+@pytest.mark.django_db
+class TestV1DispatchRegression:
+    """R1: a catalog without age partitions keeps occupancy-v1 untouched."""
+
+    def test_initial_catalog_remains_v1_with_658_626_and_calculated_co(self):
+        parent_model, _ = _measurement_models()
+        capture_date = timezone.localdate()
+        document = json.loads(INITIAL_CATALOG.read_text(encoding="utf-8"))
+        validated = validate_catalog_document(document)
+        groups = [
+            {
+                "stable_key": group.stable_key,
+                "display_name": group.display_name,
+                "capacity": group.official_capacity,
+                "policy": group.calculation_policy,
+                "members": tuple(
+                    (member.source_code, member.configured_source_name)
+                    for member in group.memberships
+                ),
+            }
+            for group in validated.groups
+        ]
+        _catalog(capture_date, groups)
+        run = _run()
+        for index, group in enumerate(validated.groups):
+            for member in group.memberships:
+                _snapshot(
+                    run,
+                    captured_at=_at(capture_date),
+                    code=member.source_code,
+                    sector=member.configured_source_name,
+                    index=index,
+                )
+
+        result = _materialize(run.pk)
+        measurement = parent_model.objects.get(pk=result.measurement.pk)
+
+        assert measurement.algorithm_version == "occupancy-v1"
+        assert measurement.observed_sector_count == 47
+        assert measurement.capacity_covered_sector_count == 44
+        assert measurement.calculable_sector_count == 43
+        assert measurement.known_capacity == 658
+        assert measurement.calculable_capacity == 626
+        co = measurement.groups.get(stable_key="CO")
+        assert co.calculation_status == "calculated"
+        assert co.official_capacity == 8
+        assert co.occupied_count == 0
+        assert measurement.age_partial is False
+        assert measurement.unknown_age_count == 0
+        assert measurement.official_sector_count is None
+
+
+@pytest.mark.django_db
+class TestV2Materialization:
+    """R2-R6, R9: corrected age-partitioned materialization."""
+
+    def test_partitioned_catalog_dispatches_occupancy_v2(self):
+        capture_date = timezone.localdate()
+        _catalog(capture_date, _partitioned_3a_catalog())
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-001",
+            age_band="age_12_or_over",
+        )
+
+        result = _materialize(run.pk)
+
+        assert result.measurement.algorithm_version == "occupancy-v2"
+
+    def test_adult_and_child_3a_sectors_use_own_capacities(self):
+        capture_date = timezone.localdate()
+        _catalog(capture_date, _partitioned_3a_catalog())
+        run = _run()
+        rows = [
+            ("age_12_or_over", "A-ADULT-1"),
+            ("age_12_or_over", "A-ADULT-2"),
+            ("age_12_or_over", "A-ADULT-3"),
+            ("age_12_or_over", "A-ADULT-4"),
+            ("age_12_or_over", "A-ADULT-5"),
+            ("under_12", "C-1"),
+            ("under_12", "C-2"),
+            ("under_12", "C-3"),
+        ]
+        for index, (band, marker) in enumerate(rows):
+            _snapshot(
+                run,
+                captured_at=_at(capture_date),
+                code="654",
+                sector="3A Source",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=marker,
+                age_band=band,
+            )
+
+        result = _materialize(run.pk)
+        groups = {g.stable_key: g for g in result.measurement.groups.all()}
+        adult = groups["OBST-3A-ADULTO"]
+        child = groups["OBST-3A-INFANTIL"]
+
+        assert adult.official_capacity == 32
+        assert adult.occupied_count == 5
+        assert adult.occupancy_percentage == Decimal("15.63")
+        assert child.official_capacity == 16
+        assert child.occupied_count == 3
+        assert child.occupancy_percentage == Decimal("18.75")
+        assert result.measurement.occupied_for_rate == 8
+        assert result.measurement.calculable_capacity == 48
+        assert result.measurement.occupancy_percentage == Decimal("16.67")
+
+    def test_shared_record_number_counts_each_row_in_its_own_band(self):
+        capture_date = timezone.localdate()
+        _catalog(capture_date, _partitioned_3a_catalog())
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="SHARED-PRONT",
+            age_band="under_12",
+        )
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="SHARED-PRONT",
+            age_band="age_12_or_over",
+        )
+
+        result = _materialize(run.pk)
+        groups = {g.stable_key: g for g in result.measurement.groups.all()}
+
+        assert groups["OBST-3A-ADULTO"].occupied_count == 1
+        assert groups["OBST-3A-INFANTIL"].occupied_count == 1
+        assert result.measurement.occupied_for_rate == 2
+
+    def test_non_occupied_3a_rows_enter_neither_numerator(self):
+        capture_date = timezone.localdate()
+        _catalog(capture_date, _partitioned_3a_catalog())
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="ADULT-1",
+            age_band="age_12_or_over",
+        )
+        for index, status in enumerate(
+            [BedStatus.EMPTY, BedStatus.RESERVED, BedStatus.MAINTENANCE, BedStatus.ISOLATION],
+            start=1,
+        ):
+            _snapshot(
+                run,
+                captured_at=_at(capture_date),
+                code="654",
+                sector="3A Source",
+                status=status,
+                index=index,
+            )
+
+        result = _materialize(run.pk)
+        groups = {g.stable_key: g for g in result.measurement.groups.all()}
+
+        assert groups["OBST-3A-ADULTO"].occupied_count == 1
+        assert groups["OBST-3A-INFANTIL"].occupied_count == 0
+        assert groups["OBST-3A-INFANTIL"].occupancy_percentage == Decimal("0.00")
+        assert result.measurement.occupied_for_rate == 1
+
+    def test_unknown_occupied_age_excludes_only_that_row_and_marks_partial(self):
+        capture_date = timezone.localdate()
+        _catalog(capture_date, _partitioned_3a_catalog())
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="ADULT-1",
+            age_band="age_12_or_over",
+        )
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="CHILD-1",
+            age_band="under_12",
+        )
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=2,
+            patient_marker="UNKNOWN-1",
+            age_band="unknown",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.unknown_age_count == 1
+        assert measurement.age_partial is True
+        groups = {g.stable_key: g for g in measurement.groups.all()}
+        assert groups["OBST-3A-ADULTO"].occupied_count == 1
+        assert groups["OBST-3A-INFANTIL"].occupied_count == 1
+        assert measurement.occupied_for_rate == 2
+        assert measurement.known_capacity == 48
+        assert measurement.calculable_capacity == 48
+        assert measurement.occupancy_percentage == Decimal("4.17")
+        assert not measurement.groups.filter(calculation_status="unmapped").exists()
+
+    def test_corrected_co_keeps_raw_counts_and_null_rate_fields(self):
+        capture_date = timezone.localdate()
+        codes = ("20", "1110", "1112", "1114", "1116")
+        _catalog(
+            capture_date,
+            [
+                *_partitioned_3a_catalog(),
+                {
+                    "stable_key": "CO",
+                    "display_name": "Centro Obstetrico",
+                    "capacity": None,
+                    "policy": CalculationPolicy.UNRATED,
+                    "members": tuple((code, f"CO {code}", "all") for code in codes),
+                },
+            ],
+        )
+        run = _run()
+        for index in range(54):
+            code = codes[index % len(codes)]
+            _snapshot(
+                run,
+                captured_at=_at(capture_date),
+                code=code,
+                sector=f"CO {code}",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"SYN-{index:03d}",
+            )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.algorithm_version == "occupancy-v2"
+        co = measurement.groups.get(stable_key="CO")
+        assert co.calculation_policy == "unrated"
+        assert co.calculation_status == "unrated"
+        assert co.official_capacity is None
+        assert co.occupied_count is None
+        assert co.occupancy_percentage is None
+        assert co.exceeded_by is None
+        assert co.status_counts_json["occupied"] == 54
+        assert measurement.occupied_for_rate == 0
+        assert measurement.unknown_age_count == 0
+        assert measurement.age_partial is False
+
+    def test_full_corrected_catalog_reports_official_coverage_and_666(self):
+        capture_date = timezone.localdate()
+        document = json.loads(CORRECTED_CATALOG.read_text(encoding="utf-8"))
+        validated = validate_catalog_document(document)
+        groups = [
+            {
+                "stable_key": group.stable_key,
+                "display_name": group.display_name,
+                "capacity": group.official_capacity,
+                "policy": group.calculation_policy,
+                "members": tuple(
+                    (
+                        member.source_code,
+                        member.configured_source_name,
+                        member.age_selector,
+                    )
+                    for member in group.memberships
+                ),
+            }
+            for group in validated.groups
+        ]
+        _catalog(capture_date, groups)
+        run = _run()
+        for index, group in enumerate(validated.groups):
+            for member in group.memberships:
+                _snapshot(
+                    run,
+                    captured_at=_at(capture_date),
+                    code=member.source_code,
+                    sector=member.configured_source_name,
+                    index=index,
+                )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.algorithm_version == "occupancy-v2"
+        assert measurement.official_sector_count == 43
+        assert measurement.official_capacity_sector_count == 39
+        assert measurement.official_calculable_sector_count == 39
+        assert measurement.known_capacity == 666
+        assert measurement.calculable_capacity == 666
+        assert measurement.observed_sector_count == 47
+        assert measurement.capacity_covered_sector_count == 39
+        assert measurement.calculable_sector_count == 39
+        assert measurement.unknown_age_count == 0
+        assert measurement.age_partial is False
+
+    def test_v2_3a_overcapacity_is_not_capped(self):
+        capture_date = timezone.localdate()
+        _catalog(capture_date, _partitioned_3a_catalog())
+        run = _run()
+        for index in range(40):
+            _snapshot(
+                run,
+                captured_at=_at(capture_date),
+                code="654",
+                sector="3A Source",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"ADULT-{index:03d}",
+                age_band="age_12_or_over",
+            )
+
+        result = _materialize(run.pk)
+        groups = {g.stable_key: g for g in result.measurement.groups.all()}
+        adult = groups["OBST-3A-ADULTO"]
+
+        assert adult.occupied_count == 40
+        assert adult.occupancy_percentage == Decimal("125.00")
+        assert adult.exceeded_by == 8
+        assert result.measurement.occupied_for_rate == 40
+        assert result.measurement.exceeded_by == 0
+
+    def test_unknown_sector_does_not_change_official_coverage(self):
+        capture_date = timezone.localdate()
+        _catalog(
+            capture_date,
+            [
+                *_partitioned_3a_catalog(),
+                {
+                    "stable_key": "CO",
+                    "display_name": "Centro Obstetrico",
+                    "capacity": None,
+                    "policy": CalculationPolicy.UNRATED,
+                    "members": (("20", "CO Source", "all"),),
+                },
+            ],
+        )
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="ADULT-1",
+            age_band="age_12_or_over",
+        )
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="20",
+            sector="CO Source",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="CO-1",
+        )
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="999",
+            sector="Unknown Sector",
+            status=BedStatus.OCCUPIED,
+            index=2,
+            patient_marker="UNMAPPED-1",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.official_sector_count == 3
+        assert measurement.official_capacity_sector_count == 2
+        assert measurement.official_calculable_sector_count == 2
+        assert measurement.observed_sector_count == 3
+        assert measurement.capacity_covered_sector_count == 1
+        assert measurement.calculable_sector_count == 1
+        assert measurement.groups.filter(calculation_status="unmapped").count() == 1
+        assert measurement.occupied_for_rate == 1
+
+    def test_v2_reexecution_is_idempotent_and_never_persists_identifiers(self):
+        capture_date = timezone.localdate()
+        _catalog(capture_date, _partitioned_3a_catalog())
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="PRIVATE-RECORD-XYZ",
+            age_band="age_12_or_over",
+        )
+
+        first = _materialize(run.pk)
+        first_groups = {
+            g.stable_key: (g.occupied_count, g.components_json)
+            for g in first.measurement.groups.all()
+        }
+        second = _materialize(run.pk)
+        second_groups = {
+            g.stable_key: (g.occupied_count, g.components_json)
+            for g in second.measurement.groups.all()
+        }
+
+        assert second.status == "existing"
+        assert second.measurement.pk == first.measurement.pk
+        assert second_groups == first_groups
+        serialized = json.dumps(
+            [
+                {"counts": g.status_counts_json, "components": g.components_json}
+                for g in second.measurement.groups.all()
+            ]
+        )
+        assert "PRIVATE-RECORD-XYZ" not in serialized
+        assert "Synthetic Patient" not in serialized
+        adult = second.measurement.groups.get(stable_key="OBST-3A-ADULTO")
+        assert adult.components_json[0]["age_selector"] == "age_12_or_over"
+
+
+@pytest.mark.django_db
+class TestV2DailyEligibility:
+    """R7: age-partial v2 measurements never enter official daily statistics."""
+
+    def _daily_models(self):
+        models_module = importlib.import_module("apps.census.models")
+        parent = getattr(models_module, "DailyOccupancySummary", None)
+        child = getattr(models_module, "DailyGroupOccupancySummary", None)
+        if parent is None or child is None:
+            pytest.fail("daily occupancy summary schema is missing")
+        return parent, child
+
+    def test_v1_daily_summary_counts_all_measurements_eligible(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, [_standard_group(capacity=10)])
+        runs = [_run(), _run()]
+        for index, run in enumerate(runs):
+            _snapshot(
+                run,
+                captured_at=_at(today, 8 + index * 12),
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                patient_marker=f"SYN-{index}",
+            )
+            _materialize(run.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+
+        assert summary.measurement_count == 2
+        assert summary.eligible_measurement_count == 2
+        assert summary.age_excluded_measurement_count == 0
+        assert summary.mean_occupied == Decimal("1.00")
+
+    def test_complete_v2_measurement_is_daily_eligible(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, _partitioned_3a_catalog())
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(today, 8),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            patient_marker="ADULT-1",
+            age_band="age_12_or_over",
+        )
+        _materialize(run.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+
+        assert summary.measurement_count == 1
+        assert summary.eligible_measurement_count == 1
+        assert summary.age_excluded_measurement_count == 0
+        assert summary.mean_occupied == Decimal("1.00")
+        assert summary.mean_percentage == Decimal("2.08")
+
+    def test_mixed_day_uses_only_eligible_measurements(self):
+        parent_model, child_model = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, _partitioned_3a_catalog())
+        complete = _run()
+        partial = _run()
+        _snapshot(
+            complete,
+            captured_at=_at(today, 8),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            patient_marker="ADULT-1",
+            age_band="age_12_or_over",
+        )
+        _snapshot(
+            complete,
+            captured_at=_at(today, 8),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="ADULT-2",
+            age_band="age_12_or_over",
+        )
+        _snapshot(
+            partial,
+            captured_at=_at(today, 20),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            patient_marker="UNKNOWN-1",
+            age_band="unknown",
+        )
+        _materialize(complete.pk)
+        _materialize(partial.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+
+        assert summary.measurement_count == 2
+        assert summary.eligible_measurement_count == 1
+        assert summary.age_excluded_measurement_count == 1
+        assert summary.first_captured_at == _at(today, 8)
+        assert summary.last_captured_at == _at(today, 20)
+        assert summary.mean_occupied == Decimal("2.00")
+        assert summary.min_occupied == 2
+        assert summary.max_occupied == 2
+        assert summary.mean_percentage == Decimal("4.17")
+        assert summary.max_exceeded_by == 0
+        adult = child_model.objects.get(
+            daily_summary=summary, stable_key="OBST-3A-ADULTO"
+        )
+        assert adult.measurement_count == 1
+        assert adult.mean_occupied == Decimal("2.00")
+        assert adult.mean_percentage == Decimal("6.25")
+        infant = child_model.objects.get(
+            daily_summary=summary, stable_key="OBST-3A-INFANTIL"
+        )
+        assert infant.measurement_count == 1
+        assert infant.mean_occupied == Decimal("0.00")
+        assert infant.mean_percentage == Decimal("0.00")
+
+    def test_day_with_only_partial_measurements_has_null_official_stats(self):
+        parent_model, child_model = self._daily_models()
+        today = timezone.localdate()
+        _catalog(today, _partitioned_3a_catalog())
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(today, 8),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            patient_marker="UNKNOWN-1",
+            age_band="unknown",
+        )
+        _materialize(run.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+
+        assert summary.measurement_count == 1
+        assert summary.eligible_measurement_count == 0
+        assert summary.age_excluded_measurement_count == 1
+        assert summary.mean_occupied is None
+        assert summary.min_occupied is None
+        assert summary.max_occupied is None
+        assert summary.mean_percentage is None
+        assert summary.min_percentage is None
+        assert summary.max_percentage is None
+        assert summary.max_exceeded_by is None
+        assert child_model.objects.filter(daily_summary=summary).count() == 0

@@ -1,4 +1,10 @@
-"""Immutable occupancy-v1 materialization for one explicit census run."""
+"""Immutable occupancy materialization for one explicit census run.
+
+Two deterministic algorithm versions are dispatched from the persisted
+catalog context: ``occupancy-v1`` for legacy catalogs without age partitions
+and ``occupancy-v2`` for corrected age-partitioned catalogs. Measurements are
+immutable and never recalculated.
+"""
 
 from __future__ import annotations
 
@@ -18,10 +24,12 @@ from apps.census.models import (
     CalculationPolicy,
     CapacityCatalogVersion,
     CapacityGroupDefinition,
+    CapacityMembershipSelector,
     CapacitySectorMembership,
     CensusSnapshot,
     DailyGroupOccupancySummary,
     DailyOccupancySummary,
+    OccupancyAgeBand,
     OccupancyCalculationStatus,
     OccupancyGroupMeasurement,
     OccupancyMeasurement,
@@ -29,6 +37,7 @@ from apps.census.models import (
 from apps.ingestion.models import IngestionRun
 
 ALGORITHM_VERSION = "occupancy-v1"
+ALGORITHM_VERSION_V2 = "occupancy-v2"
 _CENSUS_INTENT = "census_extraction"
 _PERCENT_QUANTUM = Decimal("0.01")
 _STATUS_KEYS = tuple(BedStatus.values)
@@ -50,6 +59,7 @@ class _ObservedRow:
     code: str
     name: str
     status: str
+    age_band: str = OccupancyAgeBand.NOT_APPLICABLE
 
 
 @dataclass(frozen=True)
@@ -87,13 +97,16 @@ def materialize_occupancy_measurement(*, run_id: int) -> MaterializationResult:
         if catalog is None:
             return MaterializationResult("pre_activation", None, False)
 
-        group_values, totals = _calculate(catalog, observed_rows)
+        algorithm_version = _select_algorithm_version(catalog)
+        group_values, totals = _calculate(
+            catalog, observed_rows, algorithm_version
+        )
         measurement = OccupancyMeasurement.objects.create(
             census_run=run,
             catalog=catalog,
             captured_at=captured_at,
             local_date=local_date,
-            algorithm_version=ALGORITHM_VERSION,
+            algorithm_version=algorithm_version,
             **totals,
         )
         OccupancyGroupMeasurement.objects.bulk_create(
@@ -160,27 +173,43 @@ def refresh_daily_occupancy_summary(*, local_date: date) -> None:
 def _daily_parent_values(
     measurements: list[OccupancyMeasurement],
 ) -> dict[str, object]:
-    """Aggregate hospital-level daily statistics from day measurements."""
-    reference = measurements[0]
-    occupied = [measurement.occupied_for_rate for measurement in measurements]
+    """Aggregate hospital-level daily statistics from day measurements.
+
+    Every day measurement is kept for audit (``measurement_count``) but only
+    daily-eligible measurements feed the official statistics. An
+    ``occupancy-v1`` measurement is always eligible; an ``occupancy-v2``
+    measurement with an unknown occupied age in a partitioned sector is
+    excluded entirely from mean, minimum, maximum and exceeded-by. When no
+    measurement is eligible the official fields stay null - no zero or
+    previous value is fabricated.
+    """
+    eligible = [m for m in measurements if _is_daily_eligible(m)]
+    reference = eligible[0] if eligible else measurements[0]
+    occupied = [measurement.occupied_for_rate for measurement in eligible]
     exact_percentages = [
         _exact_percentage(
             measurement.occupied_for_rate, measurement.calculable_capacity
         )
-        for measurement in measurements
+        for measurement in eligible
         if measurement.calculable_capacity > 0
     ]
     return {
         "catalog": reference.catalog,
         "algorithm_version": reference.algorithm_version,
         "measurement_count": len(measurements),
+        "eligible_measurement_count": len(eligible),
+        "age_excluded_measurement_count": len(measurements) - len(eligible),
         "first_captured_at": measurements[0].captured_at,
         "last_captured_at": measurements[-1].captured_at,
         "known_capacity": reference.known_capacity,
         "calculable_capacity": reference.calculable_capacity,
-        "mean_occupied": _rounded_mean(occupied),
-        "min_occupied": min(occupied),
-        "max_occupied": max(occupied),
+        "official_sector_count": reference.official_sector_count,
+        "official_calculable_sector_count": (
+            reference.official_calculable_sector_count
+        ),
+        "mean_occupied": _rounded_mean(occupied) if eligible else None,
+        "min_occupied": min(occupied) if eligible else None,
+        "max_occupied": max(occupied) if eligible else None,
         "mean_percentage": (
             _rounded_mean(exact_percentages) if exact_percentages else None
         ),
@@ -194,8 +223,10 @@ def _daily_parent_values(
             if exact_percentages
             else None
         ),
-        "max_exceeded_by": max(
-            measurement.exceeded_by for measurement in measurements
+        "max_exceeded_by": (
+            max(measurement.exceeded_by for measurement in eligible)
+            if eligible
+            else None
         ),
         "min_observed_sector_count": min(
             measurement.observed_sector_count for measurement in measurements
@@ -220,14 +251,28 @@ def _daily_parent_values(
     }
 
 
+def _is_daily_eligible(measurement: OccupancyMeasurement) -> bool:
+    """Decide whether one measurement feeds official daily statistics.
+
+    ``occupancy-v1`` measurements are always complete. An ``occupancy-v2``
+    measurement whose point rate is partial (unknown occupied age in an
+    age-partitioned sector) is excluded entirely from official averages.
+    """
+    if measurement.algorithm_version == ALGORITHM_VERSION_V2:
+        return not measurement.age_partial
+    return True
+
+
 def _daily_group_values(
     measurements: list[OccupancyMeasurement],
 ) -> list[dict[str, object]]:
-    """Aggregate per-group daily statistics from day measurements."""
+    """Aggregate per-group daily statistics from eligible day measurements."""
     by_key: dict[str, list[tuple[datetime, OccupancyGroupMeasurement]]] = (
         defaultdict(list)
     )
     for measurement in measurements:
+        if not _is_daily_eligible(measurement):
+            continue
         captured_at = measurement.captured_at
         for child in measurement.groups.all():
             by_key[child.stable_key].append((captured_at, child))
@@ -327,7 +372,13 @@ def _load_observed_rows(
     snapshots = list(
         CensusSnapshot.objects.filter(ingestion_run=run)
         .order_by("captured_at", "pk")
-        .values_list("captured_at", "setor_codigo", "setor", "bed_status")
+        .values_list(
+            "captured_at",
+            "setor_codigo",
+            "setor",
+            "bed_status",
+            "age_band",
+        )
     )
     if not snapshots:
         raise OccupancyMaterializationError(
@@ -340,10 +391,29 @@ def _load_observed_rows(
                 code=(code or "").strip(),
                 name=(name or "").strip(),
                 status=status,
+                age_band=age_band,
             ),
         )
-        for captured_at, code, name, status in snapshots
+        for captured_at, code, name, status, age_band in snapshots
     ]
+
+
+def _select_algorithm_version(
+    catalog: CapacityCatalogVersion,
+) -> str:
+    """Deterministically dispatch v1/v2 from the persisted catalog context.
+
+    A catalog that partitions at least one source code by age band uses
+    ``occupancy-v2``; a legacy catalog without partitions keeps
+    ``occupancy-v1`` and its exact prior semantics. The choice depends only
+    on the catalog that was already applicable on the capture local date,
+    never on the current date or on any hardcoded date.
+    """
+    for group in catalog.groups.all():
+        for membership in group.memberships.all():
+            if membership.age_selector != CapacityMembershipSelector.ALL:
+                return ALGORITHM_VERSION_V2
+    return ALGORITHM_VERSION
 
 
 def _applicable_catalog(local_date: date) -> CapacityCatalogVersion | None:
@@ -362,8 +432,9 @@ def _applicable_catalog(local_date: date) -> CapacityCatalogVersion | None:
 def _calculate(
     catalog: CapacityCatalogVersion,
     rows: tuple[_ObservedRow, ...],
+    algorithm_version: str,
 ) -> tuple[list[_GroupValues], dict[str, int | Decimal | None]]:
-    by_code, blank_by_name = _aggregate_observations(rows)
+    by_code, by_band, blank_by_name = _aggregate_observations(rows)
     definitions = list(catalog.groups.all())
     membership_to_group = {
         membership.source_code: group
@@ -391,8 +462,11 @@ def _calculate(
 
     values: list[_GroupValues] = []
     configured_codes: set[str] = set()
+    record_selector = algorithm_version == ALGORITHM_VERSION_V2
     for group in definitions:
-        group_values = _calculate_catalog_group(group, by_code)
+        group_values = _calculate_catalog_group(
+            group, by_code, by_band, record_selector=record_selector
+        )
         values.append(group_values)
         configured_codes.update(
             membership.source_code for membership in group.memberships.all()
@@ -442,6 +516,38 @@ def _calculate(
         "occupancy_percentage": percentage,
         "exceeded_by": max(occupied_for_rate - calculable_capacity, 0),
     }
+    if algorithm_version == ALGORITHM_VERSION_V2:
+        partitioned_codes = {
+            membership.source_code
+            for group in definitions
+            for membership in group.memberships.all()
+            if membership.age_selector != CapacityMembershipSelector.ALL
+        }
+        unknown_age_count = sum(
+            1
+            for row in rows
+            if row.code in partitioned_codes
+            and row.age_band == OccupancyAgeBand.UNKNOWN
+            and row.status == BedStatus.OCCUPIED
+        )
+        totals.update(
+            {
+                "official_sector_count": len(definitions),
+                "official_capacity_sector_count": sum(
+                    1
+                    for group in definitions
+                    if group.official_capacity is not None
+                ),
+                "official_calculable_sector_count": sum(
+                    1
+                    for group in definitions
+                    if group.calculation_policy
+                    == CalculationPolicy.STANDARD
+                ),
+                "unknown_age_count": unknown_age_count,
+                "age_partial": unknown_age_count > 0,
+            }
+        )
     return sorted(values, key=lambda value: value.stable_key), totals
 
 
@@ -449,28 +555,43 @@ def _aggregate_observations(
     rows: Iterable[_ObservedRow],
 ) -> tuple[
     dict[str, dict[str, Counter[str]]],
+    dict[tuple[str, str], dict[str, Counter[str]]],
     dict[str, Counter[str]],
 ]:
     by_code: dict[str, dict[str, Counter[str]]] = defaultdict(
+        lambda: defaultdict(Counter)
+    )
+    by_band: dict[tuple[str, str], dict[str, Counter[str]]] = defaultdict(
         lambda: defaultdict(Counter)
     )
     blank_by_name: dict[str, Counter[str]] = defaultdict(Counter)
     for row in rows:
         if row.code:
             by_code[row.code][row.name][row.status] += 1
+            by_band[(row.code, row.age_band)][row.name][row.status] += 1
         else:
             blank_by_name[row.name][row.status] += 1
-    return by_code, blank_by_name
+    return by_code, by_band, blank_by_name
 
 
 def _calculate_catalog_group(
     group: CapacityGroupDefinition,
     by_code: dict[str, dict[str, Counter[str]]],
+    by_band: dict[tuple[str, str], dict[str, Counter[str]]],
+    *,
+    record_selector: bool,
 ) -> _GroupValues:
     total_counts = Counter[str]()
     components: list[dict[str, object]] = []
     for membership in group.memberships.all():
-        observations = by_code.get(membership.source_code, {})
+        selector = membership.age_selector
+        if selector == CapacityMembershipSelector.ALL:
+            observations = by_code.get(membership.source_code, {})
+        else:
+            observations = by_band.get(
+                (membership.source_code, selector), {}
+            )
+        recorded_selector = selector if record_selector else None
         if not observations:
             components.append(
                 _component(
@@ -480,6 +601,7 @@ def _calculate_catalog_group(
                     observed_name=None,
                     counts=Counter(),
                     mismatch=False,
+                    selector=recorded_selector,
                 )
             )
             continue
@@ -494,6 +616,7 @@ def _calculate_catalog_group(
                     observed_name=observed_name,
                     counts=counts,
                     mismatch=observed_name != membership.configured_source_name,
+                    selector=recorded_selector,
                 )
             )
 
@@ -597,8 +720,9 @@ def _component(
     observed_name: str | None,
     counts: Counter[str],
     mismatch: bool,
+    selector: str | None = None,
 ) -> dict[str, object]:
-    return {
+    component: dict[str, object] = {
         "configured_code": configured_code,
         "configured_name": configured_name,
         "observed_code": observed_code,
@@ -606,6 +730,9 @@ def _component(
         "status_counts": _status_counts(counts),
         "source_name_mismatch": mismatch,
     }
+    if selector is not None:
+        component["age_selector"] = selector
+    return component
 
 
 def _status_counts(counts: Counter[str]) -> dict[str, int]:

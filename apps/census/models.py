@@ -207,6 +207,47 @@ class OccupancyMeasurement(models.Model):
         blank=True,
     )
     exceeded_by = models.PositiveIntegerField()
+    age_partial = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when this occupancy-v2 measurement omitted occupied rows of "
+            "an age-partitioned sector because their normalized age band is "
+            "unknown; such measurements are excluded from official daily "
+            "statistics"
+        ),
+    )
+    unknown_age_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Aggregate count of occupied rows of age-partitioned sectors "
+            "whose normalized age band is unknown; no row-level patient "
+            "data is ever stored here"
+        ),
+    )
+    official_sector_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Official sectors of the applicable catalog (occupancy-v2 only); "
+            "null keeps occupancy-v1 uninterpreted"
+        ),
+    )
+    official_capacity_sector_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Official sectors with declared capacity (occupancy-v2 only); "
+            "null keeps occupancy-v1 uninterpreted"
+        ),
+    )
+    official_calculable_sector_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Official sectors with calculable occupancy (occupancy-v2 only); "
+            "null keeps occupancy-v1 uninterpreted"
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -226,6 +267,27 @@ class OccupancyMeasurement(models.Model):
                 condition=models.Q(occupancy_percentage__gte=0)
                 | models.Q(occupancy_percentage__isnull=True),
                 name="ck_occupancy_percentage_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(age_partial=True, unknown_age_count__gt=0)
+                    | models.Q(age_partial=False, unknown_age_count=0)
+                ),
+                name="ck_occupancy_age_partial_consistent",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(official_sector_count__isnull=True)
+                    | models.Q(
+                        official_capacity_sector_count__lte=models.F(
+                            "official_sector_count"
+                        ),
+                        official_calculable_sector_count__lte=models.F(
+                            "official_capacity_sector_count"
+                        ),
+                    )
+                ),
+                name="ck_occupancy_official_coverage_ordered",
             ),
         ]
         indexes = [
@@ -314,13 +376,48 @@ class DailyOccupancySummary(models.Model):
     )
     algorithm_version = models.CharField(max_length=30)
     measurement_count = models.PositiveIntegerField()
+    eligible_measurement_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Day measurements eligible for official statistics; age-partial "
+            "occupancy-v2 measurements are never eligible"
+        ),
+    )
+    age_excluded_measurement_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Day measurements excluded from official statistics because their "
+            "occupancy-v2 point rate is partial"
+        ),
+    )
     first_captured_at = models.DateTimeField()
     last_captured_at = models.DateTimeField()
     known_capacity = models.PositiveIntegerField()
     calculable_capacity = models.PositiveIntegerField()
-    mean_occupied = models.DecimalField(max_digits=12, decimal_places=2)
-    min_occupied = models.PositiveIntegerField()
-    max_occupied = models.PositiveIntegerField()
+    official_sector_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Official sectors of the day's catalog (occupancy-v2 only); null "
+            "keeps occupancy-v1 summaries uninterpreted"
+        ),
+    )
+    official_calculable_sector_count = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Official calculable sectors of the day's catalog (occupancy-v2 "
+            "only); null keeps occupancy-v1 summaries uninterpreted"
+        ),
+    )
+    mean_occupied = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    min_occupied = models.PositiveIntegerField(null=True, blank=True)
+    max_occupied = models.PositiveIntegerField(null=True, blank=True)
     mean_percentage = models.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -378,7 +475,8 @@ class DailyOccupancySummary(models.Model):
                 name="ck_daily_summary_coverage_bounds_ordered",
             ),
             models.CheckConstraint(
-                condition=models.Q(mean_occupied__gte=0),
+                condition=models.Q(mean_occupied__gte=0)
+                | models.Q(mean_occupied__isnull=True),
                 name="ck_daily_summary_mean_occupied_nonnegative",
             ),
             models.CheckConstraint(

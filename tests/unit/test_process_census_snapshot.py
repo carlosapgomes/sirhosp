@@ -1057,3 +1057,99 @@ class TestSCOH3OccupancyIntegration:
         assert DailyOccupancySummary.objects.count() == 0
         assert result.get("batch_id") is not None
         assert result["patients_total"] == 2
+
+
+def _v2_partitioned_catalog(capture_date):
+    """Corrected-style catalog with the exclusive 654 age partition."""
+    catalog = CapacityCatalogVersion.objects.create(
+        effective_from=capture_date,
+        source_reference="synthetic cco3a-s3 test catalog",
+        source_sha256=(f"{capture_date:%Y%m%d}" + "c" * 64)[:64],
+        schema_version="1.1",
+    )
+    adult = CapacityGroupDefinition.objects.create(
+        catalog=catalog,
+        stable_key="OBST-3A-ADULTO",
+        display_name="Enfermaria 3A Adulto",
+        official_capacity=32,
+        calculation_policy="standard",
+    )
+    CapacitySectorMembership.objects.create(
+        catalog=catalog,
+        group=adult,
+        source_code="654",
+        configured_source_name="3A Source",
+        age_selector="age_12_or_over",
+    )
+    child = CapacityGroupDefinition.objects.create(
+        catalog=catalog,
+        stable_key="OBST-3A-INFANTIL",
+        display_name="Enfermaria 3A Infantil",
+        official_capacity=16,
+        calculation_policy="standard",
+    )
+    CapacitySectorMembership.objects.create(
+        catalog=catalog,
+        group=child,
+        source_code="654",
+        configured_source_name="3A Source",
+        age_selector="under_12",
+    )
+    return catalog
+
+
+@pytest.mark.django_db
+class TestCCO3AS3PartialClinicalFlow:
+    """R8: age-partial v2 measurement never blocks clinical processing."""
+
+    def _partial_run(self):
+        _v2_partitioned_catalog(timezone.localdate())
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="OBSTETRICIA 3A",
+            leito="3A01",
+            prontuario="33333333",
+            nome="PACIENTE 3A",
+            especialidade="OBST",
+            bed_status=BedStatus.OCCUPIED,
+            setor_codigo="654",
+            age_band="unknown",
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+            setor_codigo="100",
+        )
+        _add_filler_snapshots(
+            captured_at=now,
+            run=run,
+            exclude={"OBSTETRICIA 3A", "UTI A"},
+        )
+        return run
+
+    def test_age_partial_v2_measurement_does_not_block_clinical_processing(self):
+        run = self._partial_run()
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        measurement = OccupancyMeasurement.objects.get(census_run=run)
+        assert measurement.algorithm_version == "occupancy-v2"
+        assert measurement.age_partial is True
+        assert measurement.unknown_age_count == 1
+        assert result.get("materialization_status") == "created"
+        assert result.get("batch_id") is not None
+        assert result["patients_total"] == 2
+        assert CensusExecutionBatch.objects.count() == 1
+        assert Patient.objects.count() == 2
+        assert IngestionRun.objects.filter(status="queued").count() >= 2
