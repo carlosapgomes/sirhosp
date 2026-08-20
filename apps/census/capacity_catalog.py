@@ -27,6 +27,7 @@ from apps.census.models import (
     CalculationPolicy,
     CapacityCatalogVersion,
     CapacityGroupDefinition,
+    CapacityMembershipSelector,
     CapacitySectorMembership,
 )
 
@@ -70,6 +71,7 @@ class CatalogConflictError(CatalogError):
 class MembershipSpec:
     source_code: str
     configured_source_name: str
+    age_selector: str = CapacityMembershipSelector.ALL
 
 
 @dataclass(frozen=True)
@@ -92,12 +94,32 @@ class ValidatedCatalog:
         return len(self.groups)
 
     @property
+    def membership_count(self) -> int:
+        return sum(len(group.memberships) for group in self.groups)
+
+    @property
     def code_count(self) -> int:
         return len({m.source_code for g in self.groups for m in g.memberships})
 
     @property
     def capacity_group_count(self) -> int:
         return sum(1 for g in self.groups if g.official_capacity is not None)
+
+    @property
+    def standard_group_count(self) -> int:
+        return sum(
+            1
+            for g in self.groups
+            if g.calculation_policy == CalculationPolicy.STANDARD
+        )
+
+    @property
+    def unrated_group_count(self) -> int:
+        return sum(
+            1
+            for g in self.groups
+            if g.calculation_policy == CalculationPolicy.UNRATED
+        )
 
     @property
     def capacity_covered_code_count(self) -> int:
@@ -141,8 +163,12 @@ class ActivationResult:
     created: bool
     group_count: int
     member_count: int
-    known_capacity: int | None
-    calculable_capacity: int | None
+    code_count: int
+    capacity_group_count: int
+    standard_group_count: int
+    unrated_group_count: int
+    known_capacity: int
+    calculable_capacity: int
 
 
 _ALLOWED_POLICIES = frozenset(
@@ -152,6 +178,8 @@ _ALLOWED_POLICIES = frozenset(
         CalculationPolicy.UNRATED,
     }
 )
+
+_ALLOWED_SELECTORS = frozenset(CapacityMembershipSelector.values)
 
 
 def parse_catalog_document(raw_document: bytes) -> dict[str, Any]:
@@ -168,10 +196,13 @@ def parse_catalog_document(raw_document: bytes) -> dict[str, Any]:
 def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
     """Validate the whole document before any persistence.
 
-    Rejects duplicate stable keys, duplicate source codes, cross-catalog
-    ambiguity, invalid policy/capacity combinations, missing required
-    names/codes and fields that exceed the persisted ``max_length``.
-    Raises :class:`CatalogValidationError` on the first problem.
+    Rejects duplicate stable keys, ambiguous source-code combinations
+    (duplicate ``all``, ``all`` mixed with an age partition, incomplete,
+    duplicated or single-group age partitions), invalid
+    policy/capacity combinations, unsupported membership selectors,
+    missing required names/codes and fields that exceed the persisted
+    ``max_length``. Raises :class:`CatalogValidationError` on the first
+    problem.
     """
     schema_version = document.get("schema_version")
     source_reference = document.get("source_reference")
@@ -196,7 +227,7 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
 
     groups: list[GroupSpec] = []
     seen_stable_keys: set[str] = set()
-    seen_source_codes: set[str] = set()
+    memberships_by_code: dict[str, list[tuple[str, str]]] = {}
 
     for index, raw_group in enumerate(raw_groups):
         group = _validate_group(raw_group, index)
@@ -206,12 +237,12 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
             )
         seen_stable_keys.add(group.stable_key)
         for membership in group.memberships:
-            if membership.source_code in seen_source_codes:
-                raise CatalogValidationError(
-                    f"Código fonte duplicado: '{membership.source_code}'."
-                )
-            seen_source_codes.add(membership.source_code)
+            memberships_by_code.setdefault(membership.source_code, []).append(
+                (group.stable_key, membership.age_selector)
+            )
         groups.append(group)
+
+    _validate_code_combinations(memberships_by_code)
 
     return ValidatedCatalog(
         schema_version=schema_version.strip(),
@@ -257,7 +288,11 @@ def activate_sector_capacity_catalog(
         document_sha256=document_sha256,
         created=False,
         group_count=validated.group_count,
-        member_count=validated.code_count,
+        member_count=validated.membership_count,
+        code_count=validated.code_count,
+        capacity_group_count=validated.capacity_group_count,
+        standard_group_count=validated.standard_group_count,
+        unrated_group_count=validated.unrated_group_count,
         known_capacity=validated.known_capacity,
         calculable_capacity=validated.calculable_capacity,
     )
@@ -431,6 +466,44 @@ def _validate_policy_capacity(
         )
 
 
+def _validate_code_combinations(
+    memberships_by_code: dict[str, list[tuple[str, str]]],
+) -> None:
+    """Reject ambiguous memberships for any source code.
+
+    A code maps either to exactly one ``all`` membership or to exactly
+    two memberships, one ``under_12`` and one ``age_12_or_over``, in two
+    different official groups. Any other combination is ambiguous and
+    rejected before persistence.
+    """
+    for code, entries in memberships_by_code.items():
+        selectors = [selector for _, selector in entries]
+        if CapacityMembershipSelector.ALL in selectors:
+            if len(entries) != 1:
+                raise CatalogValidationError(
+                    f"Código fonte '{code}' não pode combinar 'all' com "
+                    "outra associação."
+                )
+            continue
+        expected_partition = sorted(
+            [
+                CapacityMembershipSelector.UNDER_12,
+                CapacityMembershipSelector.AGE_12_OR_OVER,
+            ]
+        )
+        if len(entries) != 2 or sorted(selectors) != expected_partition:
+            raise CatalogValidationError(
+                f"Código fonte '{code}' exige exatamente uma associação "
+                "'all' ou o par completo 'under_12' + 'age_12_or_over'."
+            )
+        group_keys = {group_key for group_key, _ in entries}
+        if len(group_keys) != 2:
+            raise CatalogValidationError(
+                f"Código fonte '{code}' particionado deve pertencer a "
+                "grupos oficiais distintos."
+            )
+
+
 def _validate_membership(raw_code: Any, group_index: int) -> MembershipSpec:
     if not isinstance(raw_code, dict):
         raise CatalogValidationError(
@@ -438,6 +511,13 @@ def _validate_membership(raw_code: Any, group_index: int) -> MembershipSpec:
         )
     source_code = raw_code.get("source_code")
     configured_name = raw_code.get("configured_source_name")
+    age_selector = raw_code.get("age_selector")
+    if age_selector is None:
+        age_selector = CapacityMembershipSelector.ALL
+    elif age_selector not in _ALLOWED_SELECTORS:
+        raise CatalogValidationError(
+            f"Grupo {group_index}: seletor '{age_selector}' não suportado."
+        )
     if not isinstance(source_code, str) or not source_code.strip():
         raise CatalogValidationError(
             f"Grupo {group_index}: 'source_code' ausente ou vazio."
@@ -461,6 +541,7 @@ def _validate_membership(raw_code: Any, group_index: int) -> MembershipSpec:
     return MembershipSpec(
         source_code=source_code.strip(),
         configured_source_name=configured_name.strip(),
+        age_selector=age_selector,
     )
 
 
@@ -494,6 +575,7 @@ def _persist_catalog(
                     group=definition,
                     source_code=membership.source_code,
                     configured_source_name=membership.configured_source_name,
+                    age_selector=membership.age_selector,
                 )
                 for membership in group.memberships
             ]

@@ -64,8 +64,12 @@ class Command(BaseCommand):
             self.style.SUCCESS(
                 f"Catálogo {action} para {result.effective_from}\n"
                 f"  SHA-256: {result.document_sha256}\n"
-                f"  grupos: {result.group_count}\n"
-                f"  membros (códigos): {result.member_count}\n"
+                f"  grupos oficiais: {result.group_count}\n"
+                f"  associações: {result.member_count}\n"
+                f"  códigos-fonte distintos: {result.code_count}\n"
+                f"  grupos com capacidade: {result.capacity_group_count}\n"
+                f"  grupos standard: {result.standard_group_count}\n"
+                f"  grupos unrated: {result.unrated_group_count}\n"
                 f"  capacidade conhecida: {result.known_capacity}\n"
                 f"  capacidade calculável: {result.calculable_capacity}"
             )

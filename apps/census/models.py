@@ -111,6 +111,20 @@ class CapacityGroupDefinition(models.Model):
         return f"{self.stable_key} ({self.calculation_policy}) @ {self.catalog}"
 
 
+class CapacityMembershipSelector(models.TextChoices):
+    """Selector partitioning one source code across catalog memberships.
+
+    ``all`` maps every row of the code to one group; ``under_12`` and
+    ``age_12_or_over`` split one code exclusively between exactly two
+    official groups at the strict 12-year threshold. A code never mixes
+    ``all`` with an age partition, and a partition is never incomplete.
+    """
+
+    ALL = "all", "All"
+    UNDER_12 = "under_12", "Under 12"
+    AGE_12_OR_OVER = "age_12_or_over", "Age 12 or over"
+
+
 class CapacitySectorMembership(models.Model):
     """Associates one source code with a capacity group within one version."""
 
@@ -132,12 +146,21 @@ class CapacitySectorMembership(models.Model):
         max_length=255,
         help_text="Sector name configured for this code in this version",
     )
+    age_selector = models.CharField(
+        max_length=20,
+        choices=CapacityMembershipSelector.choices,
+        default=CapacityMembershipSelector.ALL,
+        help_text=(
+            "Which census rows of this source code belong to this group: "
+            "all rows or one exclusive age partition"
+        ),
+    )
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["catalog", "source_code"],
-                name="uq_capacity_member_catalog_source_code",
+                fields=["catalog", "source_code", "age_selector"],
+                name="uq_capacity_member_catalog_code_selector",
             ),
         ]
         ordering = ["catalog", "source_code"]

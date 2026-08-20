@@ -35,6 +35,14 @@ INITIAL_CATALOG = (
     / "initial_sector_capacity_catalog.json"
 )
 
+CORRECTED_CATALOG = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "census"
+    / "data"
+    / "corrected_sector_capacity_catalog.json"
+)
+
 # C1: nomes exatos esperados no sistema fonte (CensusSnapshot.setor).
 EXPECTED_SOURCE_NAMES = {
     "751": "0 - SALA DE PROCEDIMENTO ADULTO HGRS",
@@ -186,6 +194,45 @@ def _valid_document() -> dict:
 
 def _initial_document() -> dict:
     return json.loads(INITIAL_CATALOG.read_text(encoding="utf-8"))
+
+
+def _corrected_document() -> dict:
+    return json.loads(CORRECTED_CATALOG.read_text(encoding="utf-8"))
+
+
+def _partitioned_document() -> dict:
+    """Minimal valid document with one age-partitioned source code."""
+    document = _valid_document()
+    source_name = "SETOR PARTICIONADO"
+    document["groups"][1] = {
+        "stable_key": "B",
+        "display_name": "Sector B Child",
+        "official_capacity": 16,
+        "calculation_policy": CalculationPolicy.STANDARD,
+        "source_codes": [
+            {
+                "source_code": "654",
+                "configured_source_name": source_name,
+                "age_selector": "under_12",
+            }
+        ],
+    }
+    document["groups"].append(
+        {
+            "stable_key": "C",
+            "display_name": "Sector C Adult",
+            "official_capacity": 32,
+            "calculation_policy": CalculationPolicy.STANDARD,
+            "source_codes": [
+                {
+                    "source_code": "654",
+                    "configured_source_name": source_name,
+                    "age_selector": "age_12_or_over",
+                }
+            ],
+        }
+    )
+    return document
 
 
 class TestSchemaConstraints:
@@ -499,7 +546,9 @@ class TestControlledActivation:
         assert CapacityGroupDefinition.objects.count() == 0
         assert CapacitySectorMembership.objects.count() == 0
         out = capsys.readouterr().out
-        assert "grupos: 2" in out
+        assert "grupos oficiais: 2" in out
+        assert "associações: 2" in out
+        assert "códigos-fonte distintos: 2" in out
         assert "capacidade conhecida: 15" in out
         assert "SHA-256" in out
 
@@ -520,8 +569,369 @@ class TestControlledActivation:
         assert version.memberships.count() == 2
         assert result.group_count == 2
         assert result.member_count == 2
+        assert result.code_count == 2
         assert result.known_capacity == 15
         assert result.calculable_capacity == 15
+
+
+class TestMembershipSelectors:
+    """R1: persistent membership selector with safe legacy default."""
+
+    def test_selector_choices_are_the_three_supported_values(self):
+        from apps.census.models import CapacityMembershipSelector
+
+        assert set(CapacityMembershipSelector.values) == {
+            "all",
+            "under_12",
+            "age_12_or_over",
+        }
+
+    def test_legacy_membership_without_selector_defaults_to_all(self):
+        catalog = validate_catalog_document(_valid_document())
+        selectors = {
+            membership.age_selector
+            for group in catalog.groups
+            for membership in group.memberships
+        }
+        assert selectors == {"all"}
+
+    def test_initial_catalog_parsing_defaults_every_selector_to_all(self):
+        catalog = validate_catalog_document(_initial_document())
+        selectors = {
+            membership.age_selector
+            for group in catalog.groups
+            for membership in group.memberships
+        }
+        assert selectors == {"all"}
+        assert catalog.membership_count == 47
+        assert catalog.code_count == 47
+
+    @pytest.mark.django_db
+    def test_db_membership_defaults_to_all(self):
+        version = CapacityCatalogVersion.objects.create(
+            effective_from="2030-01-05",
+            source_reference="r",
+            source_sha256="a" * 64,
+            schema_version="1.0",
+        )
+        group = CapacityGroupDefinition.objects.create(
+            catalog=version,
+            stable_key="A",
+            display_name="A",
+            official_capacity=1,
+            calculation_policy=CalculationPolicy.STANDARD,
+        )
+        membership = CapacitySectorMembership.objects.create(
+            catalog=version,
+            group=group,
+            source_code="100",
+            configured_source_name="A",
+        )
+        membership.refresh_from_db()
+        assert membership.age_selector == "all"
+
+
+class TestSelectorCombinationValidation:
+    """R2: domain rejects ambiguous code/group combinations before writing."""
+
+    def test_duplicate_all_for_same_code_rejected(self):
+        document = _valid_document()
+        document["groups"][1]["source_codes"] = [
+            {
+                "source_code": "100",
+                "configured_source_name": "Outro setor",
+                "age_selector": "all",
+            }
+        ]
+        with pytest.raises(CatalogValidationError) as excinfo:
+            validate_catalog_document(document)
+        assert "100" in str(excinfo.value)
+
+    def test_all_mixed_with_age_partition_rejected(self):
+        document = _partitioned_document()
+        document["groups"].append(
+            {
+                "stable_key": "D",
+                "display_name": "Sector D",
+                "official_capacity": 5,
+                "calculation_policy": CalculationPolicy.STANDARD,
+                "source_codes": [
+                    {
+                        "source_code": "654",
+                        "configured_source_name": "SETOR",
+                        "age_selector": "all",
+                    }
+                ],
+            }
+        )
+        with pytest.raises(CatalogValidationError):
+            validate_catalog_document(document)
+
+    def test_incomplete_age_partition_rejected(self):
+        document = _partitioned_document()
+        del document["groups"][2]
+        with pytest.raises(CatalogValidationError) as excinfo:
+            validate_catalog_document(document)
+        assert "654" in str(excinfo.value)
+
+    def test_duplicate_age_partition_rejected(self):
+        document = _partitioned_document()
+        document["groups"][2]["source_codes"][0]["age_selector"] = "under_12"
+        with pytest.raises(CatalogValidationError):
+            validate_catalog_document(document)
+
+    @pytest.mark.parametrize("selector", ["unknown", "over_12", "", "todas"])
+    def test_unknown_selector_rejected(self, selector: str):
+        document = _partitioned_document()
+        document["groups"][1]["source_codes"][0]["age_selector"] = selector
+        with pytest.raises(CatalogValidationError):
+            validate_catalog_document(document)
+
+    def test_age_partition_inside_single_group_rejected(self):
+        document = _valid_document()
+        document["groups"][1]["source_codes"] = [
+            {
+                "source_code": "654",
+                "configured_source_name": "SETOR",
+                "age_selector": "under_12",
+            },
+            {
+                "source_code": "654",
+                "configured_source_name": "SETOR",
+                "age_selector": "age_12_or_over",
+            },
+        ]
+        with pytest.raises(CatalogValidationError):
+            validate_catalog_document(document)
+
+    def test_complete_partition_in_different_groups_accepted(self):
+        catalog = validate_catalog_document(_partitioned_document())
+        assert catalog.group_count == 3
+        assert catalog.membership_count == 3
+        assert catalog.code_count == 2
+
+    @pytest.mark.django_db
+    def test_invalid_partition_leaves_no_partial_rows(self, tmp_path: Path):
+        document = _partitioned_document()
+        del document["groups"][2]
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError):
+            activate_sector_capacity_catalog(path, _future_date())
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+
+class TestSelectorPersistence:
+    """R6: atomic activation persists selectors bound to catalog and group."""
+
+    @pytest.mark.django_db
+    def test_activation_persists_partitioned_memberships(self, tmp_path: Path):
+        path = _write_document(tmp_path, _partitioned_document())
+        result = activate_sector_capacity_catalog(path, _future_date())
+        assert result.created is True
+        assert result.member_count == 3
+        assert result.code_count == 2
+        version = CapacityCatalogVersion.objects.get()
+        assert version.groups.count() == 3
+        assert version.memberships.count() == 3
+        partitioned = {
+            membership.age_selector: membership
+            for membership in CapacitySectorMembership.objects.filter(
+                source_code="654"
+            )
+        }
+        assert set(partitioned) == {"under_12", "age_12_or_over"}
+        child = partitioned["under_12"]
+        adult = partitioned["age_12_or_over"]
+        assert child.catalog_id == adult.catalog_id == version.pk
+        assert child.group.stable_key == "B"
+        assert adult.group.stable_key == "C"
+
+    @pytest.mark.django_db
+    def test_partitioned_activation_is_idempotent(self, tmp_path: Path):
+        path = _write_document(tmp_path, _partitioned_document())
+        effective = _future_date()
+        first = activate_sector_capacity_catalog(path, effective)
+        second = activate_sector_capacity_catalog(path, effective)
+        assert first.created is True
+        assert second.created is False
+        assert first.document_sha256 == second.document_sha256
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert CapacitySectorMembership.objects.count() == 3
+
+    @pytest.mark.django_db
+    def test_db_constraint_blocks_duplicate_catalog_code_selector(self):
+        version = CapacityCatalogVersion.objects.create(
+            effective_from="2030-01-06",
+            source_reference="r",
+            source_sha256="a" * 64,
+            schema_version="1.0",
+        )
+        group = CapacityGroupDefinition.objects.create(
+            catalog=version,
+            stable_key="A",
+            display_name="A",
+            official_capacity=1,
+            calculation_policy=CalculationPolicy.STANDARD,
+        )
+        CapacitySectorMembership.objects.create(
+            catalog=version,
+            group=group,
+            source_code="100",
+            configured_source_name="A",
+        )
+        with pytest.raises(IntegrityError):
+            with transaction.atomic():
+                CapacitySectorMembership.objects.create(
+                    catalog=version,
+                    group=group,
+                    source_code="100",
+                    configured_source_name="A2",
+                    age_selector="all",
+                )
+        CapacitySectorMembership.objects.create(
+            catalog=version,
+            group=group,
+            source_code="100",
+            configured_source_name="A2",
+            age_selector="under_12",
+        )
+        assert version.memberships.count() == 2
+
+
+class TestCorrectedCatalogDocument:
+    """R4: corrected artifact changes only CO and the 3A partition."""
+
+    def test_unaffected_groups_are_copied_exactly(self):
+        initial = _initial_document()
+        corrected = _corrected_document()
+        initial_groups = {g["stable_key"]: g for g in initial["groups"]}
+        corrected_groups = {g["stable_key"]: g for g in corrected["groups"]}
+        unaffected = set(initial_groups) - {"CO", "OBST-3A"}
+        assert len(unaffected) == 40
+        for key in unaffected:
+            assert corrected_groups[key] == initial_groups[key]
+
+    def test_only_approved_group_changes_exist(self):
+        initial = _initial_document()
+        corrected = _corrected_document()
+        initial_keys = {g["stable_key"] for g in initial["groups"]}
+        corrected_keys = {g["stable_key"] for g in corrected["groups"]}
+        assert initial_keys - corrected_keys == {"OBST-3A"}
+        assert corrected_keys - initial_keys == {
+            "OBST-3A-ADULTO",
+            "OBST-3A-INFANTIL",
+        }
+        assert len(corrected_keys) == 43
+
+    def test_co_is_unrated_without_capacity_and_all_selector(self):
+        corrected = _corrected_document()
+        co = next(
+            g for g in corrected["groups"] if g["stable_key"] == "CO"
+        )
+        assert co["calculation_policy"] == "unrated"
+        assert co["official_capacity"] is None
+        assert {
+            (m["source_code"], m.get("age_selector", "all"))
+            for m in co["source_codes"]
+        } == {
+            ("20", "all"),
+            ("1110", "all"),
+            ("1112", "all"),
+            ("1114", "all"),
+            ("1116", "all"),
+        }
+
+    def test_3a_is_split_into_adult_and_child_official_sectors(self):
+        corrected = _corrected_document()
+        groups = {g["stable_key"]: g for g in corrected["groups"]}
+        adult = groups["OBST-3A-ADULTO"]
+        child = groups["OBST-3A-INFANTIL"]
+        assert adult["calculation_policy"] == "standard"
+        assert adult["official_capacity"] == 32
+        assert adult["source_codes"] == [
+            {
+                "source_code": "654",
+                "configured_source_name": (
+                    "3 6 - 3A - OBSTETRÍCIA CLÍNICA - HGRS"
+                ),
+                "age_selector": "age_12_or_over",
+            }
+        ]
+        assert child["calculation_policy"] == "standard"
+        assert child["official_capacity"] == 16
+        assert child["source_codes"] == [
+            {
+                "source_code": "654",
+                "configured_source_name": (
+                    "3 6 - 3A - OBSTETRÍCIA CLÍNICA - HGRS"
+                ),
+                "age_selector": "under_12",
+            }
+        ]
+
+    def test_corrected_document_has_no_extra_fields(self):
+        corrected = _corrected_document()
+        group_keys = {
+            "stable_key",
+            "display_name",
+            "official_capacity",
+            "calculation_policy",
+            "source_codes",
+        }
+        membership_keys = {
+            "source_code",
+            "configured_source_name",
+            "age_selector",
+        }
+        for group in corrected["groups"]:
+            assert set(group) <= group_keys
+            for membership in group["source_codes"]:
+                assert set(membership) <= membership_keys
+        assert "sem dados de pacientes" in corrected["source_reference"]
+
+
+class TestCorrectedCatalogTotals:
+    """R5: exact derived totals for the corrected photography."""
+
+    def test_corrected_totals_derived_from_document(self):
+        catalog = validate_catalog_document(_corrected_document())
+        assert catalog.group_count == 43
+        assert catalog.membership_count == 48
+        assert catalog.code_count == 47
+        assert catalog.capacity_group_count == 39
+        assert catalog.standard_group_count == 39
+        assert catalog.unrated_group_count == 4
+        assert catalog.capacity_covered_code_count == 39
+        assert catalog.calculable_code_count == 39
+        assert catalog.known_capacity == 666
+        assert catalog.calculable_capacity == 666
+
+    @pytest.mark.django_db
+    def test_dry_run_reports_corrected_totals_and_persists_nothing(
+        self, capsys
+    ):
+        call_command(
+            "activate_sector_capacity_catalog",
+            "--input",
+            str(CORRECTED_CATALOG),
+            "--effective-from",
+            _future_date(),
+            "--dry-run",
+        )
+        out = capsys.readouterr().out
+        assert "grupos oficiais: 43" in out
+        assert "associações: 48" in out
+        assert "códigos-fonte distintos: 47" in out
+        assert "grupos com capacidade: 39" in out
+        assert "grupos standard: 39" in out
+        assert "grupos unrated: 4" in out
+        assert "capacidade conhecida: 666" in out
+        assert "capacidade calculável: 666" in out
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
 
     @pytest.mark.django_db
     def test_command_activation_reports_and_persists(self, tmp_path: Path, capsys):
@@ -667,8 +1077,12 @@ class TestInitialCatalogCommand:
             "--dry-run",
         )
         out = capsys.readouterr().out
-        assert "grupos: 42" in out
-        assert "membros (códigos): 47" in out
+        assert "grupos oficiais: 42" in out
+        assert "associações: 47" in out
+        assert "códigos-fonte distintos: 47" in out
+        assert "grupos com capacidade: 39" in out
+        assert "grupos standard: 38" in out
+        assert "grupos unrated: 3" in out
         assert "capacidade conhecida: 658" in out
         assert "capacidade calculável: 626" in out
         assert CapacityCatalogVersion.objects.count() == 0
