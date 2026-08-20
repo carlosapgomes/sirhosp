@@ -782,6 +782,11 @@ def resolve_exact_measurement(
     )
 
 
+_AUXILIARY_3A_STABLE_KEY = "AUX-3A-UNCLASSIFIED"
+_AUXILIARY_3A_DISPLAY_NAME = "3A – posições sem classificação etária"
+_AUXILIARY_3A_CALCULATION_STATUS = "auxiliary"
+
+
 @dataclass
 class _PresentationGroupRow:
     """Template-ready official group row assembled from persisted values."""
@@ -820,20 +825,36 @@ def build_official_group_rows(
 
     Consumes only persisted measurement values (display names, capacities,
     status counts, percentages, exceeded-by and calculation states) and the
-    raw beds of the same census. Beds are matched to the official group whose
-    component carries their observed code (or observed name when the code is
-    blank); a shared group therefore appears once with combined counts while
-    every contributing source sector and bed stays inside its expansion. No
-    rate, coverage or adjusted occupancy value is computed here.
+    raw beds of the same census. For ``occupancy-v2`` an age-partitioned code
+    is matched by ``(code, age_band)`` so Adulto and Infantil never overwrite
+    each other: each occupied row with a valid band lands in exactly one
+    virtual sector, while non-occupied rows and occupied rows with unknown
+    band land once in a presentation-only auxiliary grouping without
+    capacity or percentage. Shared ``all`` groups still appear once with
+    combined counts and every contributing source sector and bed stays inside
+    its expansion. No rate, coverage or adjusted occupancy value is computed
+    here.
     """
     groups = list(measurement.groups.all())
+    is_v2 = measurement.algorithm_version == ALGORITHM_VERSION_V2
+
     code_to_group: dict[str, OccupancyGroupMeasurement] = {}
     blank_name_to_group: dict[str, OccupancyGroupMeasurement] = {}
+    band_to_group: dict[tuple[str, str], OccupancyGroupMeasurement] = {}
+    partitioned_codes: set[str] = set()
     for group in groups:
         for component in group.components_json:
             observed_code = str(component.get("observed_code") or "").strip()
             if observed_code:
-                code_to_group[observed_code] = group
+                selector = str(component.get("age_selector") or "").strip()
+                if is_v2 and selector in (
+                    OccupancyAgeBand.UNDER_12,
+                    OccupancyAgeBand.AGE_12_OR_OVER,
+                ):
+                    band_to_group[(observed_code, selector)] = group
+                    partitioned_codes.add(observed_code)
+                else:
+                    code_to_group[observed_code] = group
             else:
                 observed_name = str(
                     component.get("observed_name") or ""
@@ -860,14 +881,34 @@ def build_official_group_rows(
         for group in groups
     }
     source_sector_sets: dict[str, set[str]] = defaultdict(set)
+    auxiliary_beds: list[dict[str, object]] = []
+    auxiliary_sectors: set[str] = set()
     for bed in snapshots:
         code = (bed.setor_codigo or "").strip()
+        if code and code in partitioned_codes:
+            if (
+                bed.bed_status == BedStatus.OCCUPIED
+                and bed.age_band
+                in (OccupancyAgeBand.UNDER_12, OccupancyAgeBand.AGE_12_OR_OVER)
+            ):
+                matched_group = band_to_group.get((code, bed.age_band))
+                if matched_group is not None:
+                    rows[matched_group.stable_key].beds.append(
+                        _bed_presentation_row(bed, patient_map or {})
+                    )
+                    source_sector_sets[matched_group.stable_key].add(
+                        bed.setor or ""
+                    )
+                    continue
+            auxiliary_beds.append(
+                _bed_presentation_row(bed, patient_map or {})
+            )
+            auxiliary_sectors.add(bed.setor or "")
+            continue
         if code:
             matched_group = code_to_group.get(code)
         else:
-            matched_group = blank_name_to_group.get(
-                (bed.setor or "").strip()
-            )
+            matched_group = blank_name_to_group.get((bed.setor or "").strip())
         if matched_group is None:
             continue
         rows[matched_group.stable_key].beds.append(
@@ -882,7 +923,35 @@ def build_official_group_rows(
             name for name in source_sector_sets[group.stable_key] if name
         )
         result.append(row)
+    if auxiliary_beds:
+        result.append(
+            _PresentationGroupRow(
+                stable_key=_AUXILIARY_3A_STABLE_KEY,
+                display_name=_AUXILIARY_3A_DISPLAY_NAME,
+                calculation_status=_AUXILIARY_3A_CALCULATION_STATUS,
+                official_capacity=None,
+                occupied_count=None,
+                occupancy_percentage=None,
+                exceeded_by=None,
+                status_counts=_auxiliary_status_counts(auxiliary_beds),
+                source_sectors=sorted(
+                    name for name in auxiliary_sectors if name
+                ),
+                beds=auxiliary_beds,
+                name_mismatch=False,
+            )
+        )
     return result
+
+
+def _auxiliary_status_counts(
+    beds: list[dict[str, object]],
+) -> dict[str, int]:
+    """Aggregate status counts for the presentation-only 3A auxiliary row."""
+    counts = {status: 0 for status in _STATUS_KEYS}
+    for bed in beds:
+        counts[str(bed["status"])] += 1
+    return counts
 
 
 def _bed_presentation_row(

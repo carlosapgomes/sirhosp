@@ -29,20 +29,34 @@
         <div class="col-6 col-md-3">
           <div class="card border-0 shadow-sm text-center h-100 bg-info bg-opacity-10">
             <div class="card-body py-3">
+              {% if measurement.algorithm_version == "occupancy-v2" %}
+              <div class="fs-5 fw-bold text-info">
+                {{ measurement.official_capacity_sector_count }} de {{ measurement.official_sector_count }}
+              </div>
+              <div class="small text-muted">setores oficiais com capacidade cadastrada</div>
+              {% else %}
               <div class="fs-5 fw-bold text-info">
                 {{ measurement.capacity_covered_sector_count }} de {{ measurement.observed_sector_count }}
               </div>
               <div class="small text-muted">setores com capacidade cadastrada</div>
+              {% endif %}
             </div>
           </div>
         </div>
         <div class="col-6 col-md-3">
           <div class="card border-0 shadow-sm text-center h-100 bg-success bg-opacity-10">
             <div class="card-body py-3">
+              {% if measurement.algorithm_version == "occupancy-v2" %}
+              <div class="fs-5 fw-bold text-success">
+                {{ measurement.official_calculable_sector_count }} de {{ measurement.official_sector_count }}
+              </div>
+              <div class="small text-muted">setores oficiais com lotação calculável</div>
+              {% else %}
               <div class="fs-5 fw-bold text-success">
                 {{ measurement.calculable_sector_count }} de {{ measurement.observed_sector_count }}
               </div>
               <div class="small text-muted">setores com lotação calculável</div>
+              {% endif %}
             </div>
           </div>
         </div>
@@ -74,7 +88,7 @@
             <div class="d-flex flex-wrap gap-2 align-items-center">
               <span class="badge bg-primary">{{ measurement.occupied_for_rate }} ocupados</span>
               {% if measurement.occupancy_percentage is not None %}
-              <span class="badge bg-dark">{{ measurement.occupancy_percentage|floatformat:2 }}%</span>
+              <span class="badge bg-dark">{{ measurement.occupancy_percentage|floatformat:2 }}%{% if measurement.age_partial %} (parcial){% endif %}</span>
               {% else %}
               <span class="badge bg-light text-dark">Não calculável</span>
               {% endif %}
@@ -85,6 +99,16 @@
           </div>
         </div>
       </div>
+
+      {% if measurement.algorithm_version == "occupancy-v2" and measurement.age_partial %}
+      <div class="alert alert-warning small mb-3" role="alert">
+        <i class="bi bi-exclamation-triangle-fill me-1"></i>
+        <strong>Taxa pontual parcial:</strong>
+        {{ measurement.unknown_age_count }} leito(s) ocupado(s) da Enfermaria 3A
+        sem classificação etária ficaram fora dos numeradores. Este censo não
+        entra nas médias oficiais diárias.
+      </div>
+      {% endif %}
     {% else %}
       <div class="alert alert-secondary small mb-3" role="alert">
         Estatísticas oficiais de capacidade: <strong>Pendente</strong> — a
@@ -169,6 +193,8 @@
               <div class="d-flex flex-wrap gap-1 align-items-center">
                 {% if row.official_capacity %}
                 <span class="badge bg-light text-dark">Capacidade: {{ row.official_capacity }}</span>
+                {% elif row.calculation_status == "auxiliary" %}
+                <span class="badge bg-light text-dark">Sem capacidade oficial</span>
                 {% else %}
                 <span class="badge bg-light text-dark">Capacidade não cadastrada</span>
                 {% endif %}
@@ -176,6 +202,10 @@
                 <span class="badge bg-dark">{{ row.occupancy_percentage|floatformat:2 }}%</span>
                 {% elif row.calculation_status == "linked_slots_pending" %}
                 <span class="badge bg-light text-dark">Aguardando mapeamento cama-berço</span>
+                {% elif measurement.algorithm_version == "occupancy-v2" and row.calculation_status == "unrated" %}
+                <span class="badge bg-light text-dark">Não incluído na taxa de ocupação da unidade</span>
+                {% elif row.calculation_status == "auxiliary" %}
+                <span class="badge bg-light text-dark">Posições sem faixa etária</span>
                 {% else %}
                 <span class="badge bg-light text-dark">Não calculável</span>
                 {% endif %}
