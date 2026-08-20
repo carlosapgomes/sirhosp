@@ -7,7 +7,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from apps.census.models import CensusSnapshot
+from apps.census.models import CensusSnapshot, OccupancyAgeBand
 from apps.census.services import (
     parse_census_csv,
     validate_census_completeness,
@@ -227,6 +227,9 @@ class Command(BaseCommand):
                         tipo_alta=row.get("tipo_alta", ""),
                         origem=row.get("origem", ""),
                         bed_status=row["bed_status"],
+                        age_band=(
+                            row.get("age_band") or OccupancyAgeBand.UNKNOWN
+                        ),
                     )
                     for row in parsed_rows
                 ]

@@ -15,7 +15,13 @@ from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
 
-from apps.census.models import BedStatus, CensusSnapshot, OfficialCensusRecord, PatientMovement
+from apps.census.models import (
+    BedStatus,
+    CensusSnapshot,
+    OccupancyAgeBand,
+    OfficialCensusRecord,
+    PatientMovement,
+)
 from apps.census.occupancy import materialize_occupancy_measurement
 from apps.ingestion.extractors.subprocess_utils import (
     SubprocessTimeoutError,
@@ -180,6 +186,90 @@ def classify_bed_status(prontuario: str, nome: str) -> str:
     return BedStatus.EMPTY
 
 
+# ---------------------------------------------------------------------------
+# Occupancy age band normalization (CCO3A-S1)
+# ---------------------------------------------------------------------------
+
+_MONTHS_PER_YEAR = 12
+_DAYS_PER_YEAR = 365
+# 12 years in days, scaled by 12 to keep month/day arithmetic integer-exact.
+_ADULT_AGE_SCALED_DAYS = 12 * _DAYS_PER_YEAR * _MONTHS_PER_YEAR
+
+# Legacy formats: ``Nm`` (months) or ``NmDd`` (months + days), case- and
+# space-insensitive. Bare ``Nd``, other units or any other structure are
+# rejected and classified as unknown.
+_MONTH_DAY_RE = re.compile(
+    r"(\d+)\s*m\s*(?:(\d+)\s*d)?", re.IGNORECASE
+)
+
+
+def normalize_occupancy_age_band(idade_raw: str | None) -> str:
+    """Normalize a raw legacy ``Idade`` value into an occupancy age band.
+
+    Only occupied rows reach this function. An integer is interpreted as
+    years or birth day: 0-11 is ``under_12``, 12 or greater is
+    ``age_12_or_over``. ``Nm`` and ``NmDd`` are converted to months/days
+    and compared against the strict 12-year threshold. Blank, negative,
+    decimal, unsupported-unit or structurally invalid values become
+    ``unknown``; no inference is ever performed.
+
+    Args:
+        idade_raw: Raw legacy age value (may be ``None`` or blank).
+
+    Returns:
+        One of ``OccupancyAgeBand`` values.
+    """
+    if idade_raw is None:
+        return OccupancyAgeBand.UNKNOWN
+    value = str(idade_raw).strip()
+    if not value:
+        return OccupancyAgeBand.UNKNOWN
+
+    # Integer: legacy uses it for years or for the birth day; the
+    # ambiguity never changes the band below 12.
+    if re.fullmatch(r"\d+", value):
+        return (
+            OccupancyAgeBand.UNDER_12
+            if int(value) < 12
+            else OccupancyAgeBand.AGE_12_OR_OVER
+        )
+
+    # Month/day formats ``Nm`` and ``NmDd``.
+    match = _MONTH_DAY_RE.fullmatch(value)
+    if match is None:
+        return OccupancyAgeBand.UNKNOWN
+
+    months = int(match.group(1))
+    days = int(match.group(2) or 0)
+    # 1 month = 365/12 days; compare against 12 years (12*365 days).
+    # Scaling by 12 keeps the comparison exact in integer arithmetic.
+    scaled_days = months * _DAYS_PER_YEAR + days * _MONTHS_PER_YEAR
+    if scaled_days >= _ADULT_AGE_SCALED_DAYS:
+        return OccupancyAgeBand.AGE_12_OR_OVER
+    return OccupancyAgeBand.UNDER_12
+
+
+def classify_occupancy_age_band(
+    idade_raw: str | None, bed_status: str
+) -> str:
+    """Classify one census row's occupancy age band.
+
+    Bed status takes precedence: only occupied rows are classified from
+    their own ``Idade`` value; empty, maintenance, reserved and isolation
+    rows are ``not_applicable`` regardless of any idade present.
+
+    Args:
+        idade_raw: Raw legacy age value of the row itself.
+        bed_status: Classified ``BedStatus`` of the row.
+
+    Returns:
+        One of ``OccupancyAgeBand`` values.
+    """
+    if bed_status != BedStatus.OCCUPIED:
+        return OccupancyAgeBand.NOT_APPLICABLE
+    return normalize_occupancy_age_band(idade_raw)
+
+
 def _sync_admission_ward_bed(
     patient: Patient,
     setor: str,
@@ -276,7 +366,8 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
     Returns:
         List of dicts with keys:
             setor, leito, prontuario, nome, especialidade, bed_status,
-            data_internacao (str DD/MM/AAAA), tempo_internacao (int or None)
+            data_internacao (str DD/MM/AAAA), tempo_internacao (int or None),
+            age_band (normalized occupancy age band)
 
     Raises:
         FileNotFoundError: If csv_path does not exist.
@@ -305,11 +396,14 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
         has_dt_mvt = "dt_mvt" in actual
         has_alta = "alta" in actual
         has_origem = "origem" in actual
+        has_idade = "idade" in actual
 
         for row in reader:
             prontuario = (row.get("prontuario") or "").strip()
             nome = (row.get("nome") or "").strip()
             bed_status = classify_bed_status(prontuario, nome)
+
+            idade_raw = row.get("idade") if has_idade else None
 
             dt_int_raw = (row.get("dt_int") or "").strip() if has_dt_int else ""
             data_internacao = _parse_dt_int(dt_int_raw)
@@ -349,6 +443,9 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
                         (row.get("origem") or "").strip()
                         if has_origem
                         else ""
+                    ),
+                    "age_band": classify_occupancy_age_band(
+                        idade_raw, bed_status
                     ),
                 }
             )

@@ -558,6 +558,21 @@ class BedStatus(models.TextChoices):
     ISOLATION = "isolation", "Isolamento"
 
 
+class OccupancyAgeBand(models.TextChoices):
+    """Normalized age band used only by occupancy classification.
+
+    ``under_12`` and ``age_12_or_over`` partition occupied rows at the
+    strict 12-year threshold; ``unknown`` keeps unclassifiable occupied
+    rows explicit without inferring age; ``not_applicable`` covers
+    non-occupied beds. Only the band is persisted, never the raw age.
+    """
+
+    UNDER_12 = "under_12", "Under 12"
+    AGE_12_OR_OVER = "age_12_or_over", "Age 12 or over"
+    UNKNOWN = "unknown", "Unknown"
+    NOT_APPLICABLE = "not_applicable", "Not applicable"
+
+
 class CensusSnapshot(models.Model):
     """Single row from a daily inpatient census extraction.
 
@@ -646,6 +661,15 @@ class CensusSnapshot(models.Model):
         max_length=20,
         choices=BedStatus.choices,
         help_text="Classified bed status",
+    )
+    age_band = models.CharField(
+        max_length=20,
+        choices=OccupancyAgeBand.choices,
+        default=OccupancyAgeBand.UNKNOWN,
+        help_text=(
+            "Normalized occupancy age band derived from the legacy "
+            "Idade column; raw age is never persisted"
+        ),
     )
 
     class Meta:
