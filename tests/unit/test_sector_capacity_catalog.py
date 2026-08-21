@@ -43,6 +43,14 @@ CORRECTED_CATALOG = (
     / "corrected_sector_capacity_catalog.json"
 )
 
+V3_CATALOG = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "census"
+    / "data"
+    / "sector_capacity_catalog_v3.json"
+)
+
 # C1: nomes exatos esperados no sistema fonte (CensusSnapshot.setor).
 EXPECTED_SOURCE_NAMES = {
     "751": "0 - SALA DE PROCEDIMENTO ADULTO HGRS",
@@ -198,6 +206,10 @@ def _initial_document() -> dict:
 
 def _corrected_document() -> dict:
     return json.loads(CORRECTED_CATALOG.read_text(encoding="utf-8"))
+
+
+def _v3_document() -> dict:
+    return json.loads(V3_CATALOG.read_text(encoding="utf-8"))
 
 
 def _partitioned_document() -> dict:
@@ -1303,3 +1315,308 @@ class TestSingleRead:
         assert result.document_sha256 == expected_hash
         version = CapacityCatalogVersion.objects.get()
         assert version.source_sha256 == expected_hash
+
+
+class TestAlgorithmSchemaEvolution:
+    """SOPBR-S2 R1/R6: schema novo exige algoritmo explícito suportado.
+
+    Documentos históricos (schema atual, sem algoritmo) permanecem válidos;
+    o algoritmo nunca é inferido por nome de arquivo, hash, data ou
+    estrutura do documento.
+    """
+
+    def test_legacy_schemas_without_algorithm_remain_valid(self):
+        for document in (_initial_document(), _corrected_document()):
+            catalog = validate_catalog_document(document)
+            assert catalog.algorithm_version is None
+
+    @pytest.mark.django_db
+    def test_new_schema_without_algorithm_is_rejected_before_write(
+        self, tmp_path: Path
+    ):
+        document = _valid_document()
+        document["schema_version"] = "2.0"
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError) as excinfo:
+            activate_sector_capacity_catalog(path, _future_date())
+        assert "occupancy_algorithm_version" in str(excinfo.value)
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    @pytest.mark.parametrize("algorithm", ["occupancy-v9", "", "   "])
+    @pytest.mark.django_db
+    def test_unknown_or_empty_algorithm_is_rejected_before_write(
+        self, tmp_path: Path, algorithm: str
+    ):
+        document = _valid_document()
+        document["schema_version"] = "2.0"
+        document["occupancy_algorithm_version"] = algorithm
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError) as excinfo:
+            activate_sector_capacity_catalog(path, _future_date())
+        message = str(excinfo.value)
+        assert "não suportado" in message or "não vazio" in message
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_overlong_algorithm_is_rejected(self, tmp_path: Path):
+        document = _valid_document()
+        document["schema_version"] = "2.0"
+        document["occupancy_algorithm_version"] = "x" * 31
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError):
+            activate_sector_capacity_catalog(path, _future_date(), dry_run=True)
+
+    def test_supported_algorithms_are_exactly_the_implemented_ones(self):
+        assert catalog_module.ALLOWED_ALGORITHM_VERSIONS == frozenset(
+            {"occupancy-v1", "occupancy-v2", "occupancy-v3"}
+        )
+
+    def test_each_supported_algorithm_validates(self):
+        for algorithm in catalog_module.ALLOWED_ALGORITHM_VERSIONS:
+            document = _valid_document()
+            document["schema_version"] = "2.0"
+            document["occupancy_algorithm_version"] = algorithm
+            catalog = validate_catalog_document(document)
+            assert catalog.algorithm_version == algorithm
+
+    def test_algorithm_field_in_legacy_schema_is_rejected(self):
+        document = _corrected_document()
+        document["occupancy_algorithm_version"] = "occupancy-v3"
+        with pytest.raises(CatalogValidationError) as excinfo:
+            validate_catalog_document(document)
+        assert "schema_version" in str(excinfo.value)
+
+    @pytest.mark.parametrize("schema_version", ["1.2", "3.0", "2.1"])
+    def test_unknown_schema_version_is_rejected(self, schema_version: str):
+        document = _valid_document()
+        document["schema_version"] = schema_version
+        with pytest.raises(CatalogValidationError) as excinfo:
+            validate_catalog_document(document)
+        assert "schema" in str(excinfo.value)
+
+    @pytest.mark.django_db
+    def test_v3_is_not_inferred_from_filename_date_or_duplicates(
+        self, tmp_path: Path
+    ):
+        """Schema histórico mantém algoritmo nulo mesmo com nome de arquivo
+        v3, data futura e 3A particionada: nada é inferido."""
+        document = _corrected_document()
+        path = tmp_path / "occupancy-v3-full-catalog.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        result = activate_sector_capacity_catalog(path, _future_date())
+        assert result.created is True
+        assert result.algorithm_version is None
+        version = CapacityCatalogVersion.objects.get()
+        assert version.algorithm_version is None
+
+
+class TestV3CatalogDocument:
+    """SOPBR-S2 R3: catálogo integral futuro declarando occupancy-v3."""
+
+    def test_v3_document_declares_new_schema_and_v3(self):
+        document = _v3_document()
+        assert document["schema_version"] == "2.0"
+        assert document["occupancy_algorithm_version"] == "occupancy-v3"
+
+    def test_v3_document_totals_algorithm_and_special_groups(self):
+        catalog = validate_catalog_document(_v3_document())
+        assert catalog.schema_version == "2.0"
+        assert catalog.algorithm_version == "occupancy-v3"
+        assert catalog.group_count == 43
+        assert catalog.membership_count == 48
+        assert catalog.code_count == 47
+        assert catalog.capacity_group_count == 39
+        assert catalog.standard_group_count == 39
+        assert catalog.unrated_group_count == 4
+        assert catalog.known_capacity == 666
+        assert catalog.calculable_capacity == 666
+
+        by_key = {group.stable_key: group for group in catalog.groups}
+
+        co = by_key["CO"]
+        assert co.calculation_policy == CalculationPolicy.UNRATED
+        assert co.official_capacity is None
+        assert {(m.source_code, m.age_selector) for m in co.memberships} == {
+            ("20", "all"),
+            ("1110", "all"),
+            ("1112", "all"),
+            ("1114", "all"),
+            ("1116", "all"),
+        }
+
+        adult = by_key["OBST-3A-ADULTO"]
+        child = by_key["OBST-3A-INFANTIL"]
+        assert adult.calculation_policy == CalculationPolicy.STANDARD
+        assert adult.official_capacity == 32
+        assert [
+            (m.source_code, m.age_selector) for m in adult.memberships
+        ] == [("654", "age_12_or_over")]
+        assert child.calculation_policy == CalculationPolicy.STANDARD
+        assert child.official_capacity == 16
+        assert [
+            (m.source_code, m.age_selector) for m in child.memberships
+        ] == [("654", "under_12")]
+
+    def test_v3_groups_are_structurally_identical_to_corrected(self):
+        """CO, 3A Adulto/Infantil e os outros 40 grupos copiados exatamente."""
+        assert _v3_document()["groups"] == _corrected_document()["groups"]
+
+    def test_v3_document_has_new_safe_source_reference(self):
+        v3 = _v3_document()
+        reference = v3["source_reference"]
+        assert reference != _corrected_document()["source_reference"]
+        assert len(reference) <= 255
+        assert "occupancy-v3" in reference
+        assert "sem dados de pacientes" in reference
+        lowered = reference.lower()
+        for marker in ("prontuário", "nome de paciente", "sha-256 de paciente"):
+            assert marker not in lowered
+
+
+class TestV3DryRun:
+    """SOPBR-S2 R4: dry-run observável com algoritmo v3 e zero escrita."""
+
+    @pytest.mark.django_db
+    def test_dry_run_reports_v3_and_totals_without_writes(self, capsys):
+        before = (
+            CapacityCatalogVersion.objects.count(),
+            CapacityGroupDefinition.objects.count(),
+            CapacitySectorMembership.objects.count(),
+        )
+        assert before == (0, 0, 0)
+
+        result = activate_sector_capacity_catalog(
+            V3_CATALOG, _future_date(30), dry_run=True
+        )
+        assert result.algorithm_version == "occupancy-v3"
+        assert result.created is False
+        assert result.group_count == 43
+        assert result.member_count == 48
+        assert result.code_count == 47
+        assert result.standard_group_count == 39
+        assert result.unrated_group_count == 4
+        assert result.known_capacity == 666
+        assert result.calculable_capacity == 666
+
+        call_command(
+            "activate_sector_capacity_catalog",
+            "--input",
+            str(V3_CATALOG),
+            "--effective-from",
+            _future_date(30),
+            "--dry-run",
+        )
+        out = capsys.readouterr().out
+        assert "validado (dry-run)" in out
+        assert "algoritmo de ocupação: occupancy-v3" in out
+        assert "grupos oficiais: 43" in out
+        assert "associações: 48" in out
+        assert "códigos-fonte distintos: 47" in out
+        assert "grupos com capacidade: 39" in out
+        assert "grupos standard: 39" in out
+        assert "grupos unrated: 4" in out
+        assert "capacidade conhecida: 666" in out
+        assert "capacidade calculável: 666" in out
+
+        after = (
+            CapacityCatalogVersion.objects.count(),
+            CapacityGroupDefinition.objects.count(),
+            CapacitySectorMembership.objects.count(),
+        )
+        assert after == before == (0, 0, 0)
+
+    @pytest.mark.django_db
+    def test_dry_run_labels_legacy_algorithm_as_structural(self, capsys):
+        call_command(
+            "activate_sector_capacity_catalog",
+            "--input",
+            str(INITIAL_CATALOG),
+            "--effective-from",
+            _future_date(),
+            "--dry-run",
+        )
+        out = capsys.readouterr().out
+        assert (
+            "algoritmo de ocupação: histórico (despacho estrutural)" in out
+        )
+
+
+class TestV3FutureActivation:
+    """SOPBR-S2 R5: ativação futura atômica, idempotente e conflitante."""
+
+    @pytest.mark.django_db
+    def test_today_and_past_rejected_for_v3_document(self):
+        with pytest.raises(CatalogValidationError):
+            activate_sector_capacity_catalog(
+                V3_CATALOG, timezone.localdate().isoformat()
+            )
+        with pytest.raises(CatalogValidationError):
+            activate_sector_capacity_catalog(
+                V3_CATALOG,
+                (timezone.localdate() - timedelta(days=1)).isoformat(),
+            )
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_future_activation_persists_v3_atomically(self):
+        effective = _future_date(30)
+        result = activate_sector_capacity_catalog(V3_CATALOG, effective)
+        assert result.created is True
+        assert result.algorithm_version == "occupancy-v3"
+        version = CapacityCatalogVersion.objects.get()
+        assert version.effective_from.isoformat() == effective
+        assert version.schema_version == "2.0"
+        assert version.algorithm_version == "occupancy-v3"
+        assert version.groups.count() == 43
+        assert version.memberships.count() == 48
+
+        dry = activate_sector_capacity_catalog(
+            V3_CATALOG, _future_date(31), dry_run=True
+        )
+        assert dry.algorithm_version == result.algorithm_version
+        assert (dry.group_count, dry.member_count, dry.code_count) == (
+            43,
+            48,
+            47,
+        )
+
+    @pytest.mark.django_db
+    def test_v3_activation_is_idempotent_for_same_document_and_date(self):
+        effective = _future_date(30)
+        first = activate_sector_capacity_catalog(V3_CATALOG, effective)
+        second = activate_sector_capacity_catalog(V3_CATALOG, effective)
+        assert first.created is True
+        assert second.created is False
+        assert first.document_sha256 == second.document_sha256
+        assert second.algorithm_version == "occupancy-v3"
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert CapacityGroupDefinition.objects.count() == 43
+        assert CapacitySectorMembership.objects.count() == 48
+        assert (
+            CapacityCatalogVersion.objects.get().algorithm_version
+            == "occupancy-v3"
+        )
+
+    @pytest.mark.django_db
+    def test_divergent_document_same_date_conflicts_without_mutation(
+        self, tmp_path: Path
+    ):
+        effective = _future_date(30)
+        activate_sector_capacity_catalog(V3_CATALOG, effective)
+        divergent = _v3_document()
+        divergent["source_reference"] = "divergente"
+        path = _write_document(tmp_path, divergent)
+        with pytest.raises(CatalogConflictError):
+            activate_sector_capacity_catalog(path, effective)
+        version = CapacityCatalogVersion.objects.get()
+        assert version.algorithm_version == "occupancy-v3"
+        assert version.groups.count() == 43
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert CapacityGroupDefinition.objects.count() == 43
+        assert CapacitySectorMembership.objects.count() == 48

@@ -60,10 +60,15 @@ class Command(BaseCommand):
         else:
             action = "já publicado (idempotente)"
 
+        algorithm_label = (
+            result.algorithm_version or "histórico (despacho estrutural)"
+        )
+
         self.stdout.write(
             self.style.SUCCESS(
                 f"Catálogo {action} para {result.effective_from}\n"
                 f"  SHA-256: {result.document_sha256}\n"
+                f"  algoritmo de ocupação: {algorithm_label}\n"
                 f"  grupos oficiais: {result.group_count}\n"
                 f"  associações: {result.member_count}\n"
                 f"  códigos-fonte distintos: {result.code_count}\n"

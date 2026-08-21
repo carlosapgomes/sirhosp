@@ -23,6 +23,7 @@ from typing import Any
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 
+from apps.census import occupancy
 from apps.census.models import (
     CalculationPolicy,
     CapacityCatalogVersion,
@@ -52,6 +53,23 @@ MAX_DISPLAY_NAME = _field_max_length(CapacityGroupDefinition, "display_name")
 MAX_SOURCE_CODE = _field_max_length(CapacitySectorMembership, "source_code")
 MAX_CONFIGURED_SOURCE_NAME = _field_max_length(
     CapacitySectorMembership, "configured_source_name"
+)
+MAX_ALGORITHM_VERSION = _field_max_length(
+    CapacityCatalogVersion, "algorithm_version"
+)
+
+# Schemas históricos publicados antes do contexto explícito de algoritmo;
+# permanecem válidos somente sem o campo (despacho estrutural v1/v2).
+LEGACY_SCHEMA_VERSIONS = frozenset({"1.0", "1.1"})
+# Primeira versão de schema que exige algoritmo declarado.
+SCHEMA_VERSION_WITH_ALGORITHM = "2.0"
+# Allowlist única: exatamente os algoritmos implementados em occupancy.py.
+ALLOWED_ALGORITHM_VERSIONS = frozenset(
+    {
+        occupancy.ALGORITHM_VERSION,
+        occupancy.ALGORITHM_VERSION_V2,
+        occupancy.ALGORITHM_VERSION_V3,
+    }
 )
 
 
@@ -88,6 +106,7 @@ class ValidatedCatalog:
     schema_version: str
     source_reference: str
     groups: tuple[GroupSpec, ...]
+    algorithm_version: str | None = None
 
     @property
     def group_count(self) -> int:
@@ -169,6 +188,7 @@ class ActivationResult:
     unrated_group_count: int
     known_capacity: int
     calculable_capacity: int
+    algorithm_version: str | None = None
 
 
 _ALLOWED_POLICIES = frozenset(
@@ -215,6 +235,10 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
     _reject_overlong(
         schema_version, "schema_version", MAX_SCHEMA_VERSION
     )
+    algorithm_version = _validate_algorithm_context(
+        schema_version.strip(),
+        document.get("occupancy_algorithm_version"),
+    )
     if not isinstance(source_reference, str) or not source_reference.strip():
         raise CatalogValidationError(
             "Campo 'source_reference' ausente ou vazio."
@@ -246,6 +270,7 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
 
     return ValidatedCatalog(
         schema_version=schema_version.strip(),
+        algorithm_version=algorithm_version,
         source_reference=source_reference.strip(),
         groups=tuple(groups),
     )
@@ -295,6 +320,7 @@ def activate_sector_capacity_catalog(
         unrated_group_count=validated.unrated_group_count,
         known_capacity=validated.known_capacity,
         calculable_capacity=validated.calculable_capacity,
+        algorithm_version=validated.algorithm_version,
     )
 
     if dry_run:
@@ -387,6 +413,42 @@ def _reject_overlong(
         raise CatalogValidationError(
             f"{prefix}'{field_name}' excede {max_length} caracteres."
         )
+
+
+def _validate_algorithm_context(
+    schema_version: str, raw_algorithm: Any
+) -> str | None:
+    """Resolve o contexto explícito de algoritmo a partir do schema.
+
+    Schemas históricos permanecem válidos sem algoritmo (despacho
+    estrutural v1/v2 preservado) e rejeitam o campo. O schema atual exige
+    um algoritmo da allowlist, declarado textualmente no documento: nunca
+    inferido por nome de arquivo, hash, data ou estrutura de grupos.
+    """
+    if schema_version == SCHEMA_VERSION_WITH_ALGORITHM:
+        if not isinstance(raw_algorithm, str) or not raw_algorithm.strip():
+            raise CatalogValidationError(
+                "Schema '2.0' exige 'occupancy_algorithm_version' não vazio."
+            )
+        algorithm = raw_algorithm.strip()
+        _reject_overlong(
+            algorithm, "occupancy_algorithm_version", MAX_ALGORITHM_VERSION
+        )
+        if algorithm not in ALLOWED_ALGORITHM_VERSIONS:
+            raise CatalogValidationError(
+                f"Algoritmo de ocupação '{algorithm}' não suportado."
+            )
+        return algorithm
+    if schema_version in LEGACY_SCHEMA_VERSIONS:
+        if raw_algorithm is not None:
+            raise CatalogValidationError(
+                "Campo 'occupancy_algorithm_version' exige schema_version "
+                "'2.0'."
+            )
+        return None
+    raise CatalogValidationError(
+        f"Versão de schema não suportada: '{schema_version}'."
+    )
 
 
 def _validate_group(raw_group: Any, index: int) -> GroupSpec:
@@ -556,6 +618,7 @@ def _persist_catalog(
         source_reference=validated.source_reference,
         source_sha256=document_sha256,
         schema_version=validated.schema_version,
+        algorithm_version=validated.algorithm_version,
     )
     definitions: dict[str, CapacityGroupDefinition] = {}
     for group in validated.groups:
