@@ -586,7 +586,7 @@ class TestBedStatusOfficialOccupancy:
         response = self._render(admin_client)
         content = response.content.decode()
 
-        assert "Lotação registrada no sistema legado" in content
+        assert "Posições registradas no sistema legado" in content
 
     def _initial_catalog_groups(self):
         document = json.loads(INITIAL_CATALOG.read_text(encoding="utf-8"))
@@ -1445,3 +1445,520 @@ class TestBedSidebarLink:
         assert response.status_code == 200
         assert "Leitos" in content
         assert "/beds/" in content
+
+
+@pytest.mark.django_db
+class TestBedStatusTwoRealities:
+    """SOPBR-S3: /beds shows official and physical realities side by side.
+
+    Synthetic ``occupancy-v3`` catalogs declare the algorithm explicitly; the
+    physical section consumes the exact latest census with the same v3
+    normalization contract (each unambiguous position once, exact duplicates
+    collapsed, conflicts once without a chosen patient). Every official value
+    asserted here comes from the persisted measurement, never recalculated.
+    """
+
+    @staticmethod
+    def _at(local_date, hour=12):
+        return timezone.make_aware(
+            datetime.combine(local_date, time(hour=hour)),
+            timezone.get_current_timezone(),
+        )
+
+    @staticmethod
+    def _run():
+        return IngestionRun.objects.create(
+            intent="census_extraction", status="succeeded"
+        )
+
+    @staticmethod
+    def _snapshot(
+        run,
+        *,
+        captured_at,
+        code,
+        sector,
+        status=BedStatus.EMPTY,
+        index=0,
+        patient_marker="",
+        age_band=None,
+        bed=None,
+    ):
+        return CensusSnapshot.objects.create(
+            ingestion_run=run,
+            captured_at=captured_at,
+            setor_codigo=code,
+            setor=sector,
+            leito=bed if bed is not None else f"BED-{code or 'BLANK'}-{index:03d}",
+            prontuario=patient_marker if status == BedStatus.OCCUPIED else "",
+            nome=(
+                f"Synthetic Patient {patient_marker}"
+                if status == BedStatus.OCCUPIED
+                else status.upper()
+            ),
+            especialidade="SYN",
+            bed_status=status,
+            age_band=(
+                age_band
+                if age_band is not None
+                else ("not_applicable" if status != BedStatus.OCCUPIED else "unknown")
+            ),
+        )
+
+    @staticmethod
+    def _v3_catalog(effective_from, groups):
+        catalog = CapacityCatalogVersion.objects.create(
+            effective_from=effective_from,
+            source_reference="synthetic v3 bed-status test catalog",
+            source_sha256=(f"{effective_from:%Y%m%d}" + "d" * 64)[:64],
+            schema_version="2.0",
+            algorithm_version="occupancy-v3",
+        )
+        for raw_group in groups:
+            group = CapacityGroupDefinition.objects.create(
+                catalog=catalog,
+                stable_key=raw_group["stable_key"],
+                display_name=raw_group.get("display_name", raw_group["stable_key"]),
+                official_capacity=raw_group.get("capacity"),
+                calculation_policy=raw_group["policy"],
+            )
+            for member in raw_group["members"]:
+                selector = member[2] if len(member) > 2 else "all"
+                CapacitySectorMembership.objects.create(
+                    catalog=catalog,
+                    group=group,
+                    source_code=member[0],
+                    configured_source_name=member[1],
+                    age_selector=selector,
+                )
+        return catalog
+
+    @staticmethod
+    def _standard_group(*, key="A", capacity=10, members=(("100", "Sector A", "all"),)):
+        return {
+            "stable_key": key,
+            "display_name": f"Group {key}",
+            "capacity": capacity,
+            "policy": CalculationPolicy.STANDARD,
+            "members": members,
+        }
+
+    def _materialize(self, run_id):
+        from apps.census.occupancy import materialize_occupancy_measurement
+
+        return materialize_occupancy_measurement(run_id=run_id)
+
+    def _render(self, admin_client):
+        return admin_client.get(reverse("census:bed_status"))
+
+    def _v3_duplicate_census(self, today):
+        """7 occupied rows where one bed is an exact duplicate, plus one empty.
+
+        Positions: 6 occupied + 1 empty; raw occupied rows 7; duplicate
+        occupied rows 1; official numerator 6 over capacity 10.
+        """
+        self._v3_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(6):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"SYN-{index:03d}",
+                age_band="not_applicable",
+            )
+        # exact duplicate of the first row (same bed, record, name, band)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="SYN-000",
+            age_band="not_applicable",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.EMPTY,
+            index=7,
+        )
+        return run, captured_at
+
+    def test_both_section_headings_are_simultaneously_visible(self, admin_client):
+        today = timezone.localdate()
+        run, _ = self._v3_duplicate_census(today)
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "Capacidade oficial e ocupação" in content
+        assert "Posições registradas no sistema legado" in content
+
+    def test_official_cards_use_v3_labels_and_persisted_values(self, admin_client):
+        today = timezone.localdate()
+        run, _ = self._v3_duplicate_census(today)
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        measurement = response.context["measurement"]
+        assert measurement.algorithm_version == "occupancy-v3"
+        assert measurement.occupied_for_rate == 6
+        assert measurement.official_availability == 4
+        assert measurement.exceeded_by == 0
+        assert measurement.occupancy_percentage == Decimal("60.00")
+        assert "Capacidade oficial" in content
+        assert "Ocupações consideradas na taxa" in content
+        assert "Disponibilidade na capacidade oficial" in content
+        assert "Excedente à capacidade" in content
+        assert "Taxa oficial de ocupação" in content
+        assert "60,00%" in content
+
+    def test_total_de_leitos_and_ambiguous_labels_are_gone(self, admin_client):
+        today = timezone.localdate()
+        run, _ = self._v3_duplicate_census(today)
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "Total de leitos" not in content
+        assert "Lotação registrada no sistema legado" not in content
+
+    def test_legacy_vacant_is_never_called_official_availability(self, admin_client):
+        today = timezone.localdate()
+        run, _ = self._v3_duplicate_census(today)
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "saldo calculado por setor" in content.lower()
+        assert "Vagos no legado" in content
+
+    def test_duplicate_renders_one_position_and_aggregate_diagnostic(self, admin_client):
+        today = timezone.localdate()
+        run, _ = self._v3_duplicate_census(today)
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        physical = response.context["physical"]
+        measurement = response.context["measurement"]
+        rec = measurement.physical_reconciliation_json
+        assert physical.positions_by_status["occupied"] == 6
+        assert physical.duplicate_extra_rows == 1
+        assert rec["duplicate_occupied_rows"] == 1
+        assert content.count("BED-100-000") == 1
+
+    def test_conflict_renders_once_without_chosen_patient(self, admin_client):
+        today = timezone.localdate()
+        self._v3_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="SYN-A",
+            age_band="not_applicable",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="SYN-B",
+            age_band="not_applicable",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        physical = response.context["physical"]
+        measurement = response.context["measurement"]
+        assert physical.conflict_positions == 1
+        assert measurement.position_partial is True
+        assert "Conflito no legado" in content
+        assert content.count("BED-100-000") == 1
+        assert "Synthetic Patient SYN-A" not in content
+        assert "Synthetic Patient SYN-B" not in content
+
+    def test_physical_status_counts_close_identified_total(self, admin_client):
+        today = timezone.localdate()
+        run, _ = self._v3_duplicate_census(today)
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        physical = response.context["physical"]
+        statuses = physical.positions_by_status
+        assert physical.identified_total == (
+            statuses["occupied"]
+            + statuses["empty"]
+            + statuses["reserved"]
+            + statuses["maintenance"]
+            + statuses["isolation"]
+        )
+        assert physical.duplicate_extra_rows == 1
+        assert physical.unidentified_rows == 0
+
+    def test_3a_physical_once_and_official_partition_twice(self, admin_client):
+        today = timezone.localdate()
+        self._v3_catalog(
+            today,
+            [
+                {
+                    "stable_key": "OBST-3A-ADULTO",
+                    "display_name": "Enfermaria 3A – Adulto",
+                    "capacity": 32,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (("654", "3A Source", "age_12_or_over"),),
+                },
+                {
+                    "stable_key": "OBST-3A-INFANTIL",
+                    "display_name": "Enfermaria 3A – Infantil",
+                    "capacity": 16,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (("654", "3A Source", "under_12"),),
+                },
+            ],
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="ADULT-1",
+            age_band="age_12_or_over",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="CHILD-1",
+            age_band="under_12",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        physical = response.context["physical"]
+        measured = response.context["measured_groups"]
+        content = response.content.decode()
+        official_keys = [row.stable_key for row in measured]
+        assert "OBST-3A-ADULTO" in official_keys
+        assert "OBST-3A-INFANTIL" in official_keys
+        sources = [sector.source_name for sector in physical.sectors]
+        assert sources.count("3A Source") == 1
+        assert "Enfermaria 3A – Adulto" in content
+        assert "Enfermaria 3A – Infantil" in content
+
+    def test_co_unrated_appears_physically_with_states_and_no_official_rate(self, admin_client):
+        today = timezone.localdate()
+        self._v3_catalog(
+            today,
+            [
+                {
+                    "stable_key": "CO",
+                    "display_name": "Centro Obstétrico",
+                    "capacity": None,
+                    "policy": CalculationPolicy.UNRATED,
+                    "members": (("20", "CO 20", "all"),),
+                },
+                self._standard_group(),
+            ],
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="20",
+            sector="CO 20",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="CO-1",
+            age_band="not_applicable",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="20",
+            sector="CO 20",
+            status=BedStatus.EMPTY,
+            index=1,
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        measured = response.context["measured_groups"]
+        physical = response.context["physical"]
+        content = response.content.decode()
+        co = next(row for row in measured if row.stable_key == "CO")
+        assert co.occupancy_percentage is None
+        assert co.official_availability is None
+        assert "Não incluído na taxa de ocupação da unidade" in content
+        co_sector = next(s for s in physical.sectors if s.source_name == "CO 20")
+        assert co_sector.positions_by_status["occupied"] == 1
+        assert co_sector.positions_by_status["empty"] == 1
+
+    def test_bridge_closes_and_stays_private(self, admin_client):
+        today = timezone.localdate()
+        run, _ = self._v3_duplicate_census(today)
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        measurement = response.context["measurement"]
+        rec = measurement.physical_reconciliation_json
+        content = response.content.decode()
+        bridge = (
+            rec["duplicate_occupied_rows"]
+            + rec["conflict_occupied_rows"]
+            + rec["unidentified_occupied_rows"]
+            + rec["unknown_age_3a_rows"]
+            + rec["unambiguous_occupied_outside_calculable"]
+            + rec["official_numerator"]
+        )
+        assert bridge == rec["raw_occupied_rows"]
+        start = content.index("Ponte de reconciliação")
+        end = content.index("Posições registradas no sistema legado")
+        bridge_html = content[start:end]
+        for marker in ("SYN-", "BED-100", "Synthetic Patient", "Sector A"):
+            assert marker not in bridge_html
+
+    def test_v3_partial_alert_labels_rate_partial_and_daily_ineligible(self, admin_client):
+        today = timezone.localdate()
+        self._v3_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="SYN-A",
+            age_band="not_applicable",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="SYN-B",
+            age_band="not_applicable",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        measurement = response.context["measurement"]
+        content = response.content.decode()
+        assert measurement.position_partial is True
+        assert "(parcial)" in content
+        assert "médias oficiais diárias" in content
+
+    def test_v2_measurement_is_historical_without_v3_availability(self, admin_client):
+        today = timezone.localdate()
+        catalog = CapacityCatalogVersion.objects.create(
+            effective_from=today,
+            source_reference="synthetic v2 historical bed-status test catalog",
+            source_sha256=(f"{today:%Y%m%d}" + "e" * 64)[:64],
+            schema_version="1.0",
+        )
+        adult = CapacityGroupDefinition.objects.create(
+            catalog=catalog,
+            stable_key="OBST-3A-ADULTO",
+            display_name="Enfermaria 3A – Adulto",
+            official_capacity=32,
+            calculation_policy=CalculationPolicy.STANDARD,
+        )
+        CapacitySectorMembership.objects.create(
+            catalog=catalog,
+            group=adult,
+            source_code="654",
+            configured_source_name="3A Source",
+            age_selector="age_12_or_over",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="ADULT-1",
+            age_band="age_12_or_over",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        measurement = response.context["measurement"]
+        content = response.content.decode()
+        assert measurement.algorithm_version == "occupancy-v2"
+        assert measurement.official_availability is None
+        assert "Disponibilidade na capacidade oficial" not in content
+        assert "Ponte de reconciliação" not in content
+        assert "occupancy-v2" in content
+
+    def test_old_measurement_is_never_reused_for_newer_census(self, admin_client):
+        today = timezone.localdate()
+        self._v3_catalog(today, [self._standard_group()])
+        old_run = self._run()
+        self._snapshot(
+            old_run,
+            captured_at=self._at(today, 8),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="OLD-1",
+            age_band="not_applicable",
+        )
+        self._materialize(old_run.pk)
+        response = self._render(admin_client)
+        assert "Pendente" not in response.content.decode()
+
+        new_run = self._run()
+        self._snapshot(
+            new_run,
+            captured_at=self._at(today, 20),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="NEW-1",
+            age_band="not_applicable",
+        )
+        content = self._render(admin_client).content.decode()
+        assert "Pendente" in content
+        assert "Group A" not in content
+        assert "OLD-1" not in content
+
+    def test_no_exact_measurement_keeps_official_pending_and_physical_visible(self, admin_client):
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            setor="UTI A",
+            leito="01",
+            prontuario="111",
+            nome="PACIENTE UM",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        content = self._render(admin_client).content.decode()
+        assert "Pendente" in content
+        assert "Posições registradas no sistema legado" in content
+        assert "UTI A" in content
+        assert "PACIENTE UM" in content
+
+    def test_anonymous_access_remains_redirected(self, client):
+        response = client.get(reverse("census:bed_status"))
+        assert response.status_code == 302
+        assert "/login/" in response.url

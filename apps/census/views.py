@@ -9,9 +9,10 @@ from django.db.models import Count, Max
 from django.shortcuts import render
 
 from apps.census.flow_service import compute_hospital_flow, list_sectors
-from apps.census.models import BedStatus, CensusSnapshot
+from apps.census.models import CensusSnapshot
 from apps.census.occupancy import (
     build_official_group_rows,
+    build_physical_presentation,
     resolve_exact_measurement,
 )
 from apps.patients.models import Patient
@@ -100,7 +101,14 @@ def hospital_flow_view(request):
 
 @login_required
 def bed_status_view(request):
-    """Display bed occupancy status from the most recent census snapshot."""
+    """Display bed occupancy status from the most recent census snapshot.
+
+    Two realities are always presented side by side: the official capacity
+    and occupancy section (persisted exact-run measurement only) and the
+    physical snapshot registered in the legacy system (same v3 normalization
+    contract, one unambiguous position per bed). No official value is
+    recalculated here and no older measurement is ever reused as current.
+    """
     latest_captured = CensusSnapshot.objects.aggregate(
         latest=Max("captured_at")
     )["latest"]
@@ -108,13 +116,14 @@ def bed_status_view(request):
     if latest_captured is None:
         return render(request, "census/bed_status.html", {
             "page_title": "Leitos",
-            "sectors": [],
             "captured_at": None,
         })
 
     snapshots = CensusSnapshot.objects.filter(captured_at=latest_captured)
+    bed_details = snapshots.order_by("leito")
 
-    # Global totals across all sectors
+    # Global raw totals across all sectors (kept for the legacy totals
+    # context contract; the template renders the normalized physical view).
     global_totals_raw = (
         snapshots.values("bed_status")
         .annotate(count=Count("id"))
@@ -132,16 +141,14 @@ def bed_status_view(request):
         if status in totals:
             totals[status] = row["count"]
 
-    # Official occupancy statistics (SCOH-S4): the latest census is selected
-    # exactly as before, and statistics are only presented when every row of
-    # that set identifies one non-null ingestion run and that exact run owns
-    # one persisted measurement. Older measurements, current-catalog
+    # Official occupancy statistics (SCOH-S4 + SOPBR-S3): the latest census is
+    # selected exactly as before, and statistics are only presented when every
+    # row of that set identifies one non-null ingestion run and that exact run
+    # owns one persisted measurement. Older measurements, current-catalog
     # calculations and raw percentage inference are never used here.
     measurement = resolve_exact_measurement(snapshots)
 
-    bed_details = snapshots.order_by("leito")
-
-    # Look up internal Patient IDs for direct linking to admission_list
+    # Look up internal Patient IDs for direct linking to admission_list.
     prontuarios = [b.prontuario for b in bed_details if b.prontuario]
     patient_map: dict[str, int] = {}
     if prontuarios:
@@ -152,11 +159,14 @@ def bed_status_view(request):
 
     context = {
         "page_title": "Leitos",
-        "sectors": [],
         "captured_at": latest_captured,
         "totals": totals,
         "measurement": measurement,
         "measured_groups": [],
+        "physical": build_physical_presentation(
+            snapshots=bed_details,
+            patient_map=patient_map,
+        ),
     }
 
     if measurement is not None:
@@ -165,49 +175,4 @@ def bed_status_view(request):
             snapshots=bed_details,
             patient_map=patient_map,
         )
-        return render(request, "census/bed_status.html", context)
-
-    # Raw fallback: aggregate by sector and status (current behavior preserved)
-    sectors_raw = (
-        snapshots.values("setor", "bed_status")
-        .annotate(count=Count("id"))
-        .order_by("setor", "bed_status")
-    )
-
-    # Build structured data for template
-    sectors: dict[str, dict] = {}
-    for row in sectors_raw:
-        setor = row["setor"]
-        status = row["bed_status"]
-        count = row["count"]
-
-        if setor not in sectors:
-            sectors[setor] = {
-                "name": setor,
-                "occupied": 0,
-                "empty": 0,
-                "maintenance": 0,
-                "reserved": 0,
-                "isolation": 0,
-                "total": 0,
-                "beds": [],
-            }
-
-        sectors[setor][status] = count
-        sectors[setor]["total"] += count
-
-    for bed in bed_details:
-        if bed.setor in sectors:
-            sectors[bed.setor]["beds"].append({
-                "leito": bed.leito,
-                "status": bed.bed_status,
-                "status_label": BedStatus(bed.bed_status).label,
-                "nome": bed.nome
-                if bed.bed_status == BedStatus.OCCUPIED
-                else "",
-                "prontuario": bed.prontuario,
-                "patient_id": patient_map.get(bed.prontuario),
-            })
-
-    context["sectors"] = sorted(sectors.values(), key=lambda s: s["name"])
     return render(request, "census/bed_status.html", context)

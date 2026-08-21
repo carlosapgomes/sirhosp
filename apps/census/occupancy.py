@@ -102,6 +102,23 @@ class _PositionDiagnostics:
 
 
 @dataclass(frozen=True)
+class _KeyOutcome:
+    """Classification of one normalized (source, bed) key.
+
+    The ``primary`` row is the presentation representative of the position:
+    the first equivalent row for an unambiguous position, or the first row of
+    a conflicting key (used only for the bed label, never for a patient).
+    """
+
+    position: _PhysicalPosition | None
+    primary: _ObservedRow
+    duplicate_extra_rows: int
+    duplicate_occupied_rows: int
+    conflict_positions: int
+    conflict_occupied_rows: int
+
+
+@dataclass(frozen=True)
 class _GroupValues:
     stable_key: str
     display_name: str
@@ -847,31 +864,14 @@ def _normalize_positions(
 
     positions: list[_PhysicalPosition] = []
     for key_rows in by_key.values():
-        signature_rows: dict[tuple[object, ...], list[_ObservedRow]] = (
-            defaultdict(list)
-        )
-        for row in key_rows:
-            signature_rows[_row_signature(row)].append(row)
-        if len(signature_rows) > 1:
-            conflict_positions += 1
-            conflict_occupied += sum(
-                1 for row in key_rows if row.status == BedStatus.OCCUPIED
-            )
-            continue
-        (_, same_rows), = signature_rows.items()
-        primary = same_rows[0]
-        positions.append(
-            _PhysicalPosition(
-                code=primary.code,
-                name=primary.name,
-                status=primary.status,
-                age_band=primary.age_band,
-            )
-        )
-        positions_by_status[primary.status] += 1
-        duplicate_extra += len(same_rows) - 1
-        if primary.status == BedStatus.OCCUPIED:
-            duplicate_occupied += len(same_rows) - 1
+        outcome = _classify_key_rows(key_rows)
+        if outcome.position is not None:
+            positions.append(outcome.position)
+            positions_by_status[outcome.position.status] += 1
+        duplicate_extra += outcome.duplicate_extra_rows
+        duplicate_occupied += outcome.duplicate_occupied_rows
+        conflict_positions += outcome.conflict_positions
+        conflict_occupied += outcome.conflict_occupied_rows
 
     diagnostics = _PositionDiagnostics(
         positions_by_status=positions_by_status,
@@ -883,6 +883,50 @@ def _normalize_positions(
         unidentified_occupied_rows=unidentified_occupied,
     )
     return positions, diagnostics
+
+
+def _classify_key_rows(key_rows: list[_ObservedRow]) -> _KeyOutcome:
+    """Classify one normalized (source, bed) key into position or conflict.
+
+    Equivalent signatures collapse into one unambiguous physical position
+    (the first row is the presentation primary); divergent signatures on the
+    same key become one conflicting position that never feeds an official
+    numerator and never chooses a winning row. Shared by materialization and
+    by the physical presentation so both realities use the same contract.
+    """
+    signature_rows: dict[tuple[object, ...], list[_ObservedRow]] = (
+        defaultdict(list)
+    )
+    for row in key_rows:
+        signature_rows[_row_signature(row)].append(row)
+    if len(signature_rows) > 1:
+        return _KeyOutcome(
+            position=None,
+            primary=key_rows[0],
+            duplicate_extra_rows=0,
+            duplicate_occupied_rows=0,
+            conflict_positions=1,
+            conflict_occupied_rows=sum(
+                1 for row in key_rows if row.status == BedStatus.OCCUPIED
+            ),
+        )
+    (_, same_rows), = signature_rows.items()
+    primary = same_rows[0]
+    return _KeyOutcome(
+        position=_PhysicalPosition(
+            code=primary.code,
+            name=primary.name,
+            status=primary.status,
+            age_band=primary.age_band,
+        ),
+        primary=primary,
+        duplicate_extra_rows=len(same_rows) - 1,
+        duplicate_occupied_rows=(
+            len(same_rows) - 1 if primary.status == BedStatus.OCCUPIED else 0
+        ),
+        conflict_positions=0,
+        conflict_occupied_rows=0,
+    )
 
 
 def _position_rows(
@@ -1251,6 +1295,7 @@ class _PresentationGroupRow:
     source_sectors: list[str]
     beds: list[dict[str, object]]
     name_mismatch: bool
+    official_availability: int | None = None
 
     @property
     def total(self) -> int:
@@ -1285,7 +1330,14 @@ def build_official_group_rows(
     here.
     """
     groups = list(measurement.groups.all())
-    is_v2 = measurement.algorithm_version == ALGORITHM_VERSION_V2
+    # ``occupancy-v2`` and ``occupancy-v3`` both partition age-partitioned
+    # source codes (e.g. 654 into Adulto/Infantil); the v3 physical
+    # normalization still assigns each unambiguous position to exactly one
+    # persisted group band.
+    is_partitioned = measurement.algorithm_version in (
+        ALGORITHM_VERSION_V2,
+        ALGORITHM_VERSION_V3,
+    )
 
     code_to_group: dict[str, OccupancyGroupMeasurement] = {}
     blank_name_to_group: dict[str, OccupancyGroupMeasurement] = {}
@@ -1296,7 +1348,7 @@ def build_official_group_rows(
             observed_code = str(component.get("observed_code") or "").strip()
             if observed_code:
                 selector = str(component.get("age_selector") or "").strip()
-                if is_v2 and selector in (
+                if is_partitioned and selector in (
                     OccupancyAgeBand.UNDER_12,
                     OccupancyAgeBand.AGE_12_OR_OVER,
                 ):
@@ -1326,6 +1378,7 @@ def build_official_group_rows(
                 bool(component.get("source_name_mismatch"))
                 for component in group.components_json
             ),
+            official_availability=group.official_availability,
         )
         for group in groups
     }
@@ -1415,3 +1468,188 @@ def _bed_presentation_row(
         "prontuario": bed.prontuario,
         "patient_id": patient_map.get(bed.prontuario),
     }
+
+
+@dataclass
+class _PhysicalPositionRow:
+    """One physical position (or one conflict) ready for the authenticated detail."""
+
+    leito: str
+    status: str
+    status_label: str
+    nome: str
+    prontuario: str
+    patient_id: int | None
+    conflict: bool = False
+
+
+@dataclass
+class _PhysicalSectorRow:
+    """One physical source sector of the exact census.
+
+    Positions are grouped by the census origin (source code, or sector name
+    as fallback) so the 3A source appears physically once while the official
+    section keeps its Adulto/Infantil partition. ``positions`` carries only
+    unambiguous positions plus one entry per conflict; duplicate extra rows
+    and unidentified rows are aggregates, never positions.
+    """
+
+    source_code: str
+    source_name: str
+    positions_by_status: dict[str, int]
+    conflict_positions: int
+    duplicate_extra_rows: int
+    unidentified_rows: int
+    positions: list[_PhysicalPositionRow]
+
+    @property
+    def identified_positions(self) -> int:
+        return sum(self.positions_by_status.values())
+
+
+@dataclass
+class _PhysicalPresentation:
+    """Aggregate physical snapshot of the exact latest census run."""
+
+    positions_by_status: dict[str, int]
+    conflict_positions: int
+    duplicate_extra_rows: int
+    duplicate_occupied_rows: int
+    unidentified_rows: int
+    unidentified_occupied_rows: int
+    sectors: list[_PhysicalSectorRow]
+
+    @property
+    def identified_total(self) -> int:
+        return sum(self.positions_by_status.values())
+
+
+def build_physical_presentation(
+    *,
+    snapshots: Iterable[CensusSnapshot],
+    patient_map: dict[str, int] | None = None,
+) -> _PhysicalPresentation:
+    """Present the normalized physical snapshot of the exact latest census.
+
+    Reuses the ``occupancy-v3`` normalization contract (``_normalize_positions``
+    and ``_classify_key_rows``): each unambiguous physical position appears
+    once, exact duplicates collapse into one position plus extra rows,
+    conflicts appear once without a chosen patient and rows without a usable
+    bed are unidentified rows, never positions. The official measurement is
+    never consulted here and no official value is recalculated.
+    """
+    rows = tuple(_observed_row_from_snapshot(bed) for bed in snapshots)
+    _positions, diagnostics = _normalize_positions(rows)
+    return _PhysicalPresentation(
+        positions_by_status=dict(diagnostics.positions_by_status),
+        conflict_positions=diagnostics.conflict_positions,
+        duplicate_extra_rows=diagnostics.duplicate_extra_rows,
+        duplicate_occupied_rows=diagnostics.duplicate_occupied_rows,
+        unidentified_rows=diagnostics.unidentified_rows,
+        unidentified_occupied_rows=diagnostics.unidentified_occupied_rows,
+        sectors=_physical_sector_rows(rows, patient_map or {}),
+    )
+
+
+def _observed_row_from_snapshot(bed: CensusSnapshot) -> _ObservedRow:
+    """Project one census snapshot into the ephemeral normalization row."""
+    return _ObservedRow(
+        code=(bed.setor_codigo or "").strip(),
+        name=(bed.setor or "").strip(),
+        status=bed.bed_status,
+        age_band=bed.age_band,
+        bed=(bed.leito or "").strip(),
+        record=(bed.prontuario or "").strip(),
+        patient_name=(bed.nome or "").strip(),
+    )
+
+
+def _physical_sector_rows(
+    rows: tuple[_ObservedRow, ...],
+    patient_map: dict[str, int],
+) -> list[_PhysicalSectorRow]:
+    """Group physical normalization results by the census origin sector."""
+    keyed_by_source: dict[str, list[_ObservedRow]] = defaultdict(list)
+    unidentified_by_source: dict[str, list[_ObservedRow]] = defaultdict(list)
+    source_code: dict[str, str] = {}
+    source_name: dict[str, str] = {}
+    for row in rows:
+        source = (
+            _normalize_identity(row.code)
+            if row.code
+            else _normalize_identity(row.name)
+        )
+        source_code.setdefault(source, row.code or "")
+        source_name.setdefault(source, row.name or "")
+        if _normalize_identity(row.bed):
+            keyed_by_source[source].append(row)
+        else:
+            unidentified_by_source[source].append(row)
+
+    sector_rows: list[_PhysicalSectorRow] = []
+    for source in sorted(set(keyed_by_source) | set(unidentified_by_source)):
+        positions_by_status = {status: 0 for status in _STATUS_KEYS}
+        conflict_positions = 0
+        duplicate_extra_rows = 0
+        position_rows: list[_PhysicalPositionRow] = []
+        by_key: dict[tuple[str, str], list[_ObservedRow]] = defaultdict(list)
+        for row in keyed_by_source[source]:
+            by_key[(_normalize_identity(row.bed), source)].append(row)
+        for key_rows in by_key.values():
+            outcome = _classify_key_rows(key_rows)
+            if outcome.position is not None:
+                positions_by_status[outcome.position.status] += 1
+                position_rows.append(
+                    _physical_position_row(outcome.primary, patient_map)
+                )
+            else:
+                conflict_positions += 1
+                position_rows.append(
+                    _physical_position_row(
+                        outcome.primary, patient_map, conflict=True
+                    )
+                )
+            duplicate_extra_rows += outcome.duplicate_extra_rows
+        sector_rows.append(
+            _PhysicalSectorRow(
+                source_code=source_code[source],
+                source_name=source_name[source],
+                positions_by_status=positions_by_status,
+                conflict_positions=conflict_positions,
+                duplicate_extra_rows=duplicate_extra_rows,
+                unidentified_rows=len(unidentified_by_source[source]),
+                positions=position_rows,
+            )
+        )
+    return sector_rows
+
+
+def _physical_position_row(
+    row: _ObservedRow,
+    patient_map: dict[str, int],
+    *,
+    conflict: bool = False,
+) -> _PhysicalPositionRow:
+    """Present one physical position or one conflict without a chosen patient."""
+    if conflict:
+        return _PhysicalPositionRow(
+            leito=row.bed,
+            status="conflict",
+            status_label="Conflito no legado",
+            nome="",
+            prontuario="",
+            patient_id=None,
+            conflict=True,
+        )
+    return _PhysicalPositionRow(
+        leito=row.bed,
+        status=row.status,
+        status_label=BedStatus(row.status).label,
+        nome=row.patient_name if row.status == BedStatus.OCCUPIED else "",
+        prontuario=row.record if row.status == BedStatus.OCCUPIED else "",
+        patient_id=(
+            patient_map.get(row.record)
+            if row.status == BedStatus.OCCUPIED
+            else None
+        ),
+    )
