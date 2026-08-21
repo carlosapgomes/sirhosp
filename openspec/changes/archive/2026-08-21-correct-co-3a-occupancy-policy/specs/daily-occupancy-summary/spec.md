@@ -1,59 +1,4 @@
-# daily-occupancy-summary Specification
-
-## Purpose
-
-TBD - created by archiving change add-versioned-sector-capacity-occupancy-history. Update Purpose after archive.
-
-## Requirements
-
-### Requirement: Each measured local day has one persisted summary
-
-The system SHALL persist one hospital daily occupancy summary for each local
-date with at least one occupancy measurement and SHALL associate it with that
-day's catalog and algorithm version.
-
-#### Scenario: First measurement creates the daily summary
-
-- **WHEN** the first measurement for a date in `America/Bahia` is persisted
-- **THEN** one daily parent summary and its group summaries are persisted
-- **AND** measurement count is 1
-
-#### Scenario: Day without measurement has no fabricated summary
-
-- **WHEN** no accepted post-activation census measurement exists for a local
-  date
-- **THEN** the system does not create a zero or interpolated daily summary
-
-### Requirement: Daily summary is refreshed deterministically
-
-The system SHALL update the applicable daily summary after a new measurement is
-created and SHALL derive it only from immutable measurements for that local
-date.
-
-#### Scenario: Additional same-day measurement updates summary
-
-- **WHEN** a second distinct census measurement is persisted for the same local
-  date
-- **THEN** the existing daily summary is updated rather than duplicated
-- **AND** its measurement count becomes 2
-
-#### Scenario: Delayed accepted census completes its original date
-
-- **WHEN** a measurement is first persisted after midnight but its census
-  capture belongs to the previous local date
-- **THEN** the previous date's summary is updated from all measurements for
-  that date
-
-#### Scenario: Idempotent measurement does not alter summary
-
-- **WHEN** materialization returns an already existing measurement
-- **THEN** the daily summary is not rewritten or counted again
-
-#### Scenario: Future catalog does not rebuild prior summary
-
-- **WHEN** a new catalog version becomes effective
-- **THEN** summaries for earlier dates retain their stored catalog, values and
-  algorithm version
+## MODIFIED Requirements
 
 ### Requirement: Daily summary uses equal-weight arithmetic measurements
 
@@ -140,6 +85,8 @@ statistics.
 - **WHEN** at least one same-day v2 measurement has an unknown occupied 3A age
 - **THEN** the daily summary records its age-excluded count
 - **AND** official averages use only the eligible count
+
+## ADDED Requirements
 
 ### Requirement: A day with no eligible measurement has no fabricated rate
 

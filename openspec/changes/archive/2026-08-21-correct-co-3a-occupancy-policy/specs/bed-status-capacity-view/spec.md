@@ -1,40 +1,4 @@
-# bed-status-capacity-view Specification
-
-## Purpose
-
-TBD - created by archiving change add-versioned-sector-capacity-occupancy-history. Update Purpose after archive.
-
-## Requirements
-
-### Requirement: Bed status page uses the exact latest-census measurement
-
-The authenticated `/beds` page SHALL enrich the latest census only when an
-occupancy measurement exists for the exact `IngestionRun` represented by that
-census.
-
-#### Scenario: Exact measurement is available
-
-- **WHEN** the latest census rows belong to one run with an occupancy
-  measurement
-- **THEN** the page displays capacity statistics from that measurement
-- **AND** it displays the census capture time and catalog effective date
-
-#### Scenario: Latest measurement is pending
-
-- **WHEN** the latest census has no exact occupancy measurement
-- **THEN** the page preserves its existing raw sector and bed-status table
-- **AND** it labels capacity statistics as pending or unavailable
-- **AND** it does not calculate capacity ad hoc in the view
-
-#### Scenario: Older measurement is not reused
-
-- **WHEN** an older census has a measurement but the latest census does not
-- **THEN** the page does not display the older percentage as current
-
-#### Scenario: Anonymous access remains protected
-
-- **WHEN** an unauthenticated user requests `/beds/`
-- **THEN** the user is redirected to login as before this change
+## MODIFIED Requirements
 
 ### Requirement: Capacity rows follow official groups
 
@@ -98,23 +62,6 @@ intentionally excluded by the corrected policy.
 - **THEN** its stored CO values remain as originally measured
 - **AND** the page does not recalculate them with corrected policy
 
-### Requirement: Over-capacity state is explicit and accessible
-
-The page SHALL display both visual and textual warning when a calculable group
-has occupancy greater than 100 percent.
-
-#### Scenario: Group exceeds official capacity
-
-- **WHEN** a group measurement has percentage greater than 100.00
-- **THEN** its row is visually highlighted
-- **AND** it contains text indicating over-capacity
-- **AND** it displays the absolute exceeded-by count
-
-#### Scenario: Group is not over capacity
-
-- **WHEN** a group measurement has percentage less than or equal to 100.00
-- **THEN** it does not display the over-capacity warning
-
 ### Requirement: Page distinguishes capacity and calculation coverage
 
 The page SHALL display algorithm-appropriate official coverage and SHALL label
@@ -166,6 +113,8 @@ the view.
 - **WHEN** the page displays an exact v1 measurement
 - **THEN** it identifies stored known capacity 658 and calculable capacity 626
 - **AND** it does not apply corrected totals retroactively
+
+## ADDED Requirements
 
 ### Requirement: Page warns when corrected occupancy is age-partial
 

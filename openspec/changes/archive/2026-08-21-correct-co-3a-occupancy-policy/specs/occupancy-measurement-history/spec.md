@@ -1,42 +1,4 @@
-# occupancy-measurement-history Specification
-
-## Purpose
-
-TBD - created by archiving change add-versioned-sector-capacity-occupancy-history. Update Purpose after archive.
-
-## Requirements
-
-### Requirement: Accepted censuses produce one immutable occupancy measurement
-
-The system SHALL persist at most one occupancy measurement for each accepted
-census `IngestionRun` whose local capture date has an applicable catalog.
-
-#### Scenario: First post-activation census is measured
-
-- **WHEN** a complete accepted census is captured on or after the first catalog
-  effective date
-- **THEN** one parent measurement and its group measurements are persisted
-- **AND** the parent references the census run and applicable catalog
-
-#### Scenario: Pre-activation census is not measured
-
-- **WHEN** a census capture date is earlier than the first catalog effective
-  date
-- **THEN** materialization returns `pre_activation`
-- **AND** no measurement is created
-
-#### Scenario: Repeated materialization is idempotent
-
-- **WHEN** materialization is requested again for a census run that already has
-  a measurement
-- **THEN** the existing measurement is returned
-- **AND** no values, children or daily summaries are recalculated
-
-#### Scenario: Command requires a specific run
-
-- **WHEN** an operator invokes the manual materialization command
-- **THEN** the operator MUST provide one census run id
-- **AND** the command does not scan or backfill other censuses
+## MODIFIED Requirements
 
 ### Requirement: Measurements snapshot their calculation context
 
@@ -66,37 +28,6 @@ changes cannot alter its meaning.
 
 - **WHEN** a measurement uses the corrected age-partitioned catalog
 - **THEN** it records algorithm version `occupancy-v2`
-
-### Requirement: Standard group occupancy uses raw occupied legacy records
-
-For a `standard` group, the system SHALL sum rows with
-`BedStatus.OCCUPIED` across every member code, divide once by the official
-capacity and SHALL NOT cap the result at 100 percent.
-
-#### Scenario: Simple group is calculated
-
-- **WHEN** a standard group with capacity 10 has 8 occupied rows
-- **THEN** its numerator is 8
-- **AND** its occupancy percentage is 80.00
-- **AND** its exceeded-by value is 0
-
-#### Scenario: Group exceeds capacity
-
-- **WHEN** a standard group with capacity 8 has 54 occupied rows
-- **THEN** its occupancy percentage is 675.00
-- **AND** its exceeded-by value is 46
-
-#### Scenario: Non-occupied states do not enter the numerator
-
-- **WHEN** a group contains empty, reserved, maintenance or isolation rows
-- **THEN** those rows remain in the stored aggregate status counts
-- **AND** they do not enter the occupied numerator
-
-#### Scenario: Percentage rounding is deterministic
-
-- **WHEN** a percentage has more than two decimal places
-- **THEN** it is persisted as `Decimal` with two places using
-  `ROUND_HALF_UP`
 
 ### Requirement: Shared groups consume capacity only once
 
@@ -191,19 +122,6 @@ measurements.
 - **AND** it does not become an official sector or change the 39/43 official
   catalog coverage
 
-### Requirement: Source-name drift is audited without automatic remapping
-
-The system SHALL map by source code and record a safe aggregate mismatch when
-the observed source name differs from the configured name.
-
-#### Scenario: Configured code arrives with a different name
-
-- **WHEN** a known source code has an observed name different from its catalog
-  membership name
-- **THEN** it remains in the configured group for that catalog version
-- **AND** its component snapshot records `source_name_mismatch=true`
-- **AND** no new catalog or identity is created automatically
-
 ### Requirement: Measurement persistence contains no patient identifiers
 
 The capacity and occupancy history tables MUST contain only catalog data,
@@ -222,6 +140,8 @@ calculation metadata.
 - **WHEN** a corrected measurement omits occupied 3A rows with unknown age
 - **THEN** it stores only their aggregate count and partial-classification flag
 - **AND** logs and errors contain no row-level patient data
+
+## ADDED Requirements
 
 ### Requirement: Corrected 3A occupancy partitions each occupied row by age
 
