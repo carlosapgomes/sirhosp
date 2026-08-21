@@ -33,6 +33,15 @@ class CapacityCatalogVersion(models.Model):
         max_length=20,
         help_text="Version of the catalog document schema",
     )
+    algorithm_version = models.CharField(
+        max_length=30,
+        null=True,
+        blank=True,
+        help_text=(
+            "Immutable occupancy algorithm context declared by the published "
+            "document; null keeps legacy structural dispatch to v1/v2"
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -224,6 +233,35 @@ class OccupancyMeasurement(models.Model):
             "data is ever stored here"
         ),
     )
+    position_partial = models.BooleanField(
+        null=True,
+        blank=True,
+        help_text=(
+            "True when this occupancy-v3 measurement excluded occupied rows "
+            "because of conflicting physical positions or occupied rows "
+            "without usable bed identity; null keeps v1/v2 uninterpreted"
+        ),
+    )
+    official_availability = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Sum of nonnegative group availability balances computed without "
+            "cross-sector compensation (occupancy-v3 only); null keeps "
+            "v1/v2 uninterpreted"
+        ),
+    )
+    physical_reconciliation_json = models.JSONField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Closed aggregate reconciliation of raw rows, physical positions, "
+            "duplicates, conflicts and unidentified rows (occupancy-v3 "
+            "only); contains only allowlisted nonnegative integers, never "
+            "row-level identity"
+        ),
+    )
     official_sector_count = models.PositiveIntegerField(
         null=True,
         blank=True,
@@ -289,6 +327,18 @@ class OccupancyMeasurement(models.Model):
                 ),
                 name="ck_occupancy_official_coverage_ordered",
             ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(position_partial__isnull=True)
+                    | models.Q(algorithm_version="occupancy-v3")
+                ),
+                name="ck_occupancy_position_partial_only_v3",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(official_availability__gte=0)
+                | models.Q(official_availability__isnull=True),
+                name="ck_occupancy_availability_nonnegative",
+            ),
         ]
         indexes = [
             models.Index(
@@ -328,6 +378,15 @@ class OccupancyGroupMeasurement(models.Model):
         blank=True,
     )
     exceeded_by = models.PositiveIntegerField(null=True, blank=True)
+    official_availability = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Nonnegative official availability balance for calculable "
+            "occupancy-v3 groups; null keeps v1/v2 and non-calculable "
+            "groups uninterpreted"
+        ),
+    )
     status_counts_json = models.JSONField(default=dict)
     components_json = models.JSONField(default=list)
 
@@ -388,6 +447,14 @@ class DailyOccupancySummary(models.Model):
         help_text=(
             "Day measurements excluded from official statistics because their "
             "occupancy-v2 point rate is partial"
+        ),
+    )
+    position_excluded_measurement_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Day measurements excluded from official statistics because their "
+            "occupancy-v3 point rate is physically partial; may overlap with "
+            "the age reason count"
         ),
     )
     first_captured_at = models.DateTimeField()

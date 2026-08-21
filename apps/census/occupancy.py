@@ -1,16 +1,17 @@
 """Immutable occupancy materialization for one explicit census run.
 
-Two deterministic algorithm versions are dispatched from the persisted
-catalog context: ``occupancy-v1`` for legacy catalogs without age partitions
-and ``occupancy-v2`` for corrected age-partitioned catalogs. Measurements are
-immutable and never recalculated.
+Three deterministic algorithm versions are dispatched from the persisted
+catalog context: ``occupancy-v1`` for legacy catalogs without age partitions,
+``occupancy-v2`` for corrected age-partitioned catalogs and ``occupancy-v3``
+for catalogs that explicitly declare the physical-position normalization.
+Measurements are immutable and never recalculated.
 """
 
 from __future__ import annotations
 
 import hashlib
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Iterable
@@ -38,6 +39,7 @@ from apps.ingestion.models import IngestionRun
 
 ALGORITHM_VERSION = "occupancy-v1"
 ALGORITHM_VERSION_V2 = "occupancy-v2"
+ALGORITHM_VERSION_V3 = "occupancy-v3"
 _CENSUS_INTENT = "census_extraction"
 _PERCENT_QUANTUM = Decimal("0.01")
 _STATUS_KEYS = tuple(BedStatus.values)
@@ -56,10 +58,47 @@ class MaterializationResult:
 
 @dataclass(frozen=True)
 class _ObservedRow:
+    """Ephemeral in-memory census row used only during materialization.
+
+    ``bed``, ``record`` and ``patient_name`` are needed only to normalize
+    physical positions and build equivalent signatures in memory; they are
+    never copied into persisted measurement or group history.
+    """
+
     code: str
     name: str
     status: str
     age_band: str = OccupancyAgeBand.NOT_APPLICABLE
+    bed: str = ""
+    record: str = ""
+    patient_name: str = ""
+
+
+@dataclass(frozen=True)
+class _PhysicalPosition:
+    """One unambiguous physical position after normalization.
+
+    Holds only the values needed to aggregate the position into the existing
+    official group pipeline; no key, signature or patient identity survives.
+    """
+
+    code: str
+    name: str
+    status: str
+    age_band: str
+
+
+@dataclass
+class _PositionDiagnostics:
+    """Aggregate integer diagnostics of one physical normalization pass."""
+
+    positions_by_status: dict[str, int]
+    duplicate_extra_rows: int
+    duplicate_occupied_rows: int
+    conflict_positions: int
+    conflict_occupied_rows: int
+    unidentified_rows: int
+    unidentified_occupied_rows: int
 
 
 @dataclass(frozen=True)
@@ -74,6 +113,7 @@ class _GroupValues:
     exceeded_by: int | None
     status_counts: dict[str, int]
     components: list[dict[str, object]]
+    official_availability: int | None = None
 
 
 def materialize_occupancy_measurement(*, run_id: int) -> MaterializationResult:
@@ -121,6 +161,7 @@ def materialize_occupancy_measurement(*, run_id: int) -> MaterializationResult:
                     occupied_count=values.occupied_count,
                     occupancy_percentage=values.occupancy_percentage,
                     exceeded_by=values.exceeded_by,
+                    official_availability=values.official_availability,
                     status_counts_json=values.status_counts,
                     components_json=values.components,
                 )
@@ -198,7 +239,12 @@ def _daily_parent_values(
         "algorithm_version": reference.algorithm_version,
         "measurement_count": len(measurements),
         "eligible_measurement_count": len(eligible),
-        "age_excluded_measurement_count": len(measurements) - len(eligible),
+        "age_excluded_measurement_count": sum(
+            1 for measurement in measurements if measurement.age_partial
+        ),
+        "position_excluded_measurement_count": sum(
+            1 for measurement in measurements if measurement.position_partial
+        ),
         "first_captured_at": measurements[0].captured_at,
         "last_captured_at": measurements[-1].captured_at,
         "known_capacity": reference.known_capacity,
@@ -256,9 +302,16 @@ def _is_daily_eligible(measurement: OccupancyMeasurement) -> bool:
 
     ``occupancy-v1`` measurements are always complete. An ``occupancy-v2``
     measurement whose point rate is partial (unknown occupied age in an
-    age-partitioned sector) is excluded entirely from official averages.
+    age-partitioned sector) is excluded entirely from official averages. An
+    ``occupancy-v3`` measurement is additionally excluded when its physical
+    positions are partial (conflict or occupied rows without bed identity).
     """
-    if measurement.algorithm_version == ALGORITHM_VERSION_V2:
+    if measurement.position_partial is True:
+        return False
+    if measurement.algorithm_version in (
+        ALGORITHM_VERSION_V2,
+        ALGORITHM_VERSION_V3,
+    ):
         return not measurement.age_partial
     return True
 
@@ -378,6 +431,9 @@ def _load_observed_rows(
             "setor",
             "bed_status",
             "age_band",
+            "leito",
+            "prontuario",
+            "nome",
         )
     )
     if not snapshots:
@@ -392,23 +448,31 @@ def _load_observed_rows(
                 name=(name or "").strip(),
                 status=status,
                 age_band=age_band,
+                bed=(bed or "").strip(),
+                record=(record or "").strip(),
+                patient_name=(patient_name or "").strip(),
             ),
         )
-        for captured_at, code, name, status, age_band in snapshots
+        for captured_at, code, name, status, age_band, bed, record, patient_name in snapshots
     ]
 
 
 def _select_algorithm_version(
     catalog: CapacityCatalogVersion,
 ) -> str:
-    """Deterministically dispatch v1/v2 from the persisted catalog context.
+    """Dispatch the immutable algorithm from the persisted catalog context.
 
-    A catalog that partitions at least one source code by age band uses
+    A catalog that explicitly declares an algorithm version uses that exact
+    value (``occupancy-v3`` for new publications). Legacy catalogs without
+    the explicit field keep the deterministic structural dispatch: a catalog
+    that partitions at least one source code by age band uses
     ``occupancy-v2``; a legacy catalog without partitions keeps
     ``occupancy-v1`` and its exact prior semantics. The choice depends only
     on the catalog that was already applicable on the capture local date,
     never on the current date or on any hardcoded date.
     """
+    if catalog.algorithm_version:
+        return catalog.algorithm_version
     for group in catalog.groups.all():
         for membership in group.memberships.all():
             if membership.age_selector != CapacityMembershipSelector.ALL:
@@ -433,7 +497,22 @@ def _calculate(
     catalog: CapacityCatalogVersion,
     rows: tuple[_ObservedRow, ...],
     algorithm_version: str,
-) -> tuple[list[_GroupValues], dict[str, int | Decimal | None]]:
+) -> tuple[list[_GroupValues], dict[str, object]]:
+    """Dispatch the exact-run calculation for the selected algorithm.
+
+    ``occupancy-v3`` normalizes physical positions first; legacy v1/v2 keep
+    their historical row-counting pipeline untouched.
+    """
+    if algorithm_version == ALGORITHM_VERSION_V3:
+        return _calculate_v3(catalog, rows)
+    return _calculate_legacy(catalog, rows, algorithm_version)
+
+
+def _calculate_legacy(
+    catalog: CapacityCatalogVersion,
+    rows: tuple[_ObservedRow, ...],
+    algorithm_version: str,
+) -> tuple[list[_GroupValues], dict[str, object]]:
     by_code, by_band, blank_by_name = _aggregate_observations(rows)
     definitions = list(catalog.groups.all())
     membership_to_group = {
@@ -506,7 +585,7 @@ def _calculate(
         if value.calculation_status == OccupancyCalculationStatus.CALCULATED
     )
     percentage = _percentage(occupied_for_rate, calculable_capacity)
-    totals: dict[str, int | Decimal | None] = {
+    totals: dict[str, object] = {
         "observed_sector_count": len(observed_identities),
         "capacity_covered_sector_count": capacity_covered,
         "calculable_sector_count": calculable,
@@ -549,6 +628,376 @@ def _calculate(
             }
         )
     return sorted(values, key=lambda value: value.stable_key), totals
+
+
+def _calculate_v3(
+    catalog: CapacityCatalogVersion,
+    rows: tuple[_ObservedRow, ...],
+) -> tuple[list[_GroupValues], dict[str, object]]:
+    """Materialize ``occupancy-v3`` from normalized physical positions.
+
+    Raw rows are collapsed into unambiguous physical positions keyed by
+    normalized source identity plus normalized bed. Exact duplicates count
+    once; conflicting positions and occupied rows without a bed never enter
+    official numerators. The resulting positions feed the same official
+    group pipeline as v2 (age selectors included), and the measurement
+    persists a closed aggregate reconciliation and non-compensated
+    availability.
+    """
+    positions, diagnostics = _normalize_positions(rows)
+    by_code, by_band, blank_by_name = _aggregate_observations(
+        _position_rows(positions)
+    )
+    definitions = list(catalog.groups.all())
+    membership_to_group = {
+        membership.source_code: group
+        for group in definitions
+        for membership in group.memberships.all()
+    }
+    observed_identities = {
+        ("code", row.code) if row.code else ("name", row.name) for row in rows
+    }
+    capacity_covered = sum(
+        1
+        for kind, identity in observed_identities
+        if kind == "code"
+        and identity in membership_to_group
+        and membership_to_group[identity].official_capacity is not None
+    )
+    calculable = sum(
+        1
+        for kind, identity in observed_identities
+        if kind == "code"
+        and identity in membership_to_group
+        and membership_to_group[identity].calculation_policy
+        == CalculationPolicy.STANDARD
+    )
+
+    values: list[_GroupValues] = []
+    configured_codes: set[str] = set()
+    for group in definitions:
+        values.append(
+            _calculate_catalog_group(
+                group, by_code, by_band, record_selector=True
+            )
+        )
+        configured_codes.update(
+            membership.source_code for membership in group.memberships.all()
+        )
+
+    used_keys = {value.stable_key for value in values}
+    for code in sorted(set(by_code) - configured_codes):
+        values.append(
+            _unmapped_group(
+                identity_kind="code",
+                identity=code,
+                observations=by_code[code],
+                used_keys=used_keys,
+            )
+        )
+    for name in sorted(blank_by_name):
+        values.append(
+            _unmapped_group(
+                identity_kind="blank",
+                identity=name,
+                observations={name: blank_by_name[name]},
+                used_keys=used_keys,
+            )
+        )
+
+    partitioned_codes = {
+        membership.source_code
+        for group in definitions
+        for membership in group.memberships.all()
+        if membership.age_selector != CapacityMembershipSelector.ALL
+    }
+    known_capacity = sum(group.official_capacity or 0 for group in definitions)
+    calculable_capacity = sum(
+        group.official_capacity or 0
+        for group in definitions
+        if group.calculation_policy == CalculationPolicy.STANDARD
+    )
+    occupied_for_rate = sum(
+        value.occupied_count or 0
+        for value in values
+        if value.calculation_status == OccupancyCalculationStatus.CALCULATED
+    )
+    percentage = _percentage(occupied_for_rate, calculable_capacity)
+
+    unknown_age_3a_rows, outside_calculable, official_numerator = (
+        _classify_occupied_positions(
+            positions=positions,
+            partitioned_codes=partitioned_codes,
+            membership_to_group=membership_to_group,
+        )
+    )
+
+    values_with_availability: list[_GroupValues] = []
+    group_availability_sum = 0
+    group_exceeded_sum = 0
+    for value in values:
+        if value.calculation_status == OccupancyCalculationStatus.CALCULATED:
+            assert value.official_capacity is not None
+            assert value.occupied_count is not None
+            availability = max(value.official_capacity - value.occupied_count, 0)
+            value = replace(value, official_availability=availability)
+            group_availability_sum += availability
+            assert value.exceeded_by is not None
+            group_exceeded_sum += value.exceeded_by
+        values_with_availability.append(value)
+    values = values_with_availability
+
+    reconciliation = _reconciliation_json(
+        rows=rows,
+        diagnostics=diagnostics,
+        unknown_age_3a_rows=unknown_age_3a_rows,
+        outside_calculable=outside_calculable,
+        official_numerator=official_numerator,
+    )
+    totals: dict[str, object] = {
+        "observed_sector_count": len(observed_identities),
+        "capacity_covered_sector_count": capacity_covered,
+        "calculable_sector_count": calculable,
+        "known_capacity": known_capacity,
+        "calculable_capacity": calculable_capacity,
+        "occupied_for_rate": occupied_for_rate,
+        "occupancy_percentage": percentage,
+        "exceeded_by": group_exceeded_sum,
+        "official_sector_count": len(definitions),
+        "official_capacity_sector_count": sum(
+            1 for group in definitions if group.official_capacity is not None
+        ),
+        "official_calculable_sector_count": sum(
+            1
+            for group in definitions
+            if group.calculation_policy == CalculationPolicy.STANDARD
+        ),
+        "unknown_age_count": unknown_age_3a_rows,
+        "age_partial": unknown_age_3a_rows > 0,
+        "position_partial": (
+            diagnostics.conflict_positions > 0
+            or diagnostics.unidentified_occupied_rows > 0
+        ),
+        "official_availability": group_availability_sum,
+        "physical_reconciliation_json": reconciliation,
+    }
+    return sorted(values, key=lambda value: value.stable_key), totals
+
+
+def _normalize_identity(value: str) -> str:
+    """Deterministic small normalization for source and bed identities.
+
+    Strips surrounding whitespace, uppercases and collapses inner runs of
+    whitespace. Deliberately conservative: no new library, no Unicode
+    folding and no leading-zero semantics.
+    """
+    return " ".join(value.strip().upper().split())
+
+
+def _row_signature(row: _ObservedRow) -> tuple[object, ...]:
+    """Equivalent-observation signature for one raw row.
+
+    An occupied signature covers status, normalized record number, normalized
+    patient name and age band; a non-occupied signature covers only status.
+    The signature exists only in memory and is never persisted.
+    """
+    if row.status == BedStatus.OCCUPIED:
+        return (
+            BedStatus.OCCUPIED,
+            _normalize_identity(row.record),
+            _normalize_identity(row.patient_name),
+            row.age_band,
+        )
+    return (row.status,)
+
+
+def _normalize_positions(
+    rows: tuple[_ObservedRow, ...],
+) -> tuple[list[_PhysicalPosition], _PositionDiagnostics]:
+    """Collapse raw rows into unambiguous physical positions.
+
+    The physical key is normalized source identity (code, or sector name as
+    fallback) plus normalized bed. A row without a usable bed stays an
+    unidentified raw row. Repeated equivalent signatures become one position
+    plus duplicate extra rows; divergent signatures on the same key become
+    one conflicting position that never feeds an official numerator.
+    """
+    positions_by_status = {status: 0 for status in _STATUS_KEYS}
+    duplicate_extra = 0
+    duplicate_occupied = 0
+    conflict_positions = 0
+    conflict_occupied = 0
+    unidentified_rows = 0
+    unidentified_occupied = 0
+
+    by_key: dict[tuple[str, str], list[_ObservedRow]] = defaultdict(list)
+    for row in rows:
+        bed = _normalize_identity(row.bed)
+        if not bed:
+            unidentified_rows += 1
+            if row.status == BedStatus.OCCUPIED:
+                unidentified_occupied += 1
+            continue
+        source = (
+            _normalize_identity(row.code)
+            if row.code
+            else _normalize_identity(row.name)
+        )
+        by_key[(source, bed)].append(row)
+
+    positions: list[_PhysicalPosition] = []
+    for key_rows in by_key.values():
+        signature_rows: dict[tuple[object, ...], list[_ObservedRow]] = (
+            defaultdict(list)
+        )
+        for row in key_rows:
+            signature_rows[_row_signature(row)].append(row)
+        if len(signature_rows) > 1:
+            conflict_positions += 1
+            conflict_occupied += sum(
+                1 for row in key_rows if row.status == BedStatus.OCCUPIED
+            )
+            continue
+        (_, same_rows), = signature_rows.items()
+        primary = same_rows[0]
+        positions.append(
+            _PhysicalPosition(
+                code=primary.code,
+                name=primary.name,
+                status=primary.status,
+                age_band=primary.age_band,
+            )
+        )
+        positions_by_status[primary.status] += 1
+        duplicate_extra += len(same_rows) - 1
+        if primary.status == BedStatus.OCCUPIED:
+            duplicate_occupied += len(same_rows) - 1
+
+    diagnostics = _PositionDiagnostics(
+        positions_by_status=positions_by_status,
+        duplicate_extra_rows=duplicate_extra,
+        duplicate_occupied_rows=duplicate_occupied,
+        conflict_positions=conflict_positions,
+        conflict_occupied_rows=conflict_occupied,
+        unidentified_rows=unidentified_rows,
+        unidentified_occupied_rows=unidentified_occupied,
+    )
+    return positions, diagnostics
+
+
+def _position_rows(
+    positions: Iterable[_PhysicalPosition],
+) -> tuple[_ObservedRow, ...]:
+    """Project unambiguous positions into the shared observation pipeline."""
+    return tuple(
+        _ObservedRow(
+            code=position.code,
+            name=position.name,
+            status=position.status,
+            age_band=position.age_band,
+        )
+        for position in positions
+    )
+
+
+def _classify_occupied_positions(
+    *,
+    positions: Iterable[_PhysicalPosition],
+    partitioned_codes: set[str],
+    membership_to_group: dict[str, CapacityGroupDefinition],
+) -> tuple[int, int, int]:
+    """Classify every unambiguous occupied position for the bridge.
+
+    Returns ``(unknown_age_3a_rows, outside_calculable, official_numerator)``.
+    Positions in partitioned sectors with unknown band are excluded for age;
+    positions whose group is unrated, linked-pending or unmapped are excluded
+    as non-calculable; the remainder feeds the official numerator.
+    """
+    unknown_age_3a_rows = 0
+    outside_calculable = 0
+    official_numerator = 0
+    for position in positions:
+        if position.status != BedStatus.OCCUPIED:
+            continue
+        if position.code in partitioned_codes:
+            if position.age_band == OccupancyAgeBand.UNKNOWN:
+                unknown_age_3a_rows += 1
+                continue
+        group = membership_to_group.get(position.code)
+        if (
+            group is not None
+            and group.calculation_policy == CalculationPolicy.STANDARD
+        ):
+            official_numerator += 1
+        else:
+            outside_calculable += 1
+    return unknown_age_3a_rows, outside_calculable, official_numerator
+
+
+# Allowlisted keys of the persisted aggregate reconciliation. Only nonnegative
+# integers are allowed; no row-level identity ever reaches this JSON.
+_RECONCILIATION_ALLOWLIST = frozenset(
+    {
+        "schema_version",
+        "raw_occupied_rows",
+        "positions_by_status",
+        "duplicate_extra_rows",
+        "duplicate_occupied_rows",
+        "conflict_positions",
+        "conflict_occupied_rows",
+        "unidentified_rows",
+        "unidentified_occupied_rows",
+        "unknown_age_3a_rows",
+        "unambiguous_occupied_outside_calculable",
+        "official_numerator",
+    }
+)
+
+
+def _reconciliation_json(
+    *,
+    rows: tuple[_ObservedRow, ...],
+    diagnostics: _PositionDiagnostics,
+    unknown_age_3a_rows: int,
+    outside_calculable: int,
+    official_numerator: int,
+) -> dict[str, int | dict[str, int]]:
+    """Build the closed aggregate reconciliation for one v3 measurement.
+
+    The bridge ``raw_occupied_rows == duplicate_occupied_rows +
+    conflict_occupied_rows + unidentified_occupied_rows + unknown_age_3a_rows
+    + unambiguous_occupied_outside_calculable + official_numerator`` holds by
+    construction; an assertion documents the invariant and a test re-checks
+    it synthetically.
+    """
+    raw_occupied_rows = sum(
+        1 for row in rows if row.status == BedStatus.OCCUPIED
+    )
+    bridge = (
+        diagnostics.duplicate_occupied_rows
+        + diagnostics.conflict_occupied_rows
+        + diagnostics.unidentified_occupied_rows
+        + unknown_age_3a_rows
+        + outside_calculable
+        + official_numerator
+    )
+    assert bridge == raw_occupied_rows
+    reconciliation: dict[str, int | dict[str, int]] = {
+        "schema_version": 1,
+        "raw_occupied_rows": raw_occupied_rows,
+        "positions_by_status": dict(diagnostics.positions_by_status),
+        "duplicate_extra_rows": diagnostics.duplicate_extra_rows,
+        "duplicate_occupied_rows": diagnostics.duplicate_occupied_rows,
+        "conflict_positions": diagnostics.conflict_positions,
+        "conflict_occupied_rows": diagnostics.conflict_occupied_rows,
+        "unidentified_rows": diagnostics.unidentified_rows,
+        "unidentified_occupied_rows": diagnostics.unidentified_occupied_rows,
+        "unknown_age_3a_rows": unknown_age_3a_rows,
+        "unambiguous_occupied_outside_calculable": outside_calculable,
+        "official_numerator": official_numerator,
+    }
+    assert set(reconciliation) == _RECONCILIATION_ALLOWLIST
+    return reconciliation
 
 
 def _aggregate_observations(
