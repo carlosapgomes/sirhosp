@@ -4,6 +4,9 @@ Evidências de releases e refatorações do SIRHOSP.
 
 ## Índice
 
+- [v0.1.0-rc.9 — Duas realidades de ocupação](v0.1.0-rc.9-upgrade.md) —
+  upgrade desde a RC8, migration 0021, normalização física v3 e separação
+  visual em `/beds`, com deploy sem ativação automática do catálogo v3.
 - [v0.1.0-rc.8 — Correção CO e partição etária da 3A](v0.1.0-rc.8-upgrade.md) —
   upgrade desde a RC7, migrations 0018–0020, catálogo corrigido 666/666,
   ativação futura e restrições de rollback após a vigência.
