@@ -20,10 +20,10 @@
       Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}. As duas seções
       abaixo usam bases diferentes: a capacidade oficial vem da medição
       imutável do censo exato; as posições vêm da fotografia física registrada
-      no sistema legado.
+      no sistema de origem.
     </p>
 
-    <!-- ===================== REALIDADE 1: CAPACIDADE OFICIAL ===================== -->
+    <!-- ===================== RESUMO 1: CAPACIDADE OFICIAL ===================== -->
     <section aria-labelledby="official-heading" class="mb-5">
       <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
         <h3 id="official-heading" class="h5 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
@@ -32,12 +32,15 @@
         {% if measurement %}
         <span class="badge bg-light text-dark border">Medição exata: {{ measurement.captured_at|date:"d/m/Y H:i" }}</span>
         <span class="badge bg-light text-dark border">Catálogo vigente desde: {{ measurement.catalog.effective_from|date:"d/m/Y" }}</span>
+        {% if measurement.algorithm_version == "occupancy-v4" and measurement.quality_warning %}
+        <span class="badge bg-warning text-dark">com ressalvas de qualidade</span>
+        {% endif %}
         {% endif %}
       </div>
       <p class="text-muted small mb-3">
         Base: catálogo oficial publicado e medição imutável do censo exato.
         Esta seção mostra somente valores persistidos — não é a fotografia
-        física do legado (seção abaixo).
+        física do sistema de origem (seção abaixo).
       </p>
 
       {% if measurement %}
@@ -150,6 +153,68 @@
             </div>
           </div>
         </div>
+        {% elif measurement.algorithm_version == "occupancy-v4" %}
+        <!-- Cards oficiais v4 (somente valores persistidos) -->
+        <div class="row g-2 mb-3">
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold" style="color: var(--sirhosp-sidebar-bg);">{{ measurement.known_capacity }}</div>
+                <div class="small text-muted">Capacidade oficial</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100 bg-primary bg-opacity-10">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold text-primary">{{ measurement.occupied_for_rate }}</div>
+                <div class="small text-muted">Ocupações consideradas</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100 bg-success bg-opacity-10">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold text-success">{{ measurement.official_availability|default:"—" }}</div>
+                <div class="small text-muted">Disponibilidade na capacidade oficial</div>
+                <div class="small text-muted" title="Saldo calculado por setor na capacidade oficial; não é lista nominal de leitos vagos">
+                  Saldo calculado por setor — não identifica nominalmente leitos oficiais vagos
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100 bg-danger bg-opacity-10">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold text-danger">{{ measurement.exceeded_by }}</div>
+                <div class="small text-muted">Excedente à capacidade</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold" style="color: var(--sirhosp-sidebar-bg);">
+                  {% if measurement.occupancy_percentage is not None %}
+                  {{ measurement.occupancy_percentage|floatformat:2 }}%
+                  {% else %}
+                  Não calculável
+                  {% endif %}
+                </div>
+                <div class="small text-muted">Taxa oficial de ocupação</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% if measurement.quality_warning %}
+        <div class="alert alert-warning small mb-3" role="alert">
+          <i class="bi bi-exclamation-triangle-fill me-1"></i>
+          <strong>Medição com ressalvas de qualidade:</strong> conflitos e
+          linhas sem posição foram registrados sem escolher ocupante, status
+          ou faixa etária. Este censo <strong>continua elegível</strong> para
+          as estatísticas diárias; as médias usam as ocupações consideradas.
+        </div>
+        {% endif %}
         {% else %}
         <!-- v1/v2: valores históricos persistidos + indicação de algoritmo -->
         <div class="row g-2 mb-3">
@@ -213,88 +278,69 @@
           medição de lotação ainda não está disponível para este censo.
         </div>
       {% endif %}
-
-      {% if measured_groups %}
-        <!-- ====== GRUPOS OFICIAIS (somente valores persistidos da medição) ====== -->
-        <div class="row g-3">
-          {% for row in measured_groups %}
-          <div class="col-12">
-            <div class="card border-0 shadow-sm{% if row.over_capacity %} border-danger{% endif %}{% if row.calculation_status == "auxiliary" %} bg-light{% endif %}">
-              <!-- Cabeçalho do card (sempre visível, clicável) -->
-              <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2{% if row.over_capacity %} bg-danger bg-opacity-10{% endif %}"
-                   data-bs-toggle="collapse"
-                   data-bs-target="#group-detail-{{ forloop.counter }}"
-                   role="button"
-                   aria-expanded="false"
-                   style="cursor: pointer;">
-                <h4 class="h6 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
-                  <i class="bi bi-chevron-right me-2 collapse-icon"></i>
-                  {{ row.display_name }}
-                  {% if row.calculation_status == "auxiliary" %}
-                  <span class="badge bg-light text-dark border ms-1">Agrupamento auxiliar de apresentação — não é setor oficial</span>
-                  {% endif %}
-                  {% if row.name_mismatch %}
-                  <span class="badge bg-warning text-dark ms-1" title="Nome observado diverge do configurado no catálogo oficial">
-                    Nome divergente
-                  </span>
-                  {% endif %}
-                </h4>
-                <div class="d-flex flex-wrap gap-1 align-items-center">
-                  {% if row.official_capacity %}
-                  <span class="badge bg-light text-dark">Capacidade: {{ row.official_capacity }}</span>
-                  {% elif row.calculation_status == "auxiliary" %}
-                  <span class="badge bg-light text-dark">Sem capacidade oficial</span>
-                  {% else %}
-                  <span class="badge bg-light text-dark">Capacidade não cadastrada</span>
-                  {% endif %}
-                  {% if row.occupancy_percentage is not None %}
-                  <span class="badge bg-dark">{{ row.occupancy_percentage|floatformat:2 }}%</span>
-                  {% elif row.calculation_status == "linked_slots_pending" %}
-                  <span class="badge bg-light text-dark">Aguardando mapeamento cama-berço</span>
-                  {% elif measurement.algorithm_version != "occupancy-v1" and row.calculation_status == "unrated" %}
-                  <span class="badge bg-light text-dark">Não incluído na taxa de ocupação da unidade</span>
-                  {% elif row.calculation_status == "auxiliary" %}
-                  <span class="badge bg-light text-dark">Posições sem faixa etária</span>
-                  {% else %}
-                  <span class="badge bg-light text-dark">Não calculável</span>
-                  {% endif %}
-                  {% if row.occupied_count is not None %}
-                  <span class="badge bg-primary">Ocupação considerada: {{ row.occupied_count }}</span>
-                  {% endif %}
-                  {% if row.official_availability is not None %}
-                  <span class="badge bg-info text-dark" title="Saldo calculado por setor na capacidade oficial">Disponibilidade: {{ row.official_availability }}</span>
-                  {% endif %}
-                  {% if row.exceeded_by is not None and row.exceeded_by > 0 %}
-                  <span class="badge bg-danger">Excedente: {{ row.exceeded_by }}</span>
-                  {% endif %}
-                </div>
-              </div>
-
-              <!-- Corpo colapsável: diagnóstico oficial do grupo -->
-              <div class="collapse" id="group-detail-{{ forloop.counter }}">
-                <div class="card-body p-0">
-                  {% if row.source_sectors %}
-                  <div class="d-flex flex-wrap gap-1 align-items-center px-3 pt-3 pb-1">
-                    <span class="small text-muted me-1">Setores de origem:</span>
-                    {% for source in row.source_sectors %}
-                    <span class="badge bg-light text-dark border">{{ source }}</span>
-                    {% endfor %}
-                  </div>
-                  {% endif %}
-                  {% if row.over_capacity %}
-                  <div class="alert alert-danger py-2 mx-3 mt-2 mb-0 small d-flex flex-wrap justify-content-between align-items-center gap-2" role="alert">
-                    <span class="fw-bold"><i class="bi bi-exclamation-triangle-fill me-1"></i>Acima da capacidade</span>
-                    <span class="fw-bold">Excedente: {{ row.exceeded_by }} leitos</span>
-                  </div>
-                  {% endif %}
-                </div>
-              </div>
-            </div>
-          </div>
-          {% endfor %}
-        </div>
-      {% endif %}
     </section>
+
+    {% if measurement.algorithm_version == "occupancy-v4" and measurement.physical_reconciliation_json %}
+    <!-- ===================== PONTE DE TRATAMENTO v4 ===================== -->
+    <section aria-labelledby="treatment-heading" class="mb-5">
+      <h3 id="treatment-heading" class="h5 fw-bold mb-2" style="color: var(--sirhosp-sidebar-bg);">
+        Como as ocupações foram tratadas
+      </h3>
+      <p class="text-muted small mb-2">
+        Como as linhas ocupadas do censo chegam às ocupações consideradas.
+        Somente contagens agregadas persistidas — nenhum dado nominal é
+        exibido aqui.
+      </p>
+      <div class="card border-0 shadow-sm">
+        <div class="card-body py-3">
+          <ul class="list-unstyled mb-2 small">
+            {% with rec=measurement.physical_reconciliation_json %}
+            <li class="mb-1">Linhas ocupadas brutas: <strong>{{ rec.raw_occupied_rows }}</strong></li>
+            {% if rec.duplicate_occupied_extra_rows %}
+            <li class="mb-1">Linhas duplicadas consolidadas: <strong>{{ rec.duplicate_occupied_extra_rows }}</strong> — posição contada uma vez</li>
+            {% endif %}
+            {% if rec.occupant_conflict_positions %}
+            <li class="mb-1">Ocupantes divergentes: <strong>{{ rec.occupant_conflict_positions }}</strong> posição(ões) computada(s) uma vez com ocupante não autoritativo ({{ rec.occupant_conflict_extra_occupied_rows }} linha(s) extra(s))</li>
+            {% endif %}
+            {% if rec.status_conflict_positions %}
+            <li class="mb-1">Status divergente: <strong>{{ rec.status_conflict_positions }}</strong> posição(ões) não computada(s) por status ambíguo ({{ rec.status_conflict_occupied_rows }} linha(s) ocupada(s))</li>
+            {% endif %}
+            {% if rec.age_conflict_positions %}
+            <li class="mb-1">Faixa etária divergente: <strong>{{ rec.age_conflict_positions }}</strong> posição(ões) não atribuída(s) a grupo etário ({{ rec.age_conflict_occupied_rows }} linha(s))</li>
+            {% endif %}
+            {% if rec.unknown_age_partition_positions %}
+            <li class="mb-1">Faixa etária desconhecida em código particionado: <strong>{{ rec.unknown_age_partition_positions }}</strong> posição(ões) não atribuída(s)</li>
+            {% endif %}
+            {% if rec.age_metadata_drift_positions %}
+            <li class="mb-1">Divergência de faixa etária em código não particionado: <strong>{{ rec.age_metadata_drift_positions }}</strong> posição(ões) mantida(s) com ressalva</li>
+            {% endif %}
+            {% if rec.unidentified_occupied_rows %}
+            <li class="mb-1">Ocupados sem posição: <strong>{{ rec.unidentified_occupied_rows }}</strong> — não computadas por ausência de posição</li>
+            {% endif %}
+            {% if rec.occupied_unrated_positions %}
+            <li class="mb-1">Fora do escopo da taxa oficial: <strong>{{ rec.occupied_unrated_positions }}</strong> — posição válida fora do escopo da taxa oficial (política unrated), não é falha de qualidade</li>
+            {% endif %}
+            {% if rec.occupied_unmapped_positions %}
+            <li class="mb-1">Posições sem mapeamento no catálogo: <strong>{{ rec.occupied_unmapped_positions }}</strong></li>
+            {% endif %}
+            {% if rec.occupied_linked_pending_positions %}
+            <li class="mb-1">Posições com cálculo pendente: <strong>{{ rec.occupied_linked_pending_positions }}</strong></li>
+            {% endif %}
+            <li class="mb-1">Posições ocupadas contadas: <strong>{{ rec.counted_occupied_positions }}</strong></li>
+            <li class="mb-1">Ocupações consideradas na taxa: <strong>{{ rec.official_numerator }}</strong></li>
+            {% endwith %}
+          </ul>
+          <p class="small text-muted mb-0">
+            A primeira ponte fecha por construção: bruto = duplicatas
+            consolidadas + ocupantes divergentes + status ambíguo + faixa
+            etária divergente/desconhecida + ausência de posição + posições
+            contadas. A segunda separa a taxa oficial, a política fora da
+            taxa, o mapeamento e o cálculo pendente.
+          </p>
+        </div>
+      </div>
+    </section>
+    {% endif %}
 
     {% if measurement.algorithm_version == "occupancy-v3" and measurement.physical_reconciliation_json %}
     <!-- ===================== PONTE DE RECONCILIAÇÃO v3 ===================== -->
@@ -336,20 +382,20 @@
     </section>
     {% endif %}
 
-    <!-- ===================== REALIDADE 2: POSIÇÕES DO LEGADO ===================== -->
+    <!-- ===================== RESUMO 2: POSIÇÕES DO SISTEMA DE ORIGEM ===================== -->
     <section aria-labelledby="physical-heading" class="mt-4">
       <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
         <h3 id="physical-heading" class="h5 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
-          Posições registradas no sistema legado
+          Posições registradas no sistema de origem
         </h3>
         <span class="badge bg-light text-dark border">Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}</span>
       </div>
       <p class="text-muted small mb-3">
-        Base: fotografia física registrada no sistema legado no momento do
+        Base: fotografia física registrada no sistema de origem no momento do
         censo. Cada posição inequívoca aparece uma vez; duplicatas exatas são
         colapsadas; conflitos aparecem sem paciente escolhido. Esta base é
-        diferente da capacidade oficial — um leito vago no legado não é
-        disponibilidade oficial.
+        diferente da capacidade oficial — um leito vago no sistema de origem
+        não é disponibilidade oficial.
       </p>
 
       <!-- Cards físicos -->
@@ -374,7 +420,7 @@
           <div class="card border-0 shadow-sm text-center h-100 bg-success bg-opacity-10">
             <div class="card-body py-3">
               <div class="fs-3 fw-bold text-success">{{ physical.positions_by_status.empty }}</div>
-              <div class="small text-muted">Vagos no legado</div>
+              <div class="small text-muted">Vagos no sistema de origem</div>
             </div>
           </div>
         </div>
@@ -406,7 +452,7 @@
           <div class="card border-0 shadow-sm text-center h-100">
             <div class="card-body py-3">
               <div class="fs-3 fw-bold" style="color: var(--sirhosp-sidebar-bg);">{{ physical.conflict_positions }}</div>
-              <div class="small text-muted">Conflitos no legado</div>
+              <div class="small text-muted">Conflitos no sistema de origem</div>
             </div>
           </div>
         </div>
@@ -427,96 +473,287 @@
           </div>
         </div>
       </div>
+    </section>
 
-      <!-- Setores físicos por origem -->
+    <!-- ===================== LISTA ÚNICA: SETORES E POSIÇÕES ===================== -->
+    <section aria-labelledby="units-heading" class="mt-4">
+      <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
+        <h3 id="units-heading" class="h5 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+          Setores e posições
+        </h3>
+      </div>
+      <p class="text-muted small mb-3">
+        Cada unidade agrupa os setores oficiais e os códigos do sistema de
+        origem ligados pelo catálogo do censo exato. Cada posição física
+        aparece uma vez; duplicatas exatas são consolidadas; conflitos e
+        linhas sem posição são casos de qualidade visíveis a todo usuário
+        autenticado, sem alternativa escolhida.
+      </p>
+
       <div class="row g-3">
-        {% for sector in physical.sectors %}
+        {% for unit in units %}
         <div class="col-12">
-          <div class="card border-0 shadow-sm">
+          <div class="card border-0 shadow-sm{% if unit.over_capacity %} border-danger{% endif %}">
             <!-- Cabeçalho do card (sempre visível, clicável) -->
-            <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2"
+            <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2{% if unit.over_capacity %} bg-danger bg-opacity-10{% endif %}"
                  data-bs-toggle="collapse"
-                 data-bs-target="#sector-detail-{{ forloop.counter }}"
+                 data-bs-target="#unit-detail-{{ forloop.counter }}"
                  role="button"
                  aria-expanded="false"
                  style="cursor: pointer;">
               <h4 class="h6 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
                 <i class="bi bi-chevron-right me-2 collapse-icon"></i>
-                {{ sector.source_name }}
-                {% if sector.source_code %}
-                <span class="badge bg-light text-dark border ms-1">código {{ sector.source_code }}</span>
+                {{ unit.title }}
+                {% if unit.is_unmapped %}
+                <span class="badge bg-warning text-dark ms-1">sem mapeamento no catálogo</span>
+                {% elif not unit.official_rows %}
+                <span class="badge bg-light text-dark border ms-1">sem medição oficial exata</span>
                 {% endif %}
               </h4>
               <div class="d-flex flex-wrap gap-1 align-items-center">
-                {% if sector.positions_by_status.occupied %}
-                <span class="badge bg-primary">{{ sector.positions_by_status.occupied }} ocupados</span>
+                {% if unit.sources %}
+                <span class="badge bg-light text-dark">{{ unit.sources|length }} código{{ unit.sources|length|pluralize }} de origem</span>
                 {% endif %}
-                {% if sector.positions_by_status.empty %}
-                <span class="badge bg-success">{{ sector.positions_by_status.empty }} vagos</span>
-                {% endif %}
-                {% if sector.positions_by_status.maintenance %}
-                <span class="badge bg-secondary">{{ sector.positions_by_status.maintenance }} manut.</span>
-                {% endif %}
-                {% if sector.positions_by_status.reserved %}
-                <span class="badge bg-warning text-dark">{{ sector.positions_by_status.reserved }} reserv.</span>
-                {% endif %}
-                {% if sector.positions_by_status.isolation %}
-                <span class="badge bg-danger">{{ sector.positions_by_status.isolation }} isolam.</span>
-                {% endif %}
-                {% if sector.conflict_positions %}
-                <span class="badge bg-danger text-white">{{ sector.conflict_positions }} conflito{{ sector.conflict_positions|pluralize }}</span>
-                {% endif %}
-                {% if sector.duplicate_extra_rows %}
-                <span class="badge bg-light text-dark border">{{ sector.duplicate_extra_rows }} dup. extra</span>
-                {% endif %}
-                {% if sector.unidentified_rows %}
-                <span class="badge bg-light text-dark border">{{ sector.unidentified_rows }} sem leito</span>
-                {% endif %}
-                <span class="badge bg-light text-dark">{{ sector.identified_positions }} posições</span>
               </div>
             </div>
 
-            <!-- Corpo colapsável: posições inequívocas + conflitos -->
-            <div class="collapse" id="sector-detail-{{ forloop.counter }}">
+            <!-- Corpo colapsável: mini-tabela oficial + resumo por código-fonte -->
+            <div class="collapse" id="unit-detail-{{ forloop.counter }}">
               <div class="card-body p-0">
-                <div class="list-group list-group-flush">
-                  {% for bed in sector.positions %}
-                  <div class="list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2 py-2 px-3">
-                    <div class="d-flex align-items-center gap-2">
-                      <code class="small">{{ bed.leito }}</code>
-                      {% if bed.conflict %}
-                      <span class="badge bg-danger text-white">Conflito no legado</span>
-                      {% else %}
-                      <span class="badge
-                        {% if bed.status == 'occupied' %}bg-primary
-                        {% elif bed.status == 'empty' %}bg-success
-                        {% elif bed.status == 'maintenance' %}bg-secondary
-                        {% elif bed.status == 'reserved' %}bg-warning text-dark
-                        {% else %}bg-danger{% endif %}">
-                        {{ bed.status_label }}
-                      </span>
-                      {% endif %}
-                    </div>
-                    <div class="text-end small">
-                      {% if bed.prontuario and not bed.conflict %}
-                        {% if bed.patient_id %}
-                        <a href="{% url 'patients:admission_list' bed.patient_id %}" class="text-decoration-none">
-                          {{ bed.nome }}
-                          <span class="text-muted">({{ bed.prontuario }})</span>
-                        </a>
-                        {% else %}
-                        <a href="{% url 'patients:patient_list' %}?q={{ bed.prontuario }}" class="text-decoration-none">
-                          {{ bed.nome }}
-                          <span class="text-muted">({{ bed.prontuario }})</span>
-                        </a>
-                        {% endif %}
-                      {% else %}
-                        <span class="text-muted">—</span>
-                      {% endif %}
-                    </div>
-                  </div>
+                {% if unit.over_capacity %}
+                <div class="alert alert-danger py-2 mx-3 mt-2 mb-0 small d-flex flex-wrap justify-content-between align-items-center gap-2" role="alert">
+                  <span class="fw-bold"><i class="bi bi-exclamation-triangle-fill me-1"></i>Acima da capacidade</span>
+                  {% for row in unit.official_rows %}
+                  {% if row.over_capacity %}
+                  <span class="fw-bold">{{ row.display_name }} — Excedente: {{ row.exceeded_by }} leitos</span>
+                  {% endif %}
                   {% endfor %}
                 </div>
+                {% endif %}
+
+                {% if unit.official_rows %}
+                <div class="px-3 pt-3">
+                  <span class="small text-muted fw-bold">Capacidade oficial (medição do censo exato)</span>
+                  <div class="d-flex flex-wrap gap-2 py-2">
+                    {% for row in unit.official_rows %}
+                    <div class="border rounded p-2 small" style="min-width: 240px;">
+                      <div class="fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">
+                        {{ row.display_name }}
+                        {% if row.calculation_status == "auxiliary" %}
+                        <span class="badge bg-light text-dark border ms-1">Agrupamento auxiliar de apresentação — não é setor oficial</span>
+                        {% endif %}
+                        {% if row.name_mismatch %}
+                        <span class="badge bg-warning text-dark ms-1" title="Nome observado diverge do configurado no catálogo oficial">Nome divergente</span>
+                        {% endif %}
+                      </div>
+                      <div class="d-flex flex-wrap gap-1 align-items-center">
+                        {% if row.official_capacity %}
+                        <span class="badge bg-light text-dark">Capacidade: {{ row.official_capacity }}</span>
+                        {% elif row.calculation_status == "auxiliary" %}
+                        <span class="badge bg-light text-dark">Sem capacidade oficial</span>
+                        {% else %}
+                        <span class="badge bg-light text-dark">Capacidade não cadastrada</span>
+                        {% endif %}
+                        {% if row.occupancy_percentage is not None %}
+                        <span class="badge bg-dark">{{ row.occupancy_percentage|floatformat:2 }}%</span>
+                        {% elif row.calculation_status == "linked_slots_pending" %}
+                        <span class="badge bg-light text-dark">Aguardando mapeamento cama-berço</span>
+                        {% elif measurement.algorithm_version != "occupancy-v1" and row.calculation_status == "unrated" %}
+                        <span class="badge bg-light text-dark">Não incluído na taxa de ocupação da unidade</span>
+                        {% elif row.calculation_status == "auxiliary" %}
+                        <span class="badge bg-light text-dark">Posições sem faixa etária</span>
+                        {% else %}
+                        <span class="badge bg-light text-dark">Não calculável</span>
+                        {% endif %}
+                        {% if row.occupied_count is not None %}
+                        <span class="badge bg-primary">Ocupação considerada: {{ row.occupied_count }}</span>
+                        {% endif %}
+                        {% if row.official_availability is not None %}
+                        <span class="badge bg-info text-dark" title="Saldo calculado por setor na capacidade oficial">Disponibilidade: {{ row.official_availability }}</span>
+                        {% endif %}
+                        {% if row.exceeded_by is not None and row.exceeded_by > 0 %}
+                        <span class="badge bg-danger">Excedente: {{ row.exceeded_by }}</span>
+                        {% endif %}
+                      </div>
+                    </div>
+                    {% endfor %}
+                  </div>
+                </div>
+                {% endif %}
+
+                {% for source in unit.sources %}
+                <div class="px-3 pt-3">
+                  <div class="d-flex flex-wrap align-items-center gap-2">
+                    <span class="fw-bold small">{{ source.alias }}</span>
+                    {% if source.source_code %}
+                    <span class="badge bg-light text-dark border">código {{ source.source_code }}</span>
+                    {% endif %}
+                    {% if source.positions_by_status.occupied %}
+                    <span class="badge bg-primary">{{ source.positions_by_status.occupied }} ocupados</span>
+                    {% endif %}
+                    {% if source.positions_by_status.empty %}
+                    <span class="badge bg-success">{{ source.positions_by_status.empty }} vagos</span>
+                    {% endif %}
+                    {% if source.positions_by_status.maintenance %}
+                    <span class="badge bg-secondary">{{ source.positions_by_status.maintenance }} manut.</span>
+                    {% endif %}
+                    {% if source.positions_by_status.reserved %}
+                    <span class="badge bg-warning text-dark">{{ source.positions_by_status.reserved }} reserv.</span>
+                    {% endif %}
+                    {% if source.positions_by_status.isolation %}
+                    <span class="badge bg-danger">{{ source.positions_by_status.isolation }} isolam.</span>
+                    {% endif %}
+                    {% if source.conflicts %}
+                    <span class="badge bg-danger text-white">{{ source.conflicts|length }} conflito{{ source.conflicts|length|pluralize }}</span>
+                    {% endif %}
+                    {% if source.duplicate_extra_rows %}
+                    <span class="badge bg-light text-dark border">{{ source.duplicate_extra_rows }} dup. extra</span>
+                    {% endif %}
+                    {% if source.unidentified_rows %}
+                    <span class="badge bg-light text-dark border">{{ source.unidentified_rows }} sem leito</span>
+                    {% endif %}
+                    <span class="badge bg-light text-dark">{{ source.identified_positions }} posições</span>
+                  </div>
+                  {% if source.raw_name and source.raw_name != source.alias %}
+                  <div class="small text-muted mt-1">
+                    Nome no sistema de origem: <code>{{ source.raw_name }}</code>
+                  </div>
+                  {% endif %}
+                  {% if source.observed_mismatch %}
+                  <div class="small text-muted">
+                    Nome observado no censo: {{ source.observed_name }}
+                  </div>
+                  {% endif %}
+
+                  {% if not source.positions and not source.conflicts and not source.unidentified_rows %}
+                  <div class="small text-muted py-2">sem posições registradas no censo</div>
+                  {% endif %}
+
+                  {% if source.positions %}
+                  <div class="list-group list-group-flush mt-2">
+                    {% for pos in source.positions %}
+                    <div class="list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2 py-2 px-3">
+                      <div class="d-flex align-items-center gap-2">
+                        <code class="small">{{ pos.leito }}</code>
+                        <span class="badge
+                          {% if pos.status == 'occupied' %}bg-primary
+                          {% elif pos.status == 'empty' %}bg-success
+                          {% elif pos.status == 'maintenance' %}bg-secondary
+                          {% elif pos.status == 'reserved' %}bg-warning text-dark
+                          {% else %}bg-danger{% endif %}">
+                          {{ pos.status_label }}
+                        </span>
+                        {% if pos.note %}
+                        <span class="badge bg-warning text-dark">{{ pos.note }}</span>
+                        {% endif %}
+                      </div>
+                      <div class="text-end small">
+                        {% if pos.prontuario %}
+                          {% if pos.patient_id %}
+                          <a href="{% url 'patients:admission_list' pos.patient_id %}" class="text-decoration-none">
+                            {{ pos.nome }}
+                            <span class="text-muted">({{ pos.prontuario }})</span>
+                          </a>
+                          {% else %}
+                          <a href="{% url 'patients:patient_list' %}?q={{ pos.prontuario }}" class="text-decoration-none">
+                            {{ pos.nome }}
+                            <span class="text-muted">({{ pos.prontuario }})</span>
+                          </a>
+                          {% endif %}
+                        {% else %}
+                          <span class="text-muted">—</span>
+                        {% endif %}
+                      </div>
+                    </div>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+
+                  {% for case in source.conflicts %}
+                  <div class="alert alert-warning py-2 mx-0 my-2 small" role="alert">
+                    <div class="fw-bold">
+                      <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                      <code>{{ case.leito }}</code> — {{ case.reason }}
+                    </div>
+                    {% if case.counted %}
+                    <span class="badge bg-warning text-dark">posição contada uma vez — ocupante não autoritativo</span>
+                    {% else %}
+                    <span class="badge bg-secondary">não computada</span>
+                    {% endif %}
+                    {% if case.alternatives %}
+                    <ul class="list-unstyled mt-2 mb-0">
+                      {% for alt in case.alternatives %}
+                      <li class="mb-1 d-flex flex-wrap align-items-center gap-2">
+                        <span class="badge
+                          {% if alt.status == 'occupied' %}bg-primary
+                          {% elif alt.status == 'empty' %}bg-success
+                          {% elif alt.status == 'maintenance' %}bg-secondary
+                          {% elif alt.status == 'reserved' %}bg-warning text-dark
+                          {% else %}bg-danger{% endif %}">
+                          {{ alt.status_label }}
+                        </span>
+                        {% if alt.nome %}
+                          {% if alt.patient_id %}
+                          <a href="{% url 'patients:admission_list' alt.patient_id %}" class="text-decoration-none">
+                            {{ alt.nome }}
+                            <span class="text-muted">({{ alt.prontuario }})</span>
+                          </a>
+                          {% else %}
+                          <a href="{% url 'patients:patient_list' %}?q={{ alt.prontuario }}" class="text-decoration-none">
+                            {{ alt.nome }}
+                            <span class="text-muted">({{ alt.prontuario }})</span>
+                          </a>
+                          {% endif %}
+                        {% else %}
+                          <span class="text-muted">—</span>
+                        {% endif %}
+                        {% if case.conflict_type == "age" %}
+                        <span class="text-muted">faixa etária: {{ alt.age_label }}</span>
+                        {% endif %}
+                        {% if alt.occurrence_count > 1 %}
+                        <span class="badge bg-light text-dark border">{{ alt.occurrence_count }} linhas equivalentes</span>
+                        {% endif %}
+                        <span class="badge bg-warning text-dark">registro divergente — não autoritativo</span>
+                      </li>
+                      {% endfor %}
+                    </ul>
+                    {% endif %}
+                  </div>
+                  {% endfor %}
+
+                  {% if source.unidentified_occupied_rows %}
+                  <div class="alert alert-secondary py-2 mx-0 my-2 small" role="alert">
+                    <div class="fw-bold">
+                      <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                      Linhas ocupadas sem posição — não computadas por ausência de posição
+                      ({{ source.unidentified_occupied_rows }})
+                    </div>
+                    <ul class="list-unstyled mt-2 mb-0">
+                      {% for case in source.unidentified_cases %}
+                      <li class="mb-1 d-flex flex-wrap align-items-center gap-2">
+                        {% if case.nome %}
+                          {% if case.patient_id %}
+                          <a href="{% url 'patients:admission_list' case.patient_id %}" class="text-decoration-none">
+                            {{ case.nome }}
+                            <span class="text-muted">({{ case.prontuario }})</span>
+                          </a>
+                          {% else %}
+                          <a href="{% url 'patients:patient_list' %}?q={{ case.prontuario }}" class="text-decoration-none">
+                            {{ case.nome }}
+                            <span class="text-muted">({{ case.prontuario }})</span>
+                          </a>
+                          {% endif %}
+                        {% else %}
+                          <span class="text-muted">—</span>
+                        {% endif %}
+                        <span class="badge bg-secondary">não computada por ausência de posição</span>
+                      </li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                  {% endif %}
+                </div>
+                {% endfor %}
               </div>
             </div>
           </div>

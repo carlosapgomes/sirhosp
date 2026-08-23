@@ -2154,33 +2154,6 @@ class _PhysicalPresentation:
         return sum(self.positions_by_status.values())
 
 
-def build_physical_presentation(
-    *,
-    snapshots: Iterable[CensusSnapshot],
-    patient_map: dict[str, int] | None = None,
-) -> _PhysicalPresentation:
-    """Present the normalized physical snapshot of the exact latest census.
-
-    Reuses the ``occupancy-v3`` normalization contract (``_normalize_positions``
-    and ``_classify_key_rows``): each unambiguous physical position appears
-    once, exact duplicates collapse into one position plus extra rows,
-    conflicts appear once without a chosen patient and rows without a usable
-    bed are unidentified rows, never positions. The official measurement is
-    never consulted here and no official value is recalculated.
-    """
-    rows = tuple(_observed_row_from_snapshot(bed) for bed in snapshots)
-    _positions, diagnostics = _normalize_positions(rows)
-    return _PhysicalPresentation(
-        positions_by_status=dict(diagnostics.positions_by_status),
-        conflict_positions=diagnostics.conflict_positions,
-        duplicate_extra_rows=diagnostics.duplicate_extra_rows,
-        duplicate_occupied_rows=diagnostics.duplicate_occupied_rows,
-        unidentified_rows=diagnostics.unidentified_rows,
-        unidentified_occupied_rows=diagnostics.unidentified_occupied_rows,
-        sectors=_physical_sector_rows(rows, patient_map or {}),
-    )
-
-
 def _observed_row_from_snapshot(bed: CensusSnapshot) -> _ObservedRow:
     """Project one census snapshot into the ephemeral normalization row."""
     return _ObservedRow(
@@ -2282,4 +2255,768 @@ def _physical_position_row(
             if row.status == BedStatus.OCCUPIED
             else None
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# MOQA-S3: /beds unified presentation units.
+#
+# The page keeps two aggregate summaries and renders exactly one detailed
+# list ``Setores e posições``. Each expandable unit is one connected
+# component of the bipartite graph whose group nodes are the persisted
+# official groups of the exact measurement and whose source nodes are the
+# source codes bound by the memberships persisted in the exact catalog.
+# Unmapped census sources form their own warning units. Every physical
+# position is normalized once per source with the same v4 (or v3) key
+# classification used by materialization; the raw ``beds`` of the official
+# group rows are never rendered here because that would repeat duplicates
+# and conflicts. Quality details are presentation-memory only: they are
+# never persisted, logged or aggregated.
+# ---------------------------------------------------------------------------
+
+_AGE_BAND_LABELS: dict[str, str] = {
+    OccupancyAgeBand.UNDER_12: "Menor de 12 anos",
+    OccupancyAgeBand.AGE_12_OR_OVER: "12 anos ou mais",
+    OccupancyAgeBand.UNKNOWN: "Desconhecida",
+    OccupancyAgeBand.NOT_APPLICABLE: "Não se aplica",
+}
+
+_CONFLICT_REASONS = {
+    "occupant": (
+        "Ocupante divergente — posição computada uma vez, "
+        "sem ocupante autoritativo"
+    ),
+    "status": (
+        "Status divergente — posição e linhas não computadas "
+        "por status ambíguo"
+    ),
+    "age": (
+        "Faixa etária divergente — posição não atribuída a grupo etário"
+    ),
+    "legacy": "Conflito no sistema de origem — posição sem estado definido",
+}
+
+
+@dataclass
+class _UnitOfficialRow:
+    """Persisted official values of one group inside a presentation unit."""
+
+    stable_key: str
+    display_name: str
+    calculation_status: str
+    official_capacity: int | None
+    occupied_count: int | None
+    occupancy_percentage: Decimal | None
+    exceeded_by: int | None
+    official_availability: int | None
+    status_counts: dict[str, int]
+    name_mismatch: bool
+
+    @property
+    def over_capacity(self) -> bool:
+        return (
+            self.occupancy_percentage is not None
+            and self.occupancy_percentage > Decimal("100.00")
+        )
+
+
+@dataclass
+class _UnitAlternative:
+    """One unique raw signature of a conflict, never authoritative."""
+
+    status: str
+    status_label: str
+    nome: str
+    prontuario: str
+    patient_id: int | None
+    age_label: str
+    occurrence_count: int
+
+
+@dataclass
+class _UnitConflictCase:
+    """One physical conflict case with its unique alternatives."""
+
+    leito: str
+    conflict_type: str
+    reason: str
+    counted: bool
+    alternatives: list[_UnitAlternative]
+
+
+@dataclass
+class _UnitUnidentifiedCase:
+    """One occupied raw row without usable bed identity."""
+
+    status: str
+    status_label: str
+    nome: str
+    prontuario: str
+    patient_id: int | None
+
+
+@dataclass
+class _UnitPositionRow:
+    """One unambiguous physical position rendered exactly once."""
+
+    leito: str
+    status: str
+    status_label: str
+    nome: str
+    prontuario: str
+    patient_id: int | None
+    note: str | None = None
+
+
+@dataclass
+class _UnitSourceSummary:
+    """One source-code block inside a presentation unit."""
+
+    source_code: str
+    alias: str
+    raw_name: str | None
+    observed_name: str | None
+    observed_mismatch: bool
+    positions_by_status: dict[str, int]
+    positions: list[_UnitPositionRow]
+    conflicts: list[_UnitConflictCase]
+    duplicate_extra_rows: int
+    unidentified_rows: int
+    unidentified_occupied_rows: int
+    unidentified_cases: list[_UnitUnidentifiedCase]
+
+    @property
+    def identified_positions(self) -> int:
+        return sum(self.positions_by_status.values())
+
+    @property
+    def has_quality_cases(self) -> bool:
+        return bool(self.conflicts or self.unidentified_occupied_rows)
+
+
+@dataclass
+class _UnitRow:
+    """One connected-component unit of the unified sector list."""
+
+    title: str
+    official_rows: list[_UnitOfficialRow]
+    sources: list[_UnitSourceSummary]
+    is_unmapped: bool = False
+
+    @property
+    def over_capacity(self) -> bool:
+        return any(row.over_capacity for row in self.official_rows)
+
+
+@dataclass
+class _UnitsPresentation:
+    """Template-ready unit list plus the physical aggregate snapshot."""
+
+    units: list[_UnitRow]
+    physical: _PhysicalPresentation
+
+
+def _unit_official_row(
+    group: OccupancyGroupMeasurement,
+) -> _UnitOfficialRow:
+    """Project one persisted group measurement into a unit official row."""
+    return _UnitOfficialRow(
+        stable_key=group.stable_key,
+        display_name=group.display_name,
+        calculation_status=group.calculation_status,
+        official_capacity=group.official_capacity,
+        occupied_count=group.occupied_count,
+        occupancy_percentage=group.occupancy_percentage,
+        exceeded_by=group.exceeded_by,
+        official_availability=group.official_availability,
+        status_counts=dict(group.status_counts_json),
+        name_mismatch=any(
+            bool(component.get("source_name_mismatch"))
+            for component in group.components_json
+        ),
+    )
+
+
+def _source_alias(
+    membership: CapacitySectorMembership,
+) -> tuple[str, str | None]:
+    """Return ``(primary label, raw provenance)`` for one exact membership.
+
+    The curated v4 alias is the primary label; the configured raw source name
+    is preserved only as subordinate provenance (``Nome no sistema de
+    origem``). Historical catalogs without an alias use the configured name
+    as the documented fallback, without consulting the current catalog and
+    without regex normalization.
+    """
+    if membership.source_display_name:
+        return membership.source_display_name, membership.configured_source_name
+    return membership.configured_source_name, None
+
+
+def _catalog_components(
+    catalog: CapacityCatalogVersion,
+) -> list[tuple[list[str], list[str]]]:
+    """Connected components of the bipartite group<->code graph.
+
+    Returns ``(group_keys, codes)`` tuples, each sorted deterministically.
+    Codes connect to their group through the memberships persisted in the
+    exact catalog; no stable key or source code is special-cased.
+    """
+    parent: dict[str, str] = {}
+
+    def find(key: str) -> str:
+        parent.setdefault(key, key)
+        root = key
+        while parent[root] != root:
+            root = parent[root]
+        while parent[key] != root:
+            parent[key], key = root, parent[key]
+        return root
+
+    def union(left: str, right: str) -> None:
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for definition in catalog.groups.all():
+        group_key = f"group:{definition.stable_key}"
+        for membership in definition.memberships.all():
+            union(group_key, f"code:{membership.source_code}")
+
+    by_root: dict[str, set[str]] = defaultdict(set)
+    for key in parent:
+        by_root[find(key)].add(key)
+    components: list[tuple[list[str], list[str]]] = []
+    for members in by_root.values():
+        group_keys = sorted(
+            key.removeprefix("group:")
+            for key in members
+            if key.startswith("group:")
+        )
+        codes = sorted(
+            key.removeprefix("code:")
+            for key in members
+            if key.startswith("code:")
+        )
+        components.append((group_keys, codes))
+    return sorted(components, key=lambda item: (item[0][0] if item[0] else "", item[1]))
+
+
+def _component_title(
+    group_keys: list[str],
+    codes: list[str],
+    group_rows: dict[str, OccupancyGroupMeasurement],
+    alias_by_code: dict[str, str],
+) -> str:
+    """Deterministic unit title.
+
+    One group uses its official ``display_name``; several groups sharing one
+    source use the clean source alias; every other component uses the sorted
+    official names joined deterministically.
+    """
+    if len(group_keys) == 1:
+        return group_rows[group_keys[0]].display_name
+    if len(codes) == 1:
+        return alias_by_code[codes[0]]
+    return " + ".join(
+        sorted(group_rows[key].display_name for key in group_keys)
+    )
+
+
+def _legacy_sector_summary(
+    *,
+    code: str,
+    alias: str,
+    raw_name: str | None,
+    sector: _PhysicalSectorRow | None,
+) -> _UnitSourceSummary:
+    """Wrap one v3-normalized physical sector as a unit source summary."""
+    observed_name = sector.source_name if sector is not None else None
+    positions_by_status = (
+        dict(sector.positions_by_status)
+        if sector is not None
+        else {status: 0 for status in _STATUS_KEYS}
+    )
+    positions: list[_UnitPositionRow] = []
+    conflicts: list[_UnitConflictCase] = []
+    if sector is not None:
+        for row in sector.positions:
+            if row.conflict:
+                conflicts.append(
+                    _UnitConflictCase(
+                        leito=row.leito,
+                        conflict_type="legacy",
+                        reason=_CONFLICT_REASONS["legacy"],
+                        counted=False,
+                        alternatives=[],
+                    )
+                )
+            else:
+                positions.append(
+                    _UnitPositionRow(
+                        leito=row.leito,
+                        status=row.status,
+                        status_label=row.status_label,
+                        nome=row.nome,
+                        prontuario=row.prontuario,
+                        patient_id=row.patient_id,
+                    )
+                )
+    return _UnitSourceSummary(
+        source_code=code,
+        alias=alias,
+        raw_name=raw_name,
+        observed_name=observed_name,
+        observed_mismatch=bool(
+            observed_name
+            and observed_name != alias
+            and (raw_name is None or observed_name != raw_name)
+        ),
+        positions_by_status=positions_by_status,
+        positions=positions,
+        conflicts=conflicts,
+        duplicate_extra_rows=sector.duplicate_extra_rows if sector is not None else 0,
+        unidentified_rows=sector.unidentified_rows if sector is not None else 0,
+        unidentified_occupied_rows=0,
+        unidentified_cases=[],
+    )
+
+
+def _legacy_units(
+    measurement: OccupancyMeasurement | None,
+    rows: tuple[_ObservedRow, ...],
+    patient_map: dict[str, int],
+) -> list[_UnitRow]:
+    """Build the unified units for v1/v2/v3 or for a runless census."""
+    sectors = _physical_sector_rows(rows, patient_map)
+    sector_by_source = {
+        _normalize_identity(sector.source_code): sector for sector in sectors
+    }
+
+    if measurement is None:
+        return [
+            _UnitRow(
+                title=sector.source_name,
+                official_rows=[],
+                sources=[
+                    _legacy_sector_summary(
+                        code=sector.source_code,
+                        alias=sector.source_name,
+                        raw_name=None,
+                        sector=sector,
+                    )
+                ],
+            )
+            for sector in sectors
+        ]
+
+    group_rows = {
+        group.stable_key: group for group in measurement.groups.all()
+    }
+    definitions = {
+        group.stable_key: group
+        for group in measurement.catalog.groups.all()
+    }
+    membership_by_code: dict[str, CapacitySectorMembership] = {}
+    for definition in definitions.values():
+        for membership in definition.memberships.all():
+            membership_by_code[membership.source_code] = membership
+
+    units: list[_UnitRow] = []
+    alias_by_code = {
+        code: _source_alias(membership)[0]
+        for code, membership in membership_by_code.items()
+    }
+    for group_keys, codes in _catalog_components(measurement.catalog):
+        units.append(
+            _UnitRow(
+                title=_component_title(
+                    group_keys, codes, group_rows, alias_by_code
+                ),
+                official_rows=[
+                    _unit_official_row(group_rows[key])
+                    for key in group_keys
+                    if key in group_rows
+                ],
+                sources=[
+                    _legacy_sector_summary(
+                        code=code,
+                        alias=alias_by_code[code],
+                        raw_name=(
+                            membership_by_code[code].configured_source_name
+                            if membership_by_code[code].source_display_name
+                            else None
+                        ),
+                        sector=sector_by_source.get(
+                            _normalize_identity(code)
+                        ),
+                    )
+                    for code in codes
+                ],
+            )
+        )
+
+    membership_codes = {_normalize_identity(code) for code in membership_by_code}
+    unmapped_units: list[_UnitRow] = []
+    for sector in sorted(
+        sectors, key=lambda sector: sector.source_name
+    ):
+        if (
+            sector.source_code
+            and _normalize_identity(sector.source_code) in membership_codes
+        ):
+            continue
+        unmapped_units.append(
+            _UnitRow(
+                title=sector.source_name,
+                official_rows=[],
+                sources=[
+                    _legacy_sector_summary(
+                        code=sector.source_code,
+                        alias=sector.source_name,
+                        raw_name=None,
+                        sector=sector,
+                    )
+                ],
+                is_unmapped=True,
+            )
+        )
+    units.extend(unmapped_units)
+    return sorted(units, key=lambda unit: unit.title)
+
+
+def _v4_partitioned_codes(catalog: CapacityCatalogVersion) -> set[str]:
+    """Source codes partitioned by age band in the exact catalog."""
+    return {
+        membership.source_code
+        for group in catalog.groups.all()
+        for membership in group.memberships.all()
+        if membership.age_selector != CapacityMembershipSelector.ALL
+    }
+
+
+def _conflict_alternatives(
+    key_rows: list[_ObservedRow],
+    patient_map: dict[str, int],
+) -> list[_UnitAlternative]:
+    """Unique signatures of one conflict, without any winning candidate."""
+    signature_rows: dict[tuple[object, ...], list[_ObservedRow]] = (
+        defaultdict(list)
+    )
+    for row in key_rows:
+        signature_rows[_row_signature(row)].append(row)
+    alternatives: list[_UnitAlternative] = []
+    for same_rows in signature_rows.values():
+        representative = same_rows[0]
+        occupied = representative.status == BedStatus.OCCUPIED
+        alternatives.append(
+            _UnitAlternative(
+                status=representative.status,
+                status_label=BedStatus(representative.status).label,
+                nome=representative.patient_name if occupied else "",
+                prontuario=representative.record if occupied else "",
+                patient_id=(
+                    patient_map.get(representative.record)
+                    if occupied
+                    else None
+                ),
+                age_label=_AGE_BAND_LABELS.get(
+                    representative.age_band, representative.age_band
+                ),
+                occurrence_count=len(same_rows),
+            )
+        )
+    return sorted(
+        alternatives, key=lambda alt: (alt.status, alt.prontuario, alt.nome)
+    )
+
+
+def _unit_position_row_v4(
+    outcome: _V4KeyOutcome,
+    key_rows: list[_ObservedRow],
+    patient_map: dict[str, int],
+) -> _UnitPositionRow:
+    """One counted v4 physical position without an authoritative patient."""
+    position = outcome.position
+    assert position is not None
+    if outcome.conflict == "occupant":
+        return _UnitPositionRow(
+            leito=key_rows[0].bed,
+            status=position.status,
+            status_label=BedStatus(position.status).label,
+            nome="",
+            prontuario="",
+            patient_id=None,
+            note="Ocupante não autoritativo — posição computada uma vez",
+        )
+    note: str | None = None
+    if outcome.unknown_partition:
+        note = "Faixa etária desconhecida — não atribuída a grupo etário oficial"
+    elif outcome.age_metadata_drift:
+        note = (
+            "Divergência de faixa etária em código não particionado — "
+            "ocupação mantida"
+        )
+    primary = key_rows[0]
+    occupied = primary.status == BedStatus.OCCUPIED
+    return _UnitPositionRow(
+        leito=primary.bed,
+        status=primary.status,
+        status_label=BedStatus(primary.status).label,
+        nome=primary.patient_name if occupied else "",
+        prontuario=primary.record if occupied else "",
+        patient_id=patient_map.get(primary.record) if occupied else None,
+        note=note,
+    )
+
+
+def _unit_unidentified_case(
+    row: _ObservedRow,
+    patient_map: dict[str, int],
+) -> _UnitUnidentifiedCase:
+    """One occupied row without bed identity, kept in presentation memory."""
+    return _UnitUnidentifiedCase(
+        status=row.status,
+        status_label=BedStatus(row.status).label,
+        nome=row.patient_name if row.status == BedStatus.OCCUPIED else "",
+        prontuario=row.record if row.status == BedStatus.OCCUPIED else "",
+        patient_id=(
+            patient_map.get(row.record)
+            if row.status == BedStatus.OCCUPIED
+            else None
+        ),
+    )
+
+
+def _v4_source_summary(
+    *,
+    code: str,
+    code_rows: list[_ObservedRow],
+    partitioned: bool,
+    membership: CapacitySectorMembership | None,
+    patient_map: dict[str, int],
+) -> _UnitSourceSummary:
+    """Build one v4 source block with positions, conflicts and no-bed rows."""
+    observed_names = sorted({row.name for row in code_rows if row.name})
+    observed_name = observed_names[0] if observed_names else None
+    if membership is not None:
+        alias, raw_name = _source_alias(membership)
+    else:
+        alias = observed_name or code or "Setor sem código"
+        raw_name = None
+
+    positions_by_status = {status: 0 for status in _STATUS_KEYS}
+    positions: list[_UnitPositionRow] = []
+    conflicts: list[_UnitConflictCase] = []
+    duplicate_extra_rows = 0
+    unidentified_rows = 0
+    unidentified_occupied_rows = 0
+    unidentified_cases: list[_UnitUnidentifiedCase] = []
+
+    by_bed: dict[str, list[_ObservedRow]] = defaultdict(list)
+    for row in code_rows:
+        bed = _normalize_identity(row.bed)
+        if not bed:
+            unidentified_rows += 1
+            if row.status == BedStatus.OCCUPIED:
+                unidentified_occupied_rows += 1
+                unidentified_cases.append(_unit_unidentified_case(row, patient_map))
+            continue
+        by_bed[bed].append(row)
+
+    for bed in sorted(by_bed):
+        key_rows = by_bed[bed]
+        outcome = _classify_key_rows_v4(key_rows, partitioned=partitioned)
+        duplicate_extra_rows += outcome.duplicate_extra_rows
+        if outcome.position is not None:
+            positions_by_status[outcome.position.status] += 1
+            positions.append(
+                _unit_position_row_v4(outcome, key_rows, patient_map)
+            )
+        if outcome.conflict:
+            conflicts.append(
+                _UnitConflictCase(
+                    leito=key_rows[0].bed,
+                    conflict_type=outcome.conflict,
+                    reason=_CONFLICT_REASONS[outcome.conflict],
+                    counted=outcome.conflict == "occupant",
+                    alternatives=_conflict_alternatives(key_rows, patient_map),
+                )
+            )
+
+    return _UnitSourceSummary(
+        source_code=code,
+        alias=alias,
+        raw_name=raw_name,
+        observed_name=observed_name,
+        observed_mismatch=bool(
+            observed_name
+            and observed_name != alias
+            and (raw_name is None or observed_name != raw_name)
+        ),
+        positions_by_status=positions_by_status,
+        positions=positions,
+        conflicts=conflicts,
+        duplicate_extra_rows=duplicate_extra_rows,
+        unidentified_rows=unidentified_rows,
+        unidentified_occupied_rows=unidentified_occupied_rows,
+        unidentified_cases=unidentified_cases,
+    )
+
+
+def _v4_units(
+    measurement: OccupancyMeasurement,
+    rows: tuple[_ObservedRow, ...],
+    patient_map: dict[str, int],
+    partitioned_codes: set[str],
+) -> list[_UnitRow]:
+    """Build the unified units for an occupancy-v4 exact measurement."""
+    group_rows = {
+        group.stable_key: group for group in measurement.groups.all()
+    }
+    definitions = {
+        group.stable_key: group
+        for group in measurement.catalog.groups.all()
+    }
+    membership_by_code: dict[str, CapacitySectorMembership] = {}
+    for definition in definitions.values():
+        for membership in definition.memberships.all():
+            membership_by_code[membership.source_code] = membership
+
+    rows_by_code: dict[str, list[_ObservedRow]] = defaultdict(list)
+    rows_by_name: dict[str, list[_ObservedRow]] = defaultdict(list)
+    for row in rows:
+        if row.code:
+            rows_by_code[row.code].append(row)
+        else:
+            rows_by_name[_normalize_identity(row.name)].append(row)
+
+    units: list[_UnitRow] = []
+    alias_by_code = {
+        code: _source_alias(membership)[0]
+        for code, membership in membership_by_code.items()
+    }
+    for group_keys, codes in _catalog_components(measurement.catalog):
+        units.append(
+            _UnitRow(
+                title=_component_title(
+                    group_keys, codes, group_rows, alias_by_code
+                ),
+                official_rows=[
+                    _unit_official_row(group_rows[key])
+                    for key in group_keys
+                    if key in group_rows
+                ],
+                sources=[
+                    _v4_source_summary(
+                        code=code,
+                        code_rows=rows_by_code.get(code, []),
+                        partitioned=code in partitioned_codes,
+                        membership=membership_by_code[code],
+                        patient_map=patient_map,
+                    )
+                    for code in codes
+                ],
+            )
+        )
+
+    membership_codes = set(membership_by_code)
+    for code in sorted(set(rows_by_code) - membership_codes):
+        units.append(
+            _UnitRow(
+                title=_v4_unmapped_title(rows_by_code[code], code),
+                official_rows=[],
+                sources=[
+                    _v4_source_summary(
+                        code=code,
+                        code_rows=rows_by_code[code],
+                        partitioned=False,
+                        membership=None,
+                        patient_map=patient_map,
+                    )
+                ],
+                is_unmapped=True,
+            )
+        )
+    for name in sorted(set(rows_by_name)):
+        units.append(
+            _UnitRow(
+                title=name,
+                official_rows=[],
+                sources=[
+                    _v4_source_summary(
+                        code="",
+                        code_rows=rows_by_name[name],
+                        partitioned=False,
+                        membership=None,
+                        patient_map=patient_map,
+                    )
+                ],
+                is_unmapped=True,
+            )
+        )
+    return sorted(units, key=lambda unit: unit.title)
+
+
+def _v4_unmapped_title(
+    code_rows: list[_ObservedRow], fallback: str
+) -> str:
+    """Deterministic title for an unmapped source: first observed name."""
+    observed_names = sorted({row.name for row in code_rows if row.name})
+    return observed_names[0] if observed_names else fallback
+
+
+def build_units_presentation(
+    *,
+    measurement: OccupancyMeasurement | None,
+    snapshots: Iterable[CensusSnapshot],
+    patient_map: dict[str, int] | None = None,
+) -> _UnitsPresentation:
+    """Build the unified ``Setores e posições`` list and physical snapshot.
+
+    For ``occupancy-v4`` the per-source positions reuse the v4 key
+    classification of S1 (``_classify_key_rows_v4``) so every physical
+    position appears once and occupant conflicts count one occupied position
+    without a winner; status/age conflicts stay cases without a counted
+    position. For v1/v2/v3 and for a runless census the v3 normalization
+    contract is preserved. The physical aggregate mirrors the same pass so
+    the cards and the unit list never disagree.
+    """
+    rows = tuple(_observed_row_from_snapshot(bed) for bed in snapshots)
+    patient_map = patient_map or {}
+    if measurement is None or measurement.algorithm_version != ALGORITHM_VERSION_V4:
+        _positions, diagnostics = _normalize_positions(rows)
+        physical = _PhysicalPresentation(
+            positions_by_status=dict(diagnostics.positions_by_status),
+            conflict_positions=diagnostics.conflict_positions,
+            duplicate_extra_rows=diagnostics.duplicate_extra_rows,
+            duplicate_occupied_rows=diagnostics.duplicate_occupied_rows,
+            unidentified_rows=diagnostics.unidentified_rows,
+            unidentified_occupied_rows=diagnostics.unidentified_occupied_rows,
+            sectors=_physical_sector_rows(rows, patient_map),
+        )
+        return _UnitsPresentation(
+            units=_legacy_units(measurement, rows, patient_map),
+            physical=physical,
+        )
+
+    partitioned_codes = _v4_partitioned_codes(measurement.catalog)
+    v4_positions, v4_diagnostics = _normalize_positions_v4(rows, partitioned_codes)
+    physical = _PhysicalPresentation(
+        positions_by_status=dict(v4_diagnostics.positions_by_status),
+        conflict_positions=(
+            v4_diagnostics.occupant_conflict_positions
+            + v4_diagnostics.status_conflict_positions
+            + v4_diagnostics.age_conflict_positions
+        ),
+        duplicate_extra_rows=v4_diagnostics.duplicate_extra_rows,
+        duplicate_occupied_rows=v4_diagnostics.duplicate_occupied_extra_rows,
+        unidentified_rows=v4_diagnostics.unidentified_rows,
+        unidentified_occupied_rows=v4_diagnostics.unidentified_occupied_rows,
+        sectors=[],
+    )
+    return _UnitsPresentation(
+        units=_v4_units(measurement, rows, patient_map, partitioned_codes),
+        physical=physical,
     )

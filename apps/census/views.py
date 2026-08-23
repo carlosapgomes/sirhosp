@@ -11,8 +11,9 @@ from django.shortcuts import render
 from apps.census.flow_service import compute_hospital_flow, list_sectors
 from apps.census.models import CensusSnapshot
 from apps.census.occupancy import (
+    ALGORITHM_VERSION_V4,
     build_official_group_rows,
-    build_physical_presentation,
+    build_units_presentation,
     resolve_exact_measurement,
 )
 from apps.patients.models import Patient
@@ -103,11 +104,14 @@ def hospital_flow_view(request):
 def bed_status_view(request):
     """Display bed occupancy status from the most recent census snapshot.
 
-    Two realities are always presented side by side: the official capacity
-    and occupancy section (persisted exact-run measurement only) and the
-    physical snapshot registered in the legacy system (same v3 normalization
-    contract, one unambiguous position per bed). No official value is
-    recalculated here and no older measurement is ever reused as current.
+    Two aggregate realities are always presented side by side: the official
+    capacity and occupancy section (persisted exact-run measurement only)
+    and the physical snapshot registered in the system of origin. Exactly one
+    detailed list ``Setores e posições`` follows, built from connected
+    components of the group<->code graph of the exact catalog; every physical
+    position appears once and v4 quality cases stay visible to every
+    authenticated user. No official value is recalculated here and no older
+    measurement is ever reused as current.
     """
     latest_captured = CensusSnapshot.objects.aggregate(
         latest=Max("captured_at")
@@ -141,11 +145,11 @@ def bed_status_view(request):
         if status in totals:
             totals[status] = row["count"]
 
-    # Official occupancy statistics (SCOH-S4 + SOPBR-S3): the latest census is
-    # selected exactly as before, and statistics are only presented when every
-    # row of that set identifies one non-null ingestion run and that exact run
-    # owns one persisted measurement. Older measurements, current-catalog
-    # calculations and raw percentage inference are never used here.
+    # Official occupancy statistics: the latest census is selected exactly as
+    # before, and statistics are only presented when every row of that set
+    # identifies one non-null ingestion run and that exact run owns one
+    # persisted measurement. Older measurements, current-catalog calculations
+    # and raw percentage inference are never used here.
     measurement = resolve_exact_measurement(snapshots)
 
     # Look up internal Patient IDs for direct linking to admission_list.
@@ -157,19 +161,28 @@ def bed_status_view(request):
             for p in Patient.objects.filter(patient_source_key__in=prontuarios)
         }
 
+    presentation = build_units_presentation(
+        measurement=measurement,
+        snapshots=bed_details,
+        patient_map=patient_map,
+    )
+
     context = {
         "page_title": "Leitos",
         "captured_at": latest_captured,
         "totals": totals,
         "measurement": measurement,
+        "physical": presentation.physical,
+        "units": presentation.units,
         "measured_groups": [],
-        "physical": build_physical_presentation(
-            snapshots=bed_details,
-            patient_map=patient_map,
-        ),
     }
-
-    if measurement is not None:
+    if (
+        measurement is not None
+        and measurement.algorithm_version != ALGORITHM_VERSION_V4
+    ):
+        # v1-v3 keep the historical official group rows in the context;
+        # the template renders only the unified unit list and never the raw
+        # ``beds`` of the official cards.
         context["measured_groups"] = build_official_group_rows(
             measurement=measurement,
             snapshots=bed_details,

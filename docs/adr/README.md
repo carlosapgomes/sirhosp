@@ -7,3 +7,4 @@
 - [ADR-0003 — Catálogo temporal de capacidade e materialização imutável de ocupação](ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel.md)
 - [ADR-0004 — Correção da lotação oficial: CO fora da taxa e partição etária da 3A](ADR-0004-correcao-co-e-particionamento-etario-3a.md)
 - [ADR-0005 — Duas realidades em /beds: capacidade oficial e posições do legado](ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado.md)
+- [ADR-0006 — Ocupação v4 acionável: conflitos tipados, elegibilidade com ressalvas e lista única em /beds](ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica.md)

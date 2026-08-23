@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from django.contrib.auth import get_user_model
 from django.urls import reverse
 from django.utils import timezone
 
@@ -586,7 +587,7 @@ class TestBedStatusOfficialOccupancy:
         response = self._render(admin_client)
         content = response.content.decode()
 
-        assert "Posições registradas no sistema legado" in content
+        assert "Posições registradas no sistema de origem" in content
 
     def _initial_catalog_groups(self):
         document = json.loads(INITIAL_CATALOG.read_text(encoding="utf-8"))
@@ -1111,6 +1112,7 @@ class TestBedStatusCorrectedPresentation:
         rows = response.context["measured_groups"]
         groups = {row.stable_key: row for row in rows}
         content = response.content.decode()
+        units = response.context["units"]
         adult = groups["OBST-3A-ADULTO"]
         auxiliary = next(
             (row for row in rows if "classificação etária" in row.display_name),
@@ -1118,7 +1120,13 @@ class TestBedStatusCorrectedPresentation:
         )
 
         assert auxiliary is not None
-        assert "classificação etária" in content
+        assert len(units) == 1
+        assert units[0].sources[0].source_code == "654"
+        assert content.count("BED-654-000") == 1
+        assert content.count("BED-654-001") == 1
+        assert content.count("BED-654-002") == 1
+        assert content.count("BED-654-003") == 1
+        assert content.count("BED-654-004") == 1
         assert [bed["prontuario"] for bed in adult.beds] == ["ADULT-1"]
         assert groups["OBST-3A-INFANTIL"].beds == []
         assert len(auxiliary.beds) == 4
@@ -1598,7 +1606,7 @@ class TestBedStatusTwoRealities:
         self._materialize(run.pk)
         content = self._render(admin_client).content.decode()
         assert "Capacidade oficial e ocupação" in content
-        assert "Posições registradas no sistema legado" in content
+        assert "Posições registradas no sistema de origem" in content
 
     def test_official_cards_use_v3_labels_and_persisted_values(self, admin_client):
         today = timezone.localdate()
@@ -1633,7 +1641,7 @@ class TestBedStatusTwoRealities:
         self._materialize(run.pk)
         content = self._render(admin_client).content.decode()
         assert "saldo calculado por setor" in content.lower()
-        assert "Vagos no legado" in content
+        assert "Vagos no sistema de origem" in content
 
     def test_duplicate_renders_one_position_and_aggregate_diagnostic(self, admin_client):
         today = timezone.localdate()
@@ -1681,7 +1689,7 @@ class TestBedStatusTwoRealities:
         measurement = response.context["measurement"]
         assert physical.conflict_positions == 1
         assert measurement.position_partial is True
-        assert "Conflito no legado" in content
+        assert "Conflito no sistema de origem" in content
         assert content.count("BED-100-000") == 1
         assert "Synthetic Patient SYN-A" not in content
         assert "Synthetic Patient SYN-B" not in content
@@ -1825,7 +1833,7 @@ class TestBedStatusTwoRealities:
         )
         assert bridge == rec["raw_occupied_rows"]
         start = content.index("Ponte de reconciliação")
-        end = content.index("Posições registradas no sistema legado")
+        end = content.index("Posições registradas no sistema de origem")
         bridge_html = content[start:end]
         for marker in ("SYN-", "BED-100", "Synthetic Patient", "Sector A"):
             assert marker not in bridge_html
@@ -1954,7 +1962,7 @@ class TestBedStatusTwoRealities:
         )
         content = self._render(admin_client).content.decode()
         assert "Pendente" in content
-        assert "Posições registradas no sistema legado" in content
+        assert "Posições registradas no sistema de origem" in content
         assert "UTI A" in content
         assert "PACIENTE UM" in content
 
@@ -1962,3 +1970,996 @@ class TestBedStatusTwoRealities:
         response = client.get(reverse("census:bed_status"))
         assert response.status_code == 302
         assert "/login/" in response.url
+
+
+@pytest.mark.django_db
+class TestBedStatusV4ActionablePresentation:
+    """MOQA-S3: v4 exact-run page with two summaries and one unit list.
+
+    A synthetic schema 3.0 catalog declares ``occupancy-v4`` and clean source
+    aliases; the page must render two aggregate summaries plus exactly one
+    detailed ``Setores e posições`` list whose units are connected components
+    of the group<->code graph, with every physical position once, typed
+    conflicts without a winner and quality cases visible to any authenticated
+    user. No official value is recalculated here and no PHI is expected
+    outside the authenticated unit detail.
+    """
+
+    @staticmethod
+    def _at(local_date, hour=12):
+        return timezone.make_aware(
+            datetime.combine(local_date, time(hour=hour)),
+            timezone.get_current_timezone(),
+        )
+
+    @staticmethod
+    def _run():
+        return IngestionRun.objects.create(
+            intent="census_extraction", status="succeeded"
+        )
+
+    @staticmethod
+    def _snapshot(
+        run,
+        *,
+        captured_at,
+        code,
+        sector,
+        status=BedStatus.EMPTY,
+        index=0,
+        patient_marker="",
+        age_band=None,
+        bed=None,
+    ):
+        return CensusSnapshot.objects.create(
+            ingestion_run=run,
+            captured_at=captured_at,
+            setor_codigo=code,
+            setor=sector,
+            leito=bed if bed is not None else f"BED-{code or 'BLANK'}-{index:03d}",
+            prontuario=patient_marker if status == BedStatus.OCCUPIED else "",
+            nome=(
+                f"Synthetic Patient {patient_marker}"
+                if status == BedStatus.OCCUPIED
+                else status.upper()
+            ),
+            especialidade="SYN",
+            bed_status=status,
+            age_band=(
+                age_band
+                if age_band is not None
+                else ("not_applicable" if status != BedStatus.OCCUPIED else "unknown")
+            ),
+        )
+
+    @staticmethod
+    def _v4_catalog(effective_from, groups):
+        catalog = CapacityCatalogVersion.objects.create(
+            effective_from=effective_from,
+            source_reference="synthetic v4 bed-status test catalog",
+            source_sha256=(f"{effective_from:%Y%m%d}" + "f" * 64)[:64],
+            schema_version="3.0",
+            algorithm_version="occupancy-v4",
+        )
+        for raw_group in groups:
+            group = CapacityGroupDefinition.objects.create(
+                catalog=catalog,
+                stable_key=raw_group["stable_key"],
+                display_name=raw_group.get("display_name", raw_group["stable_key"]),
+                official_capacity=raw_group.get("capacity"),
+                calculation_policy=raw_group["policy"],
+            )
+            for member in raw_group["members"]:
+                selector = member[3] if len(member) > 3 else "all"
+                CapacitySectorMembership.objects.create(
+                    catalog=catalog,
+                    group=group,
+                    source_code=member[0],
+                    configured_source_name=member[1],
+                    source_display_name=member[2],
+                    age_selector=selector,
+                )
+        return catalog
+
+    @staticmethod
+    def _standard_group(
+        *,
+        key="A",
+        capacity=10,
+        members=(("100", "Sector A", "Setor A", "all"),),
+    ):
+        return {
+            "stable_key": key,
+            "display_name": f"Group {key}",
+            "capacity": capacity,
+            "policy": CalculationPolicy.STANDARD,
+            "members": members,
+        }
+
+    @staticmethod
+    def _partitioned_3a():
+        return [
+            {
+                "stable_key": "OBST-3A-ADULTO",
+                "display_name": "Enfermaria 3A – Adulto",
+                "capacity": 32,
+                "policy": CalculationPolicy.STANDARD,
+                "members": (
+                    (
+                        "654",
+                        "3 6 - 3A - OBSTETRÍCIA CLÍNICA - HGRS",
+                        "Enfermaria 3A Obstetrícia Clínica",
+                        "age_12_or_over",
+                    ),
+                ),
+            },
+            {
+                "stable_key": "OBST-3A-INFANTIL",
+                "display_name": "Enfermaria 3A – Infantil",
+                "capacity": 16,
+                "policy": CalculationPolicy.STANDARD,
+                "members": (
+                    (
+                        "654",
+                        "3 6 - 3A - OBSTETRÍCIA CLÍNICA - HGRS",
+                        "Enfermaria 3A Obstetrícia Clínica",
+                        "under_12",
+                    ),
+                ),
+            },
+        ]
+
+    def _materialize(self, run_id):
+        from apps.census.occupancy import materialize_occupancy_measurement
+
+        return materialize_occupancy_measurement(run_id=run_id)
+
+    def _render(self, admin_client):
+        return admin_client.get(reverse("census:bed_status"))
+
+    # ---- R3: two aggregate summaries and exactly one detailed list ----
+
+    def test_two_aggregate_heads_and_one_detailed_section(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-001",
+            age_band="age_12_or_over",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "Capacidade oficial e ocupação" in content
+        assert "Posições registradas no sistema de origem" in content
+        assert "Setores e posições" in content
+
+    def test_no_tabs_and_no_second_long_list(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-001",
+            age_band="age_12_or_over",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert content.count("Setores e posições") == 1
+        assert 'data-bs-toggle="tab"' not in content
+        assert "group-detail-" not in content
+        assert "sector-detail-" not in content
+
+    # ---- R6: terminology ----
+
+    def test_origin_terminology_replaces_legacy(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-A",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="REC-B",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "sistema de origem" in content
+        assert "Conflitos no sistema de origem" in content
+        assert "legado" not in content
+
+    # ---- R2: clean alias primary and raw name subordinate ----
+
+    def test_clean_alias_primary_and_raw_subordinate(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(
+            today,
+            [
+                {
+                    "stable_key": "GASTRO",
+                    "display_name": "Enfermaria Gastroenterologia",
+                    "capacity": 12,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (
+                        (
+                            "2702",
+                            "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS",
+                            "Enfermaria Gastroenterologia",
+                            "all",
+                        ),
+                    ),
+                },
+            ],
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="2702",
+            sector="0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-2702",
+            age_band="not_applicable",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        units = response.context["units"]
+        assert len(units) == 1
+        assert units[0].sources[0].alias == "Enfermaria Gastroenterologia"
+        assert units[0].sources[0].raw_name == (
+            "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS"
+        )
+        assert "Enfermaria Gastroenterologia" in content
+        assert "Nome no sistema de origem" in content
+        assert "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS" in content
+        assert content.index("Enfermaria Gastroenterologia") < content.index(
+            "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS"
+        )
+
+    def test_legacy_catalog_without_alias_uses_configured_name_fallback(self, admin_client):
+        today = timezone.localdate()
+        catalog = CapacityCatalogVersion.objects.create(
+            effective_from=today,
+            source_reference="synthetic v3 alias-fallback bed-status test catalog",
+            source_sha256=(f"{today:%Y%m%d}" + "a9" * 32)[:64],
+            schema_version="2.0",
+            algorithm_version="occupancy-v3",
+        )
+        group = CapacityGroupDefinition.objects.create(
+            catalog=catalog,
+            stable_key="A",
+            display_name="Group A",
+            official_capacity=10,
+            calculation_policy=CalculationPolicy.STANDARD,
+        )
+        CapacitySectorMembership.objects.create(
+            catalog=catalog,
+            group=group,
+            source_code="100",
+            configured_source_name="Sector Raw A",
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector Raw A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-A",
+            age_band="not_applicable",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        units = response.context["units"]
+        assert len(units) == 1
+        assert units[0].title == "Group A"
+        assert units[0].sources[0].alias == "Sector Raw A"
+        assert units[0].sources[0].raw_name is None
+        assert "Nome no sistema de origem" not in content
+
+    # ---- R1: connected-component graph units ----
+
+    def test_one_to_one_component_unit(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(
+            today,
+            [
+                {
+                    "stable_key": "GASTRO",
+                    "display_name": "Enfermaria Gastroenterologia",
+                    "capacity": 12,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (
+                        (
+                            "2702",
+                            "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS",
+                            "Enfermaria Gastroenterologia",
+                            "all",
+                        ),
+                    ),
+                },
+            ],
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="2702",
+            sector="0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS",
+            status=BedStatus.OCCUPIED,
+            patient_marker="SYN-2702",
+            age_band="not_applicable",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        units = response.context["units"]
+        assert len(units) == 1
+        unit = units[0]
+        assert unit.title == "Enfermaria Gastroenterologia"
+        assert [row.stable_key for row in unit.official_rows] == ["GASTRO"]
+        assert [source.source_code for source in unit.sources] == ["2702"]
+        assert len(unit.sources[0].positions) == 1
+        assert unit.sources[0].positions_by_status["occupied"] == 1
+
+    def test_cardio_shared_group_two_sources_capacity_once(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(
+            today,
+            [
+                {
+                    "stable_key": "ENF-2B-CARD",
+                    "display_name": "Enfermaria 2B Cardio",
+                    "capacity": 15,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (
+                        ("719", "0 N - CARDIOCLINICA", "Cardioclínica", "all"),
+                        (
+                            "2156",
+                            "2 7 - 2B - CARDIO - HGRS",
+                            "Enfermaria 2B Cardio",
+                            "all",
+                        ),
+                    ),
+                },
+            ],
+        )
+        run = self._run()
+        for index, code in enumerate(["719", "2156"]):
+            self._snapshot(
+                run,
+                captured_at=self._at(today),
+                code=code,
+                sector=f"Sector {code}",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"SYN-{code}",
+                age_band="not_applicable",
+            )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        units = response.context["units"]
+        assert len(units) == 1
+        unit = units[0]
+        assert unit.title == "Enfermaria 2B Cardio"
+        assert [source.source_code for source in unit.sources] == ["2156", "719"]
+        assert content.count("Capacidade: 15") == 1
+        assert "Cardioclínica" in content
+        assert "Enfermaria 2B Cardio" in content
+
+    def test_3a_two_groups_one_source_physical_once(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, self._partitioned_3a())
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="ADULT-1",
+            age_band="age_12_or_over",
+            bed="3A-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="CHILD-1",
+            age_band="under_12",
+            bed="3A-02",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        units = response.context["units"]
+        assert len(units) == 1
+        unit = units[0]
+        assert unit.title == "Enfermaria 3A Obstetrícia Clínica"
+        assert [row.stable_key for row in unit.official_rows] == [
+            "OBST-3A-ADULTO",
+            "OBST-3A-INFANTIL",
+        ]
+        assert [source.source_code for source in unit.sources] == ["654"]
+        assert content.count("3A-01") == 1
+        assert content.count("3A-02") == 1
+        assert content.count("Capacidade: 32") == 1
+        assert content.count("Capacidade: 16") == 1
+        assert "Enfermaria 3A – Adulto" in content
+        assert "Enfermaria 3A – Infantil" in content
+
+    def test_co_unrated_many_sources_with_clean_aliases(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(
+            today,
+            [
+                {
+                    "stable_key": "CO",
+                    "display_name": "Centro Obstétrico",
+                    "capacity": None,
+                    "policy": CalculationPolicy.UNRATED,
+                    "members": (
+                        ("20", "0 T - CENTRO OBSTETRICO (CO) - HGRS", "Centro Obstétrico", "all"),
+                        (
+                            "1110",
+                            "0 T - SALA DE OBSERVACAO GINECOLOGICA",
+                            "Observação Ginecológica",
+                            "all",
+                        ),
+                        (
+                            "1112",
+                            "0 T - SALA DE MEDICACAO - OBSERVACAO CO",
+                            "Sala de Medicação (CO)",
+                            "all",
+                        ),
+                        (
+                            "1114",
+                            "0 T - SALA DE ESTABILIZAÇÃO CO (RN)",
+                            "Estabilização RN (CO)",
+                            "all",
+                        ),
+                        (
+                            "1116",
+                            "0 T - INTERNAÇÃO CENTRO OBSTETRICO",
+                            "Internação Centro Obstétrico",
+                            "all",
+                        ),
+                    ),
+                },
+            ],
+        )
+        run = self._run()
+        codes = ("20", "1110", "1112", "1114", "1116")
+        for index, code in enumerate(codes):
+            self._snapshot(
+                run,
+                captured_at=self._at(today),
+                code=code,
+                sector=f"CO {code}",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"SYN-CO-{index:03d}",
+                age_band="not_applicable",
+            )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        units = response.context["units"]
+        assert len(units) == 1
+        unit = units[0]
+        assert unit.title == "Centro Obstétrico"
+        assert [source.source_code for source in unit.sources] == sorted(codes)
+        assert content.count("Capacidade não cadastrada") == 1
+        assert "Observação Ginecológica" in content
+        assert "Sala de Medicação (CO)" in content
+        assert "posição válida fora do escopo da taxa oficial" in content
+
+    def test_unmapped_source_gets_warning_unit(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="SYN-A",
+            age_band="not_applicable",
+        )
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="777",
+            sector="Setor Fantasma",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="SYN-777",
+            age_band="not_applicable",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        units = response.context["units"]
+        assert len(units) == 2
+        unit = next(unit for unit in units if unit.is_unmapped)
+        assert unit.title == "Setor Fantasma"
+        assert unit.official_rows == []
+        assert content.count("Capacidade: 10") == 1
+        assert "sem mapeamento no catálogo" in content
+        assert "Setor Fantasma" in content
+
+    # ---- R4: one physical position once ----
+
+    def test_exact_duplicate_renders_once_and_consolidated_label(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(2):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker="SYN-DUP",
+                age_band="age_12_or_over",
+                bed="BED-DUP-01",
+            )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        measurement = response.context["measurement"]
+        assert measurement.quality_warning is False
+        assert content.count("BED-DUP-01") == 1
+        assert "Linhas duplicadas consolidadas" in content
+        assert "posição contada uma vez" in content
+
+    # ---- R7: non-authoritative quality details for authenticated users ----
+
+    def test_occupant_conflict_counted_with_non_authoritative_alternatives(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-A",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="REC-B",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        measurement = response.context["measurement"]
+        units = response.context["units"]
+        source = units[0].sources[0]
+        assert measurement.quality_warning is True
+        assert measurement.occupied_for_rate == 1
+        assert len(source.positions) == 1
+        assert source.positions[0].note is not None
+        assert len(source.conflicts) == 1
+        conflict = source.conflicts[0]
+        assert conflict.conflict_type == "occupant"
+        assert conflict.counted is True
+        assert len(conflict.alternatives) == 2
+        assert content.count("registro divergente — não autoritativo") == 2
+        assert "Synthetic Patient REC-A" in content
+        assert "Synthetic Patient REC-B" in content
+
+    def test_status_conflict_shows_alternatives_without_winner(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-ST",
+            age_band="age_12_or_over",
+            bed="BED-ST-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.EMPTY,
+            index=1,
+            bed="BED-ST-01",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        measurement = response.context["measurement"]
+        units = response.context["units"]
+        source = units[0].sources[0]
+        assert measurement.occupied_for_rate == 0
+        assert source.positions == []
+        assert len(source.conflicts) == 1
+        conflict = source.conflicts[0]
+        assert conflict.conflict_type == "status"
+        assert conflict.counted is False
+        assert len(conflict.alternatives) == 2
+        assert "não computadas por status ambíguo" in content
+        assert "Synthetic Patient REC-ST" in content
+        assert "Ocupado" in content
+        assert "Vago" in content
+
+    def test_age_conflict_not_assigned_with_alternatives(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, self._partitioned_3a())
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="ADULT-X",
+            age_band="age_12_or_over",
+            bed="BED-AGE-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="CHILD-X",
+            age_band="under_12",
+            bed="BED-AGE-01",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        measurement = response.context["measurement"]
+        units = response.context["units"]
+        source = units[0].sources[0]
+        assert measurement.occupied_for_rate == 0
+        assert source.positions == []
+        assert len(source.conflicts) == 1
+        conflict = source.conflicts[0]
+        assert conflict.conflict_type == "age"
+        assert conflict.counted is False
+        assert len(conflict.alternatives) == 2
+        assert "não atribuída a grupo etário" in content
+        assert "Synthetic Patient ADULT-X" in content
+        assert "Synthetic Patient CHILD-X" in content
+        assert "12 anos ou mais" in content
+        assert "Menor de 12 anos" in content
+
+    def test_occupied_without_bed_actionable_not_position(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="NOBED-1",
+            age_band="age_12_or_over",
+            bed="",
+        )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        measurement = response.context["measurement"]
+        physical = response.context["physical"]
+        assert measurement.occupied_for_rate == 0
+        assert physical.unidentified_rows == 1
+        assert physical.unidentified_occupied_rows == 1
+        assert physical.positions_by_status["occupied"] == 0
+        assert "Linhas ocupadas sem posição" in content
+        assert "não computadas por ausência de posição" in content
+        assert "Synthetic Patient NOBED-1" in content
+
+    # ---- R5/R8: treatment and eligibility ----
+
+    def test_treatment_labels_and_out_of_rate_wording(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(
+            today,
+            [
+                self._standard_group(),
+                {
+                    "stable_key": "CO",
+                    "display_name": "Centro Obstétrico",
+                    "capacity": None,
+                    "policy": CalculationPolicy.UNRATED,
+                    "members": (
+                        ("20", "0 T - CENTRO OBSTETRICO (CO) - HGRS", "Centro Obstétrico", "all"),
+                    ),
+                },
+                {
+                    "stable_key": "PEND",
+                    "display_name": "Grupo Pendente",
+                    "capacity": 10,
+                    "policy": CalculationPolicy.LINKED_SLOTS_PENDING,
+                    "members": (
+                        ("900", "Sector Pending", "Setor Pendente", "all"),
+                    ),
+                },
+            ],
+        )
+        run = self._run()
+        for index, (code, sector) in enumerate(
+            [
+                ("100", "Sector A"),
+                ("20", "CO 20"),
+                ("900", "Sector Pending"),
+                ("777", "Setor Fantasma"),
+            ]
+        ):
+            self._snapshot(
+                run,
+                captured_at=self._at(today),
+                code=code,
+                sector=sector,
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"SYN-T{index:03d}",
+                age_band="not_applicable",
+            )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "Como as ocupações foram tratadas" in content
+        assert "posição válida fora do escopo da taxa oficial" in content
+        assert "sem mapeamento no catálogo" in content
+        assert "cálculo pendente" in content
+
+    def test_v4_warning_eligible_with_reservations_badge(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-A",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="REC-B",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "com ressalvas de qualidade" in content
+        assert "Ocupações consideradas" in content
+        assert "continua elegível" in content
+        assert "estatísticas diárias" in content
+        assert "(parcial)" not in content
+        assert "médias oficiais diárias" not in content
+
+    # ---- R9: authentication and exact-run ----
+
+    def test_non_staff_authenticated_user_sees_quality_details(self, client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-A",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="REC-B",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._materialize(run.pk)
+        user = get_user_model().objects.create_user(
+            username="medico", password="synthetic-password-1"
+        )
+        assert user.is_staff is False
+        client.force_login(user)
+        response = client.get(reverse("census:bed_status"))
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "Synthetic Patient REC-A" in content
+        assert "Synthetic Patient REC-B" in content
+        assert "registro divergente — não autoritativo" in content
+
+    def test_anonymous_redirected(self, client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="REC-A",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._materialize(run.pk)
+        response = client.get(reverse("census:bed_status"))
+        assert response.status_code == 302
+        assert "/login/" in response.url
+
+    def test_exact_run_pending_never_reuses_older_measurement(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(
+            today,
+            [
+                {
+                    "stable_key": "GASTRO",
+                    "display_name": "Enfermaria Gastroenterologia",
+                    "capacity": 12,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (
+                        (
+                            "2702",
+                            "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS",
+                            "Enfermaria Gastroenterologia",
+                            "all",
+                        ),
+                    ),
+                },
+            ],
+        )
+        old_run = self._run()
+        self._snapshot(
+            old_run,
+            captured_at=self._at(today, 8),
+            code="2702",
+            sector="0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="OLD-1",
+            age_band="not_applicable",
+        )
+        self._materialize(old_run.pk)
+
+        new_run = self._run()
+        self._snapshot(
+            new_run,
+            captured_at=self._at(today, 20),
+            code="2702",
+            sector="Setor B",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="NEW-1",
+            age_band="not_applicable",
+        )
+        response = self._render(admin_client)
+        content = response.content.decode()
+        assert "Pendente" in content
+        assert "Enfermaria Gastroenterologia" not in content
+        assert "Setor B" in content
+        assert "Synthetic Patient NEW-1" in content
+        assert "OLD-1" not in content
+
+    # ---- R5 privacy: aggregate bridge never nominal ----
+
+    def test_aggregate_bridge_never_exposes_nominal_markers(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-A",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="REC-B",
+            age_band="age_12_or_over",
+            bed="BED-CONF-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=2,
+            patient_marker="NOBED-1",
+            age_band="age_12_or_over",
+            bed="",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        start = content.index("Como as ocupações foram tratadas")
+        end = content.index("Setores e posições")
+        bridge_html = content[start:end]
+        for marker in ("SYN-", "BED-", "Synthetic Patient", "Sector A"):
+            assert marker not in bridge_html
