@@ -4,6 +4,9 @@ Evidências de releases e refatorações do SIRHOSP.
 
 ## Índice
 
+- [v0.1.0-rc.10 — Qualidade de ocupação acionável](v0.1.0-rc.10-upgrade.md) —
+  upgrade desde a RC9, migrations 0022–0023, conflitos tipados, aliases
+  temporais e lista única em `/beds`, sem ativação automática do catálogo v4.
 - [v0.1.0-rc.9 — Duas realidades de ocupação](v0.1.0-rc.9-upgrade.md) —
   upgrade desde a RC8, migration 0021, normalização física v3 e separação
   visual em `/beds`, com deploy sem ativação automática do catálogo v3.
