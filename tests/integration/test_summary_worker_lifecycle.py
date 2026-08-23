@@ -9,6 +9,7 @@ AdmissionSummaryVersion.
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
@@ -22,6 +23,40 @@ from apps.summaries.models import (
 )
 
 UTC = timezone.utc
+
+
+def _stub_llm_response() -> dict:
+    """Return a deterministic valid response without contacting a provider."""
+    return {
+        "estado_estruturado": {
+            "motivo_internacao": "synthetic reason",
+            "linha_do_tempo": [],
+            "problemas_ativos": [],
+            "problemas_resolvidos": [],
+            "procedimentos": [],
+            "antimicrobianos": [],
+            "exames_relevantes": [],
+            "intercorrencias": [],
+            "pendencias": [],
+            "riscos_eventos_adversos": [],
+            "situacao_atual": "synthetic stable state",
+        },
+        "resumo_markdown": "# Synthetic summary",
+        "mudancas_da_rodada": ["synthetic initial record"],
+        "incertezas": [],
+        "evidencias": [],
+        "alertas_consistencia": [],
+    }
+
+
+@pytest.fixture(autouse=True)
+def _mock_llm_gateway():
+    """Simulate the service boundary for every lifecycle integration test."""
+    with patch(
+        "apps.summaries.services.call_llm_gateway",
+        return_value=_stub_llm_response(),
+    ) as gateway:
+        yield gateway
 
 
 # ---------------------------------------------------------------------------
@@ -72,15 +107,26 @@ def _make_queued_run(admission=None, **overrides):
 class TestWorkerClaim:
     """Tests that the worker command claims runs atomically."""
 
-    def test_command_claims_queued_run(self):
-        """process_summary_runs picks up a queued run."""
+    def test_command_claims_queued_run(self, _mock_llm_gateway):
+        """process_summary_runs picks up a queued run through the stub."""
         run = _make_queued_run()
 
         call_command("process_summary_runs")
 
         run.refresh_from_db()
-        # After processing with stub gateway, should be succeeded
         assert run.status == "succeeded"
+        assert _mock_llm_gateway.called
+
+    def test_unmocked_llm_client_is_blocked_before_network(self):
+        """The global guard fails locally if a test bypasses the service stub."""
+        from apps.summaries.llm_gateway import call_llm_gateway
+
+        with pytest.raises(AssertionError, match="Unexpected external LLM client"):
+            call_llm_gateway(
+                estado_estruturado_anterior={},
+                resumo_markdown_anterior="",
+                novas_evolucoes=[],
+            )
 
     def test_select_for_update_skip_locked_used(self):
         """The command uses select_for_update(skip_locked=True) to claim."""
