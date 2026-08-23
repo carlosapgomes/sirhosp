@@ -54,6 +54,9 @@ MAX_SOURCE_CODE = _field_max_length(CapacitySectorMembership, "source_code")
 MAX_CONFIGURED_SOURCE_NAME = _field_max_length(
     CapacitySectorMembership, "configured_source_name"
 )
+MAX_SOURCE_DISPLAY_NAME = _field_max_length(
+    CapacitySectorMembership, "source_display_name"
+)
 MAX_ALGORITHM_VERSION = _field_max_length(
     CapacityCatalogVersion, "algorithm_version"
 )
@@ -63,12 +66,19 @@ MAX_ALGORITHM_VERSION = _field_max_length(
 LEGACY_SCHEMA_VERSIONS = frozenset({"1.0", "1.1"})
 # Primeira versão de schema que exige algoritmo declarado.
 SCHEMA_VERSION_WITH_ALGORITHM = "2.0"
+# Schema novo que, além do algoritmo, exige alias humano limpo por membership.
+SCHEMA_VERSION_WITH_ALIASES = "3.0"
+# Schemas que exigem contexto explícito de algoritmo suportado.
+SCHEMAS_REQUIRING_ALGORITHM = frozenset(
+    {SCHEMA_VERSION_WITH_ALGORITHM, SCHEMA_VERSION_WITH_ALIASES}
+)
 # Allowlist única: exatamente os algoritmos implementados em occupancy.py.
 ALLOWED_ALGORITHM_VERSIONS = frozenset(
     {
         occupancy.ALGORITHM_VERSION,
         occupancy.ALGORITHM_VERSION_V2,
         occupancy.ALGORITHM_VERSION_V3,
+        occupancy.ALGORITHM_VERSION_V4,
     }
 )
 
@@ -89,6 +99,7 @@ class CatalogConflictError(CatalogError):
 class MembershipSpec:
     source_code: str
     configured_source_name: str
+    source_display_name: str | None = None
     age_selector: str = CapacityMembershipSelector.ALL
 
 
@@ -141,6 +152,16 @@ class ValidatedCatalog:
         )
 
     @property
+    def aliased_membership_count(self) -> int:
+        """Memberships carrying a clean source alias (non-null)."""
+        return sum(
+            1
+            for group in self.groups
+            for membership in group.memberships
+            if membership.source_display_name
+        )
+
+    @property
     def capacity_covered_code_count(self) -> int:
         return len(
             {
@@ -189,6 +210,7 @@ class ActivationResult:
     known_capacity: int
     calculable_capacity: int
     algorithm_version: str | None = None
+    aliased_membership_count: int = 0
 
 
 _ALLOWED_POLICIES = frozenset(
@@ -220,9 +242,9 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
     (duplicate ``all``, ``all`` mixed with an age partition, incomplete,
     duplicated or single-group age partitions), invalid
     policy/capacity combinations, unsupported membership selectors,
-    missing required names/codes and fields that exceed the persisted
-    ``max_length``. Raises :class:`CatalogValidationError` on the first
-    problem.
+    missing required names/codes, divergent clean aliases on a partitioned
+    code and fields that exceed the persisted ``max_length``. Raises
+    :class:`CatalogValidationError` on the first problem.
     """
     schema_version = document.get("schema_version")
     source_reference = document.get("source_reference")
@@ -235,8 +257,9 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
     _reject_overlong(
         schema_version, "schema_version", MAX_SCHEMA_VERSION
     )
+    normalized_schema = schema_version.strip()
     algorithm_version = _validate_algorithm_context(
-        schema_version.strip(),
+        normalized_schema,
         document.get("occupancy_algorithm_version"),
     )
     if not isinstance(source_reference, str) or not source_reference.strip():
@@ -251,10 +274,12 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
 
     groups: list[GroupSpec] = []
     seen_stable_keys: set[str] = set()
-    memberships_by_code: dict[str, list[tuple[str, str]]] = {}
+    memberships_by_code: dict[str, list[tuple[str, str, str | None]]] = {}
 
     for index, raw_group in enumerate(raw_groups):
-        group = _validate_group(raw_group, index)
+        group = _validate_group(
+            raw_group, index, schema_version=normalized_schema
+        )
         if group.stable_key in seen_stable_keys:
             raise CatalogValidationError(
                 f"Chave estável duplicada: '{group.stable_key}'."
@@ -262,14 +287,18 @@ def validate_catalog_document(document: dict[str, Any]) -> ValidatedCatalog:
         seen_stable_keys.add(group.stable_key)
         for membership in group.memberships:
             memberships_by_code.setdefault(membership.source_code, []).append(
-                (group.stable_key, membership.age_selector)
+                (
+                    group.stable_key,
+                    membership.age_selector,
+                    membership.source_display_name,
+                )
             )
         groups.append(group)
 
     _validate_code_combinations(memberships_by_code)
 
     return ValidatedCatalog(
-        schema_version=schema_version.strip(),
+        schema_version=normalized_schema,
         algorithm_version=algorithm_version,
         source_reference=source_reference.strip(),
         groups=tuple(groups),
@@ -321,6 +350,7 @@ def activate_sector_capacity_catalog(
         known_capacity=validated.known_capacity,
         calculable_capacity=validated.calculable_capacity,
         algorithm_version=validated.algorithm_version,
+        aliased_membership_count=validated.aliased_membership_count,
     )
 
     if dry_run:
@@ -421,14 +451,15 @@ def _validate_algorithm_context(
     """Resolve o contexto explícito de algoritmo a partir do schema.
 
     Schemas históricos permanecem válidos sem algoritmo (despacho
-    estrutural v1/v2 preservado) e rejeitam o campo. O schema atual exige
+    estrutural v1/v2 preservado) e rejeitam o campo. Schemas atuais exigem
     um algoritmo da allowlist, declarado textualmente no documento: nunca
     inferido por nome de arquivo, hash, data ou estrutura de grupos.
     """
-    if schema_version == SCHEMA_VERSION_WITH_ALGORITHM:
+    if schema_version in SCHEMAS_REQUIRING_ALGORITHM:
         if not isinstance(raw_algorithm, str) or not raw_algorithm.strip():
             raise CatalogValidationError(
-                "Schema '2.0' exige 'occupancy_algorithm_version' não vazio."
+                f"Schema '{schema_version}' exige 'occupancy_algorithm_version' "
+                "não vazio."
             )
         algorithm = raw_algorithm.strip()
         _reject_overlong(
@@ -443,7 +474,7 @@ def _validate_algorithm_context(
         if raw_algorithm is not None:
             raise CatalogValidationError(
                 "Campo 'occupancy_algorithm_version' exige schema_version "
-                "'2.0'."
+                "'2.0' ou '3.0'."
             )
         return None
     raise CatalogValidationError(
@@ -451,7 +482,9 @@ def _validate_algorithm_context(
     )
 
 
-def _validate_group(raw_group: Any, index: int) -> GroupSpec:
+def _validate_group(
+    raw_group: Any, index: int, *, schema_version: str
+) -> GroupSpec:
     if not isinstance(raw_group, dict):
         raise CatalogValidationError(f"Grupo {index}: deve ser um objeto.")
     stable_key = raw_group.get("stable_key")
@@ -489,7 +522,10 @@ def _validate_group(raw_group: Any, index: int) -> GroupSpec:
     _validate_policy_capacity(policy, capacity_value, index)
 
     memberships = tuple(
-        _validate_membership(raw_code, index) for raw_code in raw_codes
+        _validate_membership(
+            raw_code, index, schema_version=schema_version
+        )
+        for raw_code in raw_codes
     )
     return GroupSpec(
         stable_key=stable_key.strip(),
@@ -529,17 +565,19 @@ def _validate_policy_capacity(
 
 
 def _validate_code_combinations(
-    memberships_by_code: dict[str, list[tuple[str, str]]],
+    memberships_by_code: dict[str, list[tuple[str, str, str | None]]],
 ) -> None:
     """Reject ambiguous memberships for any source code.
 
     A code maps either to exactly one ``all`` membership or to exactly
     two memberships, one ``under_12`` and one ``age_12_or_over``, in two
     different official groups. Any other combination is ambiguous and
-    rejected before persistence.
+    rejected before persistence. A partitioned code must also declare the
+    same clean alias in both memberships: one physical source keeps one
+    physical alias, never two presentation labels.
     """
     for code, entries in memberships_by_code.items():
-        selectors = [selector for _, selector in entries]
+        selectors = [selector for _, selector, _ in entries]
         if CapacityMembershipSelector.ALL in selectors:
             if len(entries) != 1:
                 raise CatalogValidationError(
@@ -558,21 +596,30 @@ def _validate_code_combinations(
                 f"Código fonte '{code}' exige exatamente uma associação "
                 "'all' ou o par completo 'under_12' + 'age_12_or_over'."
             )
-        group_keys = {group_key for group_key, _ in entries}
+        group_keys = {group_key for group_key, _, _ in entries}
         if len(group_keys) != 2:
             raise CatalogValidationError(
                 f"Código fonte '{code}' particionado deve pertencer a "
                 "grupos oficiais distintos."
             )
+        aliases = {alias for _, _, alias in entries}
+        if len(aliases) != 1:
+            raise CatalogValidationError(
+                f"Código fonte '{code}' exige o mesmo 'source_display_name' "
+                "nas duas associações da partição etária."
+            )
 
 
-def _validate_membership(raw_code: Any, group_index: int) -> MembershipSpec:
+def _validate_membership(
+    raw_code: Any, group_index: int, *, schema_version: str
+) -> MembershipSpec:
     if not isinstance(raw_code, dict):
         raise CatalogValidationError(
             f"Grupo {group_index}: membro deve ser um objeto."
         )
     source_code = raw_code.get("source_code")
     configured_name = raw_code.get("configured_source_name")
+    display_name = raw_code.get("source_display_name")
     age_selector = raw_code.get("age_selector")
     if age_selector is None:
         age_selector = CapacityMembershipSelector.ALL
@@ -600,9 +647,28 @@ def _validate_membership(raw_code: Any, group_index: int) -> MembershipSpec:
         MAX_CONFIGURED_SOURCE_NAME,
         f"Grupo {group_index}",
     )
+    if schema_version == SCHEMA_VERSION_WITH_ALIASES:
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise CatalogValidationError(
+                f"Grupo {group_index}: 'source_display_name' ausente ou vazio."
+            )
+        _reject_overlong(
+            display_name,
+            "source_display_name",
+            MAX_SOURCE_DISPLAY_NAME,
+            f"Grupo {group_index}",
+        )
+    elif display_name is not None:
+        raise CatalogValidationError(
+            f"Grupo {group_index}: campo 'source_display_name' exige "
+            "schema_version '3.0'."
+        )
     return MembershipSpec(
         source_code=source_code.strip(),
         configured_source_name=configured_name.strip(),
+        source_display_name=(
+            display_name.strip() if isinstance(display_name, str) else None
+        ),
         age_selector=age_selector,
     )
 
@@ -638,6 +704,7 @@ def _persist_catalog(
                     group=definition,
                     source_code=membership.source_code,
                     configured_source_name=membership.configured_source_name,
+                    source_display_name=membership.source_display_name,
                     age_selector=membership.age_selector,
                 )
                 for membership in group.memberships

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -49,6 +50,14 @@ V3_CATALOG = (
     / "census"
     / "data"
     / "sector_capacity_catalog_v3.json"
+)
+
+V4_CATALOG = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "census"
+    / "data"
+    / "sector_capacity_catalog_v4.json"
 )
 
 # C1: nomes exatos esperados no sistema fonte (CensusSnapshot.setor).
@@ -210,6 +219,38 @@ def _corrected_document() -> dict:
 
 def _v3_document() -> dict:
     return json.loads(V3_CATALOG.read_text(encoding="utf-8"))
+
+
+def _v4_document() -> dict:
+    return json.loads(V4_CATALOG.read_text(encoding="utf-8"))
+
+
+def _alias_document() -> dict:
+    """Minimal schema 3.0 document with a clean alias on every membership."""
+    document = _valid_document()
+    document["schema_version"] = "3.0"
+    document["occupancy_algorithm_version"] = "occupancy-v4"
+    for group in document["groups"]:
+        for membership in group["source_codes"]:
+            membership["source_display_name"] = (
+                f"Setor {membership['source_code']}"
+            )
+    return document
+
+
+def _partitioned_alias_document() -> dict:
+    """Schema 3.0 partitioned document with one shared physical alias."""
+    document = _partitioned_document()
+    document["schema_version"] = "3.0"
+    document["occupancy_algorithm_version"] = "occupancy-v4"
+    for group in document["groups"]:
+        for membership in group["source_codes"]:
+            membership["source_display_name"] = (
+                "Setor Particionado"
+                if membership["source_code"] == "654"
+                else f"Setor {membership['source_code']}"
+            )
+    return document
 
 
 def _partitioned_document() -> dict:
@@ -1372,7 +1413,7 @@ class TestAlgorithmSchemaEvolution:
 
     def test_supported_algorithms_are_exactly_the_implemented_ones(self):
         assert catalog_module.ALLOWED_ALGORITHM_VERSIONS == frozenset(
-            {"occupancy-v1", "occupancy-v2", "occupancy-v3"}
+            {"occupancy-v1", "occupancy-v2", "occupancy-v3", "occupancy-v4"}
         )
 
     def test_each_supported_algorithm_validates(self):
@@ -1390,7 +1431,7 @@ class TestAlgorithmSchemaEvolution:
             validate_catalog_document(document)
         assert "schema_version" in str(excinfo.value)
 
-    @pytest.mark.parametrize("schema_version", ["1.2", "3.0", "2.1"])
+    @pytest.mark.parametrize("schema_version", ["1.2", "2.1", "3.1"])
     def test_unknown_schema_version_is_rejected(self, schema_version: str):
         document = _valid_document()
         document["schema_version"] = schema_version
@@ -1620,3 +1661,378 @@ class TestV3FutureActivation:
         assert CapacityCatalogVersion.objects.count() == 1
         assert CapacityGroupDefinition.objects.count() == 43
         assert CapacitySectorMembership.objects.count() == 48
+
+
+# Hashes SHA-256 dos artefatos históricos (baseline MOQA-S2; byte preservation).
+HISTORICAL_JSON_SHA256 = {
+    "initial": "7e346a74503d2ea797740bc8773d6a45702fed2e6aa0497f91c7d25e7f2a6bb3",
+    "corrected": "d11e26b349b84c7c8f369867348f0ad261c2a2cdfab51cb991055aca1dc27acc",
+    "v3": "62298efb138af3b0ecec38974e6d2c922f4031a3304c932d230cebb5eb85455c",
+}
+
+
+class TestAliasSchemaEvolution:
+    """MOQA-S2 R2/R3: schema 3.0 exige alias limpo e consistente por código."""
+
+    @pytest.mark.django_db
+    def test_new_schema_without_alias_is_rejected_before_write(
+        self, tmp_path: Path
+    ):
+        document = _alias_document()
+        for group in document["groups"]:
+            for membership in group["source_codes"]:
+                del membership["source_display_name"]
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError) as excinfo:
+            activate_sector_capacity_catalog(path, _future_date())
+        message = str(excinfo.value)
+        assert "source_display_name" in message
+        assert "Grupo" in message
+        assert '"groups"' not in message
+        assert "source_codes" not in message
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    @pytest.mark.parametrize("alias", ["", "   ", "\t", "\n"])
+    def test_whitespace_alias_is_rejected(self, alias: str):
+        document = _alias_document()
+        document["groups"][0]["source_codes"][0]["source_display_name"] = alias
+        with pytest.raises(CatalogValidationError) as excinfo:
+            validate_catalog_document(document)
+        assert "source_display_name" in str(excinfo.value)
+
+    @pytest.mark.django_db
+    def test_overlong_alias_rejected_with_safe_path(self, tmp_path: Path):
+        document = _alias_document()
+        document["groups"][0]["source_codes"][0]["source_display_name"] = (
+            "x" * 256
+        )
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError) as excinfo:
+            activate_sector_capacity_catalog(
+                path, _future_date(), dry_run=True
+            )
+        message = str(excinfo.value)
+        assert "source_display_name" in message
+        assert "Grupo 0" in message
+        assert "255" in message
+        assert '"groups"' not in message
+        assert "source_codes" not in message
+        assert CapacityCatalogVersion.objects.count() == 0
+
+    def test_legacy_schemas_reject_alias_field(self):
+        for document in (_valid_document(), _v3_document()):
+            document["groups"][0]["source_codes"][0][
+                "source_display_name"
+            ] = "Alias indevido"
+            with pytest.raises(CatalogValidationError) as excinfo:
+                validate_catalog_document(document)
+            assert "schema_version" in str(excinfo.value)
+
+    def test_divergent_aliases_for_partitioned_code_rejected(self):
+        document = _partitioned_alias_document()
+        document["groups"][2]["source_codes"][0]["source_display_name"] = (
+            "Alias Divergente"
+        )
+        with pytest.raises(CatalogValidationError) as excinfo:
+            validate_catalog_document(document)
+        message = str(excinfo.value)
+        assert "654" in message
+        assert "source_display_name" in message
+
+    def test_partitioned_code_with_shared_alias_accepted(self):
+        catalog = validate_catalog_document(_partitioned_alias_document())
+        assert catalog.algorithm_version == "occupancy-v4"
+        aliases = {
+            membership.source_display_name
+            for group in catalog.groups
+            for membership in group.memberships
+            if membership.source_code == "654"
+        }
+        assert aliases == {"Setor Particionado"}
+
+    @pytest.mark.parametrize("algorithm", ["occupancy-v9", "", "   "])
+    @pytest.mark.django_db
+    def test_unknown_or_empty_algorithm_still_rejected_on_new_schema(
+        self, tmp_path: Path, algorithm: str
+    ):
+        document = _alias_document()
+        document["occupancy_algorithm_version"] = algorithm
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError) as excinfo:
+            activate_sector_capacity_catalog(path, _future_date())
+        message = str(excinfo.value)
+        assert "não suportado" in message or "não vazio" in message
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    def test_historical_documents_stay_valid_without_alias(self):
+        for document in (
+            _initial_document(),
+            _corrected_document(),
+            _v3_document(),
+        ):
+            catalog = validate_catalog_document(document)
+            assert catalog.aliased_membership_count == 0
+            assert all(
+                membership.source_display_name is None
+                for group in catalog.groups
+                for membership in group.memberships
+            )
+
+
+class TestV4CatalogDocument:
+    """MOQA-S2 R5/R6: catálogo integral v4 com aliases curados."""
+
+    def test_v4_document_declares_new_schema_and_v4(self):
+        document = _v4_document()
+        assert document["schema_version"] == "3.0"
+        assert document["occupancy_algorithm_version"] == "occupancy-v4"
+
+    def test_v4_document_totals_and_alias_coverage(self):
+        catalog = validate_catalog_document(_v4_document())
+        assert catalog.schema_version == "3.0"
+        assert catalog.algorithm_version == "occupancy-v4"
+        assert catalog.group_count == 43
+        assert catalog.membership_count == 48
+        assert catalog.code_count == 47
+        assert catalog.capacity_group_count == 39
+        assert catalog.standard_group_count == 39
+        assert catalog.unrated_group_count == 4
+        assert catalog.known_capacity == 666
+        assert catalog.calculable_capacity == 666
+        assert catalog.aliased_membership_count == 48
+
+    def test_v4_preserves_co_policy_and_3a_partition(self):
+        catalog = validate_catalog_document(_v4_document())
+        by_key = {group.stable_key: group for group in catalog.groups}
+        co = by_key["CO"]
+        assert co.calculation_policy == CalculationPolicy.UNRATED
+        assert co.official_capacity is None
+        assert {(m.source_code, m.age_selector) for m in co.memberships} == {
+            ("20", "all"),
+            ("1110", "all"),
+            ("1112", "all"),
+            ("1114", "all"),
+            ("1116", "all"),
+        }
+        adult = by_key["OBST-3A-ADULTO"]
+        child = by_key["OBST-3A-INFANTIL"]
+        assert adult.calculation_policy == CalculationPolicy.STANDARD
+        assert adult.official_capacity == 32
+        assert [m.source_code for m in adult.memberships] == ["654"]
+        assert child.calculation_policy == CalculationPolicy.STANDARD
+        assert child.official_capacity == 16
+        assert [m.source_code for m in child.memberships] == ["654"]
+
+    def test_v4_structural_groups_match_v3_except_aliases(self):
+        v3 = _v3_document()
+        v4 = _v4_document()
+        assert [g["stable_key"] for g in v4["groups"]] == [
+            g["stable_key"] for g in v3["groups"]
+        ]
+        for group4, group3 in zip(
+            v4["groups"], v3["groups"], strict=True
+        ):
+            for key in ("display_name", "official_capacity", "calculation_policy"):
+                assert group4[key] == group3[key]
+            assert [m["source_code"] for m in group4["source_codes"]] == [
+                m["source_code"] for m in group3["source_codes"]
+            ]
+
+    def test_curated_aliases_gastro_3a_cardio_and_co(self):
+        document = _v4_document()
+        aliases = {
+            m["source_code"]: m["source_display_name"]
+            for group in document["groups"]
+            for m in group["source_codes"]
+        }
+        assert aliases["2702"] == "Enfermaria Gastroenterologia"
+        assert aliases["654"] == "Enfermaria 3A Obstetrícia Clínica"
+        assert aliases["719"] == "Cardioclínica"
+        assert aliases["2156"] == "Enfermaria 2B Cardio"
+        assert aliases["20"] == "Centro Obstétrico"
+        assert aliases["1110"] == "Observação Ginecológica"
+        assert aliases["1112"] == "Sala de Medicação (CO)"
+        assert aliases["1114"] == "Estabilização RN (CO)"
+        assert aliases["1116"] == "Internação Centro Obstétrico"
+
+    def test_3a_uses_one_physical_alias_across_both_memberships(self):
+        document = _v4_document()
+        partitions = [
+            m
+            for group in document["groups"]
+            for m in group["source_codes"]
+            if m["source_code"] == "654"
+        ]
+        assert len(partitions) == 2
+        assert {m["source_display_name"] for m in partitions} == {
+            "Enfermaria 3A Obstetrícia Clínica"
+        }
+        group_names = {g["display_name"] for g in document["groups"]}
+        for membership in partitions:
+            assert membership["source_display_name"] not in group_names
+
+    def test_raw_name_preserved_and_distinct_from_alias(self):
+        document = _v4_document()
+        for group in document["groups"]:
+            for membership in group["source_codes"]:
+                assert membership["configured_source_name"].strip()
+                assert membership["source_display_name"].strip()
+                if membership["source_code"] in {
+                    "2702",
+                    "654",
+                    "719",
+                    "2156",
+                }:
+                    assert (
+                        membership["source_display_name"]
+                        != membership["configured_source_name"]
+                    )
+
+    def test_all_memberships_have_non_empty_clean_alias(self):
+        document = _v4_document()
+        memberships = [
+            m for group in document["groups"] for m in group["source_codes"]
+        ]
+        assert len(memberships) == 48
+        for membership in memberships:
+            alias = membership["source_display_name"]
+            assert isinstance(alias, str)
+            assert alias == alias.strip()
+            assert len(alias) <= 255
+
+    def test_aliases_have_no_technical_location_patterns(self):
+        document = _v4_document()
+        for group in document["groups"]:
+            for membership in group["source_codes"]:
+                alias = membership["source_display_name"]
+                assert not alias[:1].isdigit()
+                for marker in (
+                    "0 T",
+                    "0 S",
+                    "0 L",
+                    "0 N",
+                    "0 0",
+                    " - HGRS",
+                    "sistema legado",
+                ):
+                    assert marker not in alias, f"'{alias}' contém '{marker}'"
+                assert not re.search(r"[1-4] [6-8] -", alias)
+
+
+class TestV4DryRunAndPersistence:
+    """MOQA-S2 R4: dry-run sem escrita; publicação atômica com aliases."""
+
+    @pytest.mark.django_db
+    def test_dry_run_reports_v4_totals_and_full_alias_coverage(self):
+        before = (
+            CapacityCatalogVersion.objects.count(),
+            CapacityGroupDefinition.objects.count(),
+            CapacitySectorMembership.objects.count(),
+        )
+        assert before == (0, 0, 0)
+
+        result = activate_sector_capacity_catalog(
+            V4_CATALOG, _future_date(30), dry_run=True
+        )
+        assert result.algorithm_version == "occupancy-v4"
+        assert result.created is False
+        assert result.group_count == 43
+        assert result.member_count == 48
+        assert result.code_count == 47
+        assert result.standard_group_count == 39
+        assert result.unrated_group_count == 4
+        assert result.known_capacity == 666
+        assert result.calculable_capacity == 666
+        assert result.aliased_membership_count == 48
+        assert result.aliased_membership_count == result.member_count
+
+        after = (
+            CapacityCatalogVersion.objects.count(),
+            CapacityGroupDefinition.objects.count(),
+            CapacitySectorMembership.objects.count(),
+        )
+        assert after == before == (0, 0, 0)
+
+    @pytest.mark.django_db
+    def test_future_activation_persists_aliases_atomically(self):
+        effective = _future_date(30)
+        result = activate_sector_capacity_catalog(V4_CATALOG, effective)
+        assert result.created is True
+        assert result.aliased_membership_count == 48
+        version = CapacityCatalogVersion.objects.get()
+        assert version.schema_version == "3.0"
+        assert version.algorithm_version == "occupancy-v4"
+        assert version.groups.count() == 43
+        assert version.memberships.count() == 48
+
+        rows = {m.source_code: m for m in version.memberships.all()}
+        assert rows["2702"].source_display_name == "Enfermaria Gastroenterologia"
+        assert (
+            rows["2702"].configured_source_name
+            == "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS"
+        )
+        assert rows["654"].source_display_name == (
+            "Enfermaria 3A Obstetrícia Clínica"
+        )
+        assert rows["719"].source_display_name == "Cardioclínica"
+        assert rows["2156"].source_display_name == "Enfermaria 2B Cardio"
+
+    @pytest.mark.django_db
+    def test_v4_activation_is_idempotent_for_same_document_and_date(self):
+        effective = _future_date(30)
+        first = activate_sector_capacity_catalog(V4_CATALOG, effective)
+        second = activate_sector_capacity_catalog(V4_CATALOG, effective)
+        assert first.created is True
+        assert second.created is False
+        assert first.document_sha256 == second.document_sha256
+        assert second.aliased_membership_count == 48
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert CapacityGroupDefinition.objects.count() == 43
+        assert CapacitySectorMembership.objects.count() == 48
+
+    @pytest.mark.django_db
+    def test_historical_activation_keeps_alias_null(self):
+        effective = _future_date(30)
+        activate_sector_capacity_catalog(V3_CATALOG, effective)
+        rows = list(
+            CapacitySectorMembership.objects.filter(source_code="2702")
+        )
+        assert len(rows) == 1
+        assert rows[0].source_display_name is None
+        assert (
+            rows[0].configured_source_name
+            == "0 T - ENFERMARIA GASTROENTEROLOGIA - HGRS"
+        )
+
+
+class TestV4BytePreservation:
+    """MOQA-S2 R7: artefatos históricos permanecem byte a byte idênticos."""
+
+    def _sha256(self, path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_historical_json_hashes_unchanged(self):
+        assert (
+            self._sha256(INITIAL_CATALOG)
+            == HISTORICAL_JSON_SHA256["initial"]
+        )
+        assert (
+            self._sha256(CORRECTED_CATALOG)
+            == HISTORICAL_JSON_SHA256["corrected"]
+        )
+        assert self._sha256(V3_CATALOG) == HISTORICAL_JSON_SHA256["v3"]
+
+    def test_historical_documents_keep_parsing_results(self):
+        for document, schema, memberships in (
+            (_initial_document(), "1.0", 47),
+            (_corrected_document(), "1.1", 48),
+            (_v3_document(), "2.0", 48),
+        ):
+            catalog = validate_catalog_document(document)
+            assert catalog.schema_version == schema
+            assert catalog.membership_count == memberships
+            assert catalog.aliased_membership_count == 0

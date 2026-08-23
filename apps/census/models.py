@@ -155,6 +155,16 @@ class CapacitySectorMembership(models.Model):
         max_length=255,
         help_text="Sector name configured for this code in this version",
     )
+    source_display_name = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text=(
+            "Curated human-facing alias for this source code in this version; "
+            "null keeps historical catalogs unaliased; schema 3.0 documents "
+            "require a non-empty value"
+        ),
+    )
     age_selector = models.CharField(
         max_length=20,
         choices=CapacityMembershipSelector.choices,
