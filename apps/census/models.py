@@ -257,9 +257,21 @@ class OccupancyMeasurement(models.Model):
         default=None,
         help_text=(
             "Closed aggregate reconciliation of raw rows, physical positions, "
-            "duplicates, conflicts and unidentified rows (occupancy-v3 "
-            "only); contains only allowlisted nonnegative integers, never "
-            "row-level identity"
+            "duplicates, conflicts and unidentified rows (occupancy-v3 uses "
+            "schema 1, occupancy-v4 uses schema 2); contains only allowlisted "
+            "nonnegative integers, never row-level identity"
+        ),
+    )
+    quality_warning = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "True when this occupancy-v4 measurement carries actionable quality "
+            "warnings (conflicts, occupied rows without position, unknown or "
+            "divergent partition age, or occupied unmapped positions); such "
+            "measurements stay daily-eligible with a separate warning counter. "
+            "Null keeps v1-v3 uninterpreted."
         ),
     )
     official_sector_count = models.PositiveIntegerField(
@@ -338,6 +350,13 @@ class OccupancyMeasurement(models.Model):
                 condition=models.Q(official_availability__gte=0)
                 | models.Q(official_availability__isnull=True),
                 name="ck_occupancy_availability_nonnegative",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(quality_warning__isnull=True)
+                    | models.Q(algorithm_version="occupancy-v4")
+                ),
+                name="ck_occupancy_quality_warning_only_v4",
             ),
         ]
         indexes = [
@@ -455,6 +474,14 @@ class DailyOccupancySummary(models.Model):
             "Day measurements excluded from official statistics because their "
             "occupancy-v3 point rate is physically partial; may overlap with "
             "the age reason count"
+        ),
+    )
+    quality_warning_measurement_count = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Day measurements materialized under occupancy-v4 that carry "
+            "quality warnings; every v4 measurement stays eligible and v4 "
+            "warnings never increment the historical exclusion counters"
         ),
     )
     first_captured_at = models.DateTimeField()

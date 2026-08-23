@@ -1247,3 +1247,93 @@ class TestV3PhysicalPartialClinicalFlow:
         assert CensusExecutionBatch.objects.count() == 1
         assert Patient.objects.count() == 3
         assert IngestionRun.objects.filter(status="queued").count() >= 3
+
+
+def _v4_snapshot_catalog(capture_date):
+    """Standard v4 catalog (code 100, capacity 10) persisted in the test."""
+    catalog = CapacityCatalogVersion.objects.create(
+        effective_from=capture_date,
+        source_reference="synthetic moqa-s1 test catalog",
+        source_sha256=(f"{capture_date:%Y%m%d}" + "e" * 64)[:64],
+        schema_version="1.0",
+        algorithm_version="occupancy-v4",
+    )
+    group = CapacityGroupDefinition.objects.create(
+        catalog=catalog,
+        stable_key="A",
+        display_name="Group A",
+        official_capacity=10,
+        calculation_policy="standard",
+    )
+    CapacitySectorMembership.objects.create(
+        catalog=catalog,
+        group=group,
+        source_code="100",
+        configured_source_name="Sector A",
+    )
+    return catalog
+
+
+@pytest.mark.django_db
+class TestV4QualityWarningClinicalFlow:
+    """R10: v4 quality warnings never block batch/enqueue clinical flow."""
+
+    def test_v4_warning_measurement_keeps_clinical_processing(self):
+        _v4_snapshot_catalog(timezone.localdate())
+        run = IngestionRun.objects.create(
+            status="succeeded", intent="census_extraction"
+        )
+        now = timezone.now()
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="14160147",
+            nome="JOSE AUGUSTO MERCES",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+            setor_codigo="100",
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="UTI A",
+            leito="UG01A",
+            prontuario="22222222",
+            nome="PACIENTE CONFLITO",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+            setor_codigo="100",
+        )
+        CensusSnapshot.objects.create(
+            captured_at=now,
+            ingestion_run=run,
+            setor="UTI B",
+            leito="UG01B",
+            prontuario="33333333",
+            nome="PACIENTE LIMPO",
+            especialidade="NEF",
+            bed_status=BedStatus.OCCUPIED,
+            setor_codigo="100",
+        )
+        _add_filler_snapshots(
+            captured_at=now,
+            run=run,
+            exclude={"UTI A", "UTI B"},
+        )
+
+        result = process_census_snapshot(run_id=run.pk)
+
+        measurement = OccupancyMeasurement.objects.get(census_run=run)
+        assert measurement.algorithm_version == "occupancy-v4"
+        assert measurement.quality_warning is True
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["schema_version"] == 2
+        assert reconciliation["occupant_conflict_positions"] == 1
+        assert result.get("materialization_status") == "created"
+        assert result.get("batch_id") is not None
+        assert result["patients_total"] == 3
+        assert CensusExecutionBatch.objects.count() == 1
+        assert Patient.objects.count() == 3
+        assert IngestionRun.objects.filter(status="queued").count() >= 3

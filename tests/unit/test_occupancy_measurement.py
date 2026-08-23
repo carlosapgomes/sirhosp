@@ -2454,3 +2454,726 @@ class TestV3DailyEligibility:
         assert summary.age_excluded_measurement_count == 0
         assert summary.mean_occupied == Decimal("1.00")
         assert summary.max_exceeded_by == 0
+
+
+@pytest.mark.django_db
+class TestV4TypedConflicts:
+    """MOQA-S1 R1-R4: occupancy-v4 dispatched by catalog with typed conflicts.
+
+    A synthetic catalog persisted directly in the test declares
+    ``occupancy-v4``; materialization must apply position normalization with
+    typed conflict classification instead of legacy row counting.
+    """
+
+    def _v4_catalog(self, groups=None, capture_date=None):
+        return _catalog(
+            capture_date or timezone.localdate(),
+            groups or [_standard_group(capacity=10)],
+            algorithm_version="occupancy-v4",
+        )
+
+    def test_v4_exact_duplicate_counts_one_position_before_typing(self):
+        self._v4_catalog()
+        run = _run()
+        for i in range(2):
+            _snapshot(
+                run,
+                captured_at=_at(timezone.localdate()),
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=i,
+                patient_marker="SYN-DUP",
+                age_band="age_12_or_over",
+                bed="BED-01",
+            )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.algorithm_version == "occupancy-v4"
+        assert measurement.groups.get(stable_key="A").occupied_count == 1
+        assert measurement.occupied_for_rate == 1
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["schema_version"] == 2
+        assert reconciliation["duplicate_occupied_extra_rows"] == 1
+        assert reconciliation["counted_occupied_positions"] == 1
+        assert reconciliation["official_numerator"] == 1
+        assert measurement.quality_warning is False
+
+    def test_v4_occupant_conflict_counts_one_position_without_winner(self):
+        self._v4_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-1",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="REC-2",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.groups.get(stable_key="A").occupied_count == 1
+        assert measurement.occupied_for_rate == 1
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["occupant_conflict_positions"] == 1
+        assert reconciliation["occupant_conflict_extra_occupied_rows"] == 1
+        assert reconciliation["counted_occupied_positions"] == 1
+        assert measurement.quality_warning is True
+
+    def test_v4_status_conflict_never_counts_and_has_no_winner(self):
+        self._v4_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-1",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.EMPTY, index=1, bed="BED-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.groups.get(stable_key="A").occupied_count == 0
+        assert measurement.occupied_for_rate == 0
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["status_conflict_positions"] == 1
+        assert reconciliation["status_conflict_occupied_rows"] == 1
+        assert reconciliation["counted_occupied_positions"] == 0
+        assert measurement.quality_warning is True
+
+    def test_v4_non_occupied_status_conflict_remains_warning_without_numerator_effect(self):
+        self._v4_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.EMPTY, index=0, bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.MAINTENANCE, index=1, bed="BED-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.occupied_for_rate == 0
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["status_conflict_positions"] == 1
+        assert reconciliation["status_conflict_occupied_rows"] == 0
+        assert measurement.quality_warning is True
+
+    def test_v4_age_conflict_in_partitioned_source_is_not_assigned(self):
+        self._v4_catalog(_partitioned_3a_catalog())
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _snapshot(
+            run, captured_at=captured_at, code="654", sector="3A Source",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="ADULT",
+            age_band="age_12_or_over", bed="3A-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="654", sector="3A Source",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="CHILD",
+            age_band="under_12", bed="3A-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+        groups = {g.stable_key: g for g in measurement.groups.all()}
+
+        assert groups["OBST-3A-ADULTO"].occupied_count == 0
+        assert groups["OBST-3A-INFANTIL"].occupied_count == 0
+        assert measurement.occupied_for_rate == 0
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["age_conflict_positions"] == 1
+        assert reconciliation["age_conflict_occupied_rows"] == 2
+        assert measurement.quality_warning is True
+
+    def test_v4_unknown_partition_position_is_not_assigned(self):
+        self._v4_catalog(_partitioned_3a_catalog())
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(timezone.localdate()),
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="UNK",
+            age_band="unknown",
+            bed="3A-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.occupied_for_rate == 0
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["unknown_age_partition_positions"] == 1
+        assert reconciliation["counted_occupied_positions"] == 0
+        assert measurement.quality_warning is True
+
+    def test_v4_non_partitioned_age_drift_keeps_occupancy_with_warning(self):
+        self._v4_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="SAME",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="SAME",
+            age_band="under_12", bed="BED-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.groups.get(stable_key="A").occupied_count == 1
+        assert measurement.occupied_for_rate == 1
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["age_metadata_drift_positions"] == 1
+        assert measurement.quality_warning is True
+
+    def test_v4_shared_record_in_distinct_beds_counts_two_positions(self):
+        self._v4_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="SHARED",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="SHARED",
+            age_band="age_12_or_over", bed="BED-02",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.groups.get(stable_key="A").occupied_count == 2
+        assert measurement.physical_reconciliation_json["duplicate_extra_rows"] == 0
+
+    def test_v4_occupied_without_bed_is_warning_and_out_of_numerator(self):
+        self._v4_catalog()
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(timezone.localdate()),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="NO-BED",
+            age_band="age_12_or_over",
+            bed="",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+
+        assert measurement.groups.get(stable_key="A").occupied_count == 0
+        reconciliation = measurement.physical_reconciliation_json
+        assert reconciliation["unidentified_occupied_rows"] == 1
+        assert reconciliation["counted_occupied_positions"] == 0
+        assert measurement.quality_warning is True
+
+
+@pytest.mark.django_db
+class TestV4ReconciliationSchema2:
+    """MOQA-S1 R5: schema 2 closes both bridges and stays private."""
+
+    def test_both_bridges_close_with_mixed_categories(self):
+        capture_date = timezone.localdate()
+        _catalog(
+            capture_date,
+            [
+                _standard_group(
+                    key="A", capacity=10, members=(("100", "Sector A"),)
+                ),
+                _standard_group(
+                    key="B", capacity=10, members=(("200", "Sector B"),)
+                ),
+                *_partitioned_3a_catalog(),
+                {
+                    "stable_key": "PENDING",
+                    "display_name": "Pending",
+                    "capacity": 32,
+                    "policy": CalculationPolicy.LINKED_SLOTS_PENDING,
+                    "members": (("300", "Sector P"),),
+                },
+                {
+                    "stable_key": "CO",
+                    "display_name": "Centro Obstetrico",
+                    "capacity": None,
+                    "policy": CalculationPolicy.UNRATED,
+                    "members": (("20", "CO Source"),),
+                },
+            ],
+            algorithm_version="occupancy-v4",
+        )
+        run = _run()
+        captured_at = _at(capture_date)
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-A1",
+            age_band="age_12_or_over", bed="BED-A1",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="REC-A1",
+            age_band="age_12_or_over", bed="BED-A1",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=2, patient_marker="REC-A2",
+            age_band="age_12_or_over", bed="BED-A2",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=3, patient_marker="REC-A3",
+            age_band="age_12_or_over", bed="BED-A3",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=4, patient_marker="REC-A4",
+            age_band="age_12_or_over", bed="BED-A3",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="200", sector="Sector B",
+            status=BedStatus.OCCUPIED, index=5, patient_marker="REC-B1",
+            age_band="age_12_or_over", bed="BED-B1",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="200", sector="Sector B",
+            status=BedStatus.EMPTY, index=6, bed="BED-B1",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="654", sector="3A Source",
+            status=BedStatus.OCCUPIED, index=7, patient_marker="REC-3A-1",
+            age_band="under_12", bed="3A-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="654", sector="3A Source",
+            status=BedStatus.OCCUPIED, index=8, patient_marker="REC-3A-2",
+            age_band="age_12_or_over", bed="3A-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="654", sector="3A Source",
+            status=BedStatus.OCCUPIED, index=9, patient_marker="REC-3A-3",
+            age_band="unknown", bed="3A-02",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=10, patient_marker="REC-NOBED",
+            age_band="age_12_or_over", bed="",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="20", sector="CO Source",
+            status=BedStatus.OCCUPIED, index=11, patient_marker="REC-CO",
+            age_band="age_12_or_over", bed="CO-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="300", sector="Sector P",
+            status=BedStatus.OCCUPIED, index=12, patient_marker="REC-P",
+            age_band="age_12_or_over", bed="P-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="999", sector="Unknown X",
+            status=BedStatus.OCCUPIED, index=13, patient_marker="REC-X",
+            age_band="age_12_or_over", bed="X-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+        reconciliation = measurement.physical_reconciliation_json
+
+        assert reconciliation["schema_version"] == 2
+        raw = reconciliation["raw_occupied_rows"]
+        bridge1 = (
+            reconciliation["duplicate_occupied_extra_rows"]
+            + reconciliation["occupant_conflict_extra_occupied_rows"]
+            + reconciliation["status_conflict_occupied_rows"]
+            + reconciliation["age_conflict_occupied_rows"]
+            + reconciliation["unidentified_occupied_rows"]
+            + reconciliation["unknown_age_partition_positions"]
+            + reconciliation["counted_occupied_positions"]
+        )
+        assert raw == 13
+        assert bridge1 == raw
+        bridge2 = (
+            reconciliation["official_numerator"]
+            + reconciliation["occupied_unrated_positions"]
+            + reconciliation["occupied_unmapped_positions"]
+            + reconciliation["occupied_linked_pending_positions"]
+        )
+        assert bridge2 == reconciliation["counted_occupied_positions"]
+        assert reconciliation["counted_occupied_positions"] == 6
+        assert reconciliation["official_numerator"] == 3
+        assert reconciliation["occupied_unrated_positions"] == 1
+        assert reconciliation["occupied_unmapped_positions"] == 1
+        assert reconciliation["occupied_linked_pending_positions"] == 1
+        assert reconciliation["age_conflict_positions"] == 1
+        assert reconciliation["status_conflict_positions"] == 1
+        assert measurement.quality_warning is True
+
+        serialized = json.dumps(reconciliation)
+        for marker in ("REC-", "BED-", "3A-", "CO-", "P-", "X-", "Sector"):
+            assert marker not in serialized
+
+    def test_v4_reconciliation_allowlist_and_recursive_privacy(self):
+        capture_date = timezone.localdate()
+        _catalog(
+            capture_date,
+            [_standard_group(capacity=10)],
+            algorithm_version="occupancy-v4",
+        )
+        run = _run()
+        captured_at = _at(capture_date)
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="PRIV-1",
+            age_band="age_12_or_over", bed="PRIV-BED-1",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="PRIV-2",
+            age_band="age_12_or_over", bed="PRIV-BED-1",
+        )
+        result = _materialize(run.pk)
+        reconciliation = result.measurement.physical_reconciliation_json
+
+        allowlist = _domain()._V4_RECONCILIATION_ALLOWLIST
+        assert set(reconciliation) == set(allowlist)
+
+        def walk(value):
+            if isinstance(value, dict):
+                for item in value.values():
+                    walk(item)
+            elif isinstance(value, str):
+                for marker in ("PRIV-", "BED-", "Sector A", "100"):
+                    assert marker not in value
+
+        walk(reconciliation)
+        assert all(
+            isinstance(value, (int, bool))
+            for value in reconciliation.values()
+            if not isinstance(value, dict)
+        )
+        assert all(
+            isinstance(value, int)
+            for counts in reconciliation["positions_by_status"].values()
+            for value in [counts]
+        )
+
+    def test_v4_unrated_policy_is_not_a_quality_warning(self):
+        capture_date = timezone.localdate()
+        _catalog(
+            capture_date,
+            [
+                {
+                    "stable_key": "CO",
+                    "display_name": "Centro Obstetrico",
+                    "capacity": None,
+                    "policy": CalculationPolicy.UNRATED,
+                    "members": (("20", "CO Source"),),
+                },
+            ],
+            algorithm_version="occupancy-v4",
+        )
+        run = _run()
+        _snapshot(
+            run,
+            captured_at=_at(capture_date),
+            code="20",
+            sector="CO Source",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-CO",
+            age_band="age_12_or_over",
+            bed="CO-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+        reconciliation = measurement.physical_reconciliation_json
+
+        assert reconciliation["occupied_unrated_positions"] == 1
+        assert reconciliation["official_numerator"] == 0
+        assert measurement.quality_warning is False
+
+    def test_v4_unmapped_and_pending_stay_separate_and_unmapped_warns(self):
+        capture_date = timezone.localdate()
+        _catalog(
+            capture_date,
+            [
+                {
+                    "stable_key": "PENDING",
+                    "display_name": "Pending",
+                    "capacity": 32,
+                    "policy": CalculationPolicy.LINKED_SLOTS_PENDING,
+                    "members": (("300", "Sector P"),),
+                },
+            ],
+            algorithm_version="occupancy-v4",
+        )
+        run = _run()
+        captured_at = _at(capture_date)
+        _snapshot(
+            run, captured_at=captured_at, code="300", sector="Sector P",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-P",
+            age_band="age_12_or_over", bed="P-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="999", sector="Unknown X",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="REC-X",
+            age_band="age_12_or_over", bed="X-01",
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+        reconciliation = measurement.physical_reconciliation_json
+
+        assert reconciliation["occupied_linked_pending_positions"] == 1
+        assert reconciliation["occupied_unmapped_positions"] == 1
+        assert reconciliation["official_numerator"] == 0
+        assert measurement.quality_warning is True
+
+
+@pytest.mark.django_db
+class TestV4DailyEligibility:
+    """MOQA-S1 R7-R8: every materialized v4 measurement is daily eligible."""
+
+    def _daily_models(self):
+        models_module = importlib.import_module("apps.census.models")
+        parent = getattr(models_module, "DailyOccupancySummary", None)
+        child = getattr(models_module, "DailyGroupOccupancySummary", None)
+        if parent is None or child is None:
+            pytest.fail("daily occupancy summary schema is missing")
+        return parent, child
+
+    def test_all_warning_v4_day_remains_eligible_and_statistical(self):
+        parent_model, child_model = self._daily_models()
+        today = timezone.localdate()
+        _catalog(
+            today,
+            [_standard_group(capacity=10)],
+            algorithm_version="occupancy-v4",
+        )
+        run = _run()
+        captured_at = _at(today, 8)
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-1",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="REC-2",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+
+        result = _materialize(run.pk)
+        assert result.measurement.quality_warning is True
+
+        summary = parent_model.objects.get(local_date=today)
+        assert summary.measurement_count == 1
+        assert summary.eligible_measurement_count == 1
+        assert summary.quality_warning_measurement_count == 1
+        assert summary.position_excluded_measurement_count == 0
+        assert summary.age_excluded_measurement_count == 0
+        assert summary.mean_occupied == Decimal("1.00")
+        assert summary.min_occupied == 1
+        assert summary.max_occupied == 1
+        assert summary.max_exceeded_by == 0
+        child = child_model.objects.get(daily_summary=summary, stable_key="A")
+        assert child.mean_occupied == Decimal("1.00")
+        assert child.measurement_count == 1
+
+    def test_clean_and_warned_v4_measurements_both_contribute(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(
+            today,
+            [_standard_group(capacity=10)],
+            algorithm_version="occupancy-v4",
+        )
+        clean = _run()
+        warned = _run()
+        _snapshot(
+            clean, captured_at=_at(today, 8), code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-CLEAN",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            warned, captured_at=_at(today, 20), code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="REC-W1",
+            age_band="age_12_or_over", bed="BED-02",
+        )
+        _snapshot(
+            warned, captured_at=_at(today, 20), code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=2, patient_marker="REC-W2",
+            age_band="age_12_or_over", bed="BED-02",
+        )
+        _materialize(clean.pk)
+        _materialize(warned.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+        assert summary.measurement_count == 2
+        assert summary.eligible_measurement_count == 2
+        assert summary.quality_warning_measurement_count == 1
+        assert summary.mean_occupied == Decimal("1.00")
+        assert summary.max_exceeded_by == 0
+
+    def test_v3_partial_day_stays_excluded_without_new_counter(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(
+            today,
+            [_standard_group(capacity=10)],
+            algorithm_version="occupancy-v3",
+        )
+        run = _run()
+        captured_at = _at(today, 8)
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-1",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="REC-2",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _materialize(run.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+        assert summary.eligible_measurement_count == 0
+        assert summary.position_excluded_measurement_count == 1
+        assert summary.quality_warning_measurement_count == 0
+        assert summary.mean_occupied is None
+
+    def test_v4_availability_and_excess_remain_non_compensated(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(
+            today,
+            [
+                _standard_group(
+                    key="A", capacity=10, members=(("100", "Sector A"),)
+                ),
+                _standard_group(
+                    key="B", capacity=10, members=(("200", "Sector B"),)
+                ),
+            ],
+            algorithm_version="occupancy-v4",
+        )
+        run = _run()
+        captured_at = _at(today, 8)
+        for i in range(12):
+            _snapshot(
+                run, captured_at=captured_at, code="100", sector="Sector A",
+                status=BedStatus.OCCUPIED, index=i, patient_marker=f"A-{i:02d}",
+                age_band="age_12_or_over", bed=f"BED-A-{i:02d}",
+            )
+        for i in range(5):
+            _snapshot(
+                run, captured_at=captured_at, code="200", sector="Sector B",
+                status=BedStatus.OCCUPIED, index=100 + i, patient_marker=f"B-{i:02d}",
+                age_band="age_12_or_over", bed=f"BED-B-{i:02d}",
+            )
+        result = _materialize(run.pk)
+        measurement = result.measurement
+        groups = {g.stable_key: g for g in measurement.groups.all()}
+
+        assert groups["A"].official_availability == 0
+        assert groups["A"].exceeded_by == 2
+        assert groups["B"].official_availability == 5
+        assert groups["B"].exceeded_by == 0
+        assert measurement.official_availability == 5
+        assert measurement.exceeded_by == 2
+        assert measurement.occupied_for_rate == 17
+        assert measurement.occupancy_percentage == Decimal("85.00")
+        assert measurement.quality_warning is False
+
+    def test_v4_idempotent_reexecution_keeps_warning_and_summary(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(
+            today,
+            [_standard_group(capacity=10)],
+            algorithm_version="occupancy-v4",
+        )
+        run = _run()
+        captured_at = _at(today, 8)
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-1",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="REC-2",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        first = _materialize(run.pk)
+        first_json = dict(first.measurement.physical_reconciliation_json)
+
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=2, patient_marker="REC-3",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        second = _materialize(run.pk)
+
+        assert second.status == "existing"
+        assert second.measurement.pk == first.measurement.pk
+        assert second.measurement.physical_reconciliation_json == first_json
+        assert second.measurement.quality_warning is True
+        summary = parent_model.objects.get(local_date=today)
+        assert summary.measurement_count == 1
+        assert summary.quality_warning_measurement_count == 1
+
+    def test_v4_warning_never_increments_historical_exclusion_counters(self):
+        parent_model, _ = self._daily_models()
+        today = timezone.localdate()
+        _catalog(
+            today,
+            [_standard_group(capacity=10)],
+            algorithm_version="occupancy-v4",
+        )
+        run = _run()
+        captured_at = _at(today, 8)
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="REC-1",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=1, patient_marker="REC-2",
+            age_band="age_12_or_over", bed="BED-01",
+        )
+        _materialize(run.pk)
+
+        summary = parent_model.objects.get(local_date=today)
+        assert summary.quality_warning_measurement_count == 1
+        assert summary.age_excluded_measurement_count == 0
+        assert summary.position_excluded_measurement_count == 0
+        assert summary.eligible_measurement_count == 1

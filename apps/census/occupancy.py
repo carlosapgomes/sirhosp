@@ -1,10 +1,12 @@
 """Immutable occupancy materialization for one explicit census run.
 
-Three deterministic algorithm versions are dispatched from the persisted
+Four deterministic algorithm versions are dispatched from the persisted
 catalog context: ``occupancy-v1`` for legacy catalogs without age partitions,
-``occupancy-v2`` for corrected age-partitioned catalogs and ``occupancy-v3``
-for catalogs that explicitly declare the physical-position normalization.
-Measurements are immutable and never recalculated.
+``occupancy-v2`` for corrected age-partitioned catalogs, ``occupancy-v3`` for
+catalogs that explicitly declare the physical-position normalization and
+``occupancy-v4`` for future catalogs that declare typed conflict
+classification with actionable quality. Measurements are immutable and never
+recalculated.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from apps.ingestion.models import IngestionRun
 ALGORITHM_VERSION = "occupancy-v1"
 ALGORITHM_VERSION_V2 = "occupancy-v2"
 ALGORITHM_VERSION_V3 = "occupancy-v3"
+ALGORITHM_VERSION_V4 = "occupancy-v4"
 _CENSUS_INTENT = "census_extraction"
 _PERCENT_QUANTUM = Decimal("0.01")
 _STATUS_KEYS = tuple(BedStatus.values)
@@ -262,6 +265,9 @@ def _daily_parent_values(
         "position_excluded_measurement_count": sum(
             1 for measurement in measurements if measurement.position_partial
         ),
+        "quality_warning_measurement_count": sum(
+            1 for measurement in measurements if measurement.quality_warning
+        ),
         "first_captured_at": measurements[0].captured_at,
         "last_captured_at": measurements[-1].captured_at,
         "known_capacity": reference.known_capacity,
@@ -322,7 +328,12 @@ def _is_daily_eligible(measurement: OccupancyMeasurement) -> bool:
     age-partitioned sector) is excluded entirely from official averages. An
     ``occupancy-v3`` measurement is additionally excluded when its physical
     positions are partial (conflict or occupied rows without bed identity).
+    Every successfully materialized ``occupancy-v4`` measurement is eligible;
+    quality warnings are tracked by a separate daily counter and never reuse
+    the historical v2/v3 exclusion counters.
     """
+    if measurement.algorithm_version == ALGORITHM_VERSION_V4:
+        return True
     if measurement.position_partial is True:
         return False
     if measurement.algorithm_version in (
@@ -517,11 +528,15 @@ def _calculate(
 ) -> tuple[list[_GroupValues], dict[str, object]]:
     """Dispatch the exact-run calculation for the selected algorithm.
 
-    ``occupancy-v3`` normalizes physical positions first; legacy v1/v2 keep
-    their historical row-counting pipeline untouched.
+    ``occupancy-v3`` and ``occupancy-v4`` normalize physical positions first;
+    legacy v1/v2 keep their historical row-counting pipeline untouched. V4
+    additionally types conflicts by their real impact and records an
+    actionable quality flag.
     """
     if algorithm_version == ALGORITHM_VERSION_V3:
         return _calculate_v3(catalog, rows)
+    if algorithm_version == ALGORITHM_VERSION_V4:
+        return _calculate_v4(catalog, rows)
     return _calculate_legacy(catalog, rows, algorithm_version)
 
 
@@ -801,6 +816,167 @@ def _calculate_v3(
     return sorted(values, key=lambda value: value.stable_key), totals
 
 
+def _calculate_v4(
+    catalog: CapacityCatalogVersion,
+    rows: tuple[_ObservedRow, ...],
+) -> tuple[list[_GroupValues], dict[str, object]]:
+    """Materialize ``occupancy-v4`` from typed physical positions.
+
+    Raw rows are collapsed by normalized source identity plus bed; exact
+    duplicates are consolidated before conflict classification. Unique
+    signatures are typed by precedence into occupant, status and age
+    conflicts. An occupant-only conflict counts one occupied position without
+    choosing a patient; status and age ambiguity never feed official
+    numerators; non-partitioned age metadata drift keeps the occupation.
+    Every successfully materialized measurement is daily-eligible and records
+    an actionable quality flag with a closed schema 2 reconciliation.
+    """
+    definitions = list(catalog.groups.all())
+    group_by_code: dict[str, CapacityGroupDefinition] = {}
+    group_by_band: dict[tuple[str, str], CapacityGroupDefinition] = {}
+    partitioned_codes: set[str] = set()
+    for group in definitions:
+        for membership in group.memberships.all():
+            # ``group_by_code`` mirrors the legacy last-wins code lookup so
+            # coverage semantics stay identical to v2/v3; the per-band map is
+            # used only for counting partitioned positions.
+            group_by_code[membership.source_code] = group
+            if membership.age_selector == CapacityMembershipSelector.ALL:
+                continue
+            group_by_band[
+                (membership.source_code, membership.age_selector)
+            ] = group
+            partitioned_codes.add(membership.source_code)
+
+    positions, diagnostics = _normalize_positions_v4(
+        rows, partitioned_codes
+    )
+    by_code, by_band, blank_by_name = _aggregate_observations(
+        _position_rows(positions)
+    )
+    observed_identities = {
+        ("code", row.code) if row.code else ("name", row.name) for row in rows
+    }
+    capacity_covered = sum(
+        1
+        for kind, identity in observed_identities
+        if kind == "code"
+        and identity in group_by_code
+        and group_by_code[identity].official_capacity is not None
+    )
+    calculable = sum(
+        1
+        for kind, identity in observed_identities
+        if kind == "code"
+        and identity in group_by_code
+        and group_by_code[identity].calculation_policy
+        == CalculationPolicy.STANDARD
+    )
+
+    values: list[_GroupValues] = []
+    configured_codes: set[str] = set()
+    for group in definitions:
+        values.append(
+            _calculate_catalog_group(
+                group, by_code, by_band, record_selector=True
+            )
+        )
+        configured_codes.update(
+            membership.source_code for membership in group.memberships.all()
+        )
+
+    used_keys = {value.stable_key for value in values}
+    for code in sorted(set(by_code) - configured_codes):
+        values.append(
+            _unmapped_group(
+                identity_kind="code",
+                identity=code,
+                observations=by_code[code],
+                used_keys=used_keys,
+            )
+        )
+    for name in sorted(blank_by_name):
+        values.append(
+            _unmapped_group(
+                identity_kind="blank",
+                identity=name,
+                observations={name: blank_by_name[name]},
+                used_keys=used_keys,
+            )
+        )
+
+    known_capacity = sum(group.official_capacity or 0 for group in definitions)
+    calculable_capacity = sum(
+        group.official_capacity or 0
+        for group in definitions
+        if group.calculation_policy == CalculationPolicy.STANDARD
+    )
+    occupied_for_rate = sum(
+        value.occupied_count or 0
+        for value in values
+        if value.calculation_status == OccupancyCalculationStatus.CALCULATED
+    )
+    percentage = _percentage(occupied_for_rate, calculable_capacity)
+
+    values_with_availability: list[_GroupValues] = []
+    group_availability_sum = 0
+    group_exceeded_sum = 0
+    for value in values:
+        if value.calculation_status == OccupancyCalculationStatus.CALCULATED:
+            assert value.official_capacity is not None
+            assert value.occupied_count is not None
+            availability = max(value.official_capacity - value.occupied_count, 0)
+            value = replace(value, official_availability=availability)
+            group_availability_sum += availability
+            assert value.exceeded_by is not None
+            group_exceeded_sum += value.exceeded_by
+        values_with_availability.append(value)
+    values = values_with_availability
+
+    official_numerator, unrated, unmapped, linked_pending = (
+        _classify_v4_counted_positions(
+            positions=positions,
+            partitioned_codes=partitioned_codes,
+            group_by_code=group_by_code,
+            group_by_band=group_by_band,
+        )
+    )
+    reconciliation = _reconciliation_v4_json(
+        rows=rows,
+        diagnostics=diagnostics,
+        official_numerator=official_numerator,
+        unrated=unrated,
+        unmapped=unmapped,
+        linked_pending=linked_pending,
+    )
+    totals: dict[str, object] = {
+        "observed_sector_count": len(observed_identities),
+        "capacity_covered_sector_count": capacity_covered,
+        "calculable_sector_count": calculable,
+        "known_capacity": known_capacity,
+        "calculable_capacity": calculable_capacity,
+        "occupied_for_rate": occupied_for_rate,
+        "occupancy_percentage": percentage,
+        "exceeded_by": group_exceeded_sum,
+        "official_sector_count": len(definitions),
+        "official_capacity_sector_count": sum(
+            1 for group in definitions if group.official_capacity is not None
+        ),
+        "official_calculable_sector_count": sum(
+            1
+            for group in definitions
+            if group.calculation_policy == CalculationPolicy.STANDARD
+        ),
+        "unknown_age_count": 0,
+        "age_partial": False,
+        "position_partial": None,
+        "official_availability": group_availability_sum,
+        "physical_reconciliation_json": reconciliation,
+        "quality_warning": reconciliation["quality_warning"],
+    }
+    return sorted(values, key=lambda value: value.stable_key), totals
+
+
 def _normalize_identity(value: str) -> str:
     """Deterministic small normalization for source and bed identities.
 
@@ -976,6 +1152,460 @@ def _classify_occupied_positions(
         else:
             outside_calculable += 1
     return unknown_age_3a_rows, outside_calculable, official_numerator
+
+
+@dataclass(frozen=True)
+class _V4KeyOutcome:
+    """Classification of one normalized (source, bed) key under v4.
+
+    ``position`` is the representative physical position only when the key is
+    counted (unambiguous or occupant-conflict); status/age conflicts keep it
+    None so they never feed an official numerator. ``conflict`` is one of
+    ``""``, ``"status"``, ``"age"`` or ``"occupant"``. Duplicate extras are
+    always separated from the unique signatures used for classification.
+    """
+
+    position: _PhysicalPosition | None
+    conflict: str
+    unknown_partition: bool
+    age_metadata_drift: bool
+    duplicate_extra_rows: int
+    duplicate_occupied_extra_rows: int
+    extra_occupied_rows: int
+    status_conflict_occupied_rows: int
+    age_conflict_occupied_rows: int
+
+
+@dataclass
+class _V4Diagnostics:
+    """Aggregate integer diagnostics of one v4 normalization pass."""
+
+    positions_by_status: dict[str, int]
+    duplicate_extra_rows: int
+    duplicate_occupied_extra_rows: int
+    occupant_conflict_positions: int
+    occupant_conflict_extra_occupied_rows: int
+    status_conflict_positions: int
+    status_conflict_occupied_rows: int
+    age_conflict_positions: int
+    age_conflict_occupied_rows: int
+    age_metadata_drift_positions: int
+    unidentified_rows: int
+    unidentified_occupied_rows: int
+    unknown_age_partition_positions: int
+
+
+def _classify_key_rows_v4(
+    key_rows: list[_ObservedRow], *, partitioned: bool
+) -> _V4KeyOutcome:
+    """Classify one v4 key after collapsing exact duplicates.
+
+    Precedence, in tested order: (1) divergent statuses become a status
+    conflict with no winning state; (2) all-occupied partitioned keys with
+    divergent or unknown selectors become an age conflict with no winning age
+    group; (3) all-occupied keys with one effective selector and divergent
+    occupant evidence become an occupant conflict counting one position;
+    (4) otherwise the key is an unambiguous position. In non-partitioned
+    codes, age metadata drift alone never suppresses an unambiguous
+    occupation.
+    """
+    signature_rows: dict[tuple[object, ...], list[_ObservedRow]] = (
+        defaultdict(list)
+    )
+    for row in key_rows:
+        signature_rows[_row_signature(row)].append(row)
+
+    duplicate_extra = 0
+    duplicate_occupied_extra = 0
+    occupied_groups: list[list[_ObservedRow]] = []
+    for same_rows in signature_rows.values():
+        extras = len(same_rows) - 1
+        duplicate_extra += extras
+        if same_rows[0].status == BedStatus.OCCUPIED:
+            duplicate_occupied_extra += extras
+            occupied_groups.append(same_rows)
+
+    if len(occupied_groups) != len(signature_rows):
+        # At least one non-occupied unique signature: status divergence.
+        return _V4KeyOutcome(
+            position=None,
+            conflict="status",
+            unknown_partition=False,
+            age_metadata_drift=False,
+            duplicate_extra_rows=duplicate_extra,
+            duplicate_occupied_extra_rows=duplicate_occupied_extra,
+            extra_occupied_rows=0,
+            status_conflict_occupied_rows=len(occupied_groups),
+            age_conflict_occupied_rows=0,
+        )
+
+    if len(occupied_groups) == 1:
+        (same_rows,) = occupied_groups
+        row = same_rows[0]
+        position = _PhysicalPosition(
+            code=row.code,
+            name=row.name,
+            status=row.status,
+            age_band=row.age_band,
+        )
+        if partitioned and row.age_band == OccupancyAgeBand.UNKNOWN:
+            return _V4KeyOutcome(
+                position=position,
+                conflict="",
+                unknown_partition=True,
+                age_metadata_drift=False,
+                duplicate_extra_rows=duplicate_extra,
+                duplicate_occupied_extra_rows=duplicate_occupied_extra,
+                extra_occupied_rows=0,
+                status_conflict_occupied_rows=0,
+                age_conflict_occupied_rows=0,
+            )
+        return _V4KeyOutcome(
+            position=position,
+            conflict="",
+            unknown_partition=False,
+            age_metadata_drift=False,
+            duplicate_extra_rows=duplicate_extra,
+            duplicate_occupied_extra_rows=duplicate_occupied_extra,
+            extra_occupied_rows=0,
+            status_conflict_occupied_rows=0,
+            age_conflict_occupied_rows=0,
+        )
+
+    bands = [rows[0].age_band for rows in occupied_groups]
+    if partitioned:
+        known_bands = {
+            band for band in bands if band != OccupancyAgeBand.UNKNOWN
+        }
+        if len(known_bands) == 1 and len(known_bands) == len(set(bands)):
+            # All alternatives share the same known effective selector.
+            row = occupied_groups[0][0]
+            return _V4KeyOutcome(
+                position=_PhysicalPosition(
+                    code=row.code,
+                    name=row.name,
+                    status=row.status,
+                    age_band=row.age_band,
+                ),
+                conflict="occupant",
+                unknown_partition=False,
+                age_metadata_drift=False,
+                duplicate_extra_rows=duplicate_extra,
+                duplicate_occupied_extra_rows=duplicate_occupied_extra,
+                extra_occupied_rows=len(occupied_groups) - 1,
+                status_conflict_occupied_rows=0,
+                age_conflict_occupied_rows=0,
+            )
+        return _V4KeyOutcome(
+            position=None,
+            conflict="age",
+            unknown_partition=False,
+            age_metadata_drift=False,
+            duplicate_extra_rows=duplicate_extra,
+            duplicate_occupied_extra_rows=duplicate_occupied_extra,
+            extra_occupied_rows=0,
+            status_conflict_occupied_rows=0,
+            age_conflict_occupied_rows=len(occupied_groups),
+        )
+
+    occupants = {
+        (rows[0].record, rows[0].patient_name) for rows in occupied_groups
+    }
+    if len(occupants) == 1:
+        # Non-partitioned age metadata drift: the physical occupation is
+        # unambiguous, so all rows collapse into one counted position and the
+        # extra rows are consolidated like duplicates; the metadata drift is
+        # recorded as an actionable warning, never as an omitted occupation.
+        row = occupied_groups[0][0]
+        return _V4KeyOutcome(
+            position=_PhysicalPosition(
+                code=row.code,
+                name=row.name,
+                status=row.status,
+                age_band=row.age_band,
+            ),
+            conflict="",
+            unknown_partition=False,
+            age_metadata_drift=len(bands) > 1,
+            duplicate_extra_rows=len(key_rows) - 1,
+            duplicate_occupied_extra_rows=len(key_rows) - 1,
+            extra_occupied_rows=0,
+            status_conflict_occupied_rows=0,
+            age_conflict_occupied_rows=0,
+        )
+    row = occupied_groups[0][0]
+    return _V4KeyOutcome(
+        position=_PhysicalPosition(
+            code=row.code,
+            name=row.name,
+            status=row.status,
+            age_band=row.age_band,
+        ),
+        conflict="occupant",
+        unknown_partition=False,
+        age_metadata_drift=False,
+        duplicate_extra_rows=duplicate_extra,
+        duplicate_occupied_extra_rows=duplicate_occupied_extra,
+        extra_occupied_rows=len(occupied_groups) - 1,
+        status_conflict_occupied_rows=0,
+        age_conflict_occupied_rows=0,
+    )
+
+
+def _normalize_positions_v4(
+    rows: tuple[_ObservedRow, ...],
+    partitioned_codes: set[str],
+) -> tuple[list[_PhysicalPosition], _V4Diagnostics]:
+    """Collapse raw rows into v4 typed positions.
+
+    The physical key is normalized source identity (code, or sector name as
+    fallback) plus normalized bed. A row without a usable bed stays an
+    unidentified raw row. Exact duplicates collapse first; unique signatures
+    are then classified by precedence. Occupant-conflict keys contribute one
+    representative position; status/age conflicts and unknown-partition
+    positions never feed an official numerator.
+    """
+    positions_by_status = {status: 0 for status in _STATUS_KEYS}
+    duplicate_extra = 0
+    duplicate_occupied_extra = 0
+    occupant_conflict_positions = 0
+    occupant_conflict_extra_occupied_rows = 0
+    status_conflict_positions = 0
+    status_conflict_occupied_rows = 0
+    age_conflict_positions = 0
+    age_conflict_occupied_rows = 0
+    age_metadata_drift_positions = 0
+    unidentified_rows = 0
+    unidentified_occupied_rows = 0
+    unknown_age_partition_positions = 0
+
+    by_key: dict[tuple[str, str], list[_ObservedRow]] = defaultdict(list)
+    for row in rows:
+        bed = _normalize_identity(row.bed)
+        if not bed:
+            unidentified_rows += 1
+            if row.status == BedStatus.OCCUPIED:
+                unidentified_occupied_rows += 1
+            continue
+        source = (
+            _normalize_identity(row.code)
+            if row.code
+            else _normalize_identity(row.name)
+        )
+        by_key[(source, bed)].append(row)
+
+    positions: list[_PhysicalPosition] = []
+    for key_rows in by_key.values():
+        partitioned = key_rows[0].code in partitioned_codes
+        outcome = _classify_key_rows_v4(key_rows, partitioned=partitioned)
+        if outcome.position is not None:
+            positions.append(outcome.position)
+            positions_by_status[outcome.position.status] += 1
+        if outcome.conflict == "occupant":
+            occupant_conflict_positions += 1
+            occupant_conflict_extra_occupied_rows += (
+                outcome.extra_occupied_rows
+            )
+        elif outcome.conflict == "status":
+            status_conflict_positions += 1
+            status_conflict_occupied_rows += (
+                outcome.status_conflict_occupied_rows
+            )
+        elif outcome.conflict == "age":
+            age_conflict_positions += 1
+            age_conflict_occupied_rows += outcome.age_conflict_occupied_rows
+        if outcome.unknown_partition:
+            unknown_age_partition_positions += 1
+        if outcome.age_metadata_drift:
+            age_metadata_drift_positions += 1
+        duplicate_extra += outcome.duplicate_extra_rows
+        duplicate_occupied_extra += outcome.duplicate_occupied_extra_rows
+
+    diagnostics = _V4Diagnostics(
+        positions_by_status=positions_by_status,
+        duplicate_extra_rows=duplicate_extra,
+        duplicate_occupied_extra_rows=duplicate_occupied_extra,
+        occupant_conflict_positions=occupant_conflict_positions,
+        occupant_conflict_extra_occupied_rows=(
+            occupant_conflict_extra_occupied_rows
+        ),
+        status_conflict_positions=status_conflict_positions,
+        status_conflict_occupied_rows=status_conflict_occupied_rows,
+        age_conflict_positions=age_conflict_positions,
+        age_conflict_occupied_rows=age_conflict_occupied_rows,
+        age_metadata_drift_positions=age_metadata_drift_positions,
+        unidentified_rows=unidentified_rows,
+        unidentified_occupied_rows=unidentified_occupied_rows,
+        unknown_age_partition_positions=unknown_age_partition_positions,
+    )
+    return positions, diagnostics
+
+
+def _classify_v4_counted_positions(
+    *,
+    positions: Iterable[_PhysicalPosition],
+    partitioned_codes: set[str],
+    group_by_code: dict[str, CapacityGroupDefinition],
+    group_by_band: dict[tuple[str, str], CapacityGroupDefinition],
+) -> tuple[int, int, int, int]:
+    """Classify counted occupied positions into the second bridge.
+
+    Returns ``(official_numerator, unrated, unmapped, linked_pending)``.
+    Positions of partitioned codes are resolved by ``(code, age_band)``;
+    unknown-band positions in partitioned codes are not counted at all (they
+    belong to the first bridge as unknown partition positions).
+    """
+    official_numerator = 0
+    unrated = 0
+    unmapped = 0
+    linked_pending = 0
+    for position in positions:
+        if position.status != BedStatus.OCCUPIED:
+            continue
+        if position.code in partitioned_codes:
+            if position.age_band not in (
+                OccupancyAgeBand.UNDER_12,
+                OccupancyAgeBand.AGE_12_OR_OVER,
+            ):
+                continue
+            group = group_by_band.get((position.code, position.age_band))
+        else:
+            group = group_by_code.get(position.code)
+        if group is None:
+            unmapped += 1
+        elif group.calculation_policy == CalculationPolicy.STANDARD:
+            official_numerator += 1
+        elif group.calculation_policy == CalculationPolicy.UNRATED:
+            unrated += 1
+        else:
+            linked_pending += 1
+    return official_numerator, unrated, unmapped, linked_pending
+
+
+# Allowlisted keys of the persisted v4 aggregate reconciliation. Only
+# nonnegative integers, one boolean quality flag and the positions-by-status
+# dict of integers are allowed; no row-level identity ever reaches this JSON.
+_V4_RECONCILIATION_ALLOWLIST = frozenset(
+    {
+        "schema_version",
+        "quality_warning",
+        "raw_occupied_rows",
+        "positions_by_status",
+        "duplicate_extra_rows",
+        "duplicate_occupied_extra_rows",
+        "occupant_conflict_positions",
+        "occupant_conflict_extra_occupied_rows",
+        "status_conflict_positions",
+        "status_conflict_occupied_rows",
+        "age_conflict_positions",
+        "age_conflict_occupied_rows",
+        "age_metadata_drift_positions",
+        "unidentified_rows",
+        "unidentified_occupied_rows",
+        "unknown_age_partition_positions",
+        "counted_occupied_positions",
+        "official_numerator",
+        "occupied_unrated_positions",
+        "occupied_unmapped_positions",
+        "occupied_linked_pending_positions",
+    }
+)
+
+
+def _reconciliation_v4_json(
+    *,
+    rows: tuple[_ObservedRow, ...],
+    diagnostics: _V4Diagnostics,
+    official_numerator: int,
+    unrated: int,
+    unmapped: int,
+    linked_pending: int,
+) -> dict[str, object]:
+    """Build the closed schema 2 reconciliation for one v4 measurement.
+
+    Two bridges hold by construction and are asserted here and re-checked by
+    synthetic tests: the raw occupied-row bridge separates duplicate extras,
+    conflict rows, unidentified rows, unknown partition positions and counted
+    positions; the counted-position bridge separates the official numerator
+    from the non-calculable policy states (unrated, unmapped, pending).
+    """
+    raw_occupied_rows = sum(
+        1 for row in rows if row.status == BedStatus.OCCUPIED
+    )
+    counted_occupied_positions = (
+        official_numerator + unrated + unmapped + linked_pending
+    )
+    bridge = (
+        diagnostics.duplicate_occupied_extra_rows
+        + diagnostics.occupant_conflict_extra_occupied_rows
+        + diagnostics.status_conflict_occupied_rows
+        + diagnostics.age_conflict_occupied_rows
+        + diagnostics.unidentified_occupied_rows
+        + diagnostics.unknown_age_partition_positions
+        + counted_occupied_positions
+    )
+    assert bridge == raw_occupied_rows
+    quality_warning = _v4_quality_warning(diagnostics, unmapped=unmapped)
+    reconciliation: dict[str, object] = {
+        "schema_version": 2,
+        "quality_warning": quality_warning,
+        "raw_occupied_rows": raw_occupied_rows,
+        "positions_by_status": dict(diagnostics.positions_by_status),
+        "duplicate_extra_rows": diagnostics.duplicate_extra_rows,
+        "duplicate_occupied_extra_rows": (
+            diagnostics.duplicate_occupied_extra_rows
+        ),
+        "occupant_conflict_positions": (
+            diagnostics.occupant_conflict_positions
+        ),
+        "occupant_conflict_extra_occupied_rows": (
+            diagnostics.occupant_conflict_extra_occupied_rows
+        ),
+        "status_conflict_positions": diagnostics.status_conflict_positions,
+        "status_conflict_occupied_rows": (
+            diagnostics.status_conflict_occupied_rows
+        ),
+        "age_conflict_positions": diagnostics.age_conflict_positions,
+        "age_conflict_occupied_rows": diagnostics.age_conflict_occupied_rows,
+        "age_metadata_drift_positions": (
+            diagnostics.age_metadata_drift_positions
+        ),
+        "unidentified_rows": diagnostics.unidentified_rows,
+        "unidentified_occupied_rows": (
+            diagnostics.unidentified_occupied_rows
+        ),
+        "unknown_age_partition_positions": (
+            diagnostics.unknown_age_partition_positions
+        ),
+        "counted_occupied_positions": counted_occupied_positions,
+        "official_numerator": official_numerator,
+        "occupied_unrated_positions": unrated,
+        "occupied_unmapped_positions": unmapped,
+        "occupied_linked_pending_positions": linked_pending,
+    }
+    assert set(reconciliation) == _V4_RECONCILIATION_ALLOWLIST
+    return reconciliation
+
+
+def _v4_quality_warning(
+    diagnostics: _V4Diagnostics, *, unmapped: int
+) -> bool:
+    """Decide whether a v4 measurement carries actionable quality warnings.
+
+    Conflicts of any type, occupied rows without position, unknown partition
+    positions, non-partitioned age metadata drift and occupied unmapped
+    positions are warnings. Intentional ``unrated`` policy and known-capacity
+    ``linked_pending`` evidence are not quality failures.
+    """
+    return bool(
+        diagnostics.occupant_conflict_positions
+        or diagnostics.status_conflict_positions
+        or diagnostics.age_conflict_positions
+        or diagnostics.age_metadata_drift_positions
+        or diagnostics.unidentified_occupied_rows
+        or diagnostics.unknown_age_partition_positions
+        or unmapped
+    )
 
 
 # Allowlisted keys of the persisted aggregate reconciliation. Only nonnegative
