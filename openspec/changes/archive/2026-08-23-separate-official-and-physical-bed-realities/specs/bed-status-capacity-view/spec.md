@@ -1,40 +1,4 @@
-# bed-status-capacity-view Specification
-
-## Purpose
-
-TBD - created by archiving change add-versioned-sector-capacity-occupancy-history. Update Purpose after archive.
-
-## Requirements
-
-### Requirement: Bed status page uses the exact latest-census measurement
-
-The authenticated `/beds` page SHALL enrich the latest census only when an
-occupancy measurement exists for the exact `IngestionRun` represented by that
-census.
-
-#### Scenario: Exact measurement is available
-
-- **WHEN** the latest census rows belong to one run with an occupancy
-  measurement
-- **THEN** the page displays capacity statistics from that measurement
-- **AND** it displays the census capture time and catalog effective date
-
-#### Scenario: Latest measurement is pending
-
-- **WHEN** the latest census has no exact occupancy measurement
-- **THEN** the page preserves its existing raw sector and bed-status table
-- **AND** it labels capacity statistics as pending or unavailable
-- **AND** it does not calculate capacity ad hoc in the view
-
-#### Scenario: Older measurement is not reused
-
-- **WHEN** an older census has a measurement but the latest census does not
-- **THEN** the page does not display the older percentage as current
-
-#### Scenario: Anonymous access remains protected
-
-- **WHEN** an unauthenticated user requests `/beds/`
-- **THEN** the user is redirected to login as before this change
+## MODIFIED Requirements
 
 ### Requirement: Capacity rows follow official groups
 
@@ -121,55 +85,6 @@ measurement algorithm.
 - **THEN** the official section labels the historical algorithm semantics
 - **AND** does not recalculate its numerator, percentage or excess with v3
 
-### Requirement: Over-capacity state is explicit and accessible
-
-The page SHALL display both visual and textual warning when a calculable group
-has occupancy greater than 100 percent.
-
-#### Scenario: Group exceeds official capacity
-
-- **WHEN** a group measurement has percentage greater than 100.00
-- **THEN** its row is visually highlighted
-- **AND** it contains text indicating over-capacity
-- **AND** it displays the absolute exceeded-by count
-
-#### Scenario: Group is not over capacity
-
-- **WHEN** a group measurement has percentage less than or equal to 100.00
-- **THEN** it does not display the over-capacity warning
-
-### Requirement: Page distinguishes capacity and calculation coverage
-
-The page SHALL display algorithm-appropriate official coverage and SHALL label
-whether the denominator represents source codes or official sectors.
-
-#### Scenario: Corrected official-sector coverage is shown
-
-- **WHEN** the page displays a corrected v2 measurement
-- **THEN** it displays `39 de 43 setores oficiais com capacidade cadastrada`
-- **AND** it displays `39 de 43 setores oficiais com lotação calculável`
-
-#### Scenario: Corrected Obstetrícia 3A is calculated
-
-- **WHEN** the page displays v2 groups `OBST-3A-ADULTO` and
-  `OBST-3A-INFANTIL`
-- **THEN** it displays capacities 32 and 16 respectively
-- **AND** it displays each persisted occupied count, percentage and exceeded-by
-- **AND** it does not display the old cama-berço pending message
-
-#### Scenario: Legacy v1 coverage remains meaningful
-
-- **WHEN** the page displays an exact v1 measurement
-- **THEN** it retains the stored 44/47 capacity and 43/47 calculable source-code
-  coverage labels
-- **AND** does not relabel those values as 39/43 official-sector coverage
-
-#### Scenario: Sector has no official capacity
-
-- **WHEN** a group is `unrated` or `unmapped`
-- **THEN** the page displays `Capacidade não cadastrada` or equivalent
-- **AND** it does not display zero percent
-
 ### Requirement: Hospital total uses only calculable groups
 
 The official section SHALL display hospital occupancy from the exact persisted
@@ -205,23 +120,7 @@ persisted per-sector availability and excess without cross-sector compensation.
   when the complete initial catalog applies
 - **AND** does not apply corrected or v3 totals retroactively
 
-### Requirement: Page warns when corrected occupancy is age-partial
-
-The page SHALL display an aggregate, non-identifying warning whenever the exact
-v2 measurement omitted an occupied 3A row because its age was unknown.
-
-#### Scenario: Partial corrected measurement is displayed
-
-- **WHEN** the exact measurement has a positive unknown-age occupied count
-- **THEN** the page labels its point-in-time rate as partial
-- **AND** displays the aggregate number of omitted 3A rows
-- **AND** explains that the measurement is excluded from official daily means
-- **AND** exposes no exact age, name or record number in the warning
-
-#### Scenario: Complete corrected measurement has no partial warning
-
-- **WHEN** the exact v2 measurement has zero unknown-age occupied rows
-- **THEN** the page does not display the age-partial warning
+## ADDED Requirements
 
 ### Requirement: Page reconciles official and physical occupancy safely
 
