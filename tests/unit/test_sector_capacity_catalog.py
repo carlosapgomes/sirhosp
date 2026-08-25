@@ -60,6 +60,14 @@ V4_CATALOG = (
     / "sector_capacity_catalog_v4.json"
 )
 
+V5_CATALOG = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "census"
+    / "data"
+    / "sector_capacity_catalog_v5.json"
+)
+
 # C1: nomes exatos esperados no sistema fonte (CensusSnapshot.setor).
 EXPECTED_SOURCE_NAMES = {
     "751": "0 - SALA DE PROCEDIMENTO ADULTO HGRS",
@@ -223,6 +231,10 @@ def _v3_document() -> dict:
 
 def _v4_document() -> dict:
     return json.loads(V4_CATALOG.read_text(encoding="utf-8"))
+
+
+def _v5_document() -> dict:
+    return json.loads(V5_CATALOG.read_text(encoding="utf-8"))
 
 
 def _alias_document() -> dict:
@@ -1413,7 +1425,13 @@ class TestAlgorithmSchemaEvolution:
 
     def test_supported_algorithms_are_exactly_the_implemented_ones(self):
         assert catalog_module.ALLOWED_ALGORITHM_VERSIONS == frozenset(
-            {"occupancy-v1", "occupancy-v2", "occupancy-v3", "occupancy-v4"}
+            {
+                "occupancy-v1",
+                "occupancy-v2",
+                "occupancy-v3",
+                "occupancy-v4",
+                "occupancy-v5",
+            }
         )
 
     def test_each_supported_algorithm_validates(self):
@@ -1668,6 +1686,7 @@ HISTORICAL_JSON_SHA256 = {
     "initial": "7e346a74503d2ea797740bc8773d6a45702fed2e6aa0497f91c7d25e7f2a6bb3",
     "corrected": "d11e26b349b84c7c8f369867348f0ad261c2a2cdfab51cb991055aca1dc27acc",
     "v3": "62298efb138af3b0ecec38974e6d2c922f4031a3304c932d230cebb5eb85455c",
+    "v4": "141166289c296cb5982da3f145edddf576d15392303ba2d7aaf198ff4bfaf0f9",
 }
 
 
@@ -2025,6 +2044,7 @@ class TestV4BytePreservation:
             == HISTORICAL_JSON_SHA256["corrected"]
         )
         assert self._sha256(V3_CATALOG) == HISTORICAL_JSON_SHA256["v3"]
+        assert self._sha256(V4_CATALOG) == HISTORICAL_JSON_SHA256["v4"]
 
     def test_historical_documents_keep_parsing_results(self):
         for document, schema, memberships in (
@@ -2036,3 +2056,288 @@ class TestV4BytePreservation:
             assert catalog.schema_version == schema
             assert catalog.membership_count == memberships
             assert catalog.aliased_membership_count == 0
+
+
+class TestV5CatalogDocument:
+    """CIPOO-S2 R1/R2: catálogo integral v5 com algoritmo explícito.
+
+    V5 é aceito somente porque a allowlist implementada contém
+    ``occupancy-v5``; o documento integral preserva a estrutura v4 e
+    altera somente o contexto de versão/fonte/algoritmo.
+    """
+
+    def test_v5_document_declares_new_schema_and_v5(self):
+        document = _v5_document()
+        assert document["schema_version"] == "3.0"
+        assert document["occupancy_algorithm_version"] == "occupancy-v5"
+
+    def test_v5_document_totals_and_alias_coverage(self):
+        catalog = validate_catalog_document(_v5_document())
+        assert catalog.schema_version == "3.0"
+        assert catalog.algorithm_version == "occupancy-v5"
+        assert catalog.group_count == 43
+        assert catalog.membership_count == 48
+        assert catalog.code_count == 47
+        assert catalog.capacity_group_count == 39
+        assert catalog.standard_group_count == 39
+        assert catalog.unrated_group_count == 4
+        assert catalog.known_capacity == 666
+        assert catalog.calculable_capacity == 666
+        assert catalog.aliased_membership_count == 48
+
+    def test_v5_groups_are_structurally_identical_to_v4(self):
+        """Somente o contexto de versão/fonte/algoritmo pode mudar."""
+        assert _v5_document()["groups"] == _v4_document()["groups"]
+
+    def test_v5_changes_only_algorithm_context(self):
+        v4 = _v4_document()
+        v5 = _v5_document()
+        assert set(v5) == set(v4)
+        for key in ("schema_version",):
+            assert v5[key] == v4[key]
+        assert v5["occupancy_algorithm_version"] == "occupancy-v5"
+        assert v4["occupancy_algorithm_version"] == "occupancy-v4"
+        assert v5["source_reference"] != v4["source_reference"]
+        assert "occupancy-v5" in v5["source_reference"]
+        assert "sem dados de pacientes" in v5["source_reference"]
+        assert len(v5["source_reference"]) <= 255
+        lowered = v5["source_reference"].lower()
+        for marker in ("prontuário", "nome de paciente", "sha-256 de paciente"):
+            assert marker not in lowered
+
+    def test_v5_hash_is_own_and_distinct_from_v4(self):
+        sha5 = hashlib.sha256(V5_CATALOG.read_bytes()).hexdigest()
+        sha4 = hashlib.sha256(V4_CATALOG.read_bytes()).hexdigest()
+        assert len(sha5) == 64
+        assert sha5 != sha4
+        assert sha5 != HISTORICAL_JSON_SHA256["v4"]
+
+    def test_v5_preserves_co_policy_and_3a_partition(self):
+        catalog = validate_catalog_document(_v5_document())
+        by_key = {group.stable_key: group for group in catalog.groups}
+        co = by_key["CO"]
+        assert co.calculation_policy == CalculationPolicy.UNRATED
+        assert co.official_capacity is None
+        assert {(m.source_code, m.age_selector) for m in co.memberships} == {
+            ("20", "all"),
+            ("1110", "all"),
+            ("1112", "all"),
+            ("1114", "all"),
+            ("1116", "all"),
+        }
+        adult = by_key["OBST-3A-ADULTO"]
+        child = by_key["OBST-3A-INFANTIL"]
+        assert adult.calculation_policy == CalculationPolicy.STANDARD
+        assert adult.official_capacity == 32
+        assert [
+            (m.source_code, m.age_selector) for m in adult.memberships
+        ] == [("654", "age_12_or_over")]
+        assert child.calculation_policy == CalculationPolicy.STANDARD
+        assert child.official_capacity == 16
+        assert [
+            (m.source_code, m.age_selector) for m in child.memberships
+        ] == [("654", "under_12")]
+
+    def test_v5_has_no_combined_3a_capacity(self):
+        by_key = {
+            group["stable_key"]: group for group in _v5_document()["groups"]
+        }
+        assert "OBST-3A" not in by_key
+        capacities = {
+            group["stable_key"]: group["official_capacity"]
+            for group in _v5_document()["groups"]
+        }
+        assert 48 not in capacities.values()
+
+    def test_v5_cardio_keeps_many_to_many_relations(self):
+        document = _v5_document()
+        cardio = next(
+            g for g in document["groups"] if g["stable_key"] == "ENF-2B-CARD"
+        )
+        assert [m["source_code"] for m in cardio["source_codes"]] == [
+            "719",
+            "2156",
+        ]
+        assert cardio["official_capacity"] == 15
+
+    def test_v5_curated_aliases_gastro_3a_cardio_and_co(self):
+        document = _v5_document()
+        aliases = {
+            m["source_code"]: m["source_display_name"]
+            for group in document["groups"]
+            for m in group["source_codes"]
+        }
+        assert aliases["2702"] == "Enfermaria Gastroenterologia"
+        assert aliases["654"] == "Enfermaria 3A Obstetrícia Clínica"
+        assert aliases["719"] == "Cardioclínica"
+        assert aliases["2156"] == "Enfermaria 2B Cardio"
+        assert aliases["20"] == "Centro Obstétrico"
+
+    def test_v5_all_memberships_have_non_empty_clean_alias(self):
+        document = _v5_document()
+        memberships = [
+            m for group in document["groups"] for m in group["source_codes"]
+        ]
+        assert len(memberships) == 48
+        for membership in memberships:
+            alias = membership["source_display_name"]
+            assert isinstance(alias, str)
+            assert alias == alias.strip()
+            assert len(alias) <= 255
+            assert membership["configured_source_name"].strip()
+
+
+class TestV5DryRun:
+    """CIPOO-S2 R4: dry-run observável com algoritmo v5 e zero escrita."""
+
+    @pytest.mark.django_db
+    def test_dry_run_reports_v5_totals_and_full_alias_coverage(self, capsys):
+        before = (
+            CapacityCatalogVersion.objects.count(),
+            CapacityGroupDefinition.objects.count(),
+            CapacitySectorMembership.objects.count(),
+        )
+        assert before == (0, 0, 0)
+
+        result = activate_sector_capacity_catalog(
+            V5_CATALOG, _future_date(30), dry_run=True
+        )
+        assert result.algorithm_version == "occupancy-v5"
+        assert result.created is False
+        assert result.group_count == 43
+        assert result.member_count == 48
+        assert result.code_count == 47
+        assert result.standard_group_count == 39
+        assert result.unrated_group_count == 4
+        assert result.known_capacity == 666
+        assert result.calculable_capacity == 666
+        assert result.aliased_membership_count == 48
+        assert result.aliased_membership_count == result.member_count
+        assert (
+            result.document_sha256
+            == hashlib.sha256(V5_CATALOG.read_bytes()).hexdigest()
+        )
+
+        call_command(
+            "activate_sector_capacity_catalog",
+            "--input",
+            str(V5_CATALOG),
+            "--effective-from",
+            _future_date(30),
+            "--dry-run",
+        )
+        out = capsys.readouterr().out
+        assert "validado (dry-run)" in out
+        assert "algoritmo de ocupação: occupancy-v5" in out
+        assert "grupos oficiais: 43" in out
+        assert "associações: 48" in out
+        assert "códigos-fonte distintos: 47" in out
+        assert "grupos com capacidade: 39" in out
+        assert "grupos standard: 39" in out
+        assert "grupos unrated: 4" in out
+        assert "capacidade conhecida: 666" in out
+        assert "capacidade calculável: 666" in out
+
+        after = (
+            CapacityCatalogVersion.objects.count(),
+            CapacityGroupDefinition.objects.count(),
+            CapacitySectorMembership.objects.count(),
+        )
+        assert after == before == (0, 0, 0)
+
+
+class TestV5FutureActivation:
+    """CIPOO-S2 R5: ativação futura atômica, idempotente e conflitante."""
+
+    @pytest.mark.django_db
+    def test_today_and_past_rejected_for_v5_document(self):
+        with pytest.raises(CatalogValidationError):
+            activate_sector_capacity_catalog(
+                V5_CATALOG, timezone.localdate().isoformat()
+            )
+        with pytest.raises(CatalogValidationError):
+            activate_sector_capacity_catalog(
+                V5_CATALOG,
+                (timezone.localdate() - timedelta(days=1)).isoformat(),
+            )
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_future_activation_persists_v5_atomically(self):
+        effective = _future_date(30)
+        result = activate_sector_capacity_catalog(V5_CATALOG, effective)
+        assert result.created is True
+        assert result.algorithm_version == "occupancy-v5"
+        version = CapacityCatalogVersion.objects.get()
+        assert version.effective_from.isoformat() == effective
+        assert version.schema_version == "3.0"
+        assert version.algorithm_version == "occupancy-v5"
+        assert version.groups.count() == 43
+        assert version.memberships.count() == 48
+
+        rows = {m.source_code: m for m in version.memberships.all()}
+        assert rows["2702"].source_display_name == "Enfermaria Gastroenterologia"
+        assert rows["654"].source_display_name == (
+            "Enfermaria 3A Obstetrícia Clínica"
+        )
+        assert rows["719"].source_display_name == "Cardioclínica"
+        assert rows["2156"].source_display_name == "Enfermaria 2B Cardio"
+        assert rows["20"].source_display_name == "Centro Obstétrico"
+
+    @pytest.mark.django_db
+    def test_v5_activation_is_idempotent_for_same_document_and_date(self):
+        effective = _future_date(30)
+        first = activate_sector_capacity_catalog(V5_CATALOG, effective)
+        second = activate_sector_capacity_catalog(V5_CATALOG, effective)
+        assert first.created is True
+        assert second.created is False
+        assert first.document_sha256 == second.document_sha256
+        assert second.algorithm_version == "occupancy-v5"
+        assert second.aliased_membership_count == 48
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert CapacityGroupDefinition.objects.count() == 43
+        assert CapacitySectorMembership.objects.count() == 48
+
+    @pytest.mark.django_db
+    def test_divergent_document_same_date_conflicts_without_mutation(
+        self, tmp_path: Path
+    ):
+        effective = _future_date(30)
+        activate_sector_capacity_catalog(V5_CATALOG, effective)
+        divergent = _v5_document()
+        divergent["source_reference"] = "divergente"
+        path = _write_document(tmp_path, divergent)
+        with pytest.raises(CatalogConflictError):
+            activate_sector_capacity_catalog(path, effective)
+        version = CapacityCatalogVersion.objects.get()
+        assert version.algorithm_version == "occupancy-v5"
+        assert version.groups.count() == 43
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert CapacityGroupDefinition.objects.count() == 43
+        assert CapacitySectorMembership.objects.count() == 48
+
+    @pytest.mark.django_db
+    def test_invalid_json_for_v5_date_writes_nothing(self, tmp_path: Path):
+        bad = tmp_path / "bad-v5.json"
+        bad.write_text("{not json", encoding="utf-8")
+        with pytest.raises(CatalogValidationError):
+            activate_sector_capacity_catalog(bad, _future_date(30))
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0
+
+    @pytest.mark.django_db
+    def test_unknown_algorithm_variant_still_rejected_before_write(
+        self, tmp_path: Path
+    ):
+        document = _v5_document()
+        document["occupancy_algorithm_version"] = "occupancy-v6"
+        path = _write_document(tmp_path, document)
+        with pytest.raises(CatalogValidationError) as excinfo:
+            activate_sector_capacity_catalog(path, _future_date(30))
+        assert "não suportado" in str(excinfo.value)
+        assert CapacityCatalogVersion.objects.count() == 0
+        assert CapacityGroupDefinition.objects.count() == 0
+        assert CapacitySectorMembership.objects.count() == 0

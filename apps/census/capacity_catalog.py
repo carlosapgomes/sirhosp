@@ -79,6 +79,7 @@ ALLOWED_ALGORITHM_VERSIONS = frozenset(
         occupancy.ALGORITHM_VERSION_V2,
         occupancy.ALGORITHM_VERSION_V3,
         occupancy.ALGORITHM_VERSION_V4,
+        occupancy.ALGORITHM_VERSION_V5,
     }
 )
 
