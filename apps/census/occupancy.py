@@ -2817,6 +2817,7 @@ class _PhysicalPresentation:
     unidentified_rows: int
     unidentified_occupied_rows: int
     sectors: list[_PhysicalSectorRow]
+    v5_coverage: _V5Coverage | None = None
 
     @property
     def identified_total(self) -> int:
@@ -3079,9 +3080,14 @@ class _UnitRow:
 
 @dataclass
 class _UnitsPresentation:
-    """Template-ready unit list plus the physical aggregate snapshot."""
+    """Template-ready unit list plus the physical aggregate snapshot.
 
-    units: list[_UnitRow]
+    ``occupancy-v5`` replaces the v3/v4 physical units with patient/state
+    units of the same catalog graph; the template branches on the persisted
+    algorithm version before touching either type.
+    """
+
+    units: list[_UnitRow] | list[_V5UnitRow]
     physical: _PhysicalPresentation
 
 
@@ -3636,6 +3642,511 @@ def _v4_unmapped_title(
     return observed_names[0] if observed_names else fallback
 
 
+# ---------------------------------------------------------------------------
+# CIPOO-S3: /beds v5 presentation by identified patient.
+#
+# For an exact ``occupancy-v5`` measurement the page renders one official
+# summary card set, a private aggregate bridge and a single
+# ``Setores, pacientes e estados de leitos`` list. Units are the same
+# connected components of the catalog group<->code graph; each unit lists
+# one item per normalized record (all name variants, all reported beds and
+# all source codes, never a winning variant), a separate incomplete-identity
+# block and the operational states reported by the source. Shared bed text
+# and multiple states for one bed become factual messages, never physical
+# conflicts. Everything here is presentation memory of the exact census:
+# nothing is persisted, logged or aggregated.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _V5Coverage:
+    """Secondary coverage metadata derived from persisted v5 counts."""
+
+    with_capacity_and_rate: int
+    total_sectors: int
+    outside_rate: int
+
+
+@dataclass
+class _V5PatientItem:
+    """One deduplicated patient item of a v5 presentation unit."""
+
+    record: str
+    names: list[str]
+    beds: list[str]
+    missing_bed: bool
+    source_codes: list[str]
+    patient_id: int | None
+    cross_group: bool
+    name_variant_lines: int
+    counted_policy: str
+    counted_label: str
+
+
+@dataclass
+class _V5OperationalRow:
+    """One operational source row of a v5 presentation unit."""
+
+    source_key: str
+    status: str
+    status_label: str
+    bed: str
+    source_code: str
+    source_name: str
+
+
+@dataclass
+class _V5IncompleteRow:
+    """One incomplete-identity row of a v5 presentation unit."""
+
+    source_key: str
+    name: str
+    record: str
+    bed: str
+    source_code: str
+    source_name: str
+    patient_id: int | None
+
+
+@dataclass
+class _V5SharedBedCase:
+    """Factual shared-bed message: N patients reported the same bed text."""
+
+    bed: str
+    patient_count: int
+
+
+@dataclass
+class _V5SharedStateCase:
+    """Factual same-bed message: N operational states share one bed text."""
+
+    bed: str
+    state_count: int
+
+
+@dataclass
+class _V5SourceBlock:
+    """One source-code block of a v5 presentation unit."""
+
+    source_code: str
+    alias: str
+    raw_name: str | None
+    operational_counts: dict[str, int]
+
+
+@dataclass
+class _V5UnitRow:
+    """One connected-component unit of the v5 patient/state list."""
+
+    title: str
+    official_rows: list[_UnitOfficialRow]
+    sources: list[_V5SourceBlock]
+    patients: list[_V5PatientItem]
+    operational_rows: list[_V5OperationalRow]
+    incomplete_rows: list[_V5IncompleteRow]
+    shared_beds: list[_V5SharedBedCase]
+    shared_state_beds: list[_V5SharedStateCase]
+    is_unmapped: bool = False
+
+    @property
+    def over_capacity(self) -> bool:
+        return any(row.over_capacity for row in self.official_rows)
+
+
+_V5_COUNTED_LABELS = {
+    "counted": "contado na taxa oficial",
+    "unrated": "fora da taxa oficial",
+    "pending": "cálculo pendente",
+    "unmapped": "sem mapeamento no catálogo",
+}
+
+
+def _v5_counted_policy(policy: str) -> str:
+    """Counting policy label of one official group for a v5 patient item."""
+    if policy == CalculationPolicy.STANDARD:
+        return "counted"
+    if policy == CalculationPolicy.UNRATED:
+        return "unrated"
+    return "pending"
+
+
+def _v5_patient_item(
+    patient: _V5Patient,
+    *,
+    counted_policy: str,
+    cross_group: bool,
+    patient_map: dict[str, int],
+) -> _V5PatientItem:
+    """Project one deduplicated patient into template-ready evidence."""
+    return _V5PatientItem(
+        record=patient.record,
+        names=sorted(patient.names),
+        beds=sorted({line.bed for line in patient.lines if line.bed}),
+        missing_bed=any(not line.bed for line in patient.lines),
+        source_codes=sorted(
+            {line.code for line in patient.lines if line.code}
+        ),
+        patient_id=patient_map.get(patient.record),
+        cross_group=cross_group,
+        name_variant_lines=(
+            len(patient.lines) if len(patient.names) > 1 else 0
+        ),
+        counted_policy=counted_policy,
+        counted_label=_V5_COUNTED_LABELS[counted_policy],
+    )
+
+
+def _v5_source_block(
+    *,
+    code: str,
+    membership: CapacitySectorMembership | None,
+    alias_fallback: str,
+    operational_rows: Iterable[_V5OperationalRow],
+) -> _V5SourceBlock:
+    """One v5 source block: curated alias plus operational state counts."""
+    if membership is not None:
+        alias, raw_name = _source_alias(membership)
+    else:
+        alias, raw_name = alias_fallback, None
+    counts = {status: 0 for status in _STATUS_KEYS}
+    for row in operational_rows:
+        counts[row.status] += 1
+    return _V5SourceBlock(
+        source_code=code,
+        alias=alias,
+        raw_name=raw_name,
+        operational_counts={
+            status: count for status, count in counts.items() if count
+        },
+    )
+
+
+def _v5_shared_beds(
+    patients: Iterable[_V5PatientItem],
+) -> list[_V5SharedBedCase]:
+    """Factual cases where distinct patients reported the same bed text."""
+    bed_records: dict[str, set[str]] = defaultdict(set)
+    for patient in patients:
+        for bed in patient.beds:
+            bed_records[bed].add(patient.record)
+    return [
+        _V5SharedBedCase(bed=bed, patient_count=len(records))
+        for bed, records in sorted(bed_records.items())
+        if len(records) > 1
+    ]
+
+
+def _v5_shared_states(
+    operational_rows: Iterable[_V5OperationalRow],
+) -> list[_V5SharedStateCase]:
+    """Factual cases where one bed text carries multiple operational states."""
+    bed_states: dict[str, set[str]] = defaultdict(set)
+    for row in operational_rows:
+        if row.bed:
+            bed_states[row.bed].add(row.status)
+    return [
+        _V5SharedStateCase(bed=bed, state_count=len(states))
+        for bed, states in sorted(bed_states.items())
+        if len(states) > 1
+    ]
+
+
+def _v5_units(
+    measurement: OccupancyMeasurement,
+    rows: tuple[_ObservedRow, ...],
+    patient_map: dict[str, int],
+) -> list[_V5UnitRow]:
+    """Build the v5 patient/state units of one exact measurement.
+
+    Reuses the v5 identity contract of materialization: normalized textual
+    record, non-marker name and 3A resolution before the group partition.
+    The presentation classifies rows again in memory so every evidence line
+    (name variants, beds, source codes) stays visible without persisting
+    anything. No source code or stable key is special-cased: components come
+    from the persisted catalog memberships.
+    """
+    definitions = list(measurement.catalog.groups.all())
+    group_rows = {
+        group.stable_key: group for group in measurement.groups.all()
+    }
+    group_by_code: dict[str, CapacityGroupDefinition] = {}
+    band_groups: dict[tuple[str, str], CapacityGroupDefinition] = {}
+    partitioned_codes: set[str] = set()
+    for group in definitions:
+        for membership in group.memberships.all():
+            group_by_code[membership.source_code] = group
+            if membership.age_selector == CapacityMembershipSelector.ALL:
+                continue
+            band_groups[
+                (membership.source_code, membership.age_selector)
+            ] = group
+            partitioned_codes.add(membership.source_code)
+
+    membership_by_code: dict[str, CapacitySectorMembership] = {}
+    for group in definitions:
+        for membership in group.memberships.all():
+            membership_by_code[membership.source_code] = membership
+
+    patients: dict[tuple[str, str], _V5Patient] = {}
+    partitioned_lines: dict[str, list[_V5Line]] = defaultdict(list)
+    operational_rows: list[_V5OperationalRow] = []
+    incomplete_rows: list[_V5IncompleteRow] = []
+
+    def add_patient_line(unit_key: str, record: str, line: _V5Line) -> None:
+        existing = patients.get((unit_key, record))
+        if existing is None:
+            patients[(unit_key, record)] = _V5Patient(
+                unit_key=unit_key, record=record, lines=[line]
+            )
+        else:
+            existing.lines.append(line)
+
+    for row in rows:
+        code = row.code or ""
+        sector_name = _normalize_identity(row.name)
+        source_key = code or f"blank:{sector_name}"
+        if row.status != BedStatus.OCCUPIED:
+            operational_rows.append(
+                _V5OperationalRow(
+                    source_key=source_key,
+                    status=row.status,
+                    status_label=BedStatus(row.status).label,
+                    bed=_normalize_identity(row.bed),
+                    source_code=code,
+                    source_name=row.name,
+                )
+            )
+            continue
+        name = _normalize_patient_name(row.patient_name)
+        record = _normalize_record(row.record)
+        operational = _operational_status(name)
+        if operational is not None:
+            operational_rows.append(
+                _V5OperationalRow(
+                    source_key=source_key,
+                    status=operational,
+                    status_label=BedStatus(operational).label,
+                    bed=_normalize_identity(row.bed),
+                    source_code=code,
+                    source_name=row.name,
+                )
+            )
+            continue
+        if not (_is_valid_record(record) and name):
+            incomplete_rows.append(
+                _V5IncompleteRow(
+                    source_key=source_key,
+                    name=name,
+                    record=record,
+                    bed=_normalize_identity(row.bed),
+                    source_code=code,
+                    source_name=row.name,
+                    patient_id=patient_map.get(record),
+                )
+            )
+            continue
+        line = _V5Line(
+            code=code,
+            name=name,
+            bed=_normalize_identity(row.bed),
+            age_band=row.age_band,
+        )
+        if code in partitioned_codes:
+            partitioned_lines[record].append(line)
+            continue
+        if code in group_by_code:
+            unit_key = f"group:{group_by_code[code].stable_key}"
+        else:
+            unit_key = (
+                f"unmapped-code:{code}"
+                if code
+                else f"unmapped-blank:{sector_name}"
+            )
+        add_patient_line(unit_key, record, line)
+
+    fallback_counters: Counter[str] = Counter()
+    for record, lines in partitioned_lines.items():
+        group = _resolve_v5_3a_group(lines, band_groups, fallback_counters)
+        for line in lines:
+            add_patient_line(f"group:{group.stable_key}", record, line)
+
+    record_official_groups: dict[str, set[str]] = defaultdict(set)
+    patients_by_unit: dict[str, list[_V5Patient]] = defaultdict(list)
+    for unit_key, record in sorted(patients):
+        if unit_key.startswith("group:"):
+            record_official_groups[record].add(
+                unit_key.removeprefix("group:")
+            )
+        patients_by_unit[unit_key].append(patients[(unit_key, record)])
+
+    components = _catalog_components(measurement.catalog)
+    component_for_code: dict[str, int] = {}
+    for index, (_group_keys, codes) in enumerate(components):
+        for code in codes:
+            component_for_code[code] = index
+
+    policy_by_group = {
+        group.stable_key: group.calculation_policy for group in definitions
+    }
+    alias_by_code = {
+        code: _source_alias(membership)[0]
+        for code, membership in membership_by_code.items()
+    }
+    operational_by_source: dict[str, list[_V5OperationalRow]] = (
+        defaultdict(list)
+    )
+    incomplete_by_source: dict[str, list[_V5IncompleteRow]] = (
+        defaultdict(list)
+    )
+    for op_row in operational_rows:
+        operational_by_source[op_row.source_key].append(op_row)
+    for inc_row in incomplete_rows:
+        incomplete_by_source[inc_row.source_key].append(inc_row)
+
+    units: list[_V5UnitRow] = []
+    for group_keys, codes in components:
+        unit_patients: list[_V5PatientItem] = []
+        for key in group_keys:
+            for patient in patients_by_unit.get(f"group:{key}", []):
+                unit_patients.append(
+                    _v5_patient_item(
+                        patient,
+                        counted_policy=_v5_counted_policy(policy_by_group[key]),
+                        cross_group=(
+                            len(record_official_groups[patient.record]) > 1
+                        ),
+                        patient_map=patient_map,
+                    )
+                )
+        unit_operational: list[_V5OperationalRow] = []
+        unit_incomplete: list[_V5IncompleteRow] = []
+        for code in codes:
+            unit_operational.extend(operational_by_source.get(code, []))
+            unit_incomplete.extend(incomplete_by_source.get(code, []))
+        units.append(
+            _V5UnitRow(
+                title=_component_title(
+                    group_keys, codes, group_rows, alias_by_code
+                ),
+                official_rows=[
+                    _unit_official_row(group_rows[key])
+                    for key in group_keys
+                    if key in group_rows
+                ],
+                sources=[
+                    _v5_source_block(
+                        code=code,
+                        membership=membership_by_code[code],
+                        alias_fallback=alias_by_code[code],
+                        operational_rows=operational_by_source.get(code, []),
+                    )
+                    for code in codes
+                ],
+                patients=sorted(
+                    unit_patients, key=lambda item: (item.record, item.names)
+                ),
+                operational_rows=unit_operational,
+                incomplete_rows=unit_incomplete,
+                shared_beds=_v5_shared_beds(unit_patients),
+                shared_state_beds=_v5_shared_states(unit_operational),
+            )
+        )
+
+    units.extend(
+        _v5_unmapped_units(
+            rows=rows,
+            patients_by_unit=patients_by_unit,
+            operational_by_source=operational_by_source,
+            incomplete_by_source=incomplete_by_source,
+            membership_codes=set(membership_by_code),
+            patient_map=patient_map,
+        )
+    )
+    return sorted(units, key=lambda unit: unit.title)
+
+
+def _v5_unmapped_units(
+    *,
+    rows: tuple[_ObservedRow, ...],
+    patients_by_unit: dict[str, list[_V5Patient]],
+    operational_by_source: dict[str, list[_V5OperationalRow]],
+    incomplete_by_source: dict[str, list[_V5IncompleteRow]],
+    membership_codes: set[str],
+    patient_map: dict[str, int],
+) -> list[_V5UnitRow]:
+    """Unmapped v5 units: patients, operational and incomplete rows by source.
+
+    Each unmapped source key (a code not bound by the exact catalog, or a
+    blank-code sector name) becomes one warning unit when it has any patient,
+    operational or incomplete row. ``cross_group`` stays False here: the
+    message is reserved for records present in more than one official group.
+    """
+    observed_names: dict[str, str] = {}
+    for row in rows:
+        source_key = row.code or f"blank:{_normalize_identity(row.name)}"
+        observed_names.setdefault(source_key, row.name or row.code or "")
+    source_keys: set[str] = set()
+    for unit_key in patients_by_unit:
+        if unit_key.startswith("unmapped-code:"):
+            source_keys.add(unit_key.removeprefix("unmapped-code:"))
+        elif unit_key.startswith("unmapped-blank:"):
+            source_keys.add(
+                "blank:" + unit_key.removeprefix("unmapped-blank:")
+            )
+    source_keys.update(
+        key for key in operational_by_source if key not in membership_codes
+    )
+    source_keys.update(
+        key for key in incomplete_by_source if key not in membership_codes
+    )
+
+    units: list[_V5UnitRow] = []
+    for source_key in sorted(source_keys):
+        if source_key.startswith("blank:"):
+            code = ""
+            blank_name = source_key.removeprefix("blank:")
+            title = observed_names.get(source_key) or blank_name
+            unit_key = f"unmapped-blank:{blank_name}"
+        else:
+            code = source_key
+            title = observed_names.get(source_key) or source_key
+            unit_key = f"unmapped-code:{source_key}"
+        unit_patients = [
+            _v5_patient_item(
+                patient,
+                counted_policy="unmapped",
+                cross_group=False,
+                patient_map=patient_map,
+            )
+            for patient in patients_by_unit.get(unit_key, [])
+        ]
+        unit_operational = operational_by_source.get(source_key, [])
+        unit_incomplete = incomplete_by_source.get(source_key, [])
+        units.append(
+            _V5UnitRow(
+                title=title,
+                official_rows=[],
+                sources=[
+                    _v5_source_block(
+                        code=code,
+                        membership=None,
+                        alias_fallback=title,
+                        operational_rows=unit_operational,
+                    )
+                ],
+                patients=sorted(
+                    unit_patients, key=lambda item: (item.record, item.names)
+                ),
+                operational_rows=unit_operational,
+                incomplete_rows=unit_incomplete,
+                shared_beds=_v5_shared_beds(unit_patients),
+                shared_state_beds=_v5_shared_states(unit_operational),
+                is_unmapped=True,
+            )
+        )
+    return units
+
+
 def build_units_presentation(
     *,
     measurement: OccupancyMeasurement | None,
@@ -3654,6 +4165,38 @@ def build_units_presentation(
     """
     rows = tuple(_observed_row_from_snapshot(bed) for bed in snapshots)
     patient_map = patient_map or {}
+    if (
+        measurement is not None
+        and measurement.algorithm_version == ALGORITHM_VERSION_V5
+    ):
+        # V5 renders one patient/state list and a private bridge; the
+        # physical aggregate is kept only to carry the secondary coverage
+        # metadata and is never rendered as a separate reality.
+        _positions, diagnostics = _normalize_positions(rows)
+        physical = _PhysicalPresentation(
+            positions_by_status=dict(diagnostics.positions_by_status),
+            conflict_positions=diagnostics.conflict_positions,
+            duplicate_extra_rows=diagnostics.duplicate_extra_rows,
+            duplicate_occupied_rows=diagnostics.duplicate_occupied_rows,
+            unidentified_rows=diagnostics.unidentified_rows,
+            unidentified_occupied_rows=diagnostics.unidentified_occupied_rows,
+            sectors=[],
+            v5_coverage=_V5Coverage(
+                with_capacity_and_rate=(
+                    measurement.official_capacity_sector_count or 0
+                ),
+                total_sectors=measurement.official_sector_count or 0,
+                outside_rate=max(
+                    (measurement.official_sector_count or 0)
+                    - (measurement.official_calculable_sector_count or 0),
+                    0,
+                ),
+            ),
+        )
+        return _UnitsPresentation(
+            units=_v5_units(measurement, rows, patient_map),
+            physical=physical,
+        )
     if measurement is None or measurement.algorithm_version != ALGORITHM_VERSION_V4:
         _positions, diagnostics = _normalize_positions(rows)
         physical = _PhysicalPresentation(

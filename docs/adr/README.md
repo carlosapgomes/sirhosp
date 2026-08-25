@@ -8,3 +8,4 @@
 - [ADR-0004 — Correção da lotação oficial: CO fora da taxa e partição etária da 3A](ADR-0004-correcao-co-e-particionamento-etario-3a.md)
 - [ADR-0005 — Duas realidades em /beds: capacidade oficial e posições do legado](ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado.md)
 - [ADR-0006 — Ocupação v4 acionável: conflitos tipados, elegibilidade com ressalvas e lista única em /beds](ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica.md)
+- [ADR-0007 — Ocupação v5 por pacientes identificados e apresentação de /beds](ADR-0007-ocupacao-v5-pacientes-identificados.md)

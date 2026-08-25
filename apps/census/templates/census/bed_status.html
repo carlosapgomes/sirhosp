@@ -17,10 +17,16 @@
     </div>
   {% else %}
     <p class="text-muted mb-4 small">
-      Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}. As duas seções
-      abaixo usam bases diferentes: a capacidade oficial vem da medição
-      imutável do censo exato; as posições vêm da fotografia física registrada
-      no sistema de origem.
+      Censo capturado em: {{ captured_at|date:"d/m/Y H:i" }}.
+      {% if measurement and measurement.algorithm_version == "occupancy-v5" %}
+      O resumo oficial vem da medição imutável do censo exato, contada por
+      pacientes identificados; os estados de leitos vêm das linhas informadas
+      pelo sistema de origem.
+      {% else %}
+      As duas seções abaixo usam bases diferentes: a capacidade oficial vem da
+      medição imutável do censo exato; as posições vêm da fotografia física
+      registrada no sistema de origem.
+      {% endif %}
     </p>
 
     <!-- ===================== RESUMO 1: CAPACIDADE OFICIAL ===================== -->
@@ -35,6 +41,9 @@
         {% if measurement.algorithm_version == "occupancy-v4" and measurement.quality_warning %}
         <span class="badge bg-warning text-dark">com ressalvas de qualidade</span>
         {% endif %}
+        {% if measurement.algorithm_version == "occupancy-v5" and measurement.quality_warning %}
+        <span class="badge bg-warning text-dark">com ressalvas de qualidade</span>
+        {% endif %}
         {% endif %}
       </div>
       <p class="text-muted small mb-3">
@@ -44,6 +53,76 @@
       </p>
 
       {% if measurement %}
+        {% if measurement.algorithm_version == "occupancy-v5" %}
+        <!-- Cards oficiais v5: um único card de capacidade + pacientes -->
+        <div class="row g-2 mb-2">
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold" style="color: var(--sirhosp-sidebar-bg);">{{ measurement.known_capacity }}</div>
+                <div class="small text-muted">Capacidade oficial</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100 bg-primary bg-opacity-10">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold text-primary">{{ measurement.occupied_for_rate }}</div>
+                <div class="small text-muted">Pacientes identificados</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100 bg-success bg-opacity-10">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold text-success">{{ measurement.official_availability|default:"—" }}</div>
+                <div class="small text-muted">Saldo da capacidade oficial</div>
+                <div class="small text-muted" title="Saldo calculado por setor na capacidade oficial; não é lista nominal de leitos vagos">
+                  Saldo calculado por setor — não é lista nominal de leitos vagos
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100 bg-danger bg-opacity-10">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold text-danger">{{ measurement.exceeded_by }}</div>
+                <div class="small text-muted">Excedente</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-6 col-md-4">
+            <div class="card border-0 shadow-sm text-center h-100">
+              <div class="card-body py-3">
+                <div class="fs-5 fw-bold" style="color: var(--sirhosp-sidebar-bg);">
+                  {% if measurement.occupancy_percentage is not None %}
+                  {{ measurement.occupancy_percentage|floatformat:2 }}%
+                  {% else %}
+                  Não calculável
+                  {% endif %}
+                </div>
+                <div class="small text-muted">Taxa de ocupação</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% if physical.v5_coverage %}
+        <p class="small text-muted mb-3">
+          Cobertura: {{ physical.v5_coverage.with_capacity_and_rate }} de
+          {{ physical.v5_coverage.total_sectors }} setores com capacidade e
+          cálculo; {{ physical.v5_coverage.outside_rate }} fora da taxa.
+        </p>
+        {% endif %}
+        {% if measurement.quality_warning %}
+        <div class="alert alert-warning small mb-3" role="alert">
+          <i class="bi bi-exclamation-triangle-fill me-1"></i>
+          <strong>Medição com ressalvas de qualidade:</strong> a contagem
+          registrou identificação incompleta, prontuário em mais de um setor,
+          nomes informados de formas diferentes ou fallback etário. Este censo
+          <strong>continua elegível</strong> para as estatísticas diárias.
+        </div>
+        {% endif %}
+        {% else %}
         <!-- Cobertura oficial (valores persistidos) -->
         <div class="row g-2 mb-3">
           <div class="col-6 col-md-3">
@@ -255,6 +334,7 @@
           deduplicação v3.
         </div>
         {% endif %}
+        {% endif %}
 
         {% if measurement.age_partial or measurement.position_partial %}
         <div class="alert alert-warning small mb-3" role="alert">
@@ -279,6 +359,74 @@
         </div>
       {% endif %}
     </section>
+
+    {% if measurement.algorithm_version == "occupancy-v5" and measurement.physical_reconciliation_json %}
+    <!-- ===================== PONTE DE PACIENTES v5 ===================== -->
+    <section aria-labelledby="patient-bridge-heading" class="mb-5">
+      <h3 id="patient-bridge-heading" class="h5 fw-bold mb-2" style="color: var(--sirhosp-sidebar-bg);">
+        Como os pacientes foram contados
+      </h3>
+      <p class="text-muted small mb-2">
+        Como as linhas do censo chegam aos pacientes identificados do resumo
+        oficial. Somente contagens agregadas persistidas — nenhum dado nominal
+        é exibido aqui.
+      </p>
+      <div class="card border-0 shadow-sm">
+        <div class="card-body py-3">
+          <ul class="list-unstyled mb-2 small">
+            {% with rec=measurement.physical_reconciliation_json %}
+            <li class="mb-1">Linhas com identidade válida: <strong>{{ rec.valid_identity_rows }}</strong></li>
+            {% if rec.duplicate_identity_rows_within_group %}
+            <li class="mb-1">Linhas duplicadas consolidadas no grupo: <strong>{{ rec.duplicate_identity_rows_within_group }}</strong> — paciente contado uma vez</li>
+            {% endif %}
+            <li class="mb-1">Pacientes identificados em grupos com taxa: <strong>{{ rec.standard_identified_patients }}</strong></li>
+            {% if rec.unrated_identified_patients %}
+            <li class="mb-1">Pacientes identificados fora da taxa (unrated): <strong>{{ rec.unrated_identified_patients }}</strong></li>
+            {% endif %}
+            {% if rec.linked_pending_identified_patients %}
+            <li class="mb-1">Pacientes com cálculo pendente: <strong>{{ rec.linked_pending_identified_patients }}</strong></li>
+            {% endif %}
+            {% if rec.unmapped_identified_patients %}
+            <li class="mb-1">Pacientes sem mapeamento no catálogo: <strong>{{ rec.unmapped_identified_patients }}</strong></li>
+            {% endif %}
+            {% if rec.incomplete_identity_rows %}
+            <li class="mb-1">Identificação incompleta (não contada): <strong>{{ rec.incomplete_identity_rows }}</strong></li>
+            {% endif %}
+            {% if rec.cross_group_record_count %}
+            <li class="mb-1">Prontuários em mais de um setor oficial: <strong>{{ rec.cross_group_record_count }}</strong></li>
+            {% endif %}
+            {% if rec.name_variant_patient_count %}
+            <li class="mb-1">Pacientes com nomes informados de formas diferentes: <strong>{{ rec.name_variant_patient_count }}</strong></li>
+            {% endif %}
+            {% if rec.patients_without_bed_count %}
+            <li class="mb-1">Pacientes sem leito informado: <strong>{{ rec.patients_without_bed_count }}</strong> — contados normalmente</li>
+            {% endif %}
+            {% if rec.rn_fallback_patient_count %}
+            <li class="mb-1">Fallback etário RN: <strong>{{ rec.rn_fallback_patient_count }}</strong> — contado como Infantil</li>
+            {% endif %}
+            {% if rec.non_rn_fallback_patient_count %}
+            <li class="mb-1">Fallback etário Adulto: <strong>{{ rec.non_rn_fallback_patient_count }}</strong> — contado como Adulto</li>
+            {% endif %}
+            {% if rec.age_conflict_fallback_patient_count %}
+            <li class="mb-1">Faixas confiáveis contraditórias com fallback: <strong>{{ rec.age_conflict_fallback_patient_count }}</strong></li>
+            {% endif %}
+            {% if rec.operational_rows_by_status %}
+            <li class="mb-1">Linhas operacionais por estado:
+              {% for status, count in rec.operational_rows_by_status.items %}<strong>{{ count }} {{ status }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}
+            </li>
+            {% endif %}
+            {% endwith %}
+          </ul>
+          <p class="small text-muted mb-0">
+            A ponte fecha por construção: linhas com identidade válida =
+            duplicatas consolidadas + pacientes com taxa + fora da taxa +
+            pendentes + sem mapeamento. Pacientes com fallback etário
+            permanecem contados e elegíveis no resumo diário.
+          </p>
+        </div>
+      </div>
+    </section>
+    {% endif %}
 
     {% if measurement.algorithm_version == "occupancy-v4" and measurement.physical_reconciliation_json %}
     <!-- ===================== PONTE DE TRATAMENTO v4 ===================== -->
@@ -382,6 +530,7 @@
     </section>
     {% endif %}
 
+    {% if measurement.algorithm_version != "occupancy-v5" %}
     <!-- ===================== RESUMO 2: POSIÇÕES DO SISTEMA DE ORIGEM ===================== -->
     <section aria-labelledby="physical-heading" class="mt-4">
       <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
@@ -474,14 +623,29 @@
         </div>
       </div>
     </section>
+    {% endif %}
 
     <!-- ===================== LISTA ÚNICA: SETORES E POSIÇÕES ===================== -->
     <section aria-labelledby="units-heading" class="mt-4">
       <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
         <h3 id="units-heading" class="h5 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+          {% if measurement.algorithm_version == "occupancy-v5" %}
+          Setores, pacientes e estados de leitos
+          {% else %}
           Setores e posições
+          {% endif %}
         </h3>
       </div>
+      {% if measurement.algorithm_version == "occupancy-v5" %}
+      <p class="text-muted small mb-3">
+        Cada unidade agrupa os setores oficiais e os códigos do sistema de
+        origem ligados pelo catálogo do censo exato. A lista mostra um
+        paciente por prontuário, com todas as variantes de nome, leitos e
+        códigos informados; identificação incompleta e estados operacionais
+        aparecem separados, sem escolher nome, leito, setor ou estado
+        vencedor.
+      </p>
+      {% else %}
       <p class="text-muted small mb-3">
         Cada unidade agrupa os setores oficiais e os códigos do sistema de
         origem ligados pelo catálogo do censo exato. Cada posição física
@@ -489,8 +653,192 @@
         linhas sem posição são casos de qualidade visíveis a todo usuário
         autenticado, sem alternativa escolhida.
       </p>
+      {% endif %}
 
       <div class="row g-3">
+        {% if measurement.algorithm_version == "occupancy-v5" %}
+        {% for unit in units %}
+        <div class="col-12">
+          <div class="card border-0 shadow-sm{% if unit.over_capacity %} border-danger{% endif %}">
+            <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2{% if unit.over_capacity %} bg-danger bg-opacity-10{% endif %}"
+                 data-bs-toggle="collapse"
+                 data-bs-target="#v5-unit-detail-{{ forloop.counter }}"
+                 role="button"
+                 aria-expanded="false"
+                 style="cursor: pointer;">
+              <h4 class="h6 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+                <i class="bi bi-chevron-right me-2 collapse-icon"></i>
+                {{ unit.title }}
+                {% if unit.is_unmapped %}
+                <span class="badge bg-warning text-dark ms-1">sem mapeamento no catálogo</span>
+                {% endif %}
+              </h4>
+              <div class="d-flex flex-wrap gap-1 align-items-center">
+                {% if unit.sources %}
+                <span class="badge bg-light text-dark">{{ unit.sources|length }} código{{ unit.sources|length|pluralize }} de origem</span>
+                {% endif %}
+                {% if unit.patients %}
+                <span class="badge bg-primary">{{ unit.patients|length }} paciente{{ unit.patients|length|pluralize }}</span>
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="collapse" id="v5-unit-detail-{{ forloop.counter }}">
+              <div class="card-body p-0">
+                {% if unit.official_rows %}
+                <div class="px-3 pt-3">
+                  <span class="small text-muted fw-bold">Capacidade oficial (medição do censo exato)</span>
+                  <div class="d-flex flex-wrap gap-2 py-2">
+                    {% for row in unit.official_rows %}
+                    <div class="border rounded p-2 small" style="min-width: 240px;">
+                      <div class="fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">
+                        {{ row.display_name }}
+                      </div>
+                      <div class="d-flex flex-wrap gap-1 align-items-center">
+                        {% if row.official_capacity %}
+                        <span class="badge bg-light text-dark">Capacidade: {{ row.official_capacity }}</span>
+                        {% else %}
+                        <span class="badge bg-light text-dark">Capacidade não cadastrada</span>
+                        {% endif %}
+                        {% if row.occupied_count is not None %}
+                        <span class="badge bg-primary">Pacientes identificados: {{ row.occupied_count }}</span>
+                        {% endif %}
+                        {% if row.occupancy_percentage is not None %}
+                        <span class="badge bg-dark">{{ row.occupancy_percentage|floatformat:2 }}%</span>
+                        {% elif row.calculation_status == "linked_slots_pending" %}
+                        <span class="badge bg-light text-dark">Aguardando mapeamento cama-berço</span>
+                        {% elif row.calculation_status == "unrated" %}
+                        <span class="badge bg-light text-dark">Não incluído na taxa de ocupação da unidade</span>
+                        {% else %}
+                        <span class="badge bg-light text-dark">Não calculável</span>
+                        {% endif %}
+                        {% if row.exceeded_by is not None and row.exceeded_by > 0 %}
+                        <span class="badge bg-danger">Excedente: {{ row.exceeded_by }}</span>
+                        {% endif %}
+                      </div>
+                    </div>
+                    {% endfor %}
+                  </div>
+                </div>
+                {% endif %}
+
+                {% if unit.sources %}
+                <div class="px-3 pt-2 d-flex flex-wrap gap-1 align-items-center">
+                  {% for source in unit.sources %}
+                  <span class="badge bg-light text-dark border">{{ source.alias }}{% if source.source_code %} (código {{ source.source_code }}){% endif %}</span>
+                  {% endfor %}
+                </div>
+                {% endif %}
+
+                {% if unit.patients %}
+                <div class="px-3 pt-3">
+                  <span class="small text-muted fw-bold">Pacientes identificados</span>
+                  <div class="list-group list-group-flush mt-1">
+                    {% for patient in unit.patients %}
+                    <div class="list-group-item py-2 px-3">
+                      <div class="d-flex flex-wrap align-items-center gap-2">
+                        <span>
+                          {% for name in patient.names %}
+                          {% if patient.patient_id %}
+                          <a href="{% url 'patients:admission_list' patient.patient_id %}" class="text-decoration-none">{{ name }}</a>
+                          {% else %}
+                          <a href="{% url 'patients:patient_list' %}?q={{ patient.record }}" class="text-decoration-none">{{ name }}</a>
+                          {% endif %}
+                          {% if not forloop.last %}<span class="text-muted">/</span>{% endif %}
+                          {% endfor %}
+                          <span class="text-muted">({{ patient.record }})</span>
+                        </span>
+                        {% if patient.counted_policy == "counted" %}
+                        <span class="badge bg-primary">{{ patient.counted_label }}</span>
+                        {% elif patient.counted_policy == "unrated" %}
+                        <span class="badge bg-light text-dark border">{{ patient.counted_label }}</span>
+                        {% else %}
+                        <span class="badge bg-warning text-dark">{{ patient.counted_label }}</span>
+                        {% endif %}
+                        {% if patient.cross_group %}
+                        <span class="badge bg-warning text-dark">Prontuário informado em mais de um setor oficial neste censo</span>
+                        {% endif %}
+                      </div>
+                      <div class="small mt-1 d-flex flex-wrap gap-1 align-items-center">
+                        <span class="text-muted">Leitos:</span>
+                        {% for bed in patient.beds %}
+                        <code class="small">{{ bed }}</code>
+                        {% endfor %}
+                        {% if patient.missing_bed %}
+                        <code class="small">sem leito informado</code>
+                        {% endif %}
+                        {% for code in patient.source_codes %}
+                        <span class="badge bg-light text-dark border">código {{ code }}</span>
+                        {% endfor %}
+                      </div>
+                      {% if patient.name_variant_lines %}
+                      <div class="small text-muted mt-1">Nome informado de formas diferentes em {{ patient.name_variant_lines }} linhas</div>
+                      {% endif %}
+                    </div>
+                    {% endfor %}
+                  </div>
+                </div>
+                {% endif %}
+
+                {% for case in unit.shared_beds %}
+                <div class="small px-3 mt-2">
+                  <code>{{ case.bed }}</code> — {{ case.patient_count }} pacientes informados com o mesmo leito
+                </div>
+                {% endfor %}
+
+                {% if unit.operational_rows %}
+                <div class="px-3 pt-3">
+                  <span class="small text-muted fw-bold">Estados operacionais informados pelo sistema de origem</span>
+                  <div class="list-group list-group-flush mt-1">
+                    {% for op in unit.operational_rows %}
+                    <div class="list-group-item py-1 px-3 small d-flex flex-wrap align-items-center gap-2">
+                      <span class="badge
+                        {% if op.status == 'occupied' %}bg-primary
+                        {% elif op.status == 'empty' %}bg-success
+                        {% elif op.status == 'maintenance' %}bg-secondary
+                        {% elif op.status == 'reserved' %}bg-warning text-dark
+                        {% else %}bg-danger{% endif %}">
+                        {{ op.status_label }}
+                      </span>
+                      {% if op.bed %}<code class="small">{{ op.bed }}</code>{% else %}<span class="text-muted">sem leito informado</span>{% endif %}
+                      {% if op.source_code %}<span class="badge bg-light text-dark border">código {{ op.source_code }}</span>{% endif %}
+                    </div>
+                    {% endfor %}
+                  </div>
+                </div>
+                {% endif %}
+
+                {% for case in unit.shared_state_beds %}
+                <div class="small px-3 mt-2">
+                  <code>{{ case.bed }}</code> — {{ case.state_count }} estados informados para o mesmo leito
+                </div>
+                {% endfor %}
+
+                {% if unit.incomplete_rows %}
+                <div class="px-3 pt-3">
+                  <span class="small text-muted fw-bold">Identificação incompleta — não contada</span>
+                  <div class="list-group list-group-flush mt-1">
+                    {% for inc in unit.incomplete_rows %}
+                    <div class="list-group-item py-1 px-3 small d-flex flex-wrap align-items-center gap-2">
+                      {% if inc.name %}<span>{{ inc.name }}</span>{% endif %}
+                      {% if inc.record %}<span class="text-muted">({{ inc.record }})</span>{% endif %}
+                      {% if inc.bed %}<code class="small">{{ inc.bed }}</code>{% endif %}
+                      {% if inc.source_code %}<span class="badge bg-light text-dark border">código {{ inc.source_code }}</span>{% endif %}
+                    </div>
+                    {% endfor %}
+                  </div>
+                </div>
+                {% endif %}
+
+                {% if not unit.patients and not unit.operational_rows and not unit.incomplete_rows %}
+                <div class="small text-muted py-2 px-3">sem pacientes nem estados registrados neste censo</div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+        {% else %}
         {% for unit in units %}
         <div class="col-12">
           <div class="card border-0 shadow-sm{% if unit.over_capacity %} border-danger{% endif %}">
@@ -759,6 +1107,7 @@
           </div>
         </div>
         {% endfor %}
+        {% endif %}
       </div>
     </section>
   {% endif %}
