@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-release-image.yml"
 COMPOSE = ROOT / "compose.hospital.yml"
+NEXT_RELEASE = "v0.1.0-rc.11"
+NEXT_RUNBOOK = ROOT / "docs" / "releases" / f"{NEXT_RELEASE}-upgrade.md"
 
 
 def _workflow_text() -> str:
@@ -147,6 +149,41 @@ def test_hospital_compose_joins_existing_cloudflared_edge_network() -> None:
     assert "    internal:\n    hospital_edge:\n" in app_service
     assert "    - internal\n" in db
     assert "      hospital_edge:\n        aliases:\n          - prisma\n" in web
+
+
+def test_next_release_runbook_declares_dormant_v5_contract() -> None:
+    """The RC11 runbook must pin the dormant v5 release contract."""
+    assert NEXT_RUNBOOK.exists(), "runbook for the next release must exist"
+    text = NEXT_RUNBOOK.read_text(encoding="utf-8")
+
+    # Upgrade chain starts at RC10, applies the new additive migration and
+    # keeps v1-v4 historical semantics.
+    assert "v0.1.0-rc.10" in text
+    assert "0024" in text
+    assert "backfill" in text
+
+    # Operational contract: protected backup, checksums, health, anonymous
+    # 302, ten persistent workers and forward-only correction.
+    for marker in (
+        "backup",
+        "sha256",
+        "302",
+        "EXPECTED_WORKERS=10",
+        "forward",
+    ):
+        assert marker in text, f"runbook must mention {marker!r}"
+
+    # Dormant v5: deploy must not publish or activate the v5 catalog and
+    # pre/post aggregate evidence must prove v5 catalogs and measurements zero.
+    assert "v5_catalogs=0" in text
+    assert "v5_measurements=0" in text
+    assert "activate_sector_capacity_catalog" in text
+    assert "--dry-run" in text
+
+    # Security: never print secrets and explicitly prohibit destroying the
+    # database volume with `down -v`.
+    assert "Não use" in text
+    assert "down -v" in text
 
 
 def test_hospital_compose_runs_the_complete_current_topology() -> None:
