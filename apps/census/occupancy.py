@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 from django.db import transaction
 from django.db.models import Prefetch, QuerySet
@@ -43,6 +43,7 @@ ALGORITHM_VERSION = "occupancy-v1"
 ALGORITHM_VERSION_V2 = "occupancy-v2"
 ALGORITHM_VERSION_V3 = "occupancy-v3"
 ALGORITHM_VERSION_V4 = "occupancy-v4"
+ALGORITHM_VERSION_V5 = "occupancy-v5"
 _CENSUS_INTENT = "census_extraction"
 _PERCENT_QUANTUM = Decimal("0.01")
 _STATUS_KEYS = tuple(BedStatus.values)
@@ -332,7 +333,10 @@ def _is_daily_eligible(measurement: OccupancyMeasurement) -> bool:
     quality warnings are tracked by a separate daily counter and never reuse
     the historical v2/v3 exclusion counters.
     """
-    if measurement.algorithm_version == ALGORITHM_VERSION_V4:
+    if measurement.algorithm_version in (
+        ALGORITHM_VERSION_V4,
+        ALGORITHM_VERSION_V5,
+    ):
         return True
     if measurement.position_partial is True:
         return False
@@ -537,6 +541,8 @@ def _calculate(
         return _calculate_v3(catalog, rows)
     if algorithm_version == ALGORITHM_VERSION_V4:
         return _calculate_v4(catalog, rows)
+    if algorithm_version == ALGORITHM_VERSION_V5:
+        return _calculate_v5(catalog, rows)
     return _calculate_legacy(catalog, rows, algorithm_version)
 
 
@@ -1605,6 +1611,669 @@ def _v4_quality_warning(
         or diagnostics.unidentified_occupied_rows
         or diagnostics.unknown_age_partition_positions
         or unmapped
+    )
+
+
+# ---------------------------------------------------------------------------
+# CIPOO-S1: occupancy-v5 identified-patient counting.
+#
+# V5 ignores the bed label for the official numerator. Every occupied row is
+# classified in memory as an identified patient, an incomplete identity or an
+# operational state; only identified patients are counted, deduplicated by
+# normalized textual record within each official group. The 3A partition
+# deduplicates before choosing Adulto/Infantil with a literal ``RN`` prefix
+# fallback. Reconciliation schema 3 is closed, aggregate and private.
+# ---------------------------------------------------------------------------
+
+# Operational markers maintained by the census parser: a normalized name
+# that contains one of these is an operational state, never a patient
+# identity. Substring matching mirrors ``classify_bed_status`` so variants
+# such as ``RESERVA INTERNA`` stay operational.
+_OPERATIONAL_MARKERS: tuple[tuple[str, str], ...] = (
+    ("DESOCUPADO", BedStatus.EMPTY),
+    ("VAZIO", BedStatus.EMPTY),
+    ("LIMPEZA", BedStatus.MAINTENANCE),
+    ("RESERVA", BedStatus.RESERVED),
+    ("ISOLAMENTO", BedStatus.ISOLATION),
+)
+_RN_PREFIX = "RN"
+
+
+class _V5Line(NamedTuple):
+    """One identified-patient row kept only in v5 materialization memory."""
+
+    code: str
+    name: str
+    bed: str
+    age_band: str
+
+
+@dataclass(frozen=True)
+class _V5Patient:
+    """Ephemeral in-memory patient evidence grouped by official unit.
+
+    ``unit_key`` is the deduplication unit: the official group stable key or
+    a synthetic unmapped-unit identity. The patient is the normalized textual
+    record; name variants, beds and age bands are only needed in memory.
+    """
+
+    unit_key: str
+    record: str
+    lines: list[_V5Line]
+
+    @property
+    def names(self) -> set[str]:
+        return {line.name for line in self.lines}
+
+    @property
+    def without_bed(self) -> bool:
+        return all(not line.bed for line in self.lines)
+
+
+@dataclass(frozen=True)
+class _V5GroupTotals:
+    """Aggregate integer diagnostics of one v5 patient-counting pass."""
+
+    valid_identity_rows: int
+    duplicate_identity_rows_within_group: int
+    standard_patients: int
+    unrated_patients: int
+    linked_pending_patients: int
+    unmapped_patients: int
+    incomplete_identity_rows: int
+    cross_group_record_count: int
+    name_variant_patient_count: int
+    rn_fallback_patient_count: int
+    non_rn_fallback_patient_count: int
+    age_conflict_fallback_patient_count: int
+    patients_without_bed_count: int
+    operational_rows_by_status: dict[str, int]
+
+
+# Allowlisted keys of the persisted v5 aggregate reconciliation. Only
+# nonnegative integers, one boolean quality flag and one status map of
+# integers are allowed; no row-level identity ever reaches this JSON.
+_V5_RECONCILIATION_ALLOWLIST = frozenset(
+    {
+        "schema_version",
+        "quality_warning",
+        "valid_identity_rows",
+        "duplicate_identity_rows_within_group",
+        "standard_identified_patients",
+        "unrated_identified_patients",
+        "linked_pending_identified_patients",
+        "unmapped_identified_patients",
+        "incomplete_identity_rows",
+        "cross_group_record_count",
+        "name_variant_patient_count",
+        "rn_fallback_patient_count",
+        "non_rn_fallback_patient_count",
+        "age_conflict_fallback_patient_count",
+        "patients_without_bed_count",
+        "operational_rows_by_status",
+    }
+)
+
+
+def _normalize_record(value: str) -> str:
+    """External strip of a record number; remains a string with leading zeros."""
+    return value.strip()
+
+
+def _normalize_patient_name(value: str) -> str:
+    """Normalized patient name: strip, uppercase, collapse inner spaces."""
+    return _normalize_identity(value)
+
+
+def _is_valid_record(record: str) -> bool:
+    """A valid record is a non-empty sequence of digits only."""
+    return bool(record) and record.isdigit()
+
+
+def _operational_status(name: str) -> str | None:
+    """Effective operational status of a normalized marker name, if any.
+
+    Mirrors the parser's substring classification so variants like
+    ``RESERVA INTERNA`` and ``EM DESOCUPADO`` remain operational states
+    instead of patients.
+    """
+    for marker, status in _OPERATIONAL_MARKERS:
+        if marker in name:
+            return status
+    return None
+
+
+def _resolve_v5_3a_group(
+    lines: list[_V5Line],
+    band_groups: dict[tuple[str, str], CapacityGroupDefinition],
+    fallback_counters: Counter[str],
+) -> CapacityGroupDefinition:
+    """Resolve one record's partition inside an age-partitioned source code.
+
+    Deduplication happens before partition: all identified lines of the
+    record under the partitioned code are gathered first. Reliable bands
+    (``under_12`` / ``age_12_or_over``) decide when they agree on exactly
+    one band, even if other lines are ``unknown``. With no reliable band or
+    with both reliable bands the literal normalized-name prefix ``RN``
+    decides Infantil, otherwise Adulto. ``R.N.`` does not satisfy the
+    literal prefix. Fallback usage increments one aggregate counter.
+    """
+    code = lines[0].code
+    reliable = {
+        line.age_band
+        for line in lines
+        if line.age_band
+        in (OccupancyAgeBand.UNDER_12, OccupancyAgeBand.AGE_12_OR_OVER)
+    }
+    if len(reliable) == 1:
+        (band,) = reliable
+        return band_groups[(code, band)]
+    conflict = len(reliable) == 2
+    if conflict:
+        fallback_counters["age_conflict"] += 1
+    names = [line.name for line in lines]
+    if any(name.startswith(_RN_PREFIX) for name in names):
+        if not conflict:
+            fallback_counters["rn"] += 1
+        return band_groups[(code, OccupancyAgeBand.UNDER_12)]
+    if not conflict:
+        fallback_counters["non_rn"] += 1
+    return band_groups[(code, OccupancyAgeBand.AGE_12_OR_OVER)]
+
+
+def _v5_group_components(
+    *,
+    group: CapacityGroupDefinition,
+    raw_counts_by_code: dict[str, Counter[str]],
+    observed_names_by_code: dict[str, set[str]],
+    partitioned: bool,
+) -> list[dict[str, object]]:
+    """Informational components of one v5 group from observed rows.
+
+    One component per membership keeps the historical per-source shape;
+    counts are the raw observed rows of that source. The official numerator
+    never reads these counts: it always uses the patient-based group value.
+    """
+    components: list[dict[str, object]] = []
+    for membership in group.memberships.all():
+        code = membership.source_code
+        counts = raw_counts_by_code.get(code, Counter())
+        observed_names = sorted(observed_names_by_code.get(code, set()))
+        observed_name = observed_names[0] if observed_names else None
+        selector = (
+            membership.age_selector if partitioned else None
+        )
+        components.append(
+            _component(
+                configured_code=code,
+                configured_name=membership.configured_source_name,
+                observed_code=code,
+                observed_name=observed_name,
+                counts=counts,
+                mismatch=bool(
+                    observed_name
+                    and observed_name != membership.configured_source_name
+                ),
+                selector=selector,
+            )
+        )
+    return components
+
+
+def _calculate_v5(
+    catalog: CapacityCatalogVersion,
+    rows: tuple[_ObservedRow, ...],
+) -> tuple[list[_GroupValues], dict[str, object]]:
+    """Materialize ``occupancy-v5`` by identified patient per official group.
+
+    The bed label is descriptive only: a patient without a bed counts and
+    different patients sharing one bed count separately. Each occupied row
+    becomes an identified patient only with a digits-only non-empty record
+    and a non-empty non-marker name; partial identity is an aggregate
+    incomplete case; marker names are operational states. Patients dedupe
+    by normalized textual record inside each official group (shared groups
+    dedupe across all their source codes) and by unmapped unit otherwise.
+    A record present in more than one official unit counts once in each.
+    """
+    definitions = list(catalog.groups.all())
+    group_by_code: dict[str, CapacityGroupDefinition] = {}
+    band_groups: dict[tuple[str, str], CapacityGroupDefinition] = {}
+    partitioned_codes: set[str] = set()
+    for group in definitions:
+        for membership in group.memberships.all():
+            # ``group_by_code`` mirrors the legacy last-wins code lookup so
+            # coverage semantics stay identical to v2/v3/v4.
+            group_by_code[membership.source_code] = group
+            if membership.age_selector == CapacityMembershipSelector.ALL:
+                continue
+            band_groups[
+                (membership.source_code, membership.age_selector)
+            ] = group
+            partitioned_codes.add(membership.source_code)
+
+    observed_identities = {
+        ("code", row.code) if row.code else ("name", row.name) for row in rows
+    }
+    capacity_covered = sum(
+        1
+        for kind, identity in observed_identities
+        if kind == "code"
+        and identity in group_by_code
+        and group_by_code[identity].official_capacity is not None
+    )
+    calculable = sum(
+        1
+        for kind, identity in observed_identities
+        if kind == "code"
+        and identity in group_by_code
+        and group_by_code[identity].calculation_policy
+        == CalculationPolicy.STANDARD
+    )
+
+    patients: dict[tuple[str, str], _V5Patient] = {}
+    partitioned_lines: dict[str, list[_V5Line]] = (
+        defaultdict(list)
+    )
+    incomplete_identity_rows = 0
+    operational_rows = Counter({status: 0 for status in _STATUS_KEYS})
+    operational_by_code: dict[str, Counter[str]] = defaultdict(Counter)
+    raw_counts_by_code: dict[str, Counter[str]] = defaultdict(Counter)
+    observed_names_by_code: dict[str, set[str]] = defaultdict(set)
+
+    def add_patient_line(
+        unit_key: str, record: str, line: _V5Line
+    ) -> None:
+        existing = patients.get((unit_key, record))
+        if existing is None:
+            patients[(unit_key, record)] = _V5Patient(
+                unit_key=unit_key, record=record, lines=[line]
+            )
+        else:
+            existing.lines.append(line)
+
+    for row in rows:
+        code = row.code or ""
+        sector_name = _normalize_identity(row.name)
+        if code:
+            observed_names_by_code[code].add(sector_name)
+        raw_counts_by_code[code][row.status] += 1
+        if row.status != BedStatus.OCCUPIED:
+            operational_rows[row.status] += 1
+            operational_by_code[code][row.status] += 1
+            continue
+        name = _normalize_patient_name(row.patient_name)
+        record = _normalize_record(row.record)
+        operational = _operational_status(name)
+        if operational is not None:
+            operational_rows[operational] += 1
+            operational_by_code[code][operational] += 1
+            continue
+        if not (_is_valid_record(record) and name):
+            incomplete_identity_rows += 1
+            continue
+        line = _V5Line(
+            code=code,
+            name=name,
+            bed=_normalize_identity(row.bed),
+            age_band=row.age_band,
+        )
+        if code in partitioned_codes:
+            partitioned_lines[record].append(line)
+            continue
+        row_group = group_by_code.get(code)
+        if row_group is None:
+            unit_key = (
+                f"unmapped-code:{code}"
+                if code
+                else f"unmapped-blank:{sector_name}"
+            )
+        else:
+            unit_key = f"group:{row_group.stable_key}"
+        add_patient_line(unit_key, record, line)
+
+    fallback_counters = Counter[str]()
+    for record, lines in partitioned_lines.items():
+        group = _resolve_v5_3a_group(
+            lines, band_groups, fallback_counters
+        )
+        unit_key = f"group:{group.stable_key}"
+        for line in lines:
+            add_patient_line(unit_key, record, line)
+
+    duplicate_identity_rows_within_group = 0
+    name_variant_patient_count = 0
+    patients_without_bed_count = 0
+    record_units: dict[str, set[str]] = defaultdict(set)
+    for patient in patients.values():
+        duplicate_identity_rows_within_group += len(patient.lines) - 1
+        if len(patient.names) > 1:
+            name_variant_patient_count += 1
+        if patient.without_bed:
+            patients_without_bed_count += 1
+        record_units[patient.record].add(patient.unit_key)
+    cross_group_record_count = sum(
+        1 for units in record_units.values() if len(units) > 1
+    )
+    valid_identity_rows = sum(
+        len(patient.lines) for patient in patients.values()
+    )
+
+    standard_patients = 0
+    unrated_patients = 0
+    linked_pending_patients = 0
+    unmapped_patients = 0
+    unmapped_patients_by_unit: dict[str, int] = defaultdict(int)
+    group_by_key = {
+        f"group:{group.stable_key}": group for group in definitions
+    }
+    group_patients: dict[str, int] = defaultdict(int)
+    group_operational: dict[str, Counter[str]] = defaultdict(Counter)
+    for unit_key, record in sorted(patients):
+        patient = patients[(unit_key, record)]
+        if unit_key.startswith("group:"):
+            group = group_by_key[unit_key]
+            policy = group.calculation_policy
+            if policy == CalculationPolicy.STANDARD:
+                standard_patients += 1
+            elif policy == CalculationPolicy.UNRATED:
+                unrated_patients += 1
+            else:
+                linked_pending_patients += 1
+            group_patients[group.stable_key] += 1
+        else:
+            unmapped_patients += 1
+            unmapped_patients_by_unit[unit_key] += 1
+
+    for code in sorted(operational_by_code):
+        if code in partitioned_codes:
+            continue
+        operational_group = group_by_code.get(code)
+        if operational_group is None:
+            continue
+        group_operational[operational_group.stable_key].update(
+            operational_by_code[code]
+        )
+
+    assert valid_identity_rows == (
+        duplicate_identity_rows_within_group
+        + standard_patients
+        + unrated_patients
+        + linked_pending_patients
+        + unmapped_patients
+    )
+
+    known_capacity = sum(group.official_capacity or 0 for group in definitions)
+    calculable_capacity = sum(
+        group.official_capacity or 0
+        for group in definitions
+        if group.calculation_policy == CalculationPolicy.STANDARD
+    )
+
+    values: list[_GroupValues] = []
+    availability_sum = 0
+    exceeded_sum = 0
+    for group in definitions:
+        patients_count = group_patients.get(group.stable_key, 0)
+        status_counts = {status: 0 for status in _STATUS_KEYS}
+        status_counts[BedStatus.OCCUPIED] = patients_count
+        for status, count in group_operational[group.stable_key].items():
+            status_counts[status] += count
+        components = _v5_group_components(
+            group=group,
+            raw_counts_by_code=raw_counts_by_code,
+            observed_names_by_code=observed_names_by_code,
+            partitioned=any(
+                membership.age_selector
+                != CapacityMembershipSelector.ALL
+                for membership in group.memberships.all()
+            ),
+        )
+        if group.calculation_policy == CalculationPolicy.STANDARD:
+            capacity = group.official_capacity
+            assert capacity is not None
+            availability = max(capacity - patients_count, 0)
+            availability_sum += availability
+            exceeded = max(patients_count - capacity, 0)
+            exceeded_sum += exceeded
+            values.append(
+                _GroupValues(
+                    stable_key=group.stable_key,
+                    display_name=group.display_name,
+                    calculation_policy=group.calculation_policy,
+                    calculation_status=OccupancyCalculationStatus.CALCULATED,
+                    official_capacity=capacity,
+                    occupied_count=patients_count,
+                    occupancy_percentage=_percentage(
+                        patients_count, capacity
+                    ),
+                    exceeded_by=exceeded,
+                    status_counts=status_counts,
+                    components=components,
+                    official_availability=availability,
+                )
+            )
+            continue
+        status = (
+            OccupancyCalculationStatus.LINKED_SLOTS_PENDING
+            if group.calculation_policy
+            == CalculationPolicy.LINKED_SLOTS_PENDING
+            else OccupancyCalculationStatus.UNRATED
+        )
+        values.append(
+            _GroupValues(
+                stable_key=group.stable_key,
+                display_name=group.display_name,
+                calculation_policy=group.calculation_policy,
+                calculation_status=status,
+                official_capacity=group.official_capacity,
+                occupied_count=None,
+                occupancy_percentage=None,
+                exceeded_by=None,
+                status_counts=status_counts,
+                components=components,
+            )
+        )
+
+    used_keys = {value.stable_key for value in values}
+    unmapped_by_code: dict[str, list[str]] = defaultdict(list)
+    unmapped_by_name: dict[str, list[str]] = defaultdict(list)
+    for unit_key in unmapped_patients_by_unit:
+        if unit_key.startswith("unmapped-code:"):
+            unmapped_by_code[unit_key.removeprefix("unmapped-code:")].append(
+                unit_key
+            )
+        else:
+            unmapped_by_name[
+                unit_key.removeprefix("unmapped-blank:")
+            ].append(unit_key)
+    for code in sorted(unmapped_by_code):
+        unit_key = unmapped_by_code[code][0]
+        values.append(
+            _v5_unmapped_group(
+                identity_kind="code",
+                identity=code,
+                patients=unmapped_patients_by_unit[unit_key],
+                observed_names=observed_names_by_code.get(code, set()),
+                used_keys=used_keys,
+            )
+        )
+    for name in sorted(unmapped_by_name):
+        unit_key = unmapped_by_name[name][0]
+        values.append(
+            _v5_unmapped_group(
+                identity_kind="blank",
+                identity=name,
+                patients=unmapped_patients_by_unit[unit_key],
+                observed_names={name},
+                used_keys=used_keys,
+            )
+        )
+
+    occupied_for_rate = sum(
+        value.occupied_count or 0
+        for value in values
+        if value.calculation_status == OccupancyCalculationStatus.CALCULATED
+    )
+    percentage = _percentage(occupied_for_rate, calculable_capacity)
+
+    reconciliation = _reconciliation_v5_json(
+        totals=_V5GroupTotals(
+            valid_identity_rows=valid_identity_rows,
+            duplicate_identity_rows_within_group=(
+                duplicate_identity_rows_within_group
+            ),
+            standard_patients=standard_patients,
+            unrated_patients=unrated_patients,
+            linked_pending_patients=linked_pending_patients,
+            unmapped_patients=unmapped_patients,
+            incomplete_identity_rows=incomplete_identity_rows,
+            cross_group_record_count=cross_group_record_count,
+            name_variant_patient_count=name_variant_patient_count,
+            rn_fallback_patient_count=fallback_counters["rn"],
+            non_rn_fallback_patient_count=fallback_counters["non_rn"],
+            age_conflict_fallback_patient_count=fallback_counters[
+                "age_conflict"
+            ],
+            patients_without_bed_count=patients_without_bed_count,
+            operational_rows_by_status=dict(operational_rows),
+        )
+    )
+    totals: dict[str, object] = {
+        "observed_sector_count": len(observed_identities),
+        "capacity_covered_sector_count": capacity_covered,
+        "calculable_sector_count": calculable,
+        "known_capacity": known_capacity,
+        "calculable_capacity": calculable_capacity,
+        "occupied_for_rate": occupied_for_rate,
+        "occupancy_percentage": percentage,
+        "exceeded_by": exceeded_sum,
+        "official_sector_count": len(definitions),
+        "official_capacity_sector_count": sum(
+            1
+            for group in definitions
+            if group.official_capacity is not None
+        ),
+        "official_calculable_sector_count": sum(
+            1
+            for group in definitions
+            if group.calculation_policy == CalculationPolicy.STANDARD
+        ),
+        "unknown_age_count": 0,
+        "age_partial": False,
+        "position_partial": None,
+        "official_availability": availability_sum,
+        "physical_reconciliation_json": reconciliation,
+        "quality_warning": reconciliation["quality_warning"],
+    }
+    return sorted(values, key=lambda value: value.stable_key), totals
+
+
+def _v5_unmapped_group(
+    *,
+    identity_kind: str,
+    identity: str,
+    patients: int,
+    observed_names: set[str],
+    used_keys: set[str],
+) -> _GroupValues:
+    """One v5 unmapped unit listing identified patients without official rate."""
+    status_counts = {status: 0 for status in _STATUS_KEYS}
+    status_counts[BedStatus.OCCUPIED] = patients
+    observed_name = next(iter(sorted(observed_names)), "") or (
+        identity if identity_kind == "code" else "Setor sem código"
+    )
+    components = [
+        _component(
+            configured_code=None,
+            configured_name=None,
+            observed_code=identity if identity_kind == "code" else "",
+            observed_name=observed_name,
+            counts=Counter(status_counts),
+            mismatch=False,
+        )
+    ]
+    return _GroupValues(
+        stable_key=_synthetic_key(identity_kind, identity, used_keys),
+        display_name=observed_name,
+        calculation_policy="",
+        calculation_status=OccupancyCalculationStatus.UNMAPPED,
+        official_capacity=None,
+        occupied_count=None,
+        occupancy_percentage=None,
+        exceeded_by=None,
+        status_counts=status_counts,
+        components=components,
+    )
+
+
+def _reconciliation_v5_json(
+    *, totals: _V5GroupTotals,
+) -> dict[str, object]:
+    """Build the closed schema 3 reconciliation for one v5 measurement.
+
+    The bridge ``valid_identity_rows == duplicate_identity_rows_within_group
+    + standard + unrated + pending + unmapped patients`` holds by
+    construction and is asserted here and re-checked by synthetic tests.
+    Only aggregate counts and one status map are stored; no name, record,
+    bed, exact age or row signature ever reaches the JSON.
+    """
+    bridge = (
+        totals.duplicate_identity_rows_within_group
+        + totals.standard_patients
+        + totals.unrated_patients
+        + totals.linked_pending_patients
+        + totals.unmapped_patients
+    )
+    assert bridge == totals.valid_identity_rows
+    quality_warning = _v5_quality_warning(totals)
+    reconciliation: dict[str, object] = {
+        "schema_version": 3,
+        "quality_warning": quality_warning,
+        "valid_identity_rows": totals.valid_identity_rows,
+        "duplicate_identity_rows_within_group": (
+            totals.duplicate_identity_rows_within_group
+        ),
+        "standard_identified_patients": totals.standard_patients,
+        "unrated_identified_patients": totals.unrated_patients,
+        "linked_pending_identified_patients": (
+            totals.linked_pending_patients
+        ),
+        "unmapped_identified_patients": totals.unmapped_patients,
+        "incomplete_identity_rows": totals.incomplete_identity_rows,
+        "cross_group_record_count": totals.cross_group_record_count,
+        "name_variant_patient_count": totals.name_variant_patient_count,
+        "rn_fallback_patient_count": totals.rn_fallback_patient_count,
+        "non_rn_fallback_patient_count": (
+            totals.non_rn_fallback_patient_count
+        ),
+        "age_conflict_fallback_patient_count": (
+            totals.age_conflict_fallback_patient_count
+        ),
+        "patients_without_bed_count": totals.patients_without_bed_count,
+        "operational_rows_by_status": dict(
+            totals.operational_rows_by_status
+        ),
+    }
+    assert set(reconciliation) == _V5_RECONCILIATION_ALLOWLIST
+    return reconciliation
+
+
+def _v5_quality_warning(totals: _V5GroupTotals) -> bool:
+    """Decide whether a v5 measurement carries actionable quality warnings.
+
+    Incomplete identity, records in multiple official units, name variants,
+    any 3A fallback and occupied unmapped patients are warnings. Absence of
+    a bed and operational states are informational, never warnings, and
+    never make the measurement partial or ineligible.
+    """
+    return bool(
+        totals.incomplete_identity_rows
+        or totals.cross_group_record_count
+        or totals.name_variant_patient_count
+        or totals.rn_fallback_patient_count
+        or totals.non_rn_fallback_patient_count
+        or totals.age_conflict_fallback_patient_count
+        or totals.unmapped_patients
     )
 
 
