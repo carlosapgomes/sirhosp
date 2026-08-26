@@ -57,48 +57,34 @@ date.
 
 ### Requirement: Daily summary uses equal-weight arithmetic measurements
 
-The system SHALL give every daily-eligible census measurement in a day equal
-weight, SHALL exclude age-partial v2/v3 measurements and physically partial v3
-measurements from official statistics, and SHALL preserve total, eligible and
-reason-specific excluded measurement counts.
+The system SHALL give every daily-eligible census measurement equal weight,
+SHALL preserve v2/v3 historical exclusion rules, SHALL preserve v4 considered-
+position semantics and SHALL treat every successfully materialized v5
+identified-patient measurement as eligible while recording aggregate quality
+warnings separately.
 
-#### Scenario: Hospital daily metrics use all eligible same-day measurements
+#### Scenario: V5 clean and warned measurements both contribute
 
-- **WHEN** a local day contains multiple eligible calculable hospital
-  measurements
-- **THEN** the summary stores their eligible count and the day's first and last
-  capture timestamps
-- **AND** it stores mean, minimum and maximum occupied values
-- **AND** it stores mean, minimum and maximum occupancy percentages
-- **AND** it stores the greatest exceeded-by value
+- **WHEN** one v5 day contains measurements with and without identity, fallback
+  or cross-group warnings
+- **THEN** every successfully materialized measurement contributes one equal
+  observation to hospital and official-group statistics
+- **AND** no time weighting or interpolation is applied
 
-#### Scenario: Mean rounds only the final result
+#### Scenario: V5 statistics use persisted patient numerators
 
-- **WHEN** an eligible arithmetic mean contains more than two decimal places
-- **THEN** the system computes from exact numerators and capacities
-- **AND** rounds the final stored mean to two places with `ROUND_HALF_UP`
+- **WHEN** a v5 daily summary is refreshed
+- **THEN** mean, minimum and maximum use immutable persisted identified-patient
+  numerators
+- **AND** mean percentage uses exact numerator/capacity values before final
+  `ROUND_HALF_UP`
 
-#### Scenario: No time weighting is applied
+#### Scenario: Historical algorithms remain unchanged
 
-- **WHEN** intervals between eligible same-day census captures differ
-- **THEN** each eligible measurement still contributes one equal observation
-- **AND** no interpolation or duration weighting is performed
-
-#### Scenario: Audit counts preserve age and position reasons
-
-- **WHEN** a local day contains eligible, age-partial and physically partial
-  measurements
-- **THEN** total measurement count includes every point measurement
-- **AND** eligible, age-excluded and position-excluded counts are persisted
-  separately
-- **AND** reason counts may overlap when one measurement has both gaps
-
-#### Scenario: Physical conflict excludes all official group means
-
-- **WHEN** a v3 point measurement is physically partial
-- **THEN** it contributes to no hospital or official-group daily mean, minimum,
-  maximum or exceeded-by value
-- **AND** the immutable point measurement remains available for audit
+- **WHEN** v5 becomes effective
+- **THEN** v1–v4 summaries retain stored algorithms, eligibility, warning counts
+  and statistics
+- **AND** no earlier local date is rebuilt
 
 ### Requirement: Daily group summaries preserve non-calculable states
 
@@ -154,18 +140,17 @@ statistics.
 
 ### Requirement: A day with no eligible measurement has no fabricated rate
 
-The system SHALL preserve a daily audit summary when measurements exist but
-SHALL leave official statistics null if every measurement was excluded for age
-or physical-position quality.
+The system SHALL preserve null official statistics for historical days with no
+eligible measurement, while a v5 day with at least one successfully materialized
+measurement SHALL have at least one eligible observation even if every
+measurement has aggregate warnings.
 
-#### Scenario: All same-day measurements are partial
+#### Scenario: V5 all-warning day remains observable
 
-- **WHEN** a local day contains measurements but none is daily-eligible
-- **THEN** total measurement count reflects all point measurements
-- **AND** eligible measurement count is zero
-- **AND** reason-specific exclusion counts are preserved
-- **AND** official mean, minimum, maximum and exceeded-by fields are null
-- **AND** the system does not substitute zero or a prior day's values
+- **WHEN** every v5 measurement in one local day has a quality warning
+- **THEN** eligible count equals total measurement count
+- **AND** official statistics use the persisted patient numerators
+- **AND** warning count equals total measurement count
 
 ### Requirement: Legacy daily summaries remain immutable
 
@@ -189,3 +174,73 @@ SHALL NOT rebuild or reinterpret persisted v1/v2 summaries.
 - **THEN** earlier daily summaries keep their stored algorithm, counts and
   statistics
 - **AND** no backfill or bulk refresh is invoked
+
+### Requirement: V4 daily quality evidence remains aggregate and private
+
+The daily summary SHALL persist only counts needed to communicate v4 quality
+and SHALL not copy conflict alternatives or row-level identity.
+
+#### Scenario: Warned measurements update daily audit
+
+- **WHEN** a warned v4 measurement refreshes its local-day summary
+- **THEN** the summary increments one aggregate warning count
+- **AND** no patient name, record number, bed or conflict signature is stored
+
+#### Scenario: Idempotent v4 materialization does not double warning count
+
+- **WHEN** an existing v4 measurement is returned idempotently
+- **THEN** the daily warning count is not incremented again
+- **AND** the summary is not rewritten
+
+### Requirement: V4 daily policy has no backfill
+
+V4 eligibility and warning counters SHALL apply only to days materialized under
+v4 and SHALL NOT rebuild or reinterpret v1, v2 or v3 summaries.
+
+#### Scenario: First v4 day is summarized
+
+- **WHEN** the first v4 measurement is persisted after future activation
+- **THEN** its day uses v4 eligibility and warning semantics
+- **AND** all earlier summaries retain stored algorithm, counts and statistics
+
+### Requirement: V5 daily quality remains aggregate and private
+
+The daily summary SHALL reuse its aggregate warning-measurement count for v5 and
+SHALL never copy patient, name-variant, record, bed or age detail.
+
+#### Scenario: Warned v5 measurement refreshes summary
+
+- **WHEN** a v5 measurement with RN fallback, incomplete identity, cross-group
+  record, name variation or occupied unmapped evidence is persisted
+- **THEN** the day warning count includes that measurement once
+- **AND** reason detail remains only in the immutable aggregate point
+  reconciliation
+
+#### Scenario: Bed absence alone does not exclude
+
+- **WHEN** a v5 patient is counted without a bed value
+- **THEN** the measurement remains eligible
+- **AND** historical age/position exclusion counters do not increment
+
+#### Scenario: Operational states do not affect daily rate
+
+- **WHEN** v5 censuses contain changing counts of vacant, reserved, maintenance
+  or isolation rows
+- **THEN** those states do not change patient numerator, capacity or rate
+- **AND** daily history does not call them conflicts
+
+#### Scenario: Idempotent v5 materialization does not double count warning
+
+- **WHEN** an existing v5 measurement is returned
+- **THEN** its daily summary and warning count are not rewritten or incremented
+
+### Requirement: V5 daily policy has no backfill
+
+V5 patient-counting and fallback semantics SHALL apply only to local days whose
+applicable catalog declares v5.
+
+#### Scenario: First v5 day is summarized
+
+- **WHEN** the first v5 measurement is created after future activation
+- **THEN** its day records `occupancy-v5`
+- **AND** all earlier v4 and prior days remain immutable

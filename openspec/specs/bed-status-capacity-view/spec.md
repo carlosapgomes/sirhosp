@@ -38,88 +38,31 @@ census.
 
 ### Requirement: Capacity rows follow official groups
 
-When an exact measurement exists, the official section SHALL show one summary
-row per measured official group or unmapped sector using only persisted
-algorithm-appropriate official values. Physical positions and patient detail
-SHALL appear in the separate legacy section rather than being presented as
-official capacity rows.
+When an exact v5 measurement exists, `/beds` SHALL present one unified
+expandable list derived from the exact catalog graph, with official persisted
+values and identified patients deduplicated by official group rather than by
+physical bed.
 
-#### Scenario: Shared official group appears once
+#### Scenario: Shared group lists patient once
 
-- **WHEN** more than one source code belongs to one capacity group
-- **THEN** the official section shows one group row with combined official
-  numerator and one capacity state
-- **AND** the physical section retains each source sector and position once
+- **WHEN** one record appears under multiple source codes of the same official
+  group
+- **THEN** the unit lists one patient and one contribution to the official
+  numerator
+- **AND** retains every source alias and reported bed in its authenticated detail
 
-#### Scenario: V3 age-partitioned groups use normalized positions
+#### Scenario: 3A lists patient in one partition
 
-- **WHEN** a v3 measurement contains unambiguous occupied code `654` positions
-  with valid age bands
-- **THEN** the official section assigns each position once to Adulto or Infantil
-- **AND** the physical section shows the source 3A position once
-- **AND** no position appears in both physical status totals
+- **WHEN** a v5 record from code 654 is resolved by reliable age or fallback
+- **THEN** it appears once under Adulto or Infantil
+- **AND** never appears in both group numerators
+- **AND** no combined 3A capacity/rate is created
 
-#### Scenario: V2 auxiliary grouping is visually non-official
+#### Scenario: Unrated unit lists patients without rate
 
-- **WHEN** an exact v2 census contains non-occupied code `654` rows or occupied
-  rows with unknown age
-- **THEN** any compatibility auxiliary grouping is separated from the official
-  sector count and official table styling
-- **AND** it is not presented as a forty-fourth official sector
-
-#### Scenario: Existing patient detail remains authorized
-
-- **WHEN** an authenticated user expands an unambiguous physical position
-- **THEN** it retains the existing status label and authorized patient link
-- **AND** exact duplicate rows are not rendered repeatedly
-
-#### Scenario: Conflicting physical position appears once
-
-- **WHEN** one normalized source and bed has conflicting rows
-- **THEN** the physical section shows one `Conflito no legado` position
-- **AND** does not choose or display one conflicting patient as authoritative
-
-#### Scenario: Unmapped sector remains visible
-
-- **WHEN** the latest exact census contains an `unmapped` source sector
-- **THEN** the official section shows it as outside official calculation
-- **AND** the physical section shows its unambiguous positions and statuses
-
-### Requirement: Page communicates registered legacy occupancy
-
-The page SHALL distinguish official calculated occupancy from the physical
-snapshot registered in the legacy system, SHALL not imply that stale patients
-were removed and SHALL explain every aggregate exclusion applied by the exact
-measurement algorithm.
-
-#### Scenario: Official and physical headings are simultaneously visible
-
-- **WHEN** an authenticated user opens `/beds` with census data
-- **THEN** the page visibly labels one section `Capacidade oficial e ocupação`
-- **AND** visibly labels another section `Posições registradas no sistema legado`
-- **AND** neither reality is hidden behind a tab by default
-
-#### Scenario: Corrected Centro Obstétrico is outside the official rate
-
-- **WHEN** a v2 or v3 measurement contains CO status evidence
-- **THEN** the official section states that CO has no registered official
-  capacity and is outside the unit rate
-- **AND** displays no CO percentage or official availability
-- **AND** the physical section retains its normalized status evidence
-
-#### Scenario: Physical cards use physical labels
-
-- **WHEN** the physical section displays status counts
-- **THEN** it labels them as positions occupied, vacant, reserved, in
-  maintenance, in isolation or conflicting in the legacy snapshot
-- **AND** never labels raw line count as `Total de leitos`
-- **AND** never calls legacy vacant status `Disponibilidade oficial`
-
-#### Scenario: Legacy v1 and v2 measurement remains historical
-
-- **WHEN** the latest exact measurement uses v1 or v2
-- **THEN** the official section labels the historical algorithm semantics
-- **AND** does not recalculate its numerator, percentage or excess with v3
+- **WHEN** identified patients belong to CO or another unrated group
+- **THEN** the unit lists those patients and source states
+- **AND** displays no capacity, balance, percentage or excess
 
 ### Requirement: Over-capacity state is explicit and accessible
 
@@ -172,38 +115,30 @@ whether the denominator represents source codes or official sectors.
 
 ### Requirement: Hospital total uses only calculable groups
 
-The official section SHALL display hospital occupancy from the exact persisted
-measurement's calculable numerator and capacity and, for v3, SHALL display
-persisted per-sector availability and excess without cross-sector compensation.
+The v5 official summary SHALL display one official-capacity value, identified
+patients from calculable groups, non-compensated official balance, independent
+excess and rate from the exact persisted measurement.
 
-#### Scenario: V3 official total is displayed
+#### Scenario: V5 summary has no duplicate capacity cards
 
-- **WHEN** the page displays a v3 measurement
-- **THEN** it identifies official capacity, considered occupations,
-  availability in official capacity, independent excess and official rate
-- **AND** labels availability as calculated setorial balance rather than a list
-  of nominal vacant beds
+- **WHEN** known and calculable capacity both equal the official capacity
+- **THEN** v5 renders one card `Capacidade oficial`
+- **AND** does not render separate `Capacidade conhecida` or
+  `Capacidade calculável` cards
 
-#### Scenario: V3 partial official total is displayed
+#### Scenario: Coverage is secondary metadata
 
-- **WHEN** a v3 measurement has physical or age partiality
-- **THEN** its point-in-time official cards are labeled partial
-- **AND** the page explains that the census is excluded from official daily
-  means
+- **WHEN** the complete v5 catalog applies
+- **THEN** the page communicates 39 of 43 sectors with capacity and calculation
+  and four outside the rate as subordinate metadata
+- **AND** does not repeat 666 in coverage cards
 
-#### Scenario: Corrected v2 hospital total remains historical
+#### Scenario: Patient-based official cards are clear
 
-- **WHEN** the page displays an exact v2 measurement
-- **THEN** it identifies stored known and calculable capacities 666/666 when the
-  complete corrected catalog applies
-- **AND** does not fabricate v3 availability or deduplication values
-
-#### Scenario: Initial v1 hospital total remains historical
-
-- **WHEN** the page displays an exact v1 measurement
-- **THEN** it identifies stored known capacity 658 and calculable capacity 626
-  when the complete initial catalog applies
-- **AND** does not apply corrected or v3 totals retroactively
+- **WHEN** a v5 measurement is displayed
+- **THEN** the numerator card is `Pacientes identificados`
+- **AND** availability wording is `Saldo da capacidade oficial`
+- **AND** explanatory text states that saldo is not a nominal vacant-bed list
 
 ### Requirement: Page warns when corrected occupancy is age-partial
 
@@ -286,3 +221,303 @@ extra rows, conflicts and unidentified rows.
 
 - **WHEN** an unauthenticated user requests `/beds/`
 - **THEN** the user is redirected to login as before this change
+
+### Requirement: Page communicates official and source-system realities
+
+The page SHALL use `sistema de origem`, SHALL preserve exact-run official values
+and SHALL distinguish patient occupancy from the operational states and bed
+texts reported by the source.
+
+#### Scenario: V5 headings are explicit
+
+- **WHEN** an authenticated user opens a v5 exact census
+- **THEN** the official summary identifies patients versus capacity
+- **AND** the detailed section is titled `Setores, pacientes e estados de leitos`
+- **AND** it does not imply that reported bed labels define the numerator
+
+#### Scenario: Historical UI remains historical
+
+- **WHEN** the exact measurement uses v1–v4
+- **THEN** its stored official values remain unchanged
+- **AND** v5 patient counting is not applied ad hoc by the view
+
+### Requirement: Page uses clean versioned source names
+
+The v4 page SHALL use the exact catalog membership's clean source alias as the
+primary source label and SHALL retain the raw source name only as secondary
+provenance.
+
+#### Scenario: Prefixed source label has clean alias
+
+- **WHEN** the exact source row has a technical prefix such as a floor/location
+  code
+- **THEN** the unit displays the clean catalog alias as primary text
+- **AND** may display the raw label as subordinate `Nome no sistema de origem`
+
+#### Scenario: Alias belongs to exact catalog
+
+- **WHEN** a newer catalog later changes an alias
+- **THEN** historical exact measurements and presentations retain their
+  applicable catalog context
+- **AND** the current catalog is never substituted ad hoc
+
+#### Scenario: Historical membership lacks alias
+
+- **WHEN** a v1/v2/v3 catalog has no clean source alias
+- **THEN** presentation uses its documented historical fallback
+- **AND** does not edit or backfill the membership
+
+### Requirement: Page explains how occupied evidence was treated
+
+For v4, the page SHALL render a section `Como as ocupações foram tratadas` from
+persisted aggregate reconciliation and SHALL distinguish consolidation,
+computation under warning, omission by ambiguity, missing identity and policy
+scope.
+
+#### Scenario: Duplicate wording explains consolidation
+
+- **WHEN** duplicate occupied extras are positive
+- **THEN** the page labels them `Linhas duplicadas consolidadas`
+- **AND** explains that the corresponding position was counted once
+
+#### Scenario: Occupant-only conflict was counted
+
+- **WHEN** v4 counted an occupied position with divergent occupant evidence
+- **THEN** the page reports positions counted with occupant warning separately
+- **AND** explains that no patient alternative was treated as authoritative
+
+#### Scenario: Status or age conflict was not counted
+
+- **WHEN** v4 omitted occupied evidence because status or partition age was
+  ambiguous
+- **THEN** the page reports positions and affected occupied lines by reason
+- **AND** states explicitly that they were not computed in the official
+  numerator
+
+#### Scenario: Missing position was not counted
+
+- **WHEN** occupied rows lack usable bed identity
+- **THEN** the page labels them `não computadas por ausência de posição`
+- **AND** does not call them physical positions
+
+#### Scenario: Unrated position is valid but out of scope
+
+- **WHEN** unambiguous occupied positions belong to an `unrated` group
+- **THEN** the page labels them valid positions outside the official-rate scope
+- **AND** does not present them as a data-quality failure
+
+#### Scenario: Unmapped and pending remain distinct
+
+- **WHEN** occupied evidence is unmapped or linked-pending
+- **THEN** each state receives its own label and count
+- **AND** neither is conflated with intentional `unrated` policy
+
+#### Scenario: Aggregate explanation remains private
+
+- **WHEN** the treatment section is rendered
+- **THEN** it contains no patient name, record number, bed, exact age or
+  clinical text
+
+### Requirement: Authenticated users can inspect non-authoritative quality cases
+
+Every authenticated `/beds` user SHALL be able to expand v4 conflict and
+unidentified-row cases from the exact latest census, while anonymous users
+remain redirected and no candidate is selected as authoritative.
+
+#### Scenario: Occupant conflict alternatives are visible
+
+- **WHEN** an authenticated user expands an occupant-conflict position
+- **THEN** each distinct alternative is visible with the existing authorized
+  patient detail and equivalent-row count
+- **AND** every alternative is labeled `registro divergente — não autoritativo`
+- **AND** no alternative is styled or linked as the chosen truth
+
+#### Scenario: Status or age alternatives are visible
+
+- **WHEN** an authenticated user expands a status or age conflict
+- **THEN** all distinct alternatives and the conflict reason are visible
+- **AND** the page does not choose a status or age group
+
+#### Scenario: Unidentified occupied row is actionable
+
+- **WHEN** an authenticated user expands a source unit with an occupied row
+  lacking bed identity
+- **THEN** the row appears in a separate quality-case list
+- **AND** it is not counted or labeled as a physical position
+
+#### Scenario: Exact duplicates are not repeated
+
+- **WHEN** alternatives contain equivalent duplicate lines
+- **THEN** the detail shows one alternative plus occurrence count
+- **AND** does not repeat identical patient rows
+
+#### Scenario: Anonymous access remains protected on quality details
+
+- **WHEN** an unauthenticated user requests `/beds/`
+- **THEN** the user is redirected to login
+- **AND** no quality-case detail is rendered
+
+#### Scenario: Details are not persisted in aggregate history
+
+- **WHEN** quality cases are assembled for the page
+- **THEN** names, records and beds exist only in exact-run presentation memory
+- **AND** none is copied to measurement, daily summary, log or report
+
+### Requirement: Hospital total identifies v4 warnings without suppressing the day
+
+The official summary SHALL display persisted v4 considered occupancy,
+availability, independent excess and rate, SHALL mark quality warnings and SHALL
+explain that warned v4 measurements remain eligible for daily statistics.
+
+#### Scenario: Warned v4 point is displayed
+
+- **WHEN** the exact v4 measurement has quality warnings
+- **THEN** official cards are labeled `com ressalvas de qualidade`
+- **AND** the page identifies considered occupations rather than claiming
+  conflict-free occupancy
+- **AND** explains that the measurement still contributes to daily statistics
+
+#### Scenario: Clean v4 point is displayed
+
+- **WHEN** the exact v4 measurement has no warning
+- **THEN** no warning badge is displayed
+- **AND** persisted official values remain unchanged
+
+#### Scenario: Historical v3 partial point remains historical
+
+- **WHEN** the exact measurement uses v3 and is physically partial
+- **THEN** the page retains its original daily-ineligible explanation
+- **AND** does not apply v4 wording or eligibility retroactively
+
+#### Scenario: Exact-run remains mandatory
+
+- **WHEN** the latest census lacks its own measurement
+- **THEN** official summary remains pending
+- **AND** no older measurement, alias, warning or rate is reused
+
+### Requirement: V5 page groups identified patients without hiding source evidence
+
+For each v5 presentation unit, the authenticated page SHALL show one patient
+item per normalized record within the official group and SHALL show all exact-
+run name variants, source aliases and reported beds without persisting them.
+
+#### Scenario: Patient has no bed
+
+- **WHEN** an identified patient has an empty bed value
+- **THEN** the patient is listed and labeled `sem leito informado`
+- **AND** official detail shows that the patient was counted
+
+#### Scenario: Patient has multiple reported beds
+
+- **WHEN** duplicate lines of one record in a group report different beds
+- **THEN** one patient item lists every distinct bed value
+- **AND** the patient counts once
+
+#### Scenario: Different patients share bed text
+
+- **WHEN** two records report the same bed text
+- **THEN** both patient items remain visible and counted
+- **AND** the page factually reports `pacientes informados com o mesmo leito`
+- **AND** does not call either record divergent or non-authoritative
+
+#### Scenario: Patient name varies
+
+- **WHEN** one record has multiple name variants
+- **THEN** one patient item displays all variants
+- **AND** states `Nome informado de formas diferentes em N linhas`
+- **AND** does not select a canonical variant
+
+#### Scenario: Record appears in multiple official groups
+
+- **WHEN** one record is present in different groups
+- **THEN** each affected group shows the factual warning
+  `Prontuário informado em mais de um setor oficial neste censo`
+- **AND** the page does not select a true group
+
+### Requirement: V5 page separates incomplete identity and operational states
+
+The v5 detail SHALL render incomplete identity separately from operational
+source rows, and neither category SHALL be described as patient-position
+conflict.
+
+#### Scenario: Incomplete identity is visible but not counted
+
+- **WHEN** a row has only valid record or only apparent patient name, or has an
+  invalid record format
+- **THEN** it appears under `Identificação incompleta — não contada`
+- **AND** the page does not call it a patient or a physical conflict
+
+#### Scenario: Operational rows retain source state
+
+- **WHEN** rows represent vacancy, reservation, maintenance or isolation
+- **THEN** every row is shown with its state and reported bed, if any
+- **AND** none enters the patient numerator or reduces official capacity
+
+#### Scenario: Same bed has multiple operational states
+
+- **WHEN** the same normalized bed text has different operational-state rows
+- **THEN** all states remain visible
+- **AND** the page reports `estados informados para o mesmo leito`
+- **AND** it does not choose a state or add an occupancy-quality conflict
+
+#### Scenario: Single operational row is not conflict
+
+- **WHEN** one v5 row is solely vacant, reserved, maintenance or isolation
+- **THEN** it appears exactly as that state
+- **AND** no `conflito`, `registro divergente` or `não autoritativo` label appears
+
+### Requirement: V5 page explains patient-count reconciliation safely
+
+The v5 page SHALL render aggregate persisted reconciliation from patient lines
+to official numerator with factual quality labels and no identifiers.
+
+#### Scenario: Patient bridge is displayed
+
+- **WHEN** v5 reconciliation is available
+- **THEN** it displays valid identity rows, duplicate lines, standard patients,
+  unrated patients, pending/unmapped patients and official numerator
+- **AND** displayed arithmetic closes
+
+#### Scenario: Age fallback is explained
+
+- **WHEN** 3A patients use RN or Adulto fallback
+- **THEN** the aggregate section reports counts by fallback reason
+- **AND** explains that fallback patients remain counted and daily-eligible
+
+#### Scenario: Aggregate section is private
+
+- **WHEN** reconciliation is rendered
+- **THEN** it contains no name, record, bed, exact age or source row signature
+
+### Requirement: V5 exact-run authorization and privacy are preserved
+
+V5 presentation SHALL use only the latest census exact measurement, SHALL remain
+available to authenticated users under existing authorization and SHALL keep all
+row-level identity ephemeral.
+
+#### Scenario: Exact measurement is pending
+
+- **WHEN** the latest census lacks its own measurement
+- **THEN** official values remain pending
+- **AND** no older v5 numerator, catalog or patient grouping is reused
+
+#### Scenario: Authenticated user expands patient detail
+
+- **WHEN** an authenticated user expands a v5 unit
+- **THEN** authorized names, records and links may be rendered from exact-run
+  snapshots in memory
+- **AND** none is copied to measurement, summary, logs or reports
+
+#### Scenario: V5 anonymous access remains protected
+
+- **WHEN** an unauthenticated user requests `/beds/`
+- **THEN** response redirects to login as before
+- **AND** no patient or operational detail is rendered
+
+#### Scenario: V5 terminology is unambiguous
+
+- **WHEN** a v5 page is rendered
+- **THEN** user-facing v5 sections contain none of `registro divergente`,
+  `não autoritativo` or generic physical `conflito`
+- **AND** historical algorithm labels remain available only where needed to
+  explain older measurements

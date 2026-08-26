@@ -252,44 +252,41 @@ SHALL NOT block processing of an otherwise complete census.
 ### Requirement: Standard group occupancy uses version-appropriate occupied evidence
 
 For a `standard` group, the system SHALL apply the immutable algorithm selected
-by the applicable catalog, divide the resulting occupied numerator once by the
-official capacity and SHALL NOT cap the result at 100 percent. V1 and v2 SHALL
-retain their row-counting semantics; v3 SHALL count only unambiguous normalized
-physical positions.
+by the applicable catalog, divide the resulting numerator once by official
+capacity and SHALL NOT cap the result at 100 percent. V1/v2 SHALL preserve row
+semantics, v3/v4 SHALL preserve their position semantics and v5 SHALL count
+valid identified patients deduplicated by normalized record within the official
+group without using bed identity.
 
-#### Scenario: Legacy v1 or v2 group keeps row semantics
+#### Scenario: V1 through v4 remain historical
 
-- **WHEN** a v1 or v2 standard group contains occupied legacy rows
-- **THEN** its persisted numerator retains the algorithm's original row count
-- **AND** no later physical-position rule reinterprets that measurement
+- **WHEN** v5 becomes supported
+- **THEN** persisted v1–v4 measurements, reconciliations and summaries remain
+  unchanged
+- **AND** no old census is recalculated or reinterpreted
 
-#### Scenario: V3 simple group is calculated from positions
+#### Scenario: V5 patient without bed counts
 
-- **WHEN** a v3 standard group with capacity 10 has eight unambiguous occupied
-  positions
-- **THEN** its numerator is 8
-- **AND** its occupancy percentage is 80.00
-- **AND** its exceeded-by value is 0
+- **WHEN** a v5 standard-group row has a valid numeric record and valid patient
+  name but no usable bed value
+- **THEN** the patient enters the group numerator
+- **AND** absence of bed is retained only as aggregate information and
+  authenticated exact-run detail
 
-#### Scenario: V3 group exceeds capacity
+#### Scenario: Different patients share a bed
 
-- **WHEN** a v3 standard group with capacity 8 has 10 unambiguous occupied
-  positions
-- **THEN** its occupancy percentage is 125.00
-- **AND** its exceeded-by value is 2
-- **AND** its availability is 0
+- **WHEN** two valid records in the same group report the same bed text
+- **THEN** both patients enter the numerator
+- **AND** the bed text neither deduplicates nor suppresses either patient
 
-#### Scenario: Non-occupied states do not enter the numerator
+#### Scenario: Percentage, balance and excess remain deterministic
 
-- **WHEN** a v3 group contains empty, reserved, maintenance or isolation
-  positions
-- **THEN** those positions remain in the physical evidence
-- **AND** they do not enter the occupied numerator
-
-#### Scenario: Percentage rounding is deterministic
-
-- **WHEN** a percentage has more than two decimal places
-- **THEN** it is persisted as `Decimal` with two places using `ROUND_HALF_UP`
+- **WHEN** a v5 calculable group is materialized
+- **THEN** percentage uses `ROUND_HALF_UP` with two decimal places and may exceed
+  100 percent
+- **AND** balance is `max(capacity - identified patients, 0)`
+- **AND** excess is `max(identified patients - capacity, 0)`
+- **AND** hospital balance and excess are summed independently by group
 
 ### Requirement: V3 normalizes physical positions before official calculation
 
@@ -428,3 +425,347 @@ published.
 - **WHEN** v3 materialization is requested twice for the same census run
 - **THEN** the existing measurement and reconciliation are returned
 - **AND** no field, group or daily summary is recalculated
+
+### Requirement: V4 classifies physical conflicts by their effect
+
+For `occupancy-v4`, the system SHALL collapse exact duplicates before conflict
+classification, SHALL use source identity plus bed as the physical key and
+SHALL classify remaining ambiguity without using record number as a position
+key.
+
+#### Scenario: Exact duplicates are consolidated first
+
+- **WHEN** equivalent rows repeat under one physical key
+- **THEN** one signature remains for conflict classification
+- **AND** extra equivalent rows are recorded as duplicates
+- **AND** the corresponding position can still count once
+
+#### Scenario: Occupant evidence diverges but occupation agrees
+
+- **WHEN** unique alternatives under one key are occupied and use the same
+  effective age selector but differ in name or record evidence
+- **THEN** the result is `occupant_conflict`
+- **AND** the occupied position counts once
+- **AND** candidate identity remains non-authoritative
+
+#### Scenario: Status evidence diverges
+
+- **WHEN** unique alternatives under one key have different statuses
+- **THEN** the result is `status_conflict`
+- **AND** no preferred status is selected
+- **AND** the position is omitted from official numerators
+
+#### Scenario: Partition selector diverges
+
+- **WHEN** unique occupied alternatives in a partitioned code resolve to
+  different or unknown selectors
+- **THEN** the result is `age_conflict`
+- **AND** the position is omitted from partitioned official numerators
+
+#### Scenario: Occupied row lacks physical identity
+
+- **WHEN** an occupied row has no usable bed identity
+- **THEN** it remains an unidentified raw case
+- **AND** it is omitted from official numerators because it cannot be safely
+  deduplicated
+
+#### Scenario: Shared record in different beds remains distinct
+
+- **WHEN** the same record evidence appears in two normalized beds
+- **THEN** v4 preserves two positions
+- **AND** performs no patient-level deduplication or mother-child inference
+
+### Requirement: V4 reconciliation distinguishes every treatment
+
+Each v4 measurement SHALL persist a schema 2 allowlisted aggregate
+reconciliation whose occupied-row bridge and counted-position bridge close
+exactly and whose labels distinguish consolidation, ambiguity, missing identity
+and policy scope.
+
+#### Scenario: Raw occupied-row bridge closes
+
+- **WHEN** a v4 measurement is materialized
+- **THEN** raw occupied rows equal duplicate occupied extras plus occupant
+  conflict extras plus occupied rows omitted by status conflict, age conflict,
+  missing identity or unknown partition plus counted occupied positions
+- **AND** all values are nonnegative integers
+
+#### Scenario: Counted occupied-position bridge closes
+
+- **WHEN** a v4 measurement contains calculable, unrated, unmapped or pending
+  occupied positions
+- **THEN** counted occupied positions equal official numerator plus separate
+  counts for each non-calculable policy state
+- **AND** intentional `unrated` evidence is not conflated with `unmapped`
+
+#### Scenario: Occupant conflict contributes one representative
+
+- **WHEN** an occupant-only conflict contains multiple unique occupied
+  alternatives and exact duplicate extras
+- **THEN** one occupied position enters the counted-position bridge
+- **AND** remaining unique alternatives and duplicate extras are accounted for
+  exactly once in the raw-row bridge
+
+#### Scenario: Physical status partition remains closed
+
+- **WHEN** v4 contains unambiguous positions, occupant conflicts, status
+  conflicts, age conflicts, duplicates and unidentified rows
+- **THEN** each position or raw exception belongs to one documented aggregate
+  category
+- **AND** no duplicate extra row increases physical-position total
+
+#### Scenario: V4 reconciliation remains private
+
+- **WHEN** raw alternatives contain names, records, beds or exact ages
+- **THEN** persisted measurement and group history contain none of those values
+- **AND** logs and errors contain no physical key or row signature
+
+### Requirement: V4 records actionable quality without rejecting accepted census
+
+Every successfully materialized v4 measurement SHALL record whether quality
+warnings exist, while remaining a valid immutable point measurement for a
+census already accepted by the primary extraction gate.
+
+#### Scenario: Clean v4 measurement
+
+- **WHEN** a v4 measurement has no conflict, unidentified occupied row, unknown
+  partition or occupied unmapped position
+- **THEN** its v4 quality warning is false
+
+#### Scenario: V4 measurement has actionable gap
+
+- **WHEN** v4 contains any occupant, status or age conflict, occupied row without
+  position, unknown partition or occupied unmapped position
+- **THEN** its quality warning is true
+- **AND** aggregate reason counts remain available for summary and presentation
+
+#### Scenario: Repeated v4 materialization is idempotent
+
+- **WHEN** v4 materialization is requested twice for the same census run
+- **THEN** the original measurement, warning and reconciliation are returned
+- **AND** no group or daily summary is recalculated
+
+### Requirement: V4 preserves prior algorithms and activation boundaries
+
+The system SHALL dispatch v4 only from a future catalog explicitly declaring
+`occupancy-v4` and SHALL preserve all prior measurements, summaries and
+catalogs without backfill.
+
+#### Scenario: V4 catalog becomes applicable
+
+- **WHEN** an accepted census local date uses a catalog declaring
+  `occupancy-v4`
+- **THEN** its measurement records `occupancy-v4`
+- **AND** applies typed conflict semantics
+
+#### Scenario: Earlier v3 remains strict
+
+- **WHEN** an earlier v3 measurement is physically partial
+- **THEN** it keeps its original omitted numerator and daily-ineligible meaning
+- **AND** v4 does not reinterpret its reconciliation or warning state
+
+#### Scenario: Deployment does not activate v4
+
+- **WHEN** v4 code and migrations are deployed
+- **THEN** the applicable v3 catalog remains selected until a future v4 catalog
+  becomes effective
+- **AND** no startup, migration or build performs activation
+
+### Requirement: V5 recognizes patient identity deterministically
+
+For `occupancy-v5`, a census row SHALL be an identified-patient row only when
+its normalized record is non-empty and digits-only and its normalized name is
+non-empty and not an operational-state marker. Record identity SHALL remain a
+string so leading zeros are preserved.
+
+#### Scenario: Numeric record and valid name are accepted
+
+- **WHEN** record ` 0012345 ` and a non-operational non-empty name are observed
+- **THEN** the normalized identity is textual `0012345`
+- **AND** the row is eligible for patient counting
+
+#### Scenario: Non-numeric record is incomplete
+
+- **WHEN** the record is blank, punctuation-only or contains a non-digit
+- **THEN** the row does not become an identified patient
+- **AND** any partial identity evidence is counted only as an aggregate
+  incomplete-identity case
+
+#### Scenario: Operational marker is not a patient name
+
+- **WHEN** the normalized name represents vacancy, cleaning/maintenance,
+  reservation or isolation
+- **THEN** the row is an operational state rather than an identified patient
+- **AND** it does not enter an official numerator
+
+#### Scenario: Incomplete identity is not silently discarded
+
+- **WHEN** exactly one of record or valid name is present
+- **THEN** v5 records one aggregate incomplete-identity row
+- **AND** the authenticated exact-run page can display it without copying it to
+  aggregate history or logs
+
+### Requirement: V5 deduplicates records within each official group
+
+V5 SHALL count a normalized record at most once per official group, including
+across multiple source codes mapped to that group, and SHALL not perform global
+hospital deduplication across different official groups.
+
+#### Scenario: Duplicate rows in one source count once
+
+- **WHEN** one record appears in multiple rows mapped to the same official group
+- **THEN** the group numerator includes one patient
+- **AND** aggregate reconciliation records the additional lines as duplicate
+  identity rows
+
+#### Scenario: Shared group deduplicates across codes
+
+- **WHEN** one record appears under two source codes belonging to the same
+  Cardio official group
+- **THEN** it counts once in that group
+- **AND** all source and bed evidence remains available only for authenticated
+  exact-run presentation
+
+#### Scenario: Record appears in different groups
+
+- **WHEN** one normalized record appears in two different official groups
+- **THEN** it counts once in each group
+- **AND** hospital numerator remains the sum of group numerators
+- **AND** v5 records only an aggregate cross-group record count as a factual
+  quality warning
+
+#### Scenario: Name variants do not create patients
+
+- **WHEN** one record has multiple normalized names inside a group
+- **THEN** it counts once
+- **AND** aggregate quality records one patient with name variation
+- **AND** no name variant is persisted or chosen as authoritative
+
+### Requirement: V5 partitions identified 3A patients with deterministic fallback
+
+For the age-partitioned source code, v5 SHALL deduplicate by record before group
+assignment, SHALL prefer agreeing reliable age bands and SHALL use normalized
+name prefix fallback when reliable age is absent or contradictory.
+
+#### Scenario: Reliable child age wins
+
+- **WHEN** all reliable lines for one record resolve to `under_12`
+- **THEN** the patient enters only `OBST-3A-INFANTIL`
+- **AND** unknown duplicate lines do not trigger name fallback
+
+#### Scenario: Reliable adult age wins
+
+- **WHEN** all reliable lines for one record resolve to `age_12_or_over`
+- **THEN** the patient enters only `OBST-3A-ADULTO`
+
+#### Scenario: Unknown age with RN prefix becomes child
+
+- **WHEN** no reliable age exists and any normalized valid name starts
+  literally with `RN`
+- **THEN** the patient enters only the Infantil group
+- **AND** the aggregate RN-fallback counter increments
+
+#### Scenario: Unknown age without RN prefix becomes adult
+
+- **WHEN** no reliable age exists and no normalized name starts literally with
+  `RN`
+- **THEN** the patient enters only the Adulto group
+- **AND** the aggregate non-RN fallback counter increments
+
+#### Scenario: Reliable bands conflict
+
+- **WHEN** duplicate lines of one record contain both reliable age bands
+- **THEN** the reliable age is treated as contradictory
+- **AND** the same literal RN fallback determines exactly one group
+- **AND** aggregate age-conflict fallback count increments
+
+#### Scenario: Similar prefix is not RN
+
+- **WHEN** a fallback name starts with `R.N.` or another text whose first two
+  normalized characters are not exactly `RN`
+- **THEN** it uses Adulto fallback
+
+### Requirement: V5 reconciliation is closed, aggregate and private
+
+Each v5 measurement SHALL persist a versioned allowlisted aggregate
+reconciliation explaining valid identity rows, within-group duplicate rows,
+identified patients by policy, quality reasons and operational-state rows
+without storing row-level identity.
+
+#### Scenario: Identity bridge closes
+
+- **WHEN** a v5 measurement is materialized
+- **THEN** valid identity rows equal within-group duplicate identity rows plus
+  identified-patient assignments to standard, unrated, pending and unmapped
+  groups
+- **AND** every value is a nonnegative integer
+
+#### Scenario: Patient quality remains aggregate
+
+- **WHEN** records cross groups, names vary, identity is incomplete or age uses
+  fallback
+- **THEN** reconciliation stores only aggregate counts by reason
+- **AND** contains no name, record, bed, exact age or row signature
+
+#### Scenario: Operational rows stay outside occupancy
+
+- **WHEN** the census contains vacant, reserved, maintenance or isolation rows
+- **THEN** reconciliation counts their states separately
+- **AND** they neither enter the numerator nor reduce fixed capacity
+- **AND** repeated or divergent bed-state text is not an occupancy conflict
+
+#### Scenario: Reconciliation mismatch aborts atomically
+
+- **WHEN** the v5 arithmetic does not close
+- **THEN** no parent, group or summary row is persisted
+- **AND** the error contains no patient or bed identifier
+
+### Requirement: V5 quality is actionable without suppressing the measurement
+
+Every successfully materialized v5 measurement SHALL remain daily-eligible and
+SHALL set aggregate quality warning when identity, cross-group, name-variation,
+age-fallback or occupied-unmapped evidence requires attention.
+
+#### Scenario: Patient without bed remains valid
+
+- **WHEN** an identified patient lacks a bed
+- **THEN** that patient is counted
+- **AND** absence of bed is reported informationally without making the point
+  partial or ineligible
+
+#### Scenario: Fallback classification remains eligible
+
+- **WHEN** one or more 3A patients use RN or Adulto fallback
+- **THEN** the measurement quality warning is true
+- **AND** the measurement contributes to daily statistics
+
+#### Scenario: Repeated v5 materialization is idempotent
+
+- **WHEN** v5 materialization is requested twice for the same run
+- **THEN** the original measurement, groups, reconciliation and summary are
+  returned unchanged
+
+### Requirement: V5 preserves activation boundaries and clinical flow
+
+The system SHALL dispatch v5 only from a future immutable catalog declaring
+`occupancy-v5`, SHALL preserve v1–v4 and SHALL not block clinical processing of
+an otherwise accepted census.
+
+#### Scenario: V5 catalog becomes applicable
+
+- **WHEN** an accepted census local date uses a catalog declaring
+  `occupancy-v5`
+- **THEN** its measurement records `occupancy-v5`
+- **AND** applies identified-patient semantics
+
+#### Scenario: Deployment does not activate v5
+
+- **WHEN** v5 code and migrations are deployed
+- **THEN** v4 remains applicable until the future v5 catalog date
+- **AND** startup, migration and build create no catalog or measurement
+
+#### Scenario: Clinical processing continues
+
+- **WHEN** a v5 measurement has quality warnings or patients without beds
+- **THEN** census batch closure and clinical patient processing continue
+- **AND** no Celery, Redis or new worker is introduced

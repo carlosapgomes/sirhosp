@@ -126,20 +126,15 @@ partition.
 
 ### Requirement: Published catalog versions remain immutable
 
-The system SHALL preserve every published catalog version and SHALL create a new
-future version for changes in name, composition, capacity or identity.
+The system SHALL preserve every published version and JSON artifact and SHALL
+create a complete new future version for a change of occupancy algorithm.
 
-#### Scenario: Future capacity change creates a version
+#### Scenario: V5 publication does not edit v4
 
-- **WHEN** an official capacity must change
-- **THEN** an operator publishes a complete catalog for a future date
-- **AND** the previous catalog and its effective date remain unchanged
-
-#### Scenario: Source code is reassigned in the future
-
-- **WHEN** a source code changes to a different official sector identity
-- **THEN** the new catalog associates that code with the new stable group key
-- **AND** historical catalogs retain the earlier association
+- **WHEN** the v5 document is added, validated or published
+- **THEN** initial, corrected, v3 and v4 JSON documents remain byte-preserved
+- **AND** all four published database catalogs retain dates, hashes, groups and
+  memberships
 
 ### Requirement: Initial catalog represents the approved capacity baseline
 
@@ -251,32 +246,28 @@ midnight in `America/Bahia`.
 
 ### Requirement: Catalog versions declare immutable occupancy algorithm context
 
-Every newly published capacity catalog SHALL declare a supported occupancy
-algorithm version, and materialization SHALL dispatch from the persisted
-applicable catalog rather than from current date or deployed code defaults.
+Every newly published capacity catalog SHALL declare one supported occupancy
+algorithm version, SHALL persist it exactly and SHALL dispatch materialization
+from the applicable immutable catalog rather than date, filename or deployed
+code defaults.
 
-#### Scenario: Existing catalog omits explicit algorithm
+#### Scenario: V5 is explicitly declared
 
-- **WHEN** a catalog published before this schema has no explicit algorithm
-- **THEN** it retains the existing deterministic structural dispatch to v1 or v2
-- **AND** the catalog and its historical measurements are not edited
+- **WHEN** a valid future catalog declares `occupancy-v5`
+- **THEN** the catalog stores `occupancy-v5`
+- **AND** identified-patient counting semantics are selected
 
-#### Scenario: New catalog omits explicit algorithm
+#### Scenario: Unsupported algorithm remains rejected
 
-- **WHEN** a new catalog document using the updated schema omits its algorithm
+- **WHEN** a catalog declares an algorithm outside the implementation allowlist
 - **THEN** validation fails before persistence
+- **AND** no version, group or membership is created
 
-#### Scenario: Unsupported algorithm is declared
+#### Scenario: Historical algorithms remain dispatchable
 
-- **WHEN** a catalog declares an unknown algorithm version
-- **THEN** validation fails before persistence
-- **AND** no catalog row is created
-
-#### Scenario: Explicit algorithm is persisted
-
-- **WHEN** a valid future catalog declares `occupancy-v3`
-- **THEN** the version stores that exact value as immutable calculation context
-- **AND** a future code change cannot reinterpret its algorithm selection
+- **WHEN** an earlier catalog declares v3/v4 or structurally resolves v1/v2
+- **THEN** its original algorithm remains selected for its historical date
+- **AND** v5 support does not edit or reinterpret it
 
 ### Requirement: V3 catalog preserves current official policy and changes only calculation semantics
 
@@ -311,3 +302,150 @@ all CO and 3A definitions while declaring `occupancy-v3`.
 - **WHEN** v3 becomes effective at midnight in `America/Bahia`
 - **THEN** every accepted census for that local day uses v3
 - **AND** no day mixes v2 and v3 measurements
+
+### Requirement: New catalog memberships declare clean source aliases
+
+Every membership in the new catalog schema SHALL declare a non-empty curated
+`source_display_name` for user-facing source presentation while preserving
+`configured_source_name` as the raw expected source label.
+
+#### Scenario: Alias and raw source name are distinct
+
+- **WHEN** a source membership is parsed
+- **THEN** `configured_source_name` preserves the technical source label
+- **AND** `source_display_name` preserves the clean human-facing alias
+- **AND** runtime does not strip prefixes by heuristic or regex
+
+#### Scenario: Alias is missing or blank
+
+- **WHEN** a new-schema membership omits `source_display_name` or provides only
+  whitespace
+- **THEN** validation fails before persistence
+
+#### Scenario: Same code appears in age partition
+
+- **WHEN** one code has `under_12` and `age_12_or_over` memberships
+- **THEN** both memberships declare the same clean source alias
+- **AND** divergent aliases for that code are rejected
+
+#### Scenario: Legacy membership lacks alias
+
+- **WHEN** an older published membership has no clean alias
+- **THEN** it remains valid and immutable
+- **AND** presentation uses a documented historical fallback without altering
+  the row
+
+#### Scenario: Alias length is bounded
+
+- **WHEN** a new alias exceeds the persisted field limit
+- **THEN** validation reports the field path safely
+- **AND** persists no partial catalog
+
+### Requirement: V4 catalog preserves official policy and adds presentation aliases
+
+The complete v4 catalog SHALL preserve 43 official groups, 48 memberships over
+47 source codes, 39 standard groups, four unrated groups, capacities 666/666,
+CO policy and 3A partition while declaring v4 and clean aliases.
+
+#### Scenario: V4 document passes dry-run
+
+- **WHEN** the operator validates the v4 document for a future date with
+  `--dry-run`
+- **THEN** output reports `occupancy-v4`, 43 groups, 48 memberships, 47 codes,
+  four unrated groups and capacities 666/666
+- **AND** reports complete clean-alias coverage
+- **AND** persists no row
+
+#### Scenario: Complex mappings have clean aliases
+
+- **WHEN** the v4 document is inspected
+- **THEN** the 3A source code has one consistent physical alias across two
+  official groups
+- **AND** Cardio source codes have their own clean aliases under the shared
+  group
+- **AND** all CO source codes have curated aliases under the unrated group
+
+#### Scenario: Existing artifacts remain byte-preserved
+
+- **WHEN** the v4 JSON is added
+- **THEN** initial, corrected and v3 JSON files are not edited
+- **AND** the v4 file has its own SHA-256
+
+#### Scenario: V4 activates separately from deployment
+
+- **WHEN** a v4-capable release is already deployed and an approved future date
+  is supplied
+- **THEN** the atomic activation command publishes v4 explicitly
+- **AND** build, migration and container startup do not activate it
+
+#### Scenario: One local day uses one algorithm
+
+- **WHEN** v4 becomes effective at midnight in `America/Bahia`
+- **THEN** every accepted census measurement on that local day uses v4
+- **AND** no local day mixes v3 and v4
+
+### Requirement: V5 catalog preserves official policy and presentation aliases
+
+The complete v5 catalog SHALL preserve 43 official groups, 48 memberships over
+47 source codes, 39 standard groups, four unrated groups, known/calculable
+capacity 666/666, CO policy, 3A capacities/selectors and aliases 48/48 while
+declaring `occupancy-v5`.
+
+#### Scenario: V5 document passes dry-run
+
+- **WHEN** the operator validates the v5 JSON for a strictly future local date
+  with `--dry-run`
+- **THEN** output reports `occupancy-v5`, 43/48/47, 39 standard, four unrated,
+  666/666 and aliases 48/48
+- **AND** no catalog, group or membership row is persisted
+
+#### Scenario: Only algorithm context changes from v4
+
+- **WHEN** normalized v4 and v5 documents are compared
+- **THEN** groups, capacities, policies, memberships, selectors, raw names and
+  clean aliases are identical
+- **AND** v5 has a distinct source reference and SHA-256
+
+#### Scenario: CO remains outside the rate
+
+- **WHEN** v5 catalog is validated
+- **THEN** all five CO source codes remain under the unrated CO group
+- **AND** CO declares no capacity
+
+#### Scenario: 3A partition remains unchanged
+
+- **WHEN** v5 catalog is validated
+- **THEN** Adulto remains capacity 32 with `age_12_or_over`
+- **AND** Infantil remains capacity 16 with `under_12`
+- **AND** no combined 3A capacity is created
+
+### Requirement: V5 activates separately and only for a future local day
+
+V5 SHALL be published only after a v5-capable immutable release is deployed and
+only through the existing atomic future-date command.
+
+#### Scenario: Deploy does not publish v5
+
+- **WHEN** v5 code, migration and image are deployed
+- **THEN** v4 remains the applicable catalog
+- **AND** startup/build/migration create zero v5 catalogs and measurements
+
+#### Scenario: Operator dry-runs approved document
+
+- **WHEN** an operator supplies the exact v5 document and approved future date
+- **THEN** dry-run validates hash and totals without writing
+- **AND** a deterministic aggregate database snapshot is unchanged
+
+#### Scenario: Operator publishes v5 explicitly
+
+- **WHEN** the release is healthy and the operator invokes activation without
+  `--dry-run` for the approved future date
+- **THEN** one complete v5 version is created atomically
+- **AND** an exact retry is an idempotent no-op
+
+#### Scenario: First v5 local day uses one algorithm
+
+- **WHEN** v5 becomes effective at midnight in `America/Bahia`
+- **THEN** every accepted census on that date uses v5
+- **AND** the preceding date remains entirely v4
+- **AND** no backfill is performed
