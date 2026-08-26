@@ -21,6 +21,7 @@ from apps.census.models import (
     CapacityGroupDefinition,
     CapacitySectorMembership,
     CensusSnapshot,
+    OccupancyMeasurement,
 )
 from apps.ingestion.models import IngestionRun
 
@@ -3740,7 +3741,7 @@ class TestBedStatusV5PatientPresentation:
         self._materialize(run.pk)
         content = self._render(admin_client).content.decode()
         start = content.index("Como os pacientes foram contados")
-        end = content.index("Setores, pacientes e estados de leitos")
+        end = content.index("</section>", start)
         bridge_html = content[start:end]
         for marker in ("Synthetic Patient", "REC-PRIV", "BED-", "Sector A"):
             assert marker not in bridge_html
@@ -3882,3 +3883,397 @@ class TestBedStatusV5PatientPresentation:
         assert "Ocupações consideradas na taxa" in content
         assert "Medição histórica" in content
         assert "Setores, pacientes e estados de leitos" not in content
+
+    # ---- IBPU-S1: real situation summary and compact bridge ----
+
+    def test_v5_real_situation_between_official_and_units(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today, [self._standard_group()], algorithm_version="occupancy-v5"
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="REC-S1A",
+            record="16001",
+            age_band="age_12_or_over",
+            bed="BED-S1-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "Situação real do hospital" in content
+        official = content.index('id="official-heading"')
+        real = content.index('id="real-situation-heading"')
+        units = content.index('id="units-heading"')
+        assert official < real < units
+
+    def test_v5_real_situation_totals_close_with_subtitle(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [
+                self._standard_group(),
+                self._co_unrated(),
+                {
+                    "stable_key": "L",
+                    "display_name": "Group L",
+                    "capacity": 5,
+                    "policy": CalculationPolicy.LINKED_SLOTS_PENDING,
+                    "members": (("300", "Sector L", "Setor L", "all"),),
+                },
+            ],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        for index, (code, sector, record) in enumerate(
+            (
+                ("100", "Sector A", "16101"),
+                ("100", "Sector A", "16102"),
+                ("501", "CO Source 501", "16103"),
+                ("300", "Sector L", "16104"),
+                ("999", "Setor Sem Mapeamento", "16105"),
+            )
+        ):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code=code,
+                sector=sector,
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"REC-S1T-{index}",
+                record=record,
+                age_band="age_12_or_over",
+                bed=f"BED-S1T-{index:02d}",
+            )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        totals = response.context["physical"].v5_real
+        assert totals.identified_total == 5
+        assert totals.in_rate == 2
+        assert totals.outside_rate == 3
+        assert "2 na taxa oficial · 3 fora da taxa" in content
+
+    def test_v5_real_situation_operational_states_including_zero(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today, [self._standard_group()], algorithm_version="occupancy-v5"
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-S1O",
+            record="16201",
+            age_band="age_12_or_over",
+            bed="BED-S1O-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.ISOLATION,
+            index=1,
+            bed="BED-S1O-02",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.EMPTY,
+            index=2,
+            bed="BED-S1O-03",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        for label in (
+            "Vagos: 1",
+            "Reservados: 0",
+            "Em manutenção: 0",
+            "Isolamento: 1",
+        ):
+            assert label in content
+
+    def test_v5_real_situation_incomplete_line_conditional(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today, [self._standard_group()], algorithm_version="occupancy-v5"
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-S1I",
+            record="16301",
+            age_band="age_12_or_over",
+            bed="BED-S1I-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="SEM-PRONTUARIO-S1",
+            age_band="age_12_or_over",
+            bed="BED-S1I-02",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "identificação incompleta (não contada)" in content
+
+        # A census without incomplete rows omits the line entirely.
+        clean_run = self._run()
+        self._snapshot(
+            clean_run,
+            captured_at=self._at(today, 20),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-S1I2",
+            record="16302",
+            age_band="age_12_or_over",
+            bed="BED-S1I-03",
+        )
+        self._materialize(clean_run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "identificação incompleta (não contada)" not in content
+
+    def test_v5_real_situation_hidden_without_reconciliation(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today, [self._standard_group()], algorithm_version="occupancy-v5"
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="REC-S1H",
+            record="16401",
+            age_band="age_12_or_over",
+            bed="BED-S1H-01",
+        )
+        result = self._materialize(run.pk)
+        OccupancyMeasurement.objects.filter(
+            pk=result.measurement.pk
+        ).update(physical_reconciliation_json=None)
+        content = self._render(admin_client).content.decode()
+        assert "real-situation-heading" not in content
+        assert "Situação real do hospital" not in content
+
+    def test_v5_bridge_after_units_collapsed_by_default(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today, [self._standard_group()], algorithm_version="occupancy-v5"
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="REC-S1B",
+            record="16501",
+            age_band="age_12_or_over",
+            bed="BED-S1B-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        units = content.index('id="units-heading"')
+        bridge = content.index('id="patient-bridge-heading"')
+        assert units < bridge
+        start = content.index("patient-bridge-heading")
+        end = content.index("</section>", start)
+        bridge_html = content[start:end]
+        assert 'data-bs-toggle="collapse"' in bridge_html
+        assert 'class="collapse"' in bridge_html
+        assert "collapse show" not in bridge_html
+        assert 'aria-expanded="false"' in bridge_html
+        assert "collapse-icon" in bridge_html
+
+    def test_v5_bridge_content_unchanged(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [
+                self._standard_group(),
+                self._co_unrated(),
+            ],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-S1C",
+            record="16601",
+            age_band="age_12_or_over",
+            bed="BED-S1C-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="REC-S1C",
+            record="16601",
+            age_band="age_12_or_over",
+            bed="BED-S1C-02",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="501",
+            sector="CO Source 501",
+            status=BedStatus.OCCUPIED,
+            index=2,
+            patient_marker="REC-S1C2",
+            record="16602",
+            age_band="not_applicable",
+            bed="BED-S1C-03",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        start = content.index("patient-bridge-heading")
+        end = content.index("</section>", start)
+        bridge_html = content[start:end]
+        for fragment in (
+            "Linhas com identidade válida",
+            "Linhas duplicadas consolidadas no grupo",
+            "Pacientes identificados em grupos com taxa",
+            "Pacientes identificados fora da taxa (unrated)",
+            "A ponte fecha por construção",
+        ):
+            assert fragment in bridge_html
+
+    def test_v5_real_situation_private_and_anonymous_redirected(
+        self, admin_client, client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today, [self._standard_group()], algorithm_version="occupancy-v5"
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            patient_marker="REC-S1P",
+            record="16701",
+            age_band="age_12_or_over",
+            bed="BED-S1P-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        start = content.index('id="real-situation-heading"')
+        end = content.index('id="units-heading"')
+        section_html = content[start:end]
+        for marker in ("Synthetic Patient", "REC-S1P", "BED-S1P", "código "):
+            assert marker not in section_html
+        response = client.get(reverse("census:bed_status"))
+        assert response.status_code == 302
+        assert "/login/" in response.url
+
+    def test_v5_real_situation_absent_on_v3_and_v4_with_bridges_unchanged(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today, [self._standard_group()], algorithm_version="occupancy-v4"
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="V4-S1",
+            record="16801",
+            age_band="age_12_or_over",
+            bed="BED-V4-S1-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "real-situation-heading" not in content
+        assert "Situação real do hospital" not in content
+        assert (
+            content.index('id="treatment-heading"')
+            < content.index('id="units-heading"')
+        )
+        start = content.index("treatment-heading")
+        end = content.index("</section>", start)
+        v4_bridge_html = content[start:end]
+        assert 'class="collapse"' not in v4_bridge_html
+        assert "Como os pacientes foram contados" not in v4_bridge_html
+
+        # occupancy-v3 keeps its reconciliation bridge in place too.
+        tomorrow = today + timezone.timedelta(days=1)
+        self._catalog(
+            tomorrow,
+            [self._standard_group()],
+            algorithm_version="occupancy-v3",
+        )
+        v3_run = self._run()
+        self._snapshot(
+            v3_run,
+            captured_at=self._at(tomorrow, 12),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="V3-S1",
+            record="16901",
+            age_band="age_12_or_over",
+            bed="BED-V3-S1-01",
+        )
+        self._materialize(v3_run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "real-situation-heading" not in content
+        assert "Situação real do hospital" not in content
+        assert (
+            content.index('id="reconciliation-heading"')
+            < content.index('id="units-heading"')
+        )
+        start = content.index("reconciliation-heading")
+        end = content.index("</section>", start)
+        v3_bridge_html = content[start:end]
+        assert 'class="collapse"' not in v3_bridge_html

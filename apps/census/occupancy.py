@@ -2818,6 +2818,7 @@ class _PhysicalPresentation:
     unidentified_occupied_rows: int
     sectors: list[_PhysicalSectorRow]
     v5_coverage: _V5Coverage | None = None
+    v5_real: _V5RealTotals | None = None
 
     @property
     def identified_total(self) -> int:
@@ -3667,6 +3668,72 @@ class _V5Coverage:
     outside_rate: int
 
 
+_OPERATIONAL_STATUS_LABELS = (
+    ("empty", "Vagos"),
+    ("reserved", "Reservados"),
+    ("maintenance", "Em manutenção"),
+    ("isolation", "Isolamento"),
+)
+
+
+@dataclass(frozen=True)
+class _V5RealTotals:
+    """Aggregate real-situation summary derived from persisted v5 counts.
+
+    Only nonnegative integers and one presentation-ready status map; no
+    name, record, bed or row signature ever reaches this structure.
+    """
+
+    identified_total: int
+    in_rate: int
+    outside_rate: int
+    operational: dict[str, int]
+    incomplete_identity_rows: int
+
+
+def _v5_real_totals(
+    reconciliation: dict[str, object] | None,
+) -> _V5RealTotals | None:
+    """Derive the real-situation summary from the persisted reconciliation.
+
+    Tolerates missing keys: every canonical operational state defaults to
+    zero and absent reconciliation hides the summary entirely. The
+    identified total is the persisted patient-policy sum; ``in_rate`` is the
+    standard policy and ``outside_rate`` the remainder, so the breakdown
+    closes by construction. No template arithmetic is needed anywhere.
+    """
+    if not reconciliation:
+        return None
+
+    def count(key: str) -> int:
+        """Read one persisted aggregate integer, defaulting to zero."""
+        value = reconciliation.get(key)
+        return value if isinstance(value, int) else 0
+
+    standard = count("standard_identified_patients")
+    unrated = count("unrated_identified_patients")
+    linked_pending = count("linked_pending_identified_patients")
+    unmapped = count("unmapped_identified_patients")
+    identified_total = standard + unrated + linked_pending + unmapped
+    statuses = reconciliation.get("operational_rows_by_status")
+    status_map = statuses if isinstance(statuses, dict) else {}
+
+    def status_count(key: str) -> int:
+        value = status_map.get(key)
+        return value if isinstance(value, int) else 0
+
+    return _V5RealTotals(
+        identified_total=identified_total,
+        in_rate=standard,
+        outside_rate=identified_total - standard,
+        operational={
+            label: status_count(key)
+            for key, label in _OPERATIONAL_STATUS_LABELS
+        },
+        incomplete_identity_rows=count("incomplete_identity_rows"),
+    )
+
+
 @dataclass
 class _V5PatientItem:
     """One deduplicated patient item of a v5 presentation unit."""
@@ -4191,6 +4258,9 @@ def build_units_presentation(
                     - (measurement.official_calculable_sector_count or 0),
                     0,
                 ),
+            ),
+            v5_real=_v5_real_totals(
+                measurement.physical_reconciliation_json
             ),
         )
         return _UnitsPresentation(

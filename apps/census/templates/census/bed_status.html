@@ -360,70 +360,52 @@
       {% endif %}
     </section>
 
-    {% if measurement.algorithm_version == "occupancy-v5" and measurement.physical_reconciliation_json %}
-    <!-- ===================== PONTE DE PACIENTES v5 ===================== -->
-    <section aria-labelledby="patient-bridge-heading" class="mb-5">
-      <h3 id="patient-bridge-heading" class="h5 fw-bold mb-2" style="color: var(--sirhosp-sidebar-bg);">
-        Como os pacientes foram contados
-      </h3>
-      <p class="text-muted small mb-2">
-        Como as linhas do censo chegam aos pacientes identificados do resumo
-        oficial. Somente contagens agregadas persistidas — nenhum dado nominal
-        é exibido aqui.
+    {% if physical.v5_real %}
+    <!-- ===================== SITUAÇÃO REAL DO HOSPITAL (v5) ===================== -->
+    <section aria-labelledby="real-situation-heading" class="mb-5">
+      <div class="d-flex flex-wrap align-items-baseline gap-2 mb-2">
+        <h3 id="real-situation-heading" class="h5 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+          Situação real do hospital
+        </h3>
+      </div>
+      <p class="text-muted small mb-3">
+        Pacientes identificados no censo exato — dentro e fora da taxa oficial
+        — e estados de leitos informados pelo sistema de origem. Somente
+        contagens agregadas persistidas; nenhum dado nominal é exibido aqui.
       </p>
-      <div class="card border-0 shadow-sm">
-        <div class="card-body py-3">
-          <ul class="list-unstyled mb-2 small">
-            {% with rec=measurement.physical_reconciliation_json %}
-            <li class="mb-1">Linhas com identidade válida: <strong>{{ rec.valid_identity_rows }}</strong></li>
-            {% if rec.duplicate_identity_rows_within_group %}
-            <li class="mb-1">Linhas duplicadas consolidadas no grupo: <strong>{{ rec.duplicate_identity_rows_within_group }}</strong> — paciente contado uma vez</li>
-            {% endif %}
-            <li class="mb-1">Pacientes identificados em grupos com taxa: <strong>{{ rec.standard_identified_patients }}</strong></li>
-            {% if rec.unrated_identified_patients %}
-            <li class="mb-1">Pacientes identificados fora da taxa (unrated): <strong>{{ rec.unrated_identified_patients }}</strong></li>
-            {% endif %}
-            {% if rec.linked_pending_identified_patients %}
-            <li class="mb-1">Pacientes com cálculo pendente: <strong>{{ rec.linked_pending_identified_patients }}</strong></li>
-            {% endif %}
-            {% if rec.unmapped_identified_patients %}
-            <li class="mb-1">Pacientes sem mapeamento no catálogo: <strong>{{ rec.unmapped_identified_patients }}</strong></li>
-            {% endif %}
-            {% if rec.incomplete_identity_rows %}
-            <li class="mb-1">Identificação incompleta (não contada): <strong>{{ rec.incomplete_identity_rows }}</strong></li>
-            {% endif %}
-            {% if rec.cross_group_record_count %}
-            <li class="mb-1">Prontuários em mais de um setor oficial: <strong>{{ rec.cross_group_record_count }}</strong></li>
-            {% endif %}
-            {% if rec.name_variant_patient_count %}
-            <li class="mb-1">Pacientes com nomes informados de formas diferentes: <strong>{{ rec.name_variant_patient_count }}</strong></li>
-            {% endif %}
-            {% if rec.patients_without_bed_count %}
-            <li class="mb-1">Pacientes sem leito informado: <strong>{{ rec.patients_without_bed_count }}</strong> — contados normalmente</li>
-            {% endif %}
-            {% if rec.rn_fallback_patient_count %}
-            <li class="mb-1">Fallback etário RN: <strong>{{ rec.rn_fallback_patient_count }}</strong> — contado como Infantil</li>
-            {% endif %}
-            {% if rec.non_rn_fallback_patient_count %}
-            <li class="mb-1">Fallback etário Adulto: <strong>{{ rec.non_rn_fallback_patient_count }}</strong> — contado como Adulto</li>
-            {% endif %}
-            {% if rec.age_conflict_fallback_patient_count %}
-            <li class="mb-1">Faixas confiáveis contraditórias com fallback: <strong>{{ rec.age_conflict_fallback_patient_count }}</strong></li>
-            {% endif %}
-            {% if rec.operational_rows_by_status %}
-            <li class="mb-1">Linhas operacionais por estado:
-              {% for status, count in rec.operational_rows_by_status.items %}<strong>{{ count }} {{ status }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}
-            </li>
-            {% endif %}
-            {% endwith %}
-          </ul>
-          <p class="small text-muted mb-0">
-            A ponte fecha por construção: linhas com identidade válida =
-            duplicatas consolidadas + pacientes com taxa + fora da taxa +
-            pendentes + sem mapeamento. Pacientes com fallback etário
-            permanecem contados e elegíveis no resumo diário.
-          </p>
+      <div class="row g-2">
+        <div class="col-6 col-md-4">
+          <div class="card border-0 shadow-sm text-center h-100 bg-primary bg-opacity-10">
+            <div class="card-body py-3">
+              <div class="fs-5 fw-bold text-primary">{{ physical.v5_real.identified_total }}</div>
+              <div class="small text-muted">pacientes identificados</div>
+              <div class="small text-muted">
+                {{ physical.v5_real.in_rate }} na taxa oficial · {{ physical.v5_real.outside_rate }} fora da taxa
+              </div>
+            </div>
+          </div>
         </div>
+        <div class="col-6 col-md-4">
+          <div class="card border-0 shadow-sm h-100">
+            <div class="card-body py-3">
+              <div class="small text-muted fw-bold mb-2">Estados operacionais informados</div>
+              <div class="d-flex flex-wrap gap-1">
+                {% for label, count in physical.v5_real.operational.items %}
+                <span class="badge bg-light text-dark border">{{ label }}: {{ count }}</span>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+        {% if physical.v5_real.incomplete_identity_rows %}
+        <div class="col-6 col-md-4">
+          <div class="card border-0 shadow-sm h-100 bg-warning bg-opacity-10">
+            <div class="card-body py-3">
+              <div class="small">identificação incompleta (não contada): <strong>{{ physical.v5_real.incomplete_identity_rows }}</strong></div>
+            </div>
+          </div>
+        </div>
+        {% endif %}
       </div>
     </section>
     {% endif %}
@@ -1110,6 +1092,84 @@
         {% endif %}
       </div>
     </section>
+
+    {% if measurement.algorithm_version == "occupancy-v5" and measurement.physical_reconciliation_json %}
+    <!-- ===================== PONTE DE PACIENTES v5 ===================== -->
+    <section aria-labelledby="patient-bridge-heading" class="mb-5">
+      <div class="card border-0 shadow-sm">
+        <div class="card-header bg-white d-flex flex-wrap align-items-center gap-2"
+             data-bs-toggle="collapse"
+             data-bs-target="#patient-bridge-detail"
+             role="button"
+             aria-expanded="false"
+             style="cursor: pointer;">
+          <h3 id="patient-bridge-heading" class="h5 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+            <i class="bi bi-chevron-right me-2 collapse-icon"></i>
+            Como os pacientes foram contados
+          </h3>
+        </div>
+        <div class="collapse" id="patient-bridge-detail">
+          <div class="card-body py-3">
+            <p class="text-muted small mb-2">
+              Como as linhas do censo chegam aos pacientes identificados do resumo
+              oficial. Somente contagens agregadas persistidas — nenhum dado nominal
+              é exibido aqui.
+            </p>
+            <ul class="list-unstyled mb-2 small">
+              {% with rec=measurement.physical_reconciliation_json %}
+              <li class="mb-1">Linhas com identidade válida: <strong>{{ rec.valid_identity_rows }}</strong></li>
+              {% if rec.duplicate_identity_rows_within_group %}
+              <li class="mb-1">Linhas duplicadas consolidadas no grupo: <strong>{{ rec.duplicate_identity_rows_within_group }}</strong> — paciente contado uma vez</li>
+              {% endif %}
+              <li class="mb-1">Pacientes identificados em grupos com taxa: <strong>{{ rec.standard_identified_patients }}</strong></li>
+              {% if rec.unrated_identified_patients %}
+              <li class="mb-1">Pacientes identificados fora da taxa (unrated): <strong>{{ rec.unrated_identified_patients }}</strong></li>
+              {% endif %}
+              {% if rec.linked_pending_identified_patients %}
+              <li class="mb-1">Pacientes com cálculo pendente: <strong>{{ rec.linked_pending_identified_patients }}</strong></li>
+              {% endif %}
+              {% if rec.unmapped_identified_patients %}
+              <li class="mb-1">Pacientes sem mapeamento no catálogo: <strong>{{ rec.unmapped_identified_patients }}</strong></li>
+              {% endif %}
+              {% if rec.incomplete_identity_rows %}
+              <li class="mb-1">Identificação incompleta (não contada): <strong>{{ rec.incomplete_identity_rows }}</strong></li>
+              {% endif %}
+              {% if rec.cross_group_record_count %}
+              <li class="mb-1">Prontuários em mais de um setor oficial: <strong>{{ rec.cross_group_record_count }}</strong></li>
+              {% endif %}
+              {% if rec.name_variant_patient_count %}
+              <li class="mb-1">Pacientes com nomes informados de formas diferentes: <strong>{{ rec.name_variant_patient_count }}</strong></li>
+              {% endif %}
+              {% if rec.patients_without_bed_count %}
+              <li class="mb-1">Pacientes sem leito informado: <strong>{{ rec.patients_without_bed_count }}</strong> — contados normalmente</li>
+              {% endif %}
+              {% if rec.rn_fallback_patient_count %}
+              <li class="mb-1">Fallback etário RN: <strong>{{ rec.rn_fallback_patient_count }}</strong> — contado como Infantil</li>
+              {% endif %}
+              {% if rec.non_rn_fallback_patient_count %}
+              <li class="mb-1">Fallback etário Adulto: <strong>{{ rec.non_rn_fallback_patient_count }}</strong> — contado como Adulto</li>
+              {% endif %}
+              {% if rec.age_conflict_fallback_patient_count %}
+              <li class="mb-1">Faixas confiáveis contraditórias com fallback: <strong>{{ rec.age_conflict_fallback_patient_count }}</strong></li>
+              {% endif %}
+              {% if rec.operational_rows_by_status %}
+              <li class="mb-1">Linhas operacionais por estado:
+                {% for status, count in rec.operational_rows_by_status.items %}<strong>{{ count }} {{ status }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}
+              </li>
+              {% endif %}
+              {% endwith %}
+            </ul>
+            <p class="small text-muted mb-0">
+              A ponte fecha por construção: linhas com identidade válida =
+              duplicatas consolidadas + pacientes com taxa + fora da taxa +
+              pendentes + sem mapeamento. Pacientes com fallback etário
+              permanecem contados e elegíveis no resumo diário.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+    {% endif %}
   {% endif %}
 </div>
 {% endblock %}
