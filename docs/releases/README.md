@@ -4,6 +4,7 @@ Evidências de releases e refatorações do SIRHOSP.
 
 ## Índice
 
+- [v0.1.0-rc.12 — Melhorias de UX da página `/beds` (somente UI)](v0.1.0-rc.12-upgrade.md) — upgrade desde a RC11, sem migrations, sem catálogo e sem ativação; `/beds` v5 com situação real, métricas oficiais nos cabeçalhos e fim do N+1.
 - [v0.1.0-rc.11 — Ocupação v5 dormente por pacientes identificados](v0.1.0-rc.11-upgrade.md) — upgrade desde a RC10, migration 0024, pacientes identificados, catálogo v5 e `/beds` v5, sem ativação automática do catálogo v5.
 - [v0.1.0-rc.10 — Qualidade de ocupação acionável](v0.1.0-rc.10-upgrade.md) —
   upgrade desde a RC9, migrations 0022–0023, conflitos tipados, aliases
