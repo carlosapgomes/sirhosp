@@ -656,12 +656,30 @@
                 {% endif %}
               </h4>
               <div class="d-flex flex-wrap gap-1 align-items-center">
-                {% if unit.sources %}
-                <span class="badge bg-light text-dark">{{ unit.sources|length }} código{{ unit.sources|length|pluralize }} de origem</span>
-                {% endif %}
-                {% if unit.patients %}
-                <span class="badge bg-primary">{{ unit.patients|length }} paciente{{ unit.patients|length|pluralize }}</span>
-                {% endif %}
+                {% for metric in unit.header_metrics %}
+                  {% if metric.label %}
+                  <span class="badge bg-light text-dark border">{{ metric.label }}: {{ metric.occupied_count }}/{{ metric.official_capacity }} · {{ metric.occupancy_percentage|floatformat:2 }}%{% if metric.exceeded_by %} · acima da capacidade · excedente {{ metric.exceeded_by }}{% else %} · saldo {{ metric.official_availability }}{% endif %}</span>
+                  {% else %}
+                  <span class="badge bg-primary">{{ metric.occupied_count }} paciente{{ metric.occupied_count|pluralize }}</span>
+                  {% if metric.regime == "unrated" %}
+                  <span class="badge bg-light text-dark border">fora da taxa oficial</span>
+                  {% elif metric.regime == "pending" %}
+                  <span class="badge bg-light text-dark">cálculo pendente</span>
+                  {% elif metric.regime == "no_capacity" %}
+                  <span class="badge bg-light text-dark">Capacidade não cadastrada</span>
+                  {% else %}
+                  <span class="badge bg-light text-dark">Cap. {{ metric.official_capacity }}</span>
+                  <span class="badge bg-dark">{{ metric.occupancy_percentage|floatformat:2 }}%</span>
+                  {% if metric.exceeded_by %}
+                  <span class="badge bg-danger">Acima da capacidade · excedente {{ metric.exceeded_by }}</span>
+                  {% else %}
+                  <span class="badge bg-info text-dark">Saldo {{ metric.official_availability }}</span>
+                  {% endif %}
+                  {% endif %}
+                  {% endif %}
+                {% empty %}
+                  <span class="badge bg-primary">{{ unit.patients|length }} paciente{{ unit.patients|length|pluralize }}</span>
+                {% endfor %}
               </div>
             </div>
 
@@ -730,13 +748,6 @@
                           {% endfor %}
                           <span class="text-muted">({{ patient.record }})</span>
                         </span>
-                        {% if patient.counted_policy == "counted" %}
-                        <span class="badge bg-primary">{{ patient.counted_label }}</span>
-                        {% elif patient.counted_policy == "unrated" %}
-                        <span class="badge bg-light text-dark border">{{ patient.counted_label }}</span>
-                        {% else %}
-                        <span class="badge bg-warning text-dark">{{ patient.counted_label }}</span>
-                        {% endif %}
                         {% if patient.cross_group %}
                         <span class="badge bg-warning text-dark">Prontuário informado em mais de um setor oficial neste censo</span>
                         {% endif %}

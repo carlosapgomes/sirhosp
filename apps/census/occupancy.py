@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Iterable, NamedTuple
@@ -3746,8 +3746,6 @@ class _V5PatientItem:
     patient_id: int | None
     cross_group: bool
     name_variant_lines: int
-    counted_policy: str
-    counted_label: str
 
 
 @dataclass
@@ -3792,6 +3790,27 @@ class _V5SharedStateCase:
 
 
 @dataclass
+class _V5HeaderMetric:
+    """One persisted official group metric set of a v5 unit header.
+
+    Every displayed value is copied from the persisted official row; groups
+    that persist no numerator (unrated/pending) fall back to the length of
+    the already-built in-memory patient list. ``regime`` classifies
+    presentation only; ``label`` carries the short partition name of
+    multi-row units (3A). Rows are never merged into a combined total
+    (ADR-0007).
+    """
+
+    label: str
+    regime: str
+    occupied_count: int | None
+    official_capacity: int | None
+    occupancy_percentage: Decimal | None
+    official_availability: int | None
+    exceeded_by: int | None
+
+
+@dataclass
 class _V5SourceBlock:
     """One source-code block of a v5 presentation unit."""
 
@@ -3814,33 +3833,72 @@ class _V5UnitRow:
     shared_beds: list[_V5SharedBedCase]
     shared_state_beds: list[_V5SharedStateCase]
     is_unmapped: bool = False
+    header_metrics: list[_V5HeaderMetric] = field(default_factory=list)
 
     @property
     def over_capacity(self) -> bool:
         return any(row.over_capacity for row in self.official_rows)
 
 
-_V5_COUNTED_LABELS = {
-    "counted": "contado na taxa oficial",
-    "unrated": "fora da taxa oficial",
-    "pending": "cálculo pendente",
-    "unmapped": "sem mapeamento no catálogo",
-}
+def _v5_header_label(display_name: str) -> str:
+    """Short partition label derived deterministically from the display name.
+
+    The suffix after the en dash ("Enfermaria 3A – Adulto" → "Adulto");
+    names without an en dash keep the full display name. No new persisted
+    field is introduced.
+    """
+    if "–" in display_name:
+        return display_name.rsplit("–", 1)[-1].strip()
+    return display_name
 
 
-def _v5_counted_policy(policy: str) -> str:
-    """Counting policy label of one official group for a v5 patient item."""
-    if policy == CalculationPolicy.STANDARD:
-        return "counted"
-    if policy == CalculationPolicy.UNRATED:
+def _v5_header_regime(row: _UnitOfficialRow) -> str:
+    """Presentation regime of one official row for the v5 card header."""
+    if row.calculation_status == OccupancyCalculationStatus.UNRATED:
         return "unrated"
-    return "pending"
+    if (
+        row.calculation_status
+        == OccupancyCalculationStatus.LINKED_SLOTS_PENDING
+    ):
+        return "pending"
+    if row.official_capacity is None:
+        return "no_capacity"
+    return "calculated"
+
+
+def _v5_header_metrics(
+    rows: list[_UnitOfficialRow],
+    patient_count: int,
+) -> list[_V5HeaderMetric]:
+    """One header metric per persisted official row, never a combined total.
+
+    ``patient_count`` is the length of the already-built unit patient list,
+    used only when the persisted row carries no numerator (unrated/pending
+    groups); calculated groups always render their persisted
+    ``occupied_count``.
+    """
+    labeled = len(rows) > 1
+    return [
+        _V5HeaderMetric(
+            label=_v5_header_label(row.display_name) if labeled else "",
+            regime=_v5_header_regime(row),
+            occupied_count=(
+                row.occupied_count
+                if row.occupied_count is not None
+                else patient_count
+            ),
+            official_capacity=row.official_capacity,
+            occupancy_percentage=row.occupancy_percentage,
+            official_availability=row.official_availability,
+            exceeded_by=row.exceeded_by,
+        )
+        for row in rows
+    ]
 
 
 def _v5_patient_item(
     patient: _V5Patient,
     *,
-    counted_policy: str,
     cross_group: bool,
     patient_map: dict[str, int],
 ) -> _V5PatientItem:
@@ -3858,8 +3916,6 @@ def _v5_patient_item(
         name_variant_lines=(
             len(patient.lines) if len(patient.names) > 1 else 0
         ),
-        counted_policy=counted_policy,
-        counted_label=_V5_COUNTED_LABELS[counted_policy],
     )
 
 
@@ -4052,9 +4108,6 @@ def _v5_units(
         for code in codes:
             component_for_code[code] = index
 
-    policy_by_group = {
-        group.stable_key: group.calculation_policy for group in definitions
-    }
     alias_by_code = {
         code: _source_alias(membership)[0]
         for code, membership in membership_by_code.items()
@@ -4078,7 +4131,6 @@ def _v5_units(
                 unit_patients.append(
                     _v5_patient_item(
                         patient,
-                        counted_policy=_v5_counted_policy(policy_by_group[key]),
                         cross_group=(
                             len(record_official_groups[patient.record]) > 1
                         ),
@@ -4090,16 +4142,20 @@ def _v5_units(
         for code in codes:
             unit_operational.extend(operational_by_source.get(code, []))
             unit_incomplete.extend(incomplete_by_source.get(code, []))
+        official_rows = [
+            _unit_official_row(group_rows[key])
+            for key in group_keys
+            if key in group_rows
+        ]
         units.append(
             _V5UnitRow(
                 title=_component_title(
                     group_keys, codes, group_rows, alias_by_code
                 ),
-                official_rows=[
-                    _unit_official_row(group_rows[key])
-                    for key in group_keys
-                    if key in group_rows
-                ],
+                official_rows=official_rows,
+                header_metrics=_v5_header_metrics(
+                    official_rows, len(unit_patients)
+                ),
                 sources=[
                     _v5_source_block(
                         code=code,
@@ -4181,7 +4237,6 @@ def _v5_unmapped_units(
         unit_patients = [
             _v5_patient_item(
                 patient,
-                counted_policy="unmapped",
                 cross_group=False,
                 patient_map=patient_map,
             )

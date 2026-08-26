@@ -21,6 +21,7 @@ from apps.census.models import (
     CapacityGroupDefinition,
     CapacitySectorMembership,
     CensusSnapshot,
+    OccupancyGroupMeasurement,
     OccupancyMeasurement,
 )
 from apps.ingestion.models import IngestionRun
@@ -4277,3 +4278,467 @@ class TestBedStatusV5PatientPresentation:
         end = content.index("</section>", start)
         v3_bridge_html = content[start:end]
         assert 'class="collapse"' not in v3_bridge_html
+
+    # ---- IBPU-S2: official metrics in the v5 card headers ----
+
+    @staticmethod
+    def _v5_card_header(content, unit_index):
+        """HTML of one v5 card header, isolated from the collapsible body.
+
+        The slice starts at the header's collapse trigger (which carries the
+        ``data-bs-target``) and ends right before the collapsible body div,
+        so body badges never leak into header assertions.
+        """
+        start = content.index(f'data-bs-target="#v5-unit-detail-{unit_index}"')
+        end = content.index(
+            f'<div class="collapse" id="v5-unit-detail-{unit_index}"'
+        )
+        return content[start:end]
+
+    def test_v5_header_within_capacity_shows_patients_capacity_percentage_and_saldo(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [self._standard_group(capacity=15)],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(13):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"REC-H-{index:02d}",
+                record=f"170{index:02d}",
+                age_band="age_12_or_over",
+                bed=f"BED-H-{index:02d}",
+            )
+        result = self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        header = self._v5_card_header(content, 1)
+        assert "13 pacientes" in header
+        assert "Cap. 15" in header
+        assert "86,67%" in header
+        assert "Saldo 2" in header
+        # R1: the header metrics are the persisted group values, not a
+        # recount or recalculation.
+        metric = response.context["units"][0].header_metrics[0]
+        group = OccupancyGroupMeasurement.objects.get(
+            measurement=result.measurement, stable_key="A"
+        )
+        assert metric.occupied_count == group.occupied_count == 13
+        assert metric.official_capacity == group.official_capacity == 15
+        assert metric.occupancy_percentage == group.occupancy_percentage
+        assert metric.official_availability == group.official_availability == 2
+        assert metric.exceeded_by == group.exceeded_by == 0
+
+    def test_v5_header_over_capacity_shows_textual_above_and_exceeded(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [self._standard_group(capacity=1)],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(7):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"REC-O-{index:02d}",
+                record=f"171{index:02d}",
+                age_band="age_12_or_over",
+                bed=f"BED-O-{index:02d}",
+            )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        header = self._v5_card_header(content, 1)
+        assert "7 pacientes" in header
+        assert "Cap. 1" in header
+        assert "700,00%" in header
+        assert "Acima da capacidade" in header
+        assert "excedente 6" in header
+        assert "Saldo" not in header
+
+    def test_v5_header_unrated_shows_outside_rate_without_capacity_or_percentage(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [self._standard_group(), self._co_unrated()],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="501",
+            sector="CO Source 501",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-CO-H",
+            record="17201",
+            age_band="not_applicable",
+            bed="BED-CO-H-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        co_header = self._v5_card_header(content, 1)
+        assert "1 paciente" in co_header
+        assert "fora da taxa oficial" in co_header
+        assert "Cap." not in co_header
+        assert "%" not in co_header
+        standard_header = self._v5_card_header(content, 2)
+        assert "0 pacientes" in standard_header
+        assert "Cap. 10" in standard_header
+
+    def test_v5_header_pending_shows_calculo_pendente(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [
+                self._standard_group(),
+                {
+                    "stable_key": "L",
+                    "display_name": "Group L",
+                    "capacity": 5,
+                    "policy": CalculationPolicy.LINKED_SLOTS_PENDING,
+                    "members": (("300", "Sector L", "Setor L", "all"),),
+                },
+            ],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="300",
+            sector="Sector L",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-L-H",
+            record="17301",
+            age_band="age_12_or_over",
+            bed="BED-L-H-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        pending_header = self._v5_card_header(content, 2)
+        assert "1 paciente" in pending_header
+        assert "cálculo pendente" in pending_header
+        assert "Cap." not in pending_header
+        assert "%" not in pending_header
+
+    def test_v5_header_without_capacity_shows_capacidade_nao_cadastrada(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [self._standard_group()],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-NC-H",
+            record="17401",
+            age_band="age_12_or_over",
+            bed="BED-NC-H-01",
+        )
+        result = self._materialize(run.pk)
+        # Synthetic scenario: a calculated group whose official capacity was
+        # never registered (the catalog constraint forbids it, so the
+        # persisted measurement is edited directly, as in the S1 slice).
+        OccupancyGroupMeasurement.objects.filter(
+            measurement=result.measurement, stable_key="A"
+        ).update(official_capacity=None)
+        content = self._render(admin_client).content.decode()
+        header = self._v5_card_header(content, 1)
+        assert "1 paciente" in header
+        assert "Capacidade não cadastrada" in header
+        assert "Cap." not in header
+        assert "%" not in header
+
+    def test_v5_header_zero_patients_explicit_including_unmapped(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [self._standard_group()],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.EMPTY,
+            index=0,
+            bed="BED-Z-01",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="999",
+            sector="Setor Sem Mapeamento",
+            status=BedStatus.EMPTY,
+            index=1,
+            bed="BED-Z-02",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        # Units sort by title: "Group A" (mapped) before "Setor Sem
+        # Mapeamento" (unmapped); both keep an explicit zero-patient badge.
+        mapped_header = self._v5_card_header(content, 1)
+        assert "0 pacientes" in mapped_header
+        assert "Cap. 10" in mapped_header
+        assert "Saldo 10" in mapped_header
+        unmapped_header = self._v5_card_header(content, 2)
+        assert "0 pacientes" in unmapped_header
+        assert "Cap." not in unmapped_header
+
+    def test_v5_header_3a_partition_labels_without_combined_total(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today, self._partitioned_3a(), algorithm_version="occupancy-v5"
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(2):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="654",
+                sector="3A Source",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"REC-AD-H-{index}",
+                record=f"175{index:02d}",
+                age_band="age_12_or_over",
+                bed=f"BED-AD-H-{index}",
+            )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=2,
+            patient_marker="REC-CH-H",
+            record="17502",
+            age_band="under_12",
+            bed="BED-CH-H",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        header = self._v5_card_header(content, 1)
+        assert "Adulto: 2/32" in header
+        assert "saldo 30" in header
+        assert "Infantil: 1/16" in header
+        assert "saldo 15" in header
+        assert "6,25%" in header
+        # ADR-0007: no combined 3A total (2 + 1 patients, 32 + 16 beds).
+        assert "3 pacientes" not in header
+        assert "Cap. 48" not in header
+        assert "48" not in header
+
+    def test_v5_header_has_no_source_code_count_badge(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [
+                self._standard_group(
+                    key="CARDI",
+                    capacity=12,
+                    members=(
+                        ("701", "Cardio Source A", "Cardiologia", "all"),
+                        ("702", "Cardio Source B", "Cardiologia", "all"),
+                    ),
+                ),
+            ],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="701",
+            sector="Cardio Source A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-C-H",
+            record="17601",
+            age_band="age_12_or_over",
+            bed="BED-C-H-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        header = self._v5_card_header(content, 1)
+        assert "1 paciente" in header
+        assert "Cap. 12" in header
+        assert "código" not in header
+        assert "código de origem" not in content
+        # The aliases and codes stay visible in the collapsible body.
+        assert "código 701" in content
+        assert "código 702" in content
+
+    def test_v5_no_per_patient_counting_policy_badges_with_factual_exceptions(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [
+                self._standard_group(
+                    key="A",
+                    capacity=10,
+                    members=(("100", "Sector A", "Setor A", "all"),),
+                ),
+                self._standard_group(
+                    key="B",
+                    capacity=10,
+                    members=(("200", "Sector B", "Setor B", "all"),),
+                ),
+            ],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-X-H",
+            record="17701",
+            age_band="age_12_or_over",
+            bed="",
+            nome="MARIA DA SILVA",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=1,
+            patient_marker="REC-X-H",
+            record="17701",
+            age_band="age_12_or_over",
+            bed="",
+            nome="MARIA S SILVA",
+        )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="200",
+            sector="Sector B",
+            status=BedStatus.OCCUPIED,
+            index=2,
+            patient_marker="REC-X-H",
+            record="17701",
+            age_band="age_12_or_over",
+            bed="BED-X-H-02",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "contado na taxa oficial" not in content
+        # The unit-list section (after the real-situation summary, which
+        # legitimately says "dentro e fora da taxa oficial") carries no
+        # counting-policy badge per patient item.
+        start = content.index('id="units-heading"')
+        end = content.index('id="patient-bridge-heading"')
+        unit_list_html = content[start:end]
+        assert "fora da taxa oficial" not in unit_list_html
+        message = "Prontuário informado em mais de um setor oficial neste censo"
+        assert content.count(message) == 2
+        assert "Nome informado de formas diferentes em 2 linhas" in content
+        assert "sem leito informado" in content
+
+    def test_v5_body_keeps_official_mini_table_and_aliases(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today,
+            [self._standard_group(capacity=15)],
+            algorithm_version="occupancy-v5",
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="REC-B-H",
+            record="17801",
+            age_band="age_12_or_over",
+            bed="BED-B-H-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        assert "Capacidade oficial (medição do censo exato)" in content
+        assert "Pacientes identificados:" in content
+        assert "Capacidade: 15" in content
+        assert "código 100" in content
+        assert "Saldo da capacidade oficial" in content
+        header = self._v5_card_header(content, 1)
+        assert "Cap. 15" in header
+        assert "código de origem" not in content
+
+    def test_v5_regression_v4_header_keeps_source_code_badge(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(
+            today, [self._standard_group()], algorithm_version="occupancy-v4"
+        )
+        run = self._run()
+        self._snapshot(
+            run,
+            captured_at=self._at(today),
+            code="100",
+            sector="Sector A",
+            status=BedStatus.OCCUPIED,
+            index=0,
+            patient_marker="V4-H",
+            record="17901",
+            age_band="age_12_or_over",
+            bed="BED-V4-H-01",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        start = content.index('data-bs-target="#unit-detail-1"')
+        end = content.index('<div class="collapse" id="unit-detail-1"')
+        v4_header = content[start:end]
+        assert "1 código de origem" in v4_header
+        assert "Cap." not in v4_header
+        assert "Acima da capacidade" not in v4_header
