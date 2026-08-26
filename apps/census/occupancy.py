@@ -2569,7 +2569,14 @@ def resolve_exact_measurement(
     return (
         OccupancyMeasurement.objects.filter(census_run_id=run_id)
         .select_related("catalog")
-        .prefetch_related("groups")
+        .prefetch_related(
+            "groups",
+            # The v1-v5 unit builders walk the catalog graph
+            # (``catalog.groups`` and ``group.memberships``) once per group;
+            # prefetching it here keeps the authenticated page at a constant
+            # query cost regardless of catalog size (IBPU-S3).
+            "catalog__groups__memberships",
+        )
         .first()
     )
 

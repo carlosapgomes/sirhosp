@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
@@ -4742,3 +4744,83 @@ class TestBedStatusV5PatientPresentation:
         assert "1 código de origem" in v4_header
         assert "Cap." not in v4_header
         assert "Acima da capacidade" not in v4_header
+
+    # ---- IBPU-S3: query budget of the authenticated page ----
+
+    def test_v5_query_budget_does_not_grow_with_catalog_groups(
+        self, admin_client
+    ):
+        """The authenticated /beds render must not issue queries per group.
+
+        Two independent synthetic scenarios render the same page: scenario A
+        with a 4-group catalog (one membership each) and scenario B with a
+        12-group catalog on a newer census. The query difference between the
+        two renders must stay within a fixed budget (8); the catalog
+        groups/memberships N+1 would add ~3 queries per extra group
+        (membership loops in ``_v5_units`` plus ``_catalog_components``).
+        """
+        today = timezone.localdate()
+
+        def build_catalog(effective_from, group_count):
+            return self._catalog(
+                effective_from,
+                [
+                    self._standard_group(
+                        key=f"G{index:02d}",
+                        capacity=10,
+                        members=(
+                            (
+                                f"{200 + index}",
+                                f"Sector {index}",
+                                f"Setor {index}",
+                                "all",
+                            ),
+                        ),
+                    )
+                    for index in range(group_count)
+                ],
+                algorithm_version="occupancy-v5",
+            )
+
+        def census(run, captured_at, group_count):
+            for index in range(group_count):
+                self._snapshot(
+                    run,
+                    captured_at=captured_at,
+                    code=f"{200 + index}",
+                    sector=f"Sector {index}",
+                    status=BedStatus.OCCUPIED,
+                    index=index,
+                    patient_marker=f"BUDGET-{index}",
+                    record=f"195{index:02d}",
+                    age_band="age_12_or_over",
+                    bed=f"BED-BUDGET-{index:03d}",
+                )
+
+        # Scenario A: 4-group catalog; its census is the latest so far.
+        build_catalog(today, 4)
+        run_a = self._run()
+        census(run_a, self._at(today), 4)
+        self._materialize(run_a.pk)
+
+        with CaptureQueriesContext(connection) as ctx_a:
+            response = self._render(admin_client)
+        assert response.status_code == 200
+        queries_a = len(ctx_a.captured_queries)
+
+        # Scenario B: newer census (next local date) with a 12-group catalog.
+        build_catalog(today + timedelta(days=1), 12)
+        run_b = self._run()
+        census(run_b, self._at(today + timedelta(days=1)), 12)
+        self._materialize(run_b.pk)
+
+        with CaptureQueriesContext(connection) as ctx_b:
+            response = self._render(admin_client)
+        assert response.status_code == 200
+        queries_b = len(ctx_b.captured_queries)
+
+        assert queries_b - queries_a <= 8, (
+            f"query budget exceeded: {queries_a} -> {queries_b} queries "
+            f"(delta {queries_b - queries_a} > 8); the catalog "
+            "groups/memberships graph is being fetched once per group"
+        )
