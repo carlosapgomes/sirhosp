@@ -21,6 +21,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from apps.ingestion.extractors.errors import ExtractionTimeoutError
+from apps.ingestion.extractors.legacy_navigation import (
+    SEL_INTERNACOES_TABLE_ROWS,
+    NavigationError,
+    NavigationTimeoutError,
+)
 from apps.ingestion.extractors.persistent_extraction_adapter import (
     _ADMISSION_DATA_DIV_ID,
     _DATA_CONTAINER_RE,
@@ -260,30 +266,138 @@ class FakePlaywrightHandle:
 
 
 # ===========================================================================
+# RPAP-S1: realistic persistent handle (no fake-only set_html)
+# ===========================================================================
+
+
+class RealisticPersistentHandle:
+    """Mirror of the concrete ``PlaywrightSessionHandle`` protocol surface.
+
+    RPAP-S1: exposes the real ``SessionHandle`` protocol methods plus
+    ``ensure_current_page()`` — but NEVER the fake-only ``set_html()``.
+    ``get_page_html()`` returns only top-level page HTML (production
+    ``page.content()``), which never contains the ``frame_pol`` table.
+    """
+
+    def __init__(
+        self,
+        top_level_html: str = "",
+        page: Any = None,
+    ) -> None:
+        self._html = top_level_html
+        self._page = page
+        self._connected = True
+        self.cleanup_calls: int = 0
+        self.restart_calls: int = 0
+        self.shutdown_calls: int = 0
+
+    # --- SessionHandle protocol (no set_html) ---
+
+    def get_page_html(self) -> str:
+        return self._html
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def click_selector(self, selector: str) -> None:
+        pass
+
+    def open_tab(self, url: str, *, timeout: int = 120) -> bool:
+        return True
+
+    def get_tab_classes(self) -> list[str]:
+        return ["tabs-first tabs-last tabs-selected"]
+
+    def close_last_non_root_tab(self) -> TabCleanupOutcome:
+        self.cleanup_calls += 1
+        return TabCleanupOutcome.CLOSED_AND_VERIFIED
+
+    def restart_browser(self) -> None:
+        self.restart_calls += 1
+
+    def shutdown(self) -> None:
+        self.shutdown_calls += 1
+
+    def ensure_current_page(self):
+        return self._page
+
+
+def _build_admissions_page(rows: list[dict[str, Any]]) -> FakeNavigationPage:
+    """Build a fake page whose ``frame_pol`` yields the given admission rows.
+
+    Models the production topology: the admissions table lives ONLY inside
+    ``frame_pol``; the top-level page HTML never contains it.
+    """
+    page = FakeNavigationPage()
+    page.make_selector_visible("#prontuarioInput")
+    page.make_selector_visible("role:link:Pesquisa Avançada")
+    page.make_selector_visible("text:Internações")
+    frame = FakeNavigationFrame()
+    frame.set_eval_result(SEL_INTERNACOES_TABLE_ROWS, rows)
+    page.set_frame(frame)
+    return page
+
+
+def _admission_iframe_row(
+    *,
+    data_ri: str = "0",
+    data_rk: str = "ADM-RK-000",
+    start: str = "15/01/2024",
+    end: str = "20/01/2024",
+    ward: str = "Enfermaria A",
+    bed: str = "Leito 101",
+) -> dict[str, Any]:
+    """Build one synthetic admission row as read from ``frame_pol``."""
+    return {
+        "dataRi": data_ri,
+        "dataRk": data_rk,
+        "cells": [start, end, ward, bed, "Detalhes"],
+        "hasDetailsLink": True,
+    }
+
+
+# ===========================================================================
 # Bridge tests: synthetic-container production
 # ===========================================================================
 
 
 class TestRealHandleBridgeAdmissions:
     """Tests that the bridge produces valid admission snapshot containers
-    from representative legacy UI HTML that does NOT contain synthetic
-    ``#admission-snapshot-data`` divs."""
+    from the snapshot captured in ``frame_pol`` (RPAP-S1) for a wrapped
+    handle without the fake-only ``set_html()``."""
 
     def test_bridge_produces_synthetic_container_from_legacy_table(
         self,
     ) -> None:
-        """Bridge wraps admission data from legacy tabelaInternacoes into
-        <div id='admission-snapshot-data'>."""
+        """Bridge wraps the frame_pol snapshot into
+        <div id='admission-snapshot-data'> (RPAP-S1)."""
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
         )
 
-        handle = FakePlaywrightHandle()
-        handle.set_html(LEGACY_ADMISSIONS_TABLE_HTML)
+        rows = [
+            _admission_iframe_row(
+                data_ri="0", data_rk="ADM-RK-001",
+                start="15/01/2024", end="20/01/2024",
+                ward="Enfermaria A", bed="Leito 101",
+            ),
+            _admission_iframe_row(
+                data_ri="1", data_rk="ADM-RK-002",
+                start="01/03/2024", end="",
+                ward="UTI", bed="Leito 005",
+            ),
+            _admission_iframe_row(
+                data_ri="2", data_rk="", start="10/05/2024", end="15/05/2024",
+            ),
+        ]
+        handle = RealisticPersistentHandle(
+            top_level_html=LEGACY_ADMISSIONS_TABLE_HTML,
+            page=_build_admissions_page(rows),
+        )
         bridge = RealHandleBridge(handle)
 
-        # Simulate: open admissions tab, then get page HTML
-        bridge.open_tab("/consultarInternacoes.xhtml")
+        # Real path: action navigation captures the iframe snapshot.
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
         result_html = bridge.get_page_html()
 
         # Must contain the synthetic admission-snapshot-data container
@@ -297,10 +411,9 @@ class TestRealHandleBridgeAdmissions:
         json_text = match.group(1)
         data = json.loads(json_text)
         assert isinstance(data, list)
-        assert len(data) == 3  # three rows in the table
+        assert len(data) == 3  # three rows in the iframe
 
-        # Verify canonical fields (bridge outputs camelCase for
-        # AdmissionSnapshotParser compatibility)
+        # Verify canonical fields (camelCase for AdmissionSnapshotParser)
         assert data[0]["admissionKey"] == "ADM-RK-001"
         assert data[0]["admissionStart"] == "2024-01-15"
         assert data[0]["admissionEnd"] == "2024-01-20"
@@ -322,11 +435,13 @@ class TestRealHandleBridgeAdmissions:
             RealHandleBridge,
         )
 
-        handle = FakePlaywrightHandle()
-        handle.set_html(LEGACY_ADMISSIONS_TABLE_HTML)
+        handle = RealisticPersistentHandle(
+            top_level_html=LEGACY_ADMISSIONS_TABLE_HTML,
+            page=_build_admissions_page([_admission_iframe_row()]),
+        )
         bridge = RealHandleBridge(handle)
 
-        bridge.open_tab("/consultarInternacoes.xhtml")
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
         result_html = bridge.get_page_html()
 
         # The session counter must pass through (the counter div with
@@ -352,11 +467,13 @@ class TestRealHandleBridgeAdmissions:
             '<button class="ui-confirmdialog-yes">Renovar</button>'
             "</div>"
         )
-        handle = FakePlaywrightHandle()
-        handle.set_html(LEGACY_ADMISSIONS_TABLE_HTML + popup_html)
+        handle = RealisticPersistentHandle(
+            top_level_html=LEGACY_ADMISSIONS_TABLE_HTML + popup_html,
+            page=_build_admissions_page([_admission_iframe_row()]),
+        )
         bridge = RealHandleBridge(handle)
 
-        bridge.open_tab("/consultarInternacoes.xhtml")
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
         result_html = bridge.get_page_html()
 
         # Defensive popup detection must still see the visible popup.
@@ -364,16 +481,18 @@ class TestRealHandleBridgeAdmissions:
         assert is_renewal_popup_visible(result_html) is True
 
     def test_bridge_empty_table_produces_empty_json(self) -> None:
-        """Bridge handles empty admission tables gracefully."""
+        """Bridge handles empty admission iframe tables gracefully."""
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
         )
 
-        handle = FakePlaywrightHandle()
-        handle.set_html(EMPTY_TABLE_HTML)
+        handle = RealisticPersistentHandle(
+            top_level_html=EMPTY_TABLE_HTML,
+            page=_build_admissions_page([]),
+        )
         bridge = RealHandleBridge(handle)
 
-        bridge.open_tab("/consultarInternacoes.xhtml")
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
         result_html = bridge.get_page_html()
 
         match = _DATA_CONTAINER_RE.search(result_html)
@@ -387,13 +506,13 @@ class TestRealHandleBridgeAdmissions:
             RealHandleBridge,
         )
 
-        handle = FakePlaywrightHandle()
-        handle.set_html(MISSING_TABLE_HTML)
+        handle = RealisticPersistentHandle(
+            top_level_html=MISSING_TABLE_HTML,
+            page=_build_admissions_page([]),
+        )
         bridge = RealHandleBridge(handle)
 
-        bridge.open_tab("/consultarInternacoes.xhtml")
-        # The bridge should produce a container with empty data, or the
-        # adapter will raise SnapshotContainerMissingError later.
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
         result_html = bridge.get_page_html()
 
         # Bridge still produces the container (even with empty data)
@@ -401,7 +520,7 @@ class TestRealHandleBridgeAdmissions:
         match = _DATA_CONTAINER_RE.search(result_html)
         assert match is not None
         data = json.loads(match.group(1))
-        assert data == []  # no rows to extract
+        assert data == []  # no rows in the iframe
 
     def test_bridge_timeout_propagates_to_handle(self) -> None:
         """Bridge's open_tab propagates timeout to the wrapped handle."""
@@ -552,16 +671,18 @@ class TestRealHandleBridgeDelegation:
         bridge.restart_browser()
         assert handle.restart_calls == 1
 
-    def test_restart_browser_clears_stale_page_type(self) -> None:
-        """A fresh browser must not inherit the previous page transformer."""
+    def test_restart_browser_clears_job_snapshot(self) -> None:
+        """A fresh browser must not inherit the previous job's snapshot."""
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
         )
 
-        handle = FakePlaywrightHandle()
-        handle.set_html(MISSING_TABLE_HTML)
+        handle = RealisticPersistentHandle(
+            top_level_html=MISSING_TABLE_HTML,
+            page=_build_admissions_page([_admission_iframe_row()]),
+        )
         bridge = RealHandleBridge(handle)
-        bridge.open_tab("/consultarInternacoes.xhtml")
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
 
         assert bridge.get_page_html() != MISSING_TABLE_HTML
 
@@ -599,11 +720,22 @@ class TestBridgeToAdapterIntegration:
             RealHandleBridge,
         )
 
-        handle = FakePlaywrightHandle()
-        handle.set_html(LEGACY_ADMISSIONS_TABLE_HTML)
+        rows = [
+            _admission_iframe_row(data_ri="0", data_rk="ADM-RK-001"),
+            _admission_iframe_row(
+                data_ri="1", data_rk="ADM-RK-002",
+                start="01/03/2024", end="",
+            ),
+            _admission_iframe_row(
+                data_ri="2", data_rk="", start="10/05/2024", end="15/05/2024",
+            ),
+        ]
+        handle = RealisticPersistentHandle(
+            top_level_html=LEGACY_ADMISSIONS_TABLE_HTML,
+            page=_build_admissions_page(rows),
+        )
         bridge = RealHandleBridge(handle)
-
-        bridge.open_tab("/consultarInternacoes.xhtml")
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
         bridge_html = bridge.get_page_html()
 
         # Parse through existing adapter machinery
@@ -835,22 +967,23 @@ class TestBridgeErrorTaxonomy:
     or patient-data leakage."""
 
     def test_bridge_error_messages_no_sensitive_data(self) -> None:
-        """Bridge error messages do not contain credentials, patient data,
+        """Bridge output does not contain credentials, patient data,
         cookies, or internal secrets."""
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
         )
 
-        handle = FakePlaywrightHandle()
-        # Empty HTML that has nothing useful
-        handle.set_html("<html><body></body></html>")
+        handle = RealisticPersistentHandle(
+            top_level_html="<html><body></body></html>",
+            page=_build_admissions_page([]),
+        )
         bridge = RealHandleBridge(handle)
 
-        bridge.open_tab("/consultarInternacoes.xhtml")
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
         result = bridge.get_page_html()
 
-        # The bridge should return HTML with an empty container, not leak
-        # raw error info.
+        # The bridge returns the container with an explicit empty payload,
+        # not raw error info.
         assert _ADMISSION_DATA_DIV_ID in result
         assert "password" not in result.lower()
         assert "cookie" not in result.lower()
@@ -863,56 +996,37 @@ class TestBridgeErrorTaxonomy:
 
 
 class TestBridgeWithoutJSEvaluation:
-    """Tests that the bridge can extract data from HTML without requiring
-    ``evaluate_js`` on the wrapped handle."""
+    """Tests that the bridge works with a handle that has neither
+    ``evaluate_js`` nor the fake-only ``set_html`` (RPAP-S1)."""
 
     def test_bridge_works_without_evaluate_js_capability(self) -> None:
-        """Bridge extracts admission data by parsing HTML, not requiring
-        evaluate_js."""
+        """Bridge captures the iframe snapshot without requiring
+        evaluate_js or set_html on the wrapped handle."""
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
         )
 
-        # A handle without evaluate_js
-        class MinimalHandle:
-            def __init__(self, html: str = ""):
-                self._html = html
-                self._connected = True
-                self._clicked: list[str] = []
-                self._opened: list[str] = []
-                self._closed = 0
-                self._restart = 0
-                self._tab_classes: list[str] = [
-                    "tabs-first tabs-last tabs-selected"
-                ]
-
-            def get_page_html(self) -> str:
-                return self._html
-
-            def is_connected(self) -> bool:
-                return self._connected
-
-            def click_selector(self, s: str) -> None:
-                self._clicked.append(s)
-
-            def open_tab(self, u: str, *, timeout: int = 120) -> bool:
-                self._opened.append(u)
-                return True
-
-            def get_tab_classes(self) -> list[str]:
-                return list(self._tab_classes)
-
-            def close_last_non_root_tab(self) -> TabCleanupOutcome:
-                self._closed += 1
-                return TabCleanupOutcome.CLOSED_AND_VERIFIED
-
-            def restart_browser(self) -> None:
-                self._restart += 1
-
-        handle = MinimalHandle(LEGACY_ADMISSIONS_TABLE_HTML)
+        rows = [
+            _admission_iframe_row(data_ri="0", data_rk="ADM-RK-001"),
+            _admission_iframe_row(
+                data_ri="1", data_rk="ADM-RK-002",
+                start="01/03/2024", end="",
+            ),
+            _admission_iframe_row(
+                data_ri="2", data_rk="", start="10/05/2024", end="15/05/2024",
+            ),
+        ]
+        handle = RealisticPersistentHandle(
+            top_level_html=LEGACY_ADMISSIONS_TABLE_HTML,
+            page=_build_admissions_page(rows),
+        )
         bridge = RealHandleBridge(handle)
 
-        bridge.open_tab("/consultarInternacoes.xhtml")
+        # The realistic handle exposes neither fake-only capability.
+        assert not hasattr(handle, "evaluate_js")
+        assert not hasattr(handle, "set_html")
+
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
         result_html = bridge.get_page_html()
 
         match = _DATA_CONTAINER_RE.search(result_html)
@@ -4150,3 +4264,281 @@ class TestBridgePdfFormDownloadParity:
         assert "SECRET_COOKIE" not in str(outer)
         assert outer.__cause__ is None
         assert outer.__context__ is None
+
+
+# ===========================================================================
+# RPAP-S1: snapshot transport without the fake-only set_html
+# ===========================================================================
+
+
+class TestRpapS1SnapshotTransport:
+    """RPAP-S1: the normalized iframe snapshot survives adapter handoff.
+
+    Proves the corrected contract end-to-end with a realistic wrapped
+    handle that has NO ``set_html()`` and whose top-level
+    ``get_page_html()`` contains no admission table: the bridge retains the
+    snapshot read from ``frame_pol`` in job-scoped memory and
+    ``get_page_html()`` returns exactly that payload (never ``[]`` rebuilt
+    from top-level HTML). No lifecycle boundary lets an earlier patient's
+    snapshot leak into a later job.
+    """
+
+    _BASE = "apps.ingestion.extractors.real_handle_bridge"
+
+    # Top-level page HTML like production ``page.content()``: session
+    # counter present, admission table ABSENT (it lives in frame_pol only).
+    _TOP_LEVEL_WITHOUT_IFRAME = """<html>
+<body>
+<div id="tempoSessao" class="tempo-sessao">
+  Tempo de Sessão: <span>00</span>:<span>29</span>:<span>01</span>
+</div>
+<div id="mainContent">
+  <p>Busca avançada concluída. Selecione a árvore POL.</p>
+</div>
+</body>
+</html>"""
+
+    @staticmethod
+    def _bridge(rows, top_level_html=None):
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        if top_level_html is None:
+            top_level_html = (
+                TestRpapS1SnapshotTransport._TOP_LEVEL_WITHOUT_IFRAME
+            )
+        handle = RealisticPersistentHandle(
+            top_level_html=top_level_html,
+            page=_build_admissions_page(rows),
+        )
+        return handle, RealHandleBridge(handle)
+
+    def test_wrapped_handle_has_no_fake_only_set_html(self) -> None:
+        """The realistic wrapped handle exposes no ``set_html`` method."""
+        handle, _ = self._bridge([])
+        assert not hasattr(handle, "set_html")
+
+    def test_iframe_snapshot_reaches_get_page_html_without_set_html(
+        self,
+    ) -> None:
+        """Core: the iframe payload arrives exactly, never ``[]``.
+
+        The wrapped handle returns ONLY top-level HTML without the table
+        (production ``page.content()``); the bridge must hand the adapter
+        the exact snapshot read from ``frame_pol``, Unicode included.
+        """
+        rows = [
+            _admission_iframe_row(
+                data_ri="0", data_rk="ADM-UNI-001",
+                start="15/01/2024", end="20/01/2024",
+                ward="Enfermaria Águas Claras", bed="Leito 101",
+            ),
+            _admission_iframe_row(
+                data_ri="1", data_rk="ADM-UNI-002",
+                start="01/03/2024", end="",
+                ward="UTI", bed="Leito 005",
+            ),
+        ]
+        handle, bridge = self._bridge(rows)
+
+        # Production preconditions: no set_html; top-level HTML has no table.
+        assert not hasattr(handle, "set_html")
+        assert "tabelaInternacoes" not in handle.get_page_html()
+
+        assert bridge.navigate_to_admissions(patient_record="12345") is True
+
+        match = _DATA_CONTAINER_RE.search(bridge.get_page_html())
+        assert match is not None, "snapshot container missing from output"
+        data = json.loads(match.group(1))
+
+        # Exact captured payload — NOT [] rebuilt from the top-level HTML.
+        assert data == [
+            {
+                "admissionKey": "ADM-UNI-001",
+                "admissionStart": "2024-01-15",
+                "admissionEnd": "2024-01-20",
+                "ward": "Enfermaria Águas Claras",
+                "bed": "Leito 101",
+            },
+            {
+                "admissionKey": "ADM-UNI-002",
+                "admissionStart": "2024-03-01",
+                "admissionEnd": None,
+                "ward": "UTI",
+                "bed": "Leito 005",
+            },
+        ]
+
+    def test_cleanup_clears_snapshot(self) -> None:
+        """R2: cleanup followed by get_page_html() never returns the old
+        snapshot."""
+        handle, bridge = self._bridge(
+            [_admission_iframe_row(data_rk="ADM-P1")]
+        )
+        assert bridge.navigate_to_admissions(patient_record="111") is True
+        assert "ADM-P1" in bridge.get_page_html()
+
+        bridge.close_last_non_root_tab()
+        assert handle.cleanup_calls == 1
+
+        result_html = bridge.get_page_html()
+        assert "ADM-P1" not in result_html
+        assert _ADMISSION_DATA_DIV_ID not in result_html
+        # Raw top-level HTML is what remains after the job-scoped state ends.
+        assert "tempoSessao" in result_html
+
+    def test_second_patient_never_receives_first_snapshot(self) -> None:
+        """R2: a later job cannot receive an earlier patient's snapshot."""
+        handle, bridge = self._bridge(
+            [_admission_iframe_row(data_rk="ADM-P1")]
+        )
+        assert bridge.navigate_to_admissions(patient_record="111") is True
+        assert "ADM-P1" in bridge.get_page_html()
+
+        # Second patient through the same bridge: new navigation only.
+        handle._page = _build_admissions_page(
+            [_admission_iframe_row(data_rk="ADM-P2", start="10/05/2024")]
+        )
+        assert bridge.navigate_to_admissions(patient_record="222") is True
+
+        second_html = bridge.get_page_html()
+        assert "ADM-P2" in second_html
+        assert "ADM-P1" not in second_html
+
+    def test_navigation_failure_clears_previous_snapshot(self) -> None:
+        """R2: a failed navigation never leaves the earlier payload usable."""
+        _, bridge = self._bridge(
+            [_admission_iframe_row(data_rk="ADM-P1")]
+        )
+        assert bridge.navigate_to_admissions(patient_record="111") is True
+        assert "ADM-P1" in bridge.get_page_html()
+
+        with patch(
+            f"{self._BASE}._read_and_build_snapshot",
+            side_effect=NavigationError("sanitized navigation failure"),
+        ):
+            assert bridge.navigate_to_admissions(patient_record="222") is False
+
+        result_html = bridge.get_page_html()
+        assert "ADM-P1" not in result_html
+        assert _ADMISSION_DATA_DIV_ID not in result_html
+
+    def test_restart_bootstrap_shutdown_and_new_navigation_clear_snapshot(
+        self,
+    ) -> None:
+        """R2: every defined lifecycle boundary drops the job snapshot."""
+
+        def _captured_bridge():
+            _, bridge = self._bridge(
+                [_admission_iframe_row(data_rk="ADM-P1")]
+            )
+            assert bridge.navigate_to_admissions(patient_record="111") is True
+            assert "ADM-P1" in bridge.get_page_html()
+            return bridge
+
+        # restart
+        handle, bridge = self._bridge(
+            [_admission_iframe_row(data_rk="ADM-P1")]
+        )
+        assert bridge.navigate_to_admissions(patient_record="111") is True
+        bridge.restart_browser()
+        assert handle.restart_calls == 1
+        assert "ADM-P1" not in bridge.get_page_html()
+
+        # bootstrap
+        bridge = _captured_bridge()
+        with patch(
+            "apps.ingestion.extractors.legacy_session_bootstrap"
+            ".bootstrap_legacy_session"
+        ):
+            bridge.bootstrap()
+        assert "ADM-P1" not in bridge.get_page_html()
+
+        # shutdown
+        handle, bridge = self._bridge(
+            [_admission_iframe_row(data_rk="ADM-P1")]
+        )
+        assert bridge.navigate_to_admissions(patient_record="111") is True
+        bridge.shutdown()
+        assert handle.shutdown_calls == 1
+        assert "ADM-P1" not in bridge.get_page_html()
+
+        # new navigation (open_tab) starts a fresh job
+        _, bridge = self._bridge([_admission_iframe_row(data_rk="ADM-P1")])
+        assert bridge.navigate_to_admissions(patient_record="111") is True
+        bridge.open_tab("/relatorioAnaEvoInternacaoPdf.xhtml")
+        assert "ADM-P1" not in bridge.get_page_html()
+
+    def test_typed_timeouts_still_propagate(self) -> None:
+        """R4: typed navigation/content timeouts propagate unchanged."""
+
+        # NavigationTimeoutError from the iframe snapshot read re-raises.
+        _, bridge = self._bridge([_admission_iframe_row()])
+        with patch(
+            f"{self._BASE}._read_and_build_snapshot",
+            side_effect=NavigationTimeoutError("deadline expired"),
+        ):
+            with pytest.raises(NavigationTimeoutError):
+                bridge.navigate_to_admissions(patient_record="123")
+
+        # ExtractionTimeoutError from the real handle's page.content() read
+        # re-raises (never collapsed into a False return).
+        handle, bridge = self._bridge([_admission_iframe_row()])
+        with patch.object(
+            handle,
+            "get_page_html",
+            side_effect=ExtractionTimeoutError("content read timed out"),
+        ):
+            with pytest.raises(ExtractionTimeoutError):
+                bridge.navigate_to_admissions(patient_record="123")
+
+    def test_no_set_content_no_new_browser_no_subprocess(self) -> None:
+        """R3: capture never touches the real DOM or launches anything."""
+        from apps.ingestion.extractors.real_handle_bridge import (
+            RealHandleBridge,
+        )
+
+        class _SetContentTrapPage(FakeNavigationPage):
+            def set_content(self, *args, **kwargs):  # noqa: ARG002
+                raise AssertionError(
+                    "page.set_content() must never be called"
+                )
+
+        trap_page = _SetContentTrapPage()
+        trap_page.make_selector_visible("#prontuarioInput")
+        trap_page.make_selector_visible("role:link:Pesquisa Avançada")
+        trap_page.make_selector_visible("text:Internações")
+        frame = FakeNavigationFrame()
+        frame.set_eval_result(
+            SEL_INTERNACOES_TABLE_ROWS,
+            [_admission_iframe_row(data_rk="ADM-P1")],
+        )
+        trap_page.set_frame(frame)
+
+        handle = RealisticPersistentHandle(
+            top_level_html=self._TOP_LEVEL_WITHOUT_IFRAME,
+            page=trap_page,
+        )
+        bridge = RealHandleBridge(handle)
+        assert not hasattr(handle, "set_html")
+
+        with (
+            patch("subprocess.run") as mock_run,
+            patch("subprocess.Popen") as mock_popen,
+            patch("playwright.sync_api.sync_playwright") as mock_sync,
+        ):
+            assert bridge.navigate_to_admissions(patient_record="123") is True
+
+        mock_run.assert_not_called()
+        mock_popen.assert_not_called()
+        mock_sync.assert_not_called()
+        assert "ADM-P1" in bridge.get_page_html()
+
+    def test_empty_snapshot_still_transported_explicitly(self) -> None:
+        """R4: an empty snapshot stays an explicit [] (S2 owns fail-closed)."""
+        _, bridge = self._bridge([])
+        assert bridge.navigate_to_admissions(patient_record="123") is True
+        match = _DATA_CONTAINER_RE.search(bridge.get_page_html())
+        assert match is not None
+        assert json.loads(match.group(1)) == []

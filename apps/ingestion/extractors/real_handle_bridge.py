@@ -6,16 +6,18 @@ real legacy UI DOM data into the synthetic container format expected by
 :class:`~persistent_extraction_adapter.PersistentExtractionAdapter`.
 
 The real legacy UI does NOT produce ``<div id="admission-snapshot-data">``
-or ``<div id="evolution-data">`` containers. This bridge extracts
-admission and evolution data from the real DOM structure and renders it
-inside those synthetic containers so the existing adapter can consume it.
+or ``<div id="evolution-data">`` containers. This bridge renders the
+extracted data inside those synthetic containers so the existing adapter
+can consume it. RPAP-S1: the admissions snapshot is captured from the
+``frame_pol`` iframe and held in job-scoped bridge memory; it is never
+re-read from the top-level ``page.content()`` (which lacks the iframe
+table) and never requires the fake-only ``set_html()``.
 
 Design (per ``design.md`` Decision 9 and PSW-S9 scope):
 - Bridge is a thin wrapper implementing the ``SessionHandle`` protocol.
-- ``get_page_html()`` inspects the current page URL to determine whether
-  this is an admissions or evolution page, then extracts data from the
-  real legacy HTML structure and wraps it in the expected synthetic
-  container format.
+- ``get_page_html()`` serves the captured admissions snapshot from bridge
+  memory; for evolution pages it extracts data from the real legacy HTML
+  structure and wraps it in the expected synthetic container format.
 - All other protocol methods are delegated to the wrapped handle.
 - No new browser, subprocess, or fresh Playwright launch per job.
 - Extraction uses regex-based HTML parsing (no external dependency).
@@ -46,7 +48,10 @@ from datetime import date, datetime
 from typing import Any
 from urllib.parse import urljoin
 
-from apps.ingestion.extractors.errors import is_playwright_timeout_error
+from apps.ingestion.extractors.errors import (
+    ExtractionTimeoutError,
+    is_playwright_timeout_error,
+)
 from apps.ingestion.extractors.legacy_navigation import (
     SEL_FRAME_POL,
     NavigationError,
@@ -166,12 +171,6 @@ def _log_recoverable_chunk_failure(
 # URL patterns for page-type detection
 # ---------------------------------------------------------------------------
 
-_ADMISSIONS_URL_PATTERNS: list[str] = [
-    "consultarInternacoes",
-    "/admissions/",
-    "internacoes",
-]
-
 _EVOLUTIONS_URL_PATTERNS: list[str] = [
     "relatorioAnaEvoInternacaoPdf",
     "consultaDetalheInternacao",
@@ -182,35 +181,6 @@ _EVOLUTIONS_URL_PATTERNS: list[str] = [
 # ---------------------------------------------------------------------------
 # Regex patterns for extracting data from legacy DOM
 # ---------------------------------------------------------------------------
-
-# Match a full <tr ...>...</tr> row, capturing the opening tag attrs
-# group(1) = opening tag content (data-ri, data-rk, etc.)
-# group(2) = inner row content (<td> cells)
-_TR_RE = re.compile(
-    r'<tr\b([^>]*)>(.*?)</tr>',
-    re.DOTALL | re.IGNORECASE,
-)
-
-# Extract data-ri="..." attribute value
-_ATTR_DATA_RI_RE = re.compile(
-    r'\bdata-ri\s*=\s*["\'](\d*)["\']',
-    re.IGNORECASE,
-)
-
-# Extract data-rk="..." attribute value
-_ATTR_DATA_RK_RE = re.compile(
-    r'\bdata-rk\s*=\s*["\']([^"\']*)["\']',
-    re.IGNORECASE,
-)
-
-# Extract cell text from <td> elements
-_TD_RE = re.compile(r'<td[^>]*>(.*?)</td>', re.DOTALL | re.IGNORECASE)
-
-# Extract details link presence
-_DETAILS_LINK_RE = re.compile(
-    r'<a[^>]*\btitle\s*=\s*["\']Detalhes\s+da\s+Internação["\']',
-    re.IGNORECASE,
-)
 
 # Script tag with type="application/json" containing evolution data.
 # Accepts attributes in any order (id before type or vice versa).
@@ -243,34 +213,6 @@ _RENEWAL_POPUP_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-# Date parsing: BR format DD/MM/YYYY
-_BR_DATE_RE = re.compile(r'^\s*(\d{2})/(\d{2})/(\d{4})\s*$')
-
-
-def _parse_br_date(value: str) -> str | None:
-    """Parse a BR-format date (DD/MM/YYYY) and return ISO format (YYYY-MM-DD).
-
-    Args:
-        value: Date string in DD/MM/YYYY format.
-
-    Returns:
-        ISO-format date string, or ``None`` if the value is empty/invalid.
-    """
-    stripped = value.strip()
-    if not stripped:
-        return None
-    match = _BR_DATE_RE.match(stripped)
-    if not match:
-        return None
-    day, month, year = match.groups()
-    return f"{year}-{month}-{day}"
-
-
-def _strip_html_tags(text: str) -> str:
-    """Remove HTML tags from a text string."""
-    return re.sub(r'<[^>]+>', '', text).strip()
-
-
 def _extract_block(html: str, pattern: re.Pattern[str]) -> str:
     """Return the first regex match group from ``html``, or empty string.
 
@@ -279,75 +221,6 @@ def _extract_block(html: str, pattern: re.Pattern[str]) -> str:
     """
     match = pattern.search(html)
     return match.group(1) if match else ""
-
-
-def _extract_admission_rows(html: str) -> list[dict[str, Any]]:
-    """Extract admission data from legacy internações table rows.
-
-    Parses ``<tr data-ri="..." data-rk="...">`` rows from the
-    ``#tabelaInternacoes:resultList_data`` table and returns a list
-    of canonical admission dicts.
-
-    Args:
-        html: Raw page HTML from the admissions/internações page.
-
-    Returns:
-        List of admission dicts with canonical field names.
-    """
-    # Find the table body
-    table_match = re.search(
-        r'<tbody[^>]*\bid\s*=\s*["\']tabelaInternacoes:resultList_data["\']'
-        r'[^>]*>(.*?)</tbody>',
-        html,
-        re.DOTALL | re.IGNORECASE,
-    )
-    if not table_match:
-        return []
-
-    table_body = table_match.group(1)
-
-    tr_matches = _TR_RE.findall(table_body)
-    if not tr_matches:
-        return []
-
-    result: list[dict[str, Any]] = []
-    for row_attrs, row_content in tr_matches:
-        # Parse data-rk from the opening tag attributes.
-        # When data-rk is empty/missing, generate a fallback key
-        # (matches path2.py's fallback: "row-{index}").
-        data_rk_match = _ATTR_DATA_RK_RE.search(row_attrs)
-        raw_rk = data_rk_match.group(1) if data_rk_match else ""
-        data_rk = raw_rk or f"row-{len(result)}"
-
-        # Only rows with a details link are valid admissions
-        if not _DETAILS_LINK_RE.search(row_content):
-            continue
-
-        cells = _TD_RE.findall(row_content)
-        cells_text = [_strip_html_tags(c) for c in cells]
-
-        if len(cells_text) < 2:
-            continue
-
-        admission_start_iso = _parse_br_date(cells_text[0])
-        if admission_start_iso is None:
-            continue
-
-        admission_end_raw = cells_text[1] if len(cells_text) > 1 else ""
-        admission_end_iso = _parse_br_date(admission_end_raw)
-
-        ward = cells_text[2] if len(cells_text) > 2 else ""
-        bed = cells_text[3] if len(cells_text) > 3 else ""
-
-        result.append({
-            "admissionKey": data_rk or "",
-            "admissionStart": admission_start_iso,
-            "admissionEnd": admission_end_iso,
-            "ward": ward,
-            "bed": bed,
-        })
-
-    return result
 
 
 def _extract_evolution_items(html: str) -> list[dict[str, Any]]:
@@ -409,9 +282,13 @@ class RealHandleBridge:
     """Bridge that translates real legacy DOM into synthetic container format.
 
     Wraps a ``SessionHandle`` (typically ``PlaywrightSessionHandle``) and
-    overrides ``get_page_html()`` to extract admission or evolution data
-    from the real legacy page structure, wrapping it in the synthetic
-    container divs expected by the ``PersistentExtractionAdapter``.
+    overrides ``get_page_html()``. RPAP-S1: after
+    ``navigate_to_admissions()`` reads the admission table inside
+    ``frame_pol``, the bridge keeps that normalized snapshot in job-scoped
+    memory and ``get_page_html()`` returns exactly it — even though the
+    concrete handle has no fake-only ``set_html()`` and the top-level
+    ``page.content()`` never contains the iframe table. Evolution data is
+    still extracted from the real legacy page structure at read time.
 
     The bridge delegates all other ``SessionHandle`` protocol methods
     to the wrapped handle unchanged.
@@ -429,6 +306,10 @@ class RealHandleBridge:
     ) -> None:
         self._handle = handle
         self._last_url: str = ""
+        # RPAP-S1: job-scoped synthetic container for the admissions snapshot
+        # captured from ``frame_pol``. Held in memory ONLY for the current
+        # job; cleared at every lifecycle boundary and never persisted.
+        self._admissions_snapshot_html: str | None = None
         # PSW-S19 R3: the bridge owns the sanitized bootstrap boundary so the
         # adapter can re-run login + #tempoSessao readiness after every restart
         # through one lifecycle owner. Credentials are held in memory only.
@@ -456,27 +337,31 @@ class RealHandleBridge:
     def get_page_html(self) -> str:
         """Get page HTML with synthetic containers for adapter consumption.
 
-        Inspects the current page context to determine whether this is an
-        admissions or evolution page, extracts real legacy data from the
-        DOM, and wraps it in ``<div id="admission-snapshot-data">`` or
-        ``<div id="evolution-data">`` containers.
+        RPAP-S1: when an admissions snapshot was captured from ``frame_pol``
+        for the current job, returns exactly that stored payload in the
+        ``<div id="admission-snapshot-data">`` container — never a re-read of
+        the top-level HTML (which lacks the iframe table). Otherwise, when
+        the last opened URL is an evolution page, extracts real legacy data
+        from the DOM into the ``<div id="evolution-data">`` container.
 
-        For non-admission/evolution pages (e.g. root/safe-renewal tabs),
-        returns the raw HTML unchanged.
+        For non-evolution pages (e.g. root/safe-renewal tabs), returns the
+        raw HTML unchanged.
 
         Returns:
             Page HTML string, potentially containing synthetic container
             divs with extracted data as JSON payloads.
         """
+        if self._admissions_snapshot_html is not None:
+            return self._admissions_snapshot_html
+
         raw_html = self._handle.get_page_html()
 
         if not self._last_url:
             return raw_html
 
-        # Determine page type from URL
-        if self._is_admissions_page():
-            return self._build_admission_container_html(raw_html)
-        elif self._is_evolution_page():
+        # Determine page type from URL (admissions snapshots are served from
+        # bridge memory; only evolution pages are rebuilt from the DOM).
+        if self._is_evolution_page():
             return self._build_evolution_container_html(raw_html)
 
         return raw_html
@@ -501,6 +386,9 @@ class RealHandleBridge:
         Returns:
             ``True`` if the tab opened successfully.
         """
+        # RPAP-S1 R2: a new navigation starts a fresh job — any admissions
+        # snapshot from the previous job must not survive it.
+        self._clear_admissions_snapshot()
         self._last_url = url
         return self._handle.open_tab(url, timeout=timeout)
 
@@ -509,19 +397,40 @@ class RealHandleBridge:
         return self._handle.get_tab_classes()
 
     def close_last_non_root_tab(self) -> TabCleanupOutcome:
-        """Delegate to wrapped handle."""
-        return self._handle.close_last_non_root_tab()
+        """Delegate to wrapped handle and drop the job-scoped snapshot.
+
+        RPAP-S1 R2: cleanup is a job boundary — the snapshot is cleared in a
+        ``finally`` so it is dropped even when the delegated cleanup fails.
+        """
+        try:
+            return self._handle.close_last_non_root_tab()
+        finally:
+            self._clear_admissions_snapshot()
 
     def restart_browser(self) -> None:
-        """Restart the handle and discard page-type state from the old browser."""
-        self._handle.restart_browser()
-        self._last_url = ""
+        """Restart the handle and discard job state from the old browser.
+
+        RPAP-S1 R2: the snapshot is dropped in a ``finally`` so it is cleared
+        even when the delegated restart fails, without masking its error.
+        """
+        try:
+            self._handle.restart_browser()
+        finally:
+            self._clear_admissions_snapshot()
+            self._last_url = ""
 
     def shutdown(self) -> None:
-        """Delegate shutdown to the wrapped handle if available."""
-        shutdown_fn = getattr(self._handle, "shutdown", None)
-        if callable(shutdown_fn):
-            shutdown_fn()
+        """Delegate shutdown to the wrapped handle if available.
+
+        RPAP-S1 R2: the job-scoped snapshot is dropped even when the
+        delegated shutdown raises.
+        """
+        try:
+            shutdown_fn = getattr(self._handle, "shutdown", None)
+            if callable(shutdown_fn):
+                shutdown_fn()
+        finally:
+            self._clear_admissions_snapshot()
 
     def bootstrap(self) -> None:
         """Re-run the sanitized legacy login on the already-open persistent page.
@@ -536,6 +445,10 @@ class RealHandleBridge:
             LegacyBootstrapError: sanitized bootstrap failure (no credential,
                 cookie, or raw payload in the message).
         """
+        # RPAP-S1 R2: bootstrap re-authenticates a fresh session — the
+        # previous job's admissions snapshot must not survive it.
+        self._clear_admissions_snapshot()
+
         from apps.ingestion.extractors.legacy_session_bootstrap import (
             bootstrap_legacy_session,
         )
@@ -567,8 +480,9 @@ class RealHandleBridge:
         4. Click ``Interna\u00e7\u00f5es`` (Admissions).
         5. Wait for ``frame_pol`` with admission table rows.
         6. Read rows and build the canonical snapshot.
-        7. Update the internal page HTML so ``get_page_html()`` returns
-           the synthetic container with real admission data.
+        7. Serialize the snapshot into job-scoped bridge memory so
+           ``get_page_html()`` returns the synthetic container with the
+           exact captured data (no ``set_html()``, no top-level re-read).
 
         Reuses the already-open persistent session — never launches a new
         browser, never invokes ``subprocess``, never calls ``path2.py``.
@@ -580,6 +494,10 @@ class RealHandleBridge:
             ``True`` if navigation succeeded and snapshot was built,
             ``False`` if the page was unavailable.
         """
+        # RPAP-S1 R2: a new navigation starts a fresh job — any snapshot
+        # from the previous job is dropped BEFORE the first UI action.
+        self._clear_admissions_snapshot()
+
         page = self._resolve_active_page()
         if page is None:
             logger.warning(
@@ -597,30 +515,16 @@ class RealHandleBridge:
             # Step 4-5: Click Interna\u00e7\u00f5es and wait for table.
             click_internacoes(page)
 
-            # Step 6-7: Read rows and build the canonical snapshot.
+            # Step 6-7: Read rows and build the canonical snapshot. The
+            # table lives ONLY inside ``frame_pol``; the top-level page
+            # content() never contains it. RPAP-S1: the bridge serializes
+            # the snapshot into job-scoped memory (same container contract
+            # the adapter consumes) instead of relying on the fake-only
+            # ``set_html()`` or re-reading the top-level HTML.
             snapshot = _read_and_build_snapshot(page)
-
-            # Build the synthetic container HTML and set it on the handle
-            # so subsequent get_page_html() calls return real data.
-            json_payload = json.dumps(snapshot, ensure_ascii=False)
-            synthetic_html = (
-                "<html><body>\n"
-                '<div id="tempoSessao">'
-                "Tempo: <span>00</span>:<span>29</span>:<span>01</span>"
-                "</div>\n"
-                f'<div id="admission-snapshot-data">\n{json_payload}\n</div>\n'
-                "</body></html>"
+            self._admissions_snapshot_html = self._build_admissions_snapshot_html(
+                snapshot, self._handle.get_page_html()
             )
-
-            # Inject the synthetic HTML so get_page_html() returns
-            # the real data wrapped in the expected container format.
-            if hasattr(self._handle, "set_html"):
-                self._handle.set_html(synthetic_html)
-            else:
-                # Fallback: just mark the URL as admissions so
-                # get_page_html() falls through to the bridge's
-                # container-building path.
-                self._last_url = "/consultarInternacoes.xhtml"
 
             return True
 
@@ -628,6 +532,10 @@ class RealHandleBridge:
             # PSW-S17 R2/R3: a typed navigation/wait timeout MUST propagate
             # so the adapter and command record ("timeout", True). It must
             # NOT be collapsed into a fresh unchained ExtractionError.
+            raise
+        except ExtractionTimeoutError:
+            # RPAP-S1: a real Playwright timeout from the top-level content
+            # read keeps the typed timeout taxonomy (never a plain False).
             raise
         except NavigationError:
             # Non-timeout navigation failure: log a constant sanitized
@@ -707,6 +615,10 @@ class RealHandleBridge:
                 contains patient data, field values, HTML, URLs, cookies,
                 credentials, or raw Playwright exception text.
         """
+        # RPAP-S1 R2: this action flow navigates the legacy UI — the
+        # previous job's admissions snapshot must not survive it.
+        self._clear_admissions_snapshot()
+
         if timeout <= 0:
             raise NavigationError(self._DEMOGRAPHICS_TIMEOUT_MESSAGE)
 
@@ -780,6 +692,10 @@ class RealHandleBridge:
                 detail not found, evolution button disabled, PDF
                 download failure, invalid PDF).
         """
+        # RPAP-S1 R2: this action flow navigates the legacy UI — the
+        # previous job's admissions snapshot must not survive it.
+        self._clear_admissions_snapshot()
+
         page = self._resolve_active_page()
         if page is None:
             logger.warning(
@@ -1542,14 +1458,21 @@ class RealHandleBridge:
         return None
 
     # ------------------------------------------------------------------
-    # Private: page type detection
+    # Private: job-scoped admissions snapshot (RPAP-S1)
     # ------------------------------------------------------------------
 
-    def _is_admissions_page(self) -> bool:
-        """Detect whether the last URL is an admissions page."""
-        url_lower = self._last_url.lower()
-        return any(pattern.lower() in url_lower
-                   for pattern in _ADMISSIONS_URL_PATTERNS)
+    def _clear_admissions_snapshot(self) -> None:
+        """Drop the job-scoped admissions snapshot (RPAP-S1 R2).
+
+        Called before every new navigation and after cleanup, restart,
+        bootstrap, shutdown, or navigation failure so no later job can
+        receive an earlier patient's payload.
+        """
+        self._admissions_snapshot_html = None
+
+    # ------------------------------------------------------------------
+    # Private: page type detection
+    # ------------------------------------------------------------------
 
     def _is_evolution_page(self) -> bool:
         """Detect whether the last URL is an evolution page."""
@@ -1561,28 +1484,29 @@ class RealHandleBridge:
     # Private: container HTML builders
     # ------------------------------------------------------------------
 
-    def _build_admission_container_html(self, raw_html: str) -> str:
-        """Build synthetic admission container HTML from real legacy DOM.
+    def _build_admissions_snapshot_html(
+        self, snapshot: list[dict[str, Any]], raw_html: str
+    ) -> str:
+        """Build the synthetic admissions container from the captured snapshot.
 
-        Extracts session counter (``#tempoSessao``) and the renewal popup
-        (``#casca_renovasession``) from raw HTML plus admission data from the
-        internações table, then builds a page containing:
-        1. The session counter div (for controller health checks).
-        2. The renewal popup div (so defensive popup detection still works).
-        3. A ``<div id="admission-snapshot-data">`` with JSON payload.
+        RPAP-S1: the single constructor for the admissions container. The
+        JSON payload is the EXACT normalized snapshot read from ``frame_pol``
+        and held in bridge memory; only the session counter
+        (``#tempoSessao``) and renewal popup (``#casca_renovasession``)
+        fragments come from the top-level HTML so controller checks keep
+        working. Admission rows are never re-read from top-level
+        ``page.content()`` (the iframe table does not exist there).
 
         Args:
-            raw_html: Raw page HTML from the legacy admission page.
+            snapshot: Normalized admission snapshot captured from the iframe.
+            raw_html: Top-level page HTML (counter/popup fragments only).
 
         Returns:
             HTML string with synthetic counter + popup + snapshot container.
         """
         counter_div = _extract_block(raw_html, _TEMPO_SESSAO_RE)
         popup_div = _extract_block(raw_html, _RENEWAL_POPUP_RE)
-
-        # Extract admissions from the legacy table
-        admissions = _extract_admission_rows(raw_html)
-        json_payload = json.dumps(admissions, ensure_ascii=False)
+        json_payload = json.dumps(snapshot, ensure_ascii=False)
 
         return (
             "<html><body>\n"
