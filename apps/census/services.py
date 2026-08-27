@@ -131,13 +131,14 @@ def validate_snapshot_completeness(snapshots_qs) -> dict:
     }
 
 
-def _resolve_single_census_run(snapshots_qs) -> int | None:
+def resolve_single_census_run(snapshots_qs) -> int | None:
     """Resolve the unique non-null census run of a snapshot queryset.
 
     Returns the run id only when every row of the queryset resolves to the
     same non-null census ``IngestionRun``; otherwise returns ``None`` for
     missing or ambiguous provenance. ``captured_at`` is never used as a
-    synthetic idempotency key.
+    synthetic idempotency key. Public so the admissions recovery service
+    (RPAP-S4) reuses the same provenance rule without copying it.
     """
     run_ids = set(
         snapshots_qs.order_by()
@@ -547,7 +548,7 @@ def process_census_snapshot(
             else None
         )
     else:
-        provenance_run_id = _resolve_single_census_run(snapshots)
+        provenance_run_id = resolve_single_census_run(snapshots)
         if provenance_run_id is None:
             materialization_status = "missing_provenance"
             occupancy_measurement_id = None
