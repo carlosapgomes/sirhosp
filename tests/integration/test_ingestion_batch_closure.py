@@ -23,6 +23,37 @@ from apps.ingestion.models import (
 )
 
 
+# RPAP-S2 (Emenda 1): minimal synthetic NON-empty snapshot used to repair
+# batch-closure fixtures. Same shape as ``ADM_BATCH_001`` in
+# ``tests/integration/test_ingestion_worker_retries.py``. A batch-bound empty
+# capture is now an invalid payload (fail-closed), so fixtures that codified
+# the old "empty batch-bound = success" semantics carry a valid capture
+# instead; every original assertion is preserved.
+def _batch_admissions_snapshot() -> list[dict]:
+    return [
+        {
+            "admission_key": "ADM_BATCH_001",
+            "admission_start": "2026-04-01T00:00:00",
+            "admission_end": "2026-04-19T00:00:00",
+            "ward": "UTI",
+            "bed": "LEITO 01",
+        }
+    ]
+
+
+# Follow-up isolation for the repaired fixtures: a successful batch-bound
+# capture enqueues a demographics_only follow-up (batch-detached) and a
+# full_sync follow-up attached to the batch. The attached child would keep
+# the batch open, so the repaired closure tests isolate BOTH enqueuers.
+_CURRENT_DEMO_FOLLOWUP = (
+    "apps.ingestion.management.commands"
+    ".process_ingestion_runs.queue_demographics_only_run"
+)
+_CURRENT_FULLSYNC_FOLLOWUP = (
+    "apps.ingestion.services.enqueue_most_recent_admission_full_sync"
+)
+
+
 @pytest.mark.django_db
 class TestFinalRunFailureCreation:
     """FinalRunFailure is persisted when retries are exhausted."""
@@ -189,13 +220,16 @@ class TestBatchClosure:
         )
 
         mock_ext = MagicMock()
-        mock_ext.get_admission_snapshot.return_value = []
+        mock_ext.get_admission_snapshot.return_value = _batch_admissions_snapshot()
 
+        # RPAP-S2 fixture repair: non-empty batch-bound capture (empty is now
+        # fail-closed). Follow-ups are isolated so the batch drains after the
+        # successful run, preserving the original closure assertions.
         with patch(
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.PlaywrightEvolutionExtractor",
             return_value=mock_ext,
-        ):
+        ), patch(_CURRENT_DEMO_FOLLOWUP), patch(_CURRENT_FULLSYNC_FOLLOWUP):
             call_command("process_ingestion_runs")
 
         run.refresh_from_db()
@@ -229,7 +263,7 @@ class TestBatchClosure:
         )
 
         mock_ext = MagicMock()
-        mock_ext.get_admission_snapshot.return_value = []
+        mock_ext.get_admission_snapshot.return_value = _batch_admissions_snapshot()
 
         with patch(
             "apps.ingestion.management.commands"
@@ -339,7 +373,7 @@ class TestBatchClosure:
         )
 
         mock_ext = MagicMock()
-        mock_ext.get_admission_snapshot.return_value = []
+        mock_ext.get_admission_snapshot.return_value = _batch_admissions_snapshot()
 
         # Patch demographics to prevent run2 from being processed
         # The worker processes one run at a time; after run1 succeeds,
@@ -351,11 +385,13 @@ class TestBatchClosure:
         run2.next_retry_at = timezone.now() + timedelta(hours=1)
         run2.save(update_fields=["next_retry_at"])
 
+        # RPAP-S2 fixture repair: non-empty capture + follow-up isolation so
+        # run1's enqueued full_sync child cannot alter batch drainage.
         with patch(
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.PlaywrightEvolutionExtractor",
             return_value=mock_ext,
-        ):
+        ), patch(_CURRENT_DEMO_FOLLOWUP), patch(_CURRENT_FULLSYNC_FOLLOWUP):
             call_command("process_ingestion_runs")
 
         run1.refresh_from_db()
@@ -389,13 +425,15 @@ class TestBatchClosure:
             )
 
         mock_ext = MagicMock()
-        mock_ext.get_admission_snapshot.return_value = []
+        mock_ext.get_admission_snapshot.return_value = _batch_admissions_snapshot()
 
+        # RPAP-S2 fixture repair: non-empty captures + follow-up isolation so
+        # both runs drain the batch after succeeding.
         with patch(
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.PlaywrightEvolutionExtractor",
             return_value=mock_ext,
-        ):
+        ), patch(_CURRENT_DEMO_FOLLOWUP), patch(_CURRENT_FULLSYNC_FOLLOWUP):
             call_command("process_ingestion_runs")
 
         batch.refresh_from_db()
@@ -449,19 +487,22 @@ class TestBatchClosure:
         def snapshot_side_effect(*args, **kwargs):
             call_count["n"] += 1
             if call_count["n"] <= 1:
-                # First call (run1): success
-                return []
+                # First call (run1): success — RPAP-S2 fixture repair uses a
+                # non-empty batch-bound capture (empty is now fail-closed).
+                return _batch_admissions_snapshot()
             # Second call (run2): persistent failure
             raise ExtractionError("Persistent")
 
         mock_ext = MagicMock()
         mock_ext.get_admission_snapshot.side_effect = snapshot_side_effect
 
+        # RPAP-S2 fixture repair: run1's follow-ups are isolated so the batch
+        # drains when MIX_P2 fails terminally (original assertions intact).
         with patch(
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.PlaywrightEvolutionExtractor",
             return_value=mock_ext,
-        ):
+        ), patch(_CURRENT_DEMO_FOLLOWUP), patch(_CURRENT_FULLSYNC_FOLLOWUP):
             call_command("process_ingestion_runs")
 
         batch.refresh_from_db()
@@ -493,13 +534,15 @@ class TestBatchDurationComputability:
         )
 
         mock_ext = MagicMock()
-        mock_ext.get_admission_snapshot.return_value = []
+        mock_ext.get_admission_snapshot.return_value = _batch_admissions_snapshot()
 
+        # RPAP-S2 fixture repair: non-empty capture + follow-up isolation so
+        # the run drains the batch and the duration becomes computable.
         with patch(
             "apps.ingestion.management.commands"
             ".process_ingestion_runs.PlaywrightEvolutionExtractor",
             return_value=mock_ext,
-        ):
+        ), patch(_CURRENT_DEMO_FOLLOWUP), patch(_CURRENT_FULLSYNC_FOLLOWUP):
             call_command("process_ingestion_runs")
 
         batch.refresh_from_db()

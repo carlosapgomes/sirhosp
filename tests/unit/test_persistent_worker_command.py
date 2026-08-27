@@ -926,10 +926,21 @@ class TestBatchClosure:
                 "intent": "admissions_only",
             },
         )
-        mock_adapter = _make_adapter_mock(snapshot_result=[])
+        # RPAP-S2 fixture repair: non-empty batch-bound capture (empty is now
+        # fail-closed). Follow-ups are isolated so the batch drains after the
+        # successful run, preserving the original closure assertions.
+        mock_adapter = _make_adapter_mock(
+            snapshot_result=_ADMISSION_SNAPSHOT_DATA,
+        )
 
         with patch.object(
             PersistentWorkerCommand, "_create_adapter", return_value=mock_adapter
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"  # noqa: E501
+            ".queue_demographics_only_run",
+        ), patch(
+            "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"  # noqa: E501
+            ".enqueue_most_recent_admission_full_sync",
         ):
             call_command("process_ingestion_runs_persistent_session")
 

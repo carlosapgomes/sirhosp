@@ -28,6 +28,7 @@ from django.utils import timezone
 
 from apps.ingestion.batch_closure import try_close_batch
 from apps.ingestion.evolution_ingestion import ingest_evolutions as shared_ingest_evolutions
+from apps.ingestion.extractors.errors import ensure_nonempty_batch_admissions
 from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionExtractor
 from apps.ingestion.gap_planner import plan_extraction_windows
 from apps.ingestion.models import (
@@ -1089,6 +1090,11 @@ class Command(BaseCommand):
             end_date=snap_end,
             timeout=120,
         )
+
+        # RPAP-S2: an empty capture linked to a census/recovery batch is an
+        # invalid payload, not a success. Validate BEFORE any persistence so
+        # the existing failure/retry path runs with zero clinical effects.
+        ensure_nonempty_batch_admissions(run.batch_id, admissions_snapshot)
 
         return persist_admissions_snapshot(
             patient_source_key=patient_record,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 _PLAYWRIGHT_TIMEOUT_ERROR: type[BaseException] | None = None
 _PLAYWRIGHT_IMPORT_ATTEMPTED: bool = False
 
@@ -58,6 +60,40 @@ class SnapshotContainerMissingError(ExtractionError):
     session-level failures so callers can run tab cleanup on the recoverable
     error path.
     """
+
+
+class EmptyAdmissionsSnapshotError(SnapshotContainerMissingError):
+    """A batch-bound admissions snapshot contained zero rows (RPAP-S2).
+
+    An empty normalized snapshot is a legitimate standalone result, but it is
+    INVALID for a run linked to a census/recovery batch: the batch represents
+    an occupied patient who must have at least one admission. Subclassing
+    :class:`SnapshotContainerMissingError` keeps the frozen failure taxonomy —
+    the shared classifier already maps it to ``("invalid_payload", False)`` —
+    so no new failure choice is introduced. The message is a fixed sanitized
+    constant and never carries patient or clinical context.
+    """
+
+    SANITIZED_MESSAGE = "admissions snapshot empty for batch-bound capture"
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or self.SANITIZED_MESSAGE)
+
+
+def ensure_nonempty_batch_admissions(
+    batch_id: int | None, snapshot: list[dict[str, Any]]
+) -> None:
+    """RPAP-S2 R2: shared contextual rule for BOTH ingestion workers.
+
+    Raises :class:`EmptyAdmissionsSnapshotError` when a capture linked to a
+    census/recovery batch (``batch_id is not None``) returns an empty
+    normalized snapshot. Standalone captures (``batch_id is None``) keep the
+    explicit empty-result contract. Call this immediately after extraction
+    and BEFORE any persistence or success bookkeeping so the existing
+    failure/retry/cleanup path runs with zero clinical effects.
+    """
+    if batch_id is not None and not snapshot:
+        raise EmptyAdmissionsSnapshotError()
 
 
 def is_playwright_timeout_error(exc: BaseException) -> bool:

@@ -132,9 +132,11 @@ from django.utils import timezone
 from apps.ingestion.batch_closure import try_close_batch
 from apps.ingestion.evolution_ingestion import ingest_evolutions
 from apps.ingestion.extractors.errors import (
+    EmptyAdmissionsSnapshotError,
     ExtractionError,
     InvalidJsonError,
     SnapshotContainerMissingError,
+    ensure_nonempty_batch_admissions,
 )
 from apps.ingestion.extractors.legacy_navigation import (
     DEMOGRAPHICS_IDENTITY_MESSAGE,
@@ -1501,6 +1503,26 @@ class Command(BaseCommand):
                 end_date=end_date,
                 timeout=_ADMISSIONS_TIMEOUT,
             )
+            # RPAP-S2: a batch-bound empty capture is an invalid payload, not
+            # a success. Raised inside this try so the existing data-failure
+            # path (stage failed + tab cleanup + retry) applies before any
+            # persistence or success bookkeeping.
+            ensure_nonempty_batch_admissions(run.batch_id, result)
+        except EmptyAdmissionsSnapshotError as exc:
+            # Data-level failure: a job tab was opened, so cleanup is required
+            # before claiming another run.
+            self._record_stage(
+                run, "admissions_capture", "failed", stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            adapter.cleanup_after_failure()
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  {self._run_label(run)} failed during admissions capture "
+                f"(empty admissions snapshot for batch-bound run, "
+                f"reason={self._classify_failure_reason(exc)[0]})"
+            )
+            return
         except InvalidJsonError as exc:
             # Data failure — tab was opened, need cleanup
             self._record_stage(
@@ -1832,6 +1854,10 @@ class Command(BaseCommand):
                 end_date=snap_end,
                 timeout=_ADMISSIONS_TIMEOUT,
             )
+            # RPAP-S2: the mandatory admissions capture preceding full-sync
+            # also fails closed for an empty batch-bound snapshot — before
+            # gap planning, persistence, or any follow-up.
+            ensure_nonempty_batch_admissions(run.batch_id, admissions_data)
         except (InvalidJsonError, SnapshotContainerMissingError) as exc:
             # Data-level failure — tab was opened, cleanup required
             self._record_stage(

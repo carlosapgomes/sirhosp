@@ -1005,6 +1005,314 @@ class TestSharedFailureBoundaryParity:
 
 
 # ===========================================================================
+# RPAP-S2: empty batch-bound admissions capture fails closed in BOTH workers
+# ===========================================================================
+
+
+@pytest.mark.django_db
+class TestEmptyBatchBoundAdmissionsParity:
+    """RPAP-S2: an empty normalized admissions snapshot is INVALID when the
+    run is linked to a census/recovery batch, and remains a VALID explicit
+    no-admissions outcome for standalone runs.
+
+    The batch-bound capture must fail through the existing failure/retry
+    machinery BEFORE any persistence, success bookkeeping, or follow-up
+    enqueue, with the shared ``invalid_payload`` taxonomy and observably
+    equivalent effects in the current and persistent workers.
+    """
+
+    max_attempts = 3
+
+    def _admissions_run(self, pr: str) -> IngestionRun:
+        return _make_run(
+            "admissions_only",
+            pr,
+            batch=_drained_batch(),
+            max_attempts=self.max_attempts,
+        )
+
+    def _full_sync_run(self, pr: str) -> IngestionRun:
+        return _make_run(
+            "full_sync",
+            pr,
+            batch=_drained_batch(),
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            max_attempts=self.max_attempts,
+        )
+
+    def _failure_snapshot(self, run: IngestionRun, pr: str) -> dict[str, Any]:
+        run.refresh_from_db()
+        assert run.batch is not None, "failure scenario requires a batch"
+        attempts = list(IngestionRunAttempt.objects.filter(run=run))
+        latest = max(attempts, key=lambda a: a.attempt_number)
+        return {
+            "status": run.status,
+            "failure_reason": run.failure_reason,
+            "timed_out": run.timed_out,
+            "error_message": run.error_message,
+            "attempt_count": run.attempt_count,
+            "admissions_seen": run.admissions_seen,
+            "admissions_created": run.admissions_created,
+            "admissions_updated": run.admissions_updated,
+            "events_created": run.events_created,
+            "next_retry_at_present": run.next_retry_at is not None,
+            "finished": run.finished_at is not None,
+            "attempt_row_count": len(attempts),
+            "attempt_status": latest.status,
+            "attempt_failure_reason": latest.failure_reason,
+            "attempt_timed_out": latest.timed_out,
+            "attempt_error_message": latest.error_message,
+            "stage_statuses": _stage_statuses(run),
+            "batch_status": run.batch.status,
+            "patient_exists": Patient.objects.filter(
+                source_system="tasy", patient_source_key=pr
+            ).exists(),
+            "admission_count": Admission.objects.filter(
+                patient__patient_source_key=pr
+            ).count(),
+        }
+
+    def test_admissions_only_empty_batch_bound_fails_in_both_workers(
+        self,
+    ) -> None:
+        """Empty admissions_only capture bound to a batch fails before
+        persisting anything, with identical observable effects in both
+        workers (RPAP-S2 R1-R6)."""
+        # --- Current worker ---
+        run_cur = self._admissions_run("EBC-CUR")
+        before_cur = _clinical_counts()
+        rec_cur = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _current_patches(snapshot=[]):
+                stack.enter_context(p)
+            with _isolate_current_followups(rec_cur):
+                call_command("process_ingestion_runs")
+        snap_cur = self._failure_snapshot(run_cur, "EBC-CUR")
+        assert _clinical_counts() == before_cur
+
+        # --- Persistent worker ---
+        run_per = self._admissions_run("EBC-PER")
+        before_per = _clinical_counts()
+        rec_per = _FollowupRecorder()
+        adapter_per = MagicMock()
+        adapter_per.get_admission_snapshot.return_value = []
+        adapter_per.get_demographics.return_value = {}
+        adapter_per.extract_evolutions.return_value = []
+        adapter_per.ensure_session_ready.return_value = True
+        adapter_per.controller.restart_required.return_value = False
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=adapter_per,
+                )
+            )
+            with _isolate_persistent_followups(rec_per):
+                call_command("process_ingestion_runs_persistent_session")
+        snap_per = self._failure_snapshot(run_per, "EBC-PER")
+        assert _clinical_counts() == before_per
+
+        # --- Fail-before-persist with the shared taxonomy ---
+        for snap in (snap_cur, snap_per):
+            # Retryable failure, NOT a success with admissions_seen=0.
+            assert snap["status"] == "queued"
+            assert snap["failure_reason"] == "invalid_payload"
+            assert snap["timed_out"] is False
+            assert snap["next_retry_at_present"] is True
+            assert snap["finished"] is False
+            # No positive counter and no persisted clinical row.
+            assert snap["admissions_seen"] == 0
+            assert snap["admissions_created"] == 0
+            assert snap["admissions_updated"] == 0
+            assert snap["events_created"] == 0
+            assert snap["patient_exists"] is False
+            assert snap["admission_count"] == 0
+            # Existing failure machinery: attempt failed, admissions stage
+            # failed (never succeeded), batch stays open.
+            assert snap["attempt_status"] == "failed"
+            assert snap["attempt_failure_reason"] == "invalid_payload"
+            assert snap["attempt_timed_out"] is False
+            assert snap["stage_statuses"] == {"admissions_capture": "failed"}
+            assert snap["batch_status"] == "running"
+
+        # Cross-worker observable parity, including sanitized error text.
+        assert snap_cur == snap_per
+
+        # Sanitized persisted text: no patient-record token anywhere.
+        for run in (run_cur, run_per):
+            run.refresh_from_db()
+            assert run.error_message
+            assert "EBC-" not in (run.error_message or "")
+
+        # Zero follow-ups (no demographics, no full-sync) in both workers.
+        assert rec_cur.as_dict() == {
+            "demo_call_count": 0,
+            "fullsync_call_count": 0,
+        }
+        assert rec_per.as_dict() == {
+            "demo_call_count": 0,
+            "fullsync_call_count": 0,
+        }
+
+        # Persistent worker ran the existing recoverable-error cleanup path.
+        assert adapter_per.cleanup_after_failure.called
+
+    def test_full_sync_empty_batch_bound_fails_in_both_workers(self) -> None:
+        """The mandatory admissions capture that precedes full-sync also fails
+        closed for an empty batch-bound snapshot in both workers: no gap
+        planning, no evolution extraction, no persistence."""
+        # --- Current worker ---
+        run_cur = self._full_sync_run("EFS-CUR")
+        before_cur = _clinical_counts()
+        with ExitStack() as stack:
+            for p in _current_patches(snapshot=[], evolutions=[]):
+                stack.enter_context(p)
+            call_command("process_ingestion_runs")
+        snap_cur = self._failure_snapshot(run_cur, "EFS-CUR")
+        assert _clinical_counts() == before_cur
+
+        # --- Persistent worker ---
+        run_per = self._full_sync_run("EFS-PER")
+        before_per = _clinical_counts()
+        adapter_per = MagicMock()
+        adapter_per.get_admission_snapshot.return_value = []
+        adapter_per.get_demographics.return_value = {}
+        adapter_per.extract_evolutions.return_value = []
+        adapter_per.ensure_session_ready.return_value = True
+        adapter_per.controller.restart_required.return_value = False
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    PersistentWorkerCommand,
+                    "_create_adapter",
+                    return_value=adapter_per,
+                )
+            )
+            call_command("process_ingestion_runs_persistent_session")
+        snap_per = self._failure_snapshot(run_per, "EFS-PER")
+        assert _clinical_counts() == before_per
+
+        for snap in (snap_cur, snap_per):
+            assert snap["status"] == "queued"
+            assert snap["failure_reason"] == "invalid_payload"
+            assert snap["timed_out"] is False
+            assert snap["next_retry_at_present"] is True
+            assert snap["patient_exists"] is False
+            assert snap["admission_count"] == 0
+            # Capture failed BEFORE gap planning: no other stage ran.
+            assert snap["stage_statuses"] == {"admissions_capture": "failed"}
+            assert snap["attempt_status"] == "failed"
+            assert snap["batch_status"] == "running"
+
+        assert snap_cur == snap_per
+        assert adapter_per.cleanup_after_failure.called
+
+    def test_standalone_empty_snapshot_keeps_no_admissions_outcome(
+        self,
+    ) -> None:
+        """RPAP-S2 R4: a standalone (batch-less) empty capture keeps the old
+        explicit contract in both workers — success with seen=0, succeeded
+        stage/attempt, demographics follow-up, and NO evolution candidate."""
+        # --- Current worker ---
+        run_cur = _make_run("admissions_only", "SBC-CUR")
+        rec_cur = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _current_patches(snapshot=[]):
+                stack.enter_context(p)
+            # Only the demographics follow-up is isolated; the real
+            # full-sync enqueuer runs so "no evolution candidate" is proven
+            # by actual queue state (it returns None without admissions).
+            with patch(
+                "apps.ingestion.management.commands.process_ingestion_runs"
+                ".queue_demographics_only_run",
+                side_effect=rec_cur.demo,
+            ):
+                call_command("process_ingestion_runs")
+        obs_cur = _observable(run_cur, "SBC-CUR")
+
+        # --- Persistent worker ---
+        run_per = _make_run("admissions_only", "SBC-PER")
+        rec_per = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _persistent_patches(snapshot=[]):
+                stack.enter_context(p)
+            with patch(
+                "apps.ingestion.management.commands.process_ingestion_runs_persistent_session"  # noqa: E501
+                ".queue_demographics_only_run",
+                side_effect=rec_per.demo,
+            ):
+                call_command("process_ingestion_runs_persistent_session")
+        obs_per = _observable(run_per, "SBC-PER")
+
+        assert obs_cur == obs_per
+        for obs in (obs_cur, obs_per):
+            assert obs["status"] == "succeeded"
+            assert obs["failure_reason"] == ""
+            assert obs["timed_out"] is False
+            assert obs["admissions_seen"] == 0
+            assert obs["admission_count"] == 0
+            assert obs["event_count"] == 0
+            assert obs["stage_statuses"] == {
+                "admissions_capture": "succeeded"
+            }
+        # Explicit standalone feedback retained: demographics follow-up is
+        # still enqueued, but no full-sync evolution candidate is produced
+        # (real enqueuer found no admission for the captured patient).
+        assert rec_cur.demo_calls == ["SBC-CUR"]
+        assert rec_per.demo_calls == ["SBC-PER"]
+        for pr in ("SBC-CUR", "SBC-PER"):
+            assert not IngestionRun.objects.filter(
+                intent="full_sync",
+                parameters_json__patient_record=pr,
+            ).exists()
+
+    def test_nonempty_batch_bound_still_persists_and_enqueues_full_sync(
+        self,
+    ) -> None:
+        """RPAP-S2 guard: a valid non-empty batch-bound capture keeps the old
+        success semantics — persistence, succeeded stage/attempt, full-sync
+        follow-up, and batch closure in both workers."""
+        # --- Current worker ---
+        run_cur = self._admissions_run("NBC-CUR")
+        rec_cur = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _current_patches(snapshot=_admissions_snapshot("NBC-CUR")):
+                stack.enter_context(p)
+            with _isolate_current_followups(rec_cur):
+                call_command("process_ingestion_runs")
+        obs_cur = _observable(run_cur, "NBC-CUR")
+
+        # --- Persistent worker ---
+        run_per = self._admissions_run("NBC-PER")
+        rec_per = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _persistent_patches(
+                snapshot=_admissions_snapshot("NBC-PER")
+            ):
+                stack.enter_context(p)
+            with _isolate_persistent_followups(rec_per):
+                call_command("process_ingestion_runs_persistent_session")
+        obs_per = _observable(run_per, "NBC-PER")
+
+        assert obs_cur == obs_per
+        for obs in (obs_cur, obs_per):
+            assert obs["status"] == "succeeded"
+            assert obs["admissions_seen"] == 2
+            assert obs["admissions_created"] == 2
+            assert obs["patient_exists"] is True
+            assert obs["admission_count"] == 2
+            assert obs["stage_statuses"] == {
+                "admissions_capture": "succeeded"
+            }
+            assert obs["batch_status"] == "succeeded"
+            assert obs["batch_closed"] is True
+        assert rec_cur.fullsync_calls == ["called"]
+        assert rec_per.fullsync_calls == ["called"]
+
+
+# ===========================================================================
 # R5: heterogeneous multi-job sequence through ONE authenticated handle
 # ===========================================================================
 
