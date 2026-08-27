@@ -1186,23 +1186,26 @@ class TestBridgeAdmissionsNavigation:
 
         assert result is False
 
-    def test_navigate_to_admissions_without_set_html_uses_regex_container(
+    def test_navigate_to_admissions_without_set_html_transports_iframe_snapshot(
         self,
     ) -> None:
         """Real ``PlaywrightSessionHandle`` has no ``set_html``.
 
         When the wrapped handle exposes only ``get_page_html`` and
         ``ensure_current_page`` (the real persistent handle contract),
-        ``navigate_to_admissions`` cannot inject the JS-eval snapshot via
-        ``set_html``. It instead marks the page context as admissions, and
-        the next ``get_page_html()`` re-parses the raw legacy table HTML into
-        the canonical synthetic container via the PSW-S9 regex parser.
+        ``navigate_to_admissions`` cannot inject the snapshot via
+        ``set_html``. RPAP-S1: the bridge instead serializes the normalized
+        snapshot read from ``frame_pol`` (frame ``eval_on_selector_all``)
+        into job-scoped memory, and the next ``get_page_html()`` returns
+        exactly that payload in the canonical synthetic container.
 
-        This characterizes the real-handle path so it is not silently
-        broken: navigation still reuses the already-open page (no new
-        browser/subprocess) and the adapter still receives valid admission
-        data, just sourced from the regex parser instead of the JS-eval
-        snapshot.
+        The handle's top-level HTML mirrors production ``page.content()``:
+        session counter present, admissions table ABSENT (the table lives
+        only inside the iframe). This characterizes the real-handle path so
+        it is not silently broken: navigation still reuses the already-open
+        page (no new browser/subprocess) and the adapter still receives
+        valid admission data sourced from the iframe snapshot — never from
+        top-level HTML re-parsing.
         """
         from apps.ingestion.extractors.real_handle_bridge import (
             RealHandleBridge,
@@ -1233,7 +1236,11 @@ class TestBridgeAdmissionsNavigation:
             def ensure_current_page(self):
                 return self._page
 
-        handle = _HandleWithoutSetHtml(page, ADMISSIONS_TABLE_HTML)
+        handle = _HandleWithoutSetHtml(page, NO_TABLE_HTML)
+
+        # Production topology: the handle's top-level page content has the
+        # session counter but NEVER the admissions table (iframe-only).
+        assert "tabelaInternacoes" not in handle.get_page_html()
 
         bridge = RealHandleBridge(handle)  # type: ignore[arg-type]
 
