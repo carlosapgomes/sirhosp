@@ -3131,9 +3131,11 @@ class TestAdmissionsOnlyPersistenceParity:
         """PSW-S15 R2: persistent full_sync follow-up inherits a real batch.
 
         Characterization: the persistent path attaches the full_sync follow-up
-        to the source run's batch (not ``None``), the demographics follow-up
-        stays detached, and the batch remains open while its full_sync child is
-        queued.
+        to the source run's batch (not ``None``), and the batch remains open
+        while its full_sync child is queued. RPAP-S3 requirement change: a
+        batch-bound admissions success no longer enqueues a demographics
+        follow-up — the census batch already owns the single demographics_only
+        run for the patient.
         """
         batch = CensusExecutionBatch.objects.create(status="running")
         run = _queue_admissions_run(
@@ -3166,12 +3168,13 @@ class TestAdmissionsOnlyPersistenceParity:
         run.refresh_from_db()
         assert run.status == "succeeded"
 
+        # RPAP-S3: no demographics follow-up for a batch-bound run — the
+        # census batch owns the single demographics_only run for the patient.
         demos = IngestionRun.objects.filter(
             intent="demographics_only",
             parameters_json__patient_record="BATCH-P",
         )
-        assert demos.count() == 1
-        assert demos.first().batch_id is None
+        assert demos.count() == 0
 
         fs = (
             IngestionRun.objects.filter(
@@ -3199,7 +3202,10 @@ class TestAdmissionsOnlyPersistenceParity:
 
     def test_retry_then_success_does_not_duplicate_followups(self):
         """PSW-S15 R3: failed attempt creates no follow-ups; successful retry
-        creates exactly one of each; a later invocation does not duplicate.
+        creates the full_sync follow-up without duplication. RPAP-S3: a
+        batch-bound success enqueues no demographics follow-up (the census
+        batch owns the patient's demographics run); a later invocation does
+        not duplicate.
         """
         batch = CensusExecutionBatch.objects.create(status="running")
         run = _queue_admissions_run(
@@ -3241,7 +3247,8 @@ class TestAdmissionsOnlyPersistenceParity:
         run.next_retry_at = timezone.now() - datetime.timedelta(seconds=1)
         run.save(update_fields=["next_retry_at"])
 
-        # Attempt 2: success -> exactly one of each follow-up.
+        # Attempt 2: success -> full_sync follow-up only (RPAP-S3: no
+        # demographics follow-up for batch-bound runs).
         mock_ok = _make_adapter_mock(
             snapshot_result=[
                 {
@@ -3275,7 +3282,7 @@ class TestAdmissionsOnlyPersistenceParity:
                 intent="demographics_only",
                 parameters_json__patient_record="RETRY-P",
             ).count()
-            == 1
+            == 0
         )
         fs = (
             IngestionRun.objects.filter(
@@ -3302,7 +3309,7 @@ class TestAdmissionsOnlyPersistenceParity:
                 intent="demographics_only",
                 parameters_json__patient_record="RETRY-P",
             ).count()
-            == 1
+            == 0
         )
         assert (
             IngestionRun.objects.filter(

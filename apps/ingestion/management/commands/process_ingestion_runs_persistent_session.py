@@ -1621,18 +1621,20 @@ class Command(BaseCommand):
         self._mark_latest_attempt_succeeded(run)
 
         # Enqueue follow-ups under the same conditions as the current worker:
-        # demographics_only (detached from the batch so it can close
-        # independently) and the most-recent-admission full_sync (attached to
-        # the same batch as this run).
+        # demographics_only only for standalone runs (RPAP-S3: the census
+        # batch already owns the demographics run for its patients), always
+        # detached (batch=None); the most-recent-admission full_sync always
+        # follows a successful capture, attached to this run's batch.
         if patient is not None:
-            demo_run = queue_demographics_only_run(
-                patient_record=patient.patient_source_key,
-                batch=None,
-            )
-            self.stdout.write(
-                f"  Auto-enqueued demographics_only {self._run_label(demo_run, followup=True)} "
-                f"for the captured patient."
-            )
+            if run.batch_id is None:
+                demo_run = queue_demographics_only_run(
+                    patient_record=patient.patient_source_key,
+                    batch=None,
+                )
+                self.stdout.write(
+                    f"  Auto-enqueued demographics_only {self._run_label(demo_run, followup=True)} "
+                    f"for the captured patient."
+                )
             full_sync_run = enqueue_most_recent_admission_full_sync(
                 patient, batch=run.batch,
             )

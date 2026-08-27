@@ -325,11 +325,12 @@ def _persistent_patches(
 # ---------------------------------------------------------------------------
 # Follow-up isolation
 #
-# admissions_only auto-enqueues a demographics_only + full_sync follow-up. To
-# keep each worker run isolated (one run processed, no queue pollution) the
-# enqueuers are patched to record calls without creating real runs. Both
-# workers call the SAME shared services, so follow-up parity is proven by
-# identical call patterns.
+# A successful admissions_only auto-enqueues a full_sync follow-up and, for
+# standalone runs only, a demographics_only follow-up (RPAP-S3: batch-bound
+# runs skip demographics — the census batch owns it). To keep each worker run
+# isolated (one run processed, no queue pollution) the enqueuers are patched
+# to record calls without creating real runs. Both workers call the SAME
+# shared services, so follow-up parity is proven by identical call patterns.
 # ---------------------------------------------------------------------------
 
 
@@ -1310,6 +1311,141 @@ class TestEmptyBatchBoundAdmissionsParity:
             assert obs["batch_closed"] is True
         assert rec_cur.fullsync_calls == ["called"]
         assert rec_per.fullsync_calls == ["called"]
+        # RPAP-S3 requirement change: a batch-bound admissions success no
+        # longer enqueues a demographics follow-up — the census batch already
+        # owns the single demographics_only run for each of its patients.
+        assert rec_cur.demo_calls == []
+        assert rec_per.demo_calls == []
+
+
+# ===========================================================================
+# RPAP-S3: demographics ownership (batch-bound vs standalone)
+# ===========================================================================
+
+
+@pytest.mark.django_db
+class TestDemographicsOwnershipParity:
+    """RPAP-S3: the census/recovery batch owns demographics for its runs.
+
+    Completing a batch-bound ``admissions_only`` run must enqueue ONLY the
+    most-recent-admission full-sync follow-up: the census processor already
+    created the single batch-owned ``demographics_only`` run for that
+    patient, so a second detached run would duplicate the refresh. A
+    standalone ``admissions_only`` completion keeps exactly one detached
+    demographics follow-up. Both workers must show the same pattern.
+    """
+
+    def test_batch_bound_admissions_enqueues_no_demographics_in_both_workers(
+        self,
+    ) -> None:
+        """R1/R3/R4: a successful batch-bound admissions_only run creates the
+        full-sync follow-up but ZERO extra demographics follow-ups in both
+        workers, with non-empty-snapshot clinical effects preserved."""
+        # --- Current worker (batch-bound, non-empty snapshot) ---
+        run_cur = _make_run(
+            "admissions_only", "DGO-CUR", batch=_drained_batch()
+        )
+        before_cur = _clinical_counts()
+        rec_cur = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _current_patches(snapshot=_admissions_snapshot("DGO-CUR")):
+                stack.enter_context(p)
+            with _isolate_current_followups(rec_cur):
+                call_command("process_ingestion_runs")
+        obs_cur = _observable(run_cur, "DGO-CUR")
+        assert _clinical_counts() == (before_cur[0] + 1, before_cur[1] + 2,
+                                      before_cur[2])
+
+        # --- Persistent worker (batch-bound, non-empty snapshot) ---
+        run_per = _make_run(
+            "admissions_only", "DGO-PER", batch=_drained_batch()
+        )
+        before_per = _clinical_counts()
+        rec_per = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _persistent_patches(
+                snapshot=_admissions_snapshot("DGO-PER")
+            ):
+                stack.enter_context(p)
+            with _isolate_persistent_followups(rec_per):
+                call_command("process_ingestion_runs_persistent_session")
+        obs_per = _observable(run_per, "DGO-PER")
+        assert _clinical_counts() == (before_per[0] + 1, before_per[1] + 2,
+                                      before_per[2])
+
+        # R4: identical observable pattern across workers.
+        assert obs_cur == obs_per
+
+        # R1: zero extra demographics follow-up in either worker — the
+        # census batch-owned run is the sole demographics producer.
+        assert rec_cur.demo_calls == []
+        assert rec_per.demo_calls == []
+
+        # R3: full-sync follow-up and clinical effects preserved.
+        assert rec_cur.fullsync_calls == ["called"]
+        assert rec_per.fullsync_calls == ["called"]
+        for obs in (obs_cur, obs_per):
+            assert obs["status"] == "succeeded"
+            assert obs["admissions_seen"] == 2
+            assert obs["admissions_created"] == 2
+            assert obs["patient_exists"] is True
+            assert obs["admission_count"] == 2
+            assert obs["stage_statuses"] == {
+                "admissions_capture": "succeeded"
+            }
+            assert obs["batch_status"] == "succeeded"
+            assert obs["batch_closed"] is True
+
+    def test_standalone_admissions_enqueues_exactly_one_demographics(
+        self,
+    ) -> None:
+        """R2/R3/R4: without a batch, a successful admissions_only run keeps
+        exactly one detached demographics follow-up (plus the full-sync) in
+        both workers, with clinical effects preserved."""
+        # --- Current worker (standalone, non-empty snapshot) ---
+        run_cur = _make_run("admissions_only", "DGS-CUR")
+        rec_cur = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _current_patches(snapshot=_admissions_snapshot("DGS-CUR")):
+                stack.enter_context(p)
+            with _isolate_current_followups(rec_cur):
+                call_command("process_ingestion_runs")
+        obs_cur = _observable(run_cur, "DGS-CUR")
+
+        # --- Persistent worker (standalone, non-empty snapshot) ---
+        run_per = _make_run("admissions_only", "DGS-PER")
+        rec_per = _FollowupRecorder()
+        with ExitStack() as stack:
+            for p in _persistent_patches(
+                snapshot=_admissions_snapshot("DGS-PER")
+            ):
+                stack.enter_context(p)
+            with _isolate_persistent_followups(rec_per):
+                call_command("process_ingestion_runs_persistent_session")
+        obs_per = _observable(run_per, "DGS-PER")
+
+        # R4: identical observable pattern across workers.
+        assert obs_cur == obs_per
+
+        # R2: exactly one detached demographics follow-up per worker.
+        assert rec_cur.demo_calls == ["DGS-CUR"]
+        assert rec_per.demo_calls == ["DGS-PER"]
+
+        # R3: full-sync still follows the most recent admission.
+        assert rec_cur.fullsync_calls == ["called"]
+        assert rec_per.fullsync_calls == ["called"]
+
+        for obs in (obs_cur, obs_per):
+            assert obs["status"] == "succeeded"
+            assert obs["admissions_seen"] == 2
+            assert obs["admissions_created"] == 2
+            assert obs["patient_exists"] is True
+            assert obs["admission_count"] == 2
+            assert obs["stage_statuses"] == {
+                "admissions_capture": "succeeded"
+            }
+            assert obs["batch_status"] is None
+            assert obs["batch_closed"] is None
 
 
 # ===========================================================================

@@ -604,10 +604,12 @@ class Command(BaseCommand):
         # Mark attempt as succeeded (CQM-S3)
         self._mark_latest_attempt_succeeded(run)
 
-        # Auto-enqueue demographics for the patient.
-        # NOTE: these follow-up runs are NOT attached to the census batch
-        # so that the census batch can close independently.
-        if patient is not None:
+        # Auto-enqueue demographics for standalone runs only (RPAP-S3): the
+        # census/recovery batch already owns the single demographics_only run
+        # for each of its patients, so a batch-bound admissions run must not
+        # create a second one. Standalone follow-ups stay detached (batch=None)
+        # so they never interfere with batch closure.
+        if patient is not None and run.batch_id is None:
             demo_run = queue_demographics_only_run(
                 patient_record=patient.patient_source_key,
                 batch=None,
