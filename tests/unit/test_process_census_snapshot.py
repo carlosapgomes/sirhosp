@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from django.core.management.base import CommandError
 from django.utils import timezone
 
 from apps.census.models import (
@@ -11,6 +12,7 @@ from apps.census.models import (
     CensusSnapshot,
     DailyOccupancySummary,
     OccupancyMeasurement,
+    PatientMovement,
 )
 from apps.census.occupancy import OccupancyMaterializationError
 from apps.census.services import (
@@ -740,32 +742,61 @@ class TestProcessCensusSnapshotCompletenessGuard:
         assert result["runs_enqueued"] == 1
         assert result["demographics_runs_enqueued"] == 1
 
-    def test_command_reports_rejection_and_exits_nonzero(self):
-        """Management command reports sector coverage and exits non-zero."""
-        from io import StringIO
+    def test_command_rejection_raises_command_error_not_system_exit(self):
+        """The command signals rejection with CommandError, never SystemExit.
 
+        RPAP-S6: a structured snapshot rejection must cross ``call_command``
+        as a conventional Django CommandError so the orchestrator can classify
+        it as ``processing_failed``. ``SystemExit`` is a BaseException and
+        would escape the orchestrator's ``except Exception`` boundary.
+        """
         from django.core.management import call_command
 
         run = self._make_run_with_sectors(sector_count=39)
-        out = StringIO()
-        err = StringIO()
 
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(CommandError) as exc_info:
             call_command(
                 "process_census_snapshot",
                 "--run-id",
                 str(run.pk),
-                stdout=out,
-                stderr=err,
             )
 
-        assert exc_info.value.code == 1
-        message = err.getvalue()
+        assert not isinstance(exc_info.value, SystemExit)
+        message = str(exc_info.value)
         assert "rejected" in message.lower()
         assert "39" in message
         assert "40" in message
         assert "No batch created" in message
         assert CensusExecutionBatch.objects.count() == 0
+
+    def test_command_rejection_creates_no_batch_runs_or_movements(self):
+        """Rejection via call_command creates zero clinical/operational effects.
+
+        RPAP-S6/R4: a rejected snapshot must not create a CensusExecutionBatch,
+        admissions/demographics IngestionRun or PatientMovement. The service
+        rejects before any side effect; the command boundary must not add any.
+        """
+        from django.core.management import call_command
+
+        run = self._make_run_with_sectors(sector_count=39)
+
+        with pytest.raises(CommandError):
+            call_command(
+                "process_census_snapshot",
+                "--run-id",
+                str(run.pk),
+            )
+
+        assert CensusExecutionBatch.objects.count() == 0
+        assert IngestionRun.objects.filter(status="queued").count() == 0
+        assert not IngestionRun.objects.filter(
+            intent="admissions_only"
+        ).exists()
+        assert not IngestionRun.objects.filter(
+            intent="demographics_only"
+        ).exists()
+        assert Patient.objects.count() == 0
+        assert PatientMovement.objects.count() == 0
 
     def test_command_succeeds_for_complete_snapshot(self):
         """Management command succeeds when the snapshot set is complete."""
@@ -786,6 +817,7 @@ class TestProcessCensusSnapshotCompletenessGuard:
         )
 
         assert "Census snapshot processed" in out.getvalue()
+        assert "Patient movements:" in out.getvalue()
         assert CensusExecutionBatch.objects.count() == 1
 
 

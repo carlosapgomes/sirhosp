@@ -835,6 +835,83 @@ class TestRunSingleCycleExtractionFailure:
 
 
 @pytest.mark.django_db(transaction=True)
+class TestRunSingleCycleProcessingRejected:
+    """RPAP-S6: a processor CommandError becomes a controlled outcome.
+
+    ``process_census_snapshot`` signals snapshot rejection via Django
+    ``CommandError`` (an Exception subclass). The existing ``except Exception``
+    boundary in ``run_single_cycle`` must accept it, classify the cycle as
+    ``processing_failed`` and release the advisory lock — without letting
+    ``SystemExit`` escape the cycle.
+    """
+
+    def _simulate_extraction(self) -> IngestionRun:
+        """Simulate extract_census creating one succeeded census run."""
+        return IngestionRun.objects.create(
+            status="succeeded",
+            intent="census_extraction",
+            queued_at=timezone.now(),
+            processing_started_at=timezone.now(),
+            started_at=timezone.now(),
+            finished_at=timezone.now(),
+        )
+
+    def test_processor_command_error_returns_processing_failed(self):
+        """CommandError from the processor -> processing_failed, no escape."""
+        from apps.census.orchestration import run_single_cycle
+
+        with mock.patch("apps.census.orchestration.call_command") as mock_call:
+            def side_effect(command, **kwargs):
+                if command == "extract_census":
+                    self._simulate_extraction()
+                elif command == "process_census_snapshot":
+                    raise CommandError(
+                        "Census snapshot processing rejected: "
+                        "39 distinct sectors found, minimum required is 40. "
+                        "No batch created and no patient ingestion runs enqueued."
+                    )
+                return None
+            mock_call.side_effect = side_effect
+
+            result = run_single_cycle()
+
+        assert result["cycle_executed"] is True
+        assert result["outcome"] == "processing_failed"
+        assert "CommandError" in result["error"]
+        assert result["batch_id"] is None
+        # The rejection created no clinical or operational effects.
+        assert CensusExecutionBatch.objects.count() == 0
+        assert IngestionRun.objects.filter(status="queued").count() == 0
+        assert not IngestionRun.objects.filter(
+            intent__in=["admissions_only", "demographics_only"]
+        ).exists()
+
+    def test_processing_failed_releases_advisory_lock(self):
+        """The advisory lock is released after a processing rejection."""
+        from apps.census.orchestration import (
+            acquire_orchestrator_lock,
+            release_orchestrator_lock,
+            run_single_cycle,
+        )
+
+        with mock.patch("apps.census.orchestration.call_command") as mock_call:
+            def side_effect(command, **kwargs):
+                if command == "extract_census":
+                    self._simulate_extraction()
+                elif command == "process_census_snapshot":
+                    raise CommandError("Census snapshot processing rejected.")
+                return None
+            mock_call.side_effect = side_effect
+
+            result = run_single_cycle()
+
+        assert result["outcome"] == "processing_failed"
+        # The finally block released the lock, so a new acquisition succeeds.
+        assert acquire_orchestrator_lock() is True
+        release_orchestrator_lock()
+
+
+@pytest.mark.django_db(transaction=True)
 class TestRunSingleCycleAmbiguousRuns:
     """Zero or multiple new extraction runs -> fail safe, no processing."""
 
@@ -969,6 +1046,17 @@ class TestCommandOnceMode:
                     "message": "No new extraction run was identified.",
                 },
                 "AMBIGUOUS RUNS: No new extraction run was identified.",
+            ),
+            (
+                {
+                    "cycle_executed": True,
+                    "outcome": "processing_failed",
+                    "message": (
+                        "Census extraction succeeded but "
+                        "snapshot processing failed."
+                    ),
+                },
+                "UNEXPECTED OUTCOME: Census extraction succeeded but snapshot processing failed.",
             ),
             (
                 {
