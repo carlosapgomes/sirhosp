@@ -904,6 +904,121 @@ curl http://localhost:8000/health/
 docker compose -f compose.yml -f compose.prod.yml ps
 ```
 
+### 6.1 Health check do pipeline de ingestão (RPAP-S5)
+
+O comando one-shot `check_ingestion_pipeline_health` avalia o pipeline
+censo → internações → demografia → full-sync → evoluções com métricas
+estritamente agregadas. É read-only: não cria, altera ou apaga linhas e
+não chama Playwright, rede, subprocesso ou outro comando. A saída contém
+apenas nomes de métricas, contagens, percentuais, durações arredondadas,
+booleanos e reasons allowlisted — nunca identificadores de run/batch/
+paciente/internação/evento, parâmetros, texto clínico, URL ou erro bruto.
+
+- **Exit 0:** pipeline saudável na janela e nos limiares configurados.
+- **`CommandError` (exit 1):** ao menos uma invariante/limiar falhou; a
+  mensagem traz somente códigos fixos e contagens.
+
+#### 6.1.1 Flags e interpretação
+
+| Flag | Default | Significado |
+| --- | ---: | --- |
+| `--window-hours` | `24` | Janela de avaliação em horas (positivo). |
+| `--settling-minutes` | `60` | Tempo mínimo após o fim do run de internações para exigir o full-sync correspondente (não negativo). |
+| `--max-active-age-minutes` | `120` | Idade máxima da run queued/running mais antiga entre intents suportados (positivo). |
+| `--max-full-sync-failure-percent` | `20.0` | Percentual máximo de falhas terminais de full-sync (0..100). |
+| `--min-full-sync-terminal-sample` | `5` | Amostra mínima terminal para a taxa alarmar (positivo). |
+| `--max-movement-age-hours` | desligado | Alarme de frescor da última `PatientMovement` (positivo quando ativo). |
+| `--max-admission-age-hours` | desligado | Alarme de frescor da última atualização de `Admission` (positivo quando ativo). |
+| `--max-event-age-hours` | desligado | Alarme de frescor do último `ClinicalEvent` (positivo quando ativo). |
+
+Invariantes batch-bound (qualquer contagem positiva torna unhealthy):
+
+- `empty_success` — run `admissions_only` batch-bound succeeded com
+  `admissions_seen=0` na janela;
+- `missing_full_sync` — run `admissions_only` batch-bound succeeded não
+  vazio, encerrado há mais de `--settling-minutes`, sem
+  `full_sync`/`full_admission_sync` no mesmo batch+patient;
+- `duplicate_demographics` — mais de um `demographics_only` batch-owned
+  para o mesmo batch+patient na janela.
+
+Limiares:
+
+- `active_queue_age` — a run queued/running suportada mais antiga excede
+  `--max-active-age-minutes`;
+- `full_sync_failure_rate` — amostra terminal ≥
+  `--min-full-sync-terminal-sample` e percentual de falhas acima de
+  `--max-full-sync-failure-percent`; abaixo da amostra mínima o percentual
+  é informativo e não altera o exit;
+- `movement_freshness`, `admission_freshness`, `event_freshness` — ativados
+  somente quando a flag correspondente é fornecida; ausência do dado com a
+  flag ativa também é unhealthy.
+
+#### 6.1.2 Exemplo systemd genérico
+
+```ini
+# /etc/systemd/system/sirhosp-ingestion-health.service
+[Unit]
+Description=SIRHOSP ingestion pipeline health check
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/uv run --no-sync python \
+    manage.py check_ingestion_pipeline_health \
+    --max-movement-age-hours 12 --max-event-age-hours 24
+```
+
+```ini
+# /etc/systemd/system/sirhosp-ingestion-health.timer
+[Unit]
+Description=Run SIRHOSP ingestion health check hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+O exit code 1 é o sinal de alarme: pode alimentar `OnFailure=` de um
+service wrapper ou qualquer monitoramento já existente. **Provider de
+alerta (e-mail, webhook, Prometheus) fica fora do escopo deste change** e
+não é configurado aqui.
+
+#### 6.1.3 Canário, recuperação, drenagem, stop e rollback
+
+- **Canário:** rode o comando por 1–2 semanas em paralelo ao fluxo normal
+  antes de alarmar. Falso positivo esperado de `missing_full_sync` em
+  janela curta é evitado com `--settling-minutes`; taxa em amostra pequena
+  é evitada elevando `--min-full-sync-terminal-sample`.
+- **Recuperação:** quando `empty_success`/`missing_full_sync` alarmarem
+  após um ciclo, planeje primeiro com dry-run (sem mutação):
+
+  ```bash
+  docker compose -f compose.yml -f compose.prod.yml exec -T web \
+    uv run --no-sync python manage.py recover_current_census_admissions
+  ```
+
+  Aplique em lotes pequenos e reavalie entre lotes:
+
+  ```bash
+  docker compose -f compose.yml -f compose.prod.yml exec -T web \
+    uv run --no-sync python manage.py recover_current_census_admissions \
+    --apply --limit 20
+  ```
+
+- **Drenagem:** acompanhe `queue: active=` e `oldest_age_minutes=` na
+  saída do health check; um batch saudável drena com fila em zero e sem
+  `empty_success`/`missing_full_sync` novos.
+- **Stop conditions:** pare o apply se a fila ativa persistir acima do
+  limiar, se novas `empty_success` surgirem após o apply ou se
+  `full_sync_failure_rate` subir após a recuperação.
+- **Rollback:** nenhum run histórico é reaberto; a recuperação cria runs
+  novos em batch próprio. Para reverter, basta não enfileirar novos lotes
+  e aguardar a drenagem; o health check permanece diagnóstico (read-only)
+  durante todo o processo.
+
 ---
 
 ## 7. Stale ingestion run recovery
