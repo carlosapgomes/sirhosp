@@ -1,0 +1,3 @@
+01/01/2026 08:00:00
+Evolucao sintetica SYNTH-LAB-CFC-H1: observacao clinica ficticia gerada em laboratorio para reproducao de timeout por volume e deadline.
+Elaborado por Medico Sintetico Lab, CRM 99999 em: 01/01/2026 08:05

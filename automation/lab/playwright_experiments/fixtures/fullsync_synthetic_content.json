@@ -1,0 +1,75 @@
+{
+  "synthetic_sentinel": "SYNTH-LAB-CFC-H2",
+  "fixtures": [
+    {
+      "id": "h2-invalid-json",
+      "kind": "invalid_json",
+      "validation": "_parse_evolutions_json (JSONDecodeError)",
+      "exception_type": "InvalidJsonError",
+      "description": "SYNTH-LAB-CFC-H2 synthetic truncated JSON payload (unexpected structure)",
+      "content": "{\"admission_key\": \"SYNTH-ADM\", \"happened_at\": ",
+      "expected_reason": "invalid_payload",
+      "control": false
+    },
+    {
+      "id": "h2-root-not-list",
+      "kind": "root_not_list",
+      "validation": "_parse_evolutions_json (root must be a list)",
+      "exception_type": "InvalidJsonError",
+      "description": "SYNTH-LAB-CFC-H2 synthetic JSON object root where a list is required",
+      "content": "{\"type\": \"object\", \"note\": \"SYNTH-LAB-CFC-H2 unexpected root structure\"}",
+      "expected_reason": "invalid_payload",
+      "control": false
+    },
+    {
+      "id": "h2-missing-container",
+      "kind": "missing_container",
+      "validation": "_extract_json_from_container (SnapshotContainerMissingError)",
+      "exception_type": "SnapshotContainerMissingError",
+      "description": "SYNTH-LAB-CFC-H2 synthetic HTML page without the evolution-data container",
+      "content": "<html><body><p>SYNTH-LAB-CFC-H2 no evolution-data container present</p></body></html>",
+      "expected_reason": "invalid_payload",
+      "control": false
+    },
+    {
+      "id": "h2-text-html-response",
+      "kind": "text_html_response",
+      "validation": "assert_pdf_response_signature (content-type text/*)",
+      "exception_type": "EvolutionPdfError",
+      "description": "SYNTH-LAB-CFC-H2 synthetic HTML error page served where a PDF was expected",
+      "content": "<html><body>SYNTH-LAB-CFC-H2 legacy error page</body></html>",
+      "expected_reason": "invalid_payload",
+      "control": false
+    },
+    {
+      "id": "h2-bad-pdf-signature",
+      "kind": "bad_pdf_signature",
+      "validation": "assert_pdf_response_signature (%PDF- signature)",
+      "exception_type": "EvolutionPdfError",
+      "description": "SYNTH-LAB-CFC-H2 synthetic body without the %PDF- signature",
+      "content": "SYNTH-LAB-CFC-H2 body without PDF signature",
+      "expected_reason": "invalid_payload",
+      "control": false
+    },
+    {
+      "id": "h2-empty-pdf-attribute",
+      "kind": "empty_pdf_attribute",
+      "validation": "EvolutionPdfFlow (empty PDF object data attribute)",
+      "exception_type": "EvolutionPdfError",
+      "description": "SYNTH-LAB-CFC-H2 empty data attribute on the synthetic PDF object",
+      "content": "",
+      "expected_reason": "invalid_payload",
+      "control": false
+    },
+    {
+      "id": "h2-valid-control",
+      "kind": "valid_control",
+      "validation": "none (control: valid synthetic payload parses)",
+      "exception_type": null,
+      "description": "SYNTH-LAB-CFC-H2 control: valid synthetic evolution JSON list",
+      "content": "[{\"admission_key\": \"SYNTH-ADM-1\", \"happened_at\": \"2026-01-01T08:00:00\", \"event_type\": \"medical\", \"content\": \"SYNTH-LAB-CFC-H2 valid synthetic evolution\", \"profession\": \"Medico Sintetico Lab\"}]",
+      "expected_reason": null,
+      "control": true
+    }
+  ]
+}
