@@ -39,62 +39,58 @@ census cycle only when ingestion work is drained.
 ### Requirement: Orchestrator executes one safe census cycle
 
 The orchestrator SHALL execute a safe census cycle by running census extraction
-and then processing the snapshot produced by that extraction only when the
-extraction is complete enough for operational use. The one-shot management
-command SHALL return a nonzero process status when the cycle fails, is
-incomplete, is ambiguous, or produces an unknown outcome.
+and then processing only the snapshot produced by that complete extraction. A
+processing rejection SHALL be represented as a controlled failed outcome and
+MUST NOT terminate the loop with `SystemExit`.
 
 #### Scenario: Successful single cycle
 
 - **WHEN** the orchestrator is asked to run one cycle
-- **AND** the queue is drained
-- **AND** the cooldown interval has elapsed
+- **AND** the queue is drained and cooldown elapsed
 - **AND** `extract_census` completes with at least 40 distinct sectors
-- **THEN** it runs `extract_census`
-- **AND** it identifies exactly one new successful `census_extraction` run
-- **AND** it runs `process_census_snapshot` with that run id
-- **AND** it reports the created batch id and enqueued counts when available
-- **AND** the one-shot command returns process status zero
+- **THEN** it identifies exactly one new successful census extraction run
+- **AND** runs `process_census_snapshot` with that run id
+- **AND** reports success and the one-shot command returns status zero
 
 #### Scenario: Extraction fails
 
-- **WHEN** the orchestrator runs one cycle
-- **AND** `extract_census` fails
-- **THEN** it MUST NOT run `process_census_snapshot`
-- **AND** the one-shot command reports the failure and returns a nonzero process
-  status without enqueuing a new census batch
+- **WHEN** `extract_census` fails
+- **THEN** the orchestrator does not run `process_census_snapshot`
+- **AND** reports `extraction_failed` and one-shot returns nonzero
 
 #### Scenario: Extraction is incomplete
 
-- **WHEN** the orchestrator runs one cycle
-- **AND** `extract_census` detects fewer than 40 distinct sectors
-- **THEN** it MUST treat the cycle as an extraction failure
-- **AND** it MUST NOT run `process_census_snapshot`
-- **AND** the one-shot command reports incomplete coverage and returns a nonzero
-  process status
+- **WHEN** `extract_census` detects fewer than 40 distinct sectors
+- **THEN** it does not run `process_census_snapshot`
+- **AND** reports extraction failure and one-shot returns nonzero
 
 #### Scenario: Extraction run is ambiguous
 
-- **WHEN** `extract_census` returns successfully
-- **AND** the orchestrator cannot identify exactly one new successful
-  `census_extraction` run from the cycle
-- **THEN** it MUST NOT run `process_census_snapshot`
-- **AND** the one-shot command reports the ambiguity and returns a nonzero
-  process status
+- **WHEN** extraction returns successfully but does not produce exactly one new
+  successful census extraction run
+- **THEN** snapshot processing is not called
+- **AND** the cycle reports ambiguity and one-shot returns nonzero
+
+#### Scenario: Snapshot processing rejects the selected run
+
+- **WHEN** extraction succeeds and `process_census_snapshot` raises
+  `CommandError`
+- **THEN** the cycle returns the controlled outcome `processing_failed`
+- **AND** no unhandled `SystemExit` terminates one-shot or loop execution
+- **AND** no clinical batch or patient ingestion run is created from the
+  rejected snapshot
 
 #### Scenario: One-shot cycle is safely blocked
 
-- **WHEN** the one-shot command is blocked by active work or observes that
-  another orchestrator holds the coordination lock
-- **THEN** it does not start extraction
-- **AND** it reports the safe no-work condition
-- **AND** it returns process status zero
+- **WHEN** active work or the coordination lock safely blocks a one-shot cycle
+- **THEN** extraction is not started
+- **AND** the command reports no work and returns status zero
 
 #### Scenario: One-shot cycle returns an unknown outcome
 
-- **WHEN** the one-shot command receives an outcome outside its known taxonomy
+- **WHEN** one-shot receives an outcome outside its known taxonomy
 - **THEN** it reports the unexpected outcome
-- **AND** it returns a nonzero process status
+- **AND** returns nonzero
 
 ### Requirement: Orchestrator prevents concurrent execution
 
@@ -224,7 +220,7 @@ dedicated runtime service for continuous execution, while preserving manual
 - **WHEN** an operator needs to inspect eligibility or run a single controlled
   cycle
 - **THEN** the documented commands preserve `run_adaptive_census_cycles
-  --dry-run` and `run_adaptive_census_cycles --once`
+--dry-run` and `run_adaptive_census_cycles --once`
 - **AND** the commands use the dedicated runtime when volatile storage behavior
   is being validated
 

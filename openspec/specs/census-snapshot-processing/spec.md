@@ -60,7 +60,9 @@ snapshot.
 ### Requirement: Snapshot processing rejects incomplete census extraction
 
 The system SHALL refuse to create a `CensusExecutionBatch` from census snapshot
-rows that do not meet the minimum sector coverage requirement.
+rows that do not meet the minimum sector coverage requirement, and its
+management command SHALL signal rejection with Django `CommandError` rather
+than process-level `SystemExit`.
 
 #### Scenario: Explicit run with enough sectors is processed
 
@@ -77,7 +79,8 @@ rows that do not meet the minimum sector coverage requirement.
 - **THEN** the system MUST NOT create a `CensusExecutionBatch`
 - **AND** the system MUST NOT enqueue admissions or demographics runs from that
   incomplete snapshot
-- **AND** the command reports the insufficient sector coverage
+- **AND** the command raises a sanitized `CommandError`
+- **AND** no `SystemExit` escapes through `call_command`
 
 #### Scenario: Most recent snapshot path applies the same guard
 
@@ -86,7 +89,7 @@ rows that do not meet the minimum sector coverage requirement.
 - **THEN** the system MUST NOT create a `CensusExecutionBatch`
 - **AND** the system MUST NOT enqueue admissions or demographics runs from that
   incomplete snapshot
-- **AND** the command reports the insufficient sector coverage
+- **AND** the command raises a sanitized `CommandError`
 
 ### Requirement: Complete snapshot processing materializes occupancy history
 
