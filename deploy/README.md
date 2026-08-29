@@ -1031,6 +1031,17 @@ manutenção.
 
 #### 6.2.1 Caracterização em produção (one-shot read-only)
 
+**Pré-requisito de versão:** o command `characterize_fullsync_failures`
+existirá em produção somente a partir da imagem `v0.1.0-rc.14` (o change
+CFC é posterior à tag `v0.1.0-rc.13`). Antes de executar, confirme a
+disponibilidade sem tocar dados:
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml exec -T web \
+  uv run --no-sync python manage.py help characterize_fullsync_failures \
+  >/dev/null && echo AVAILABLE
+```
+
 Captura a saída agregada do command para um arquivo:
 
 ```bash
