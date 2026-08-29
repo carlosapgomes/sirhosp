@@ -1117,6 +1117,58 @@ operacional (`apps/`).
 comando de escrita; caracterização, relatório, validação e laboratório
 são read-only e não enfileiram, reabrem ou alteram runs de produção.
 
+### 6.3 Correção do esgotamento de tentativas de full-sync (FX)
+
+O change `fix-fullsync-failure-exhaustion` corrige a queima de tentativas
+da coorte fail-only de full-sync (causa registrada na ADR-0008) sem mudar
+taxonomia, mensagens persistidas, limiares ou contratos do health check.
+Não há comando novo, nem contrato novo, nem flag `--apply`: a observação
+pós-rollout usa somente os comandos das seções 6.1 e 6.2.
+
+#### 6.3.1 O que mudou operacionalmente
+
+1. **Fail-fast de payload determinístico:** falhas com reason
+   `invalid_payload` (validação determinística de payload) terminam o run
+   `failed` na primeira tentativa, registram `FinalRunFailure`
+   (`attempts_exhausted` refletindo a contagem corrente) e fecham o batch
+   — sem requeue. A decisão vem da política pura
+   `should_retry_failure_reason`, aplicada pelos dois workers
+   (`process_ingestion_runs` e
+   `process_ingestion_runs_persistent_session`); `timeout` e demais
+   reasons mantêm o retry com backoff de +60s (inalterado).
+2. **Orçamento por volume no worker persistente:** a extração de
+   evoluções por janela de gap usa `evolution_window_budget_seconds`
+   (base 120s + 2s por dia de span da janela, teto 600s) em vez do
+   `timeout=120` fixo. Janelas curtas ficam inalteradas (base 120s);
+   janelas longas legítimas ganham tempo proporcional; volume acima do
+   teto continua falhando `timeout` (comportamento bounded preservado).
+   O worker clássico mantém o orçamento fixo (fora da topologia de
+   produção; backlog documentado no design do change).
+
+#### 6.3.2 Como observar após o rollout
+
+A correção entra em vigor quando a imagem com o change é implantada; antes
+do rollout, os agregados servem de baseline (canário da seção 6.1.3). Use
+os comandos existentes:
+
+- **Health check (`check_ingestion_pipeline_health`, seção 6.1):** o campo
+  `full_sync_failure_reasons` deve passar a mostrar menos tentativas para
+  `invalid_payload` (fail-fast na 1ª tentativa) e `failure_percent` deve
+  cair à medida que a queima semanal de tentativas reduz.
+- **Caracterização (`characterize_fullsync_failures`, seção 6.2):** os
+  agregados `attempts_median` e `attempts_max` da coorte fail-only devem
+  cair após o rollout (runs determinísticos terminam com 1 tentativa) e
+  os runs fail-fast aparecem com `FinalRunFailure.attempts_exhausted=1`.
+- **Stage metrics (seção 6.2):** para janelas longas legítimas, a duração
+  mediana/p90 de `evolution_extraction` pode subir até o teto de 600s —
+  o esperado é que o p90 convirja para valores abaixo do teto conforme
+  as janelas longas deixam de estourar o orçamento fixo.
+
+**Rollback e escopo:** a correção é exclusivamente de comportamento dos
+workers; reverter a imagem para a versão anterior restaura o retry cego e
+o orçamento fixo. Nenhum run histórico é mutado ou reaberto por esta
+correção.
+
 ## 7. Stale ingestion run recovery
 
 ### 7.1 Why job-level stale recovery exists
