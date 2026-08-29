@@ -1021,6 +1021,91 @@ não é configurado aqui.
 
 ---
 
+### 6.2 Caracterização da coorte fail-only de full-sync (CFC)
+
+O change `characterize-fullsync-chronic-failures` é **diagnóstico
+read-only**: nenhum comando deste change cria, altera ou apaga linhas,
+não existe flag `--apply` e não há qualquer mutação em produção. Os
+passos abaixo podem ser executados sob demanda, sem janela de
+manutenção.
+
+#### 6.2.1 Caracterização em produção (one-shot read-only)
+
+Captura a saída agregada do command para um arquivo:
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py characterize_fullsync_failures \
+  --window-hours 168 --min-attempts 3 > /tmp/cfc-characterization.txt
+```
+
+| Flag | Default | Significado |
+| --- | ---: | --- |
+| `--window-hours` | `168` | Janela de caracterização em horas (positivo). |
+| `--min-attempts` | `3` | Mínimo de runs terminais por paciente para entrar na coorte fail-only (exclui ruído de alta recente). |
+| `--max-per-stage-rows` | `5000` | Teto de segurança de linhas de perfil por estágio (positivo). |
+
+Interpretação da saída: `cohort:` (pacientes fail-only, runs falhos,
+mediana/máximo de tentativas, idade da primeira/última falha),
+`cohort_failure_reasons:` e `contrast_failure_reasons:` (distribuição de
+reasons da coorte e do contraste fail-then-ok), `stage_profiles:` e
+`terminal_failing_stages:` (duração mediana/p90 por estágio e estágio
+terminal falho) e `hourly_histogram:` (24 buckets por hora UTC). A saída
+é estritamente agregada e o exit é sempre 0 quando a caracterização
+completa — diagnóstico, não gate.
+
+Exemplo systemd opcional (uma execução por dia):
+
+```ini
+# /etc/systemd/system/sirhosp-cfc-characterization.service
+[Unit]
+Description=SIRHOSP full-sync fail-only cohort characterization (read-only)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -lc 'docker compose -f /opt/sirhosp/compose.yml -f /opt/sirhosp/compose.prod.yml exec -T web uv run --no-sync python manage.py characterize_fullsync_failures --window-hours 168 > /var/log/sirhosp/cfc-characterization.txt'
+```
+
+#### 6.2.2 Relatório e validação da ADR de decisão
+
+Gera o relatório Markdown com as cinco seções fixas (coorte, reasons,
+timing por estágio, histograma horário, contraste) e valida a ADR de
+decisão por regras objetivas (veredito com evidência, recomendação
+presente, zero identidade/conteúdo clínico):
+
+```bash
+docker compose -f compose.yml -f compose.prod.yml exec -T web \
+  uv run --no-sync python manage.py generate_fullsync_failure_report \
+  --input /tmp/cfc-characterization.txt \
+  --output /tmp/cfc-characterization-report.md \
+  --check-adr docs/adr/ADR-0008-fullsync-failure-characterization-decision.md
+```
+
+O gerador falha fechado (exit 1, mensagem sanitizada) se a entrada
+contiver sentinela de identidade ou estiver malformada.
+
+#### 6.2.3 Laboratório sintético (fora de produção)
+
+Pré-requisitos: `uv sync` e Python 3.12. O harness usa apenas fakes
+duck-typed e dados 100% sintéticos — nenhum browser, nenhuma rede,
+nenhum dado real.
+
+```bash
+PYTHONPATH=/app uv run --no-sync python \
+  automation/lab/playwright_experiments/fullsync_failure_lab.py \
+  --output /tmp/cfc-verdicts.json
+```
+
+Artefatos: `verdicts.json` (consolidado, com sentinela sintética e um
+veredito por experimento H1/H2) e as fixtures em
+`automation/lab/playwright_experiments/fixtures/` (conteúdo e bloco de
+relatório sintéticos). O harness nunca é importado por código
+operacional (`apps/`).
+
+**Sem mutação:** este change não possui flag `--apply` nem qualquer
+comando de escrita; caracterização, relatório, validação e laboratório
+são read-only e não enfileiram, reabrem ou alteram runs de produção.
+
 ## 7. Stale ingestion run recovery
 
 ### 7.1 Why job-level stale recovery exists
