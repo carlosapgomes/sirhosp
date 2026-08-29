@@ -867,7 +867,7 @@ _FAILURE_BOUNDARIES = [
         "invalid_payload",
         lambda: InvalidJsonError("bad json"),
         "invalid_payload", False, False,
-        id="invalid-payload-retryable",
+        id="invalid-payload-fail-fast",
     ),
     pytest.param(
         "retryable_failure",
@@ -948,7 +948,10 @@ class TestSharedFailureBoundaryParity:
             assert run.timed_out is expected_timed_out, boundary_id
 
         # --- Mode-specific lifecycle parity ---
-        if terminal:
+        # FX-S1: invalid_payload is deterministic and terminates fail-fast
+        # on the first attempt even when retry attempts remain.
+        expected_terminal = terminal or boundary_id == "invalid_payload"
+        if expected_terminal:
             for run in (run_cur, run_per):
                 assert run.batch is not None, boundary_id
                 assert run.status == "failed", boundary_id
@@ -1117,12 +1120,14 @@ class TestEmptyBatchBoundAdmissionsParity:
 
         # --- Fail-before-persist with the shared taxonomy ---
         for snap in (snap_cur, snap_per):
-            # Retryable failure, NOT a success with admissions_seen=0.
-            assert snap["status"] == "queued"
+            # FX-S1: deterministic invalid_payload fails fast on the first
+            # attempt (terminal, no retry burning) — NOT a success with
+            # admissions_seen=0.
+            assert snap["status"] == "failed"
             assert snap["failure_reason"] == "invalid_payload"
             assert snap["timed_out"] is False
-            assert snap["next_retry_at_present"] is True
-            assert snap["finished"] is False
+            assert snap["next_retry_at_present"] is False
+            assert snap["finished"] is True
             # No positive counter and no persisted clinical row.
             assert snap["admissions_seen"] == 0
             assert snap["admissions_created"] == 0
@@ -1131,12 +1136,12 @@ class TestEmptyBatchBoundAdmissionsParity:
             assert snap["patient_exists"] is False
             assert snap["admission_count"] == 0
             # Existing failure machinery: attempt failed, admissions stage
-            # failed (never succeeded), batch stays open.
+            # failed (never succeeded), drained batch closes as failed.
             assert snap["attempt_status"] == "failed"
             assert snap["attempt_failure_reason"] == "invalid_payload"
             assert snap["attempt_timed_out"] is False
             assert snap["stage_statuses"] == {"admissions_capture": "failed"}
-            assert snap["batch_status"] == "running"
+            assert snap["batch_status"] == "failed"
 
         # Cross-worker observable parity, including sanitized error text.
         assert snap_cur == snap_per
@@ -1196,16 +1201,19 @@ class TestEmptyBatchBoundAdmissionsParity:
         assert _clinical_counts() == before_per
 
         for snap in (snap_cur, snap_per):
-            assert snap["status"] == "queued"
+            # FX-S1: deterministic invalid_payload fails fast on the first
+            # attempt (terminal, no retry burning).
+            assert snap["status"] == "failed"
             assert snap["failure_reason"] == "invalid_payload"
             assert snap["timed_out"] is False
-            assert snap["next_retry_at_present"] is True
+            assert snap["next_retry_at_present"] is False
+            assert snap["finished"] is True
             assert snap["patient_exists"] is False
             assert snap["admission_count"] == 0
             # Capture failed BEFORE gap planning: no other stage ran.
             assert snap["stage_statuses"] == {"admissions_capture": "failed"}
             assert snap["attempt_status"] == "failed"
-            assert snap["batch_status"] == "running"
+            assert snap["batch_status"] == "failed"
 
         assert snap_cur == snap_per
         assert adapter_per.cleanup_after_failure.called

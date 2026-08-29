@@ -401,9 +401,16 @@ class Command(BaseCommand):
         # PSW-S17 R4 (final closure): strict normalized error_message
         # derived solely from the failure category constant. No str(exc)
         # is persisted for any exception class.
-        from apps.ingestion.run_lifecycle import safe_error_message
+        from apps.ingestion.run_lifecycle import (
+            safe_error_message,
+            should_retry_failure_reason,
+        )
 
         safe_msg = safe_error_message(exc, failure_reason)
+        # FX-S1: deterministic payload failures (invalid_payload) must not
+        # burn retry attempts — they cannot heal with a retry. The decision
+        # lives in the shared run_lifecycle policy, never inline here.
+        retryable = should_retry_failure_reason(failure_reason)
 
         # Update the existing attempt record (created in _process_run)
         attempt = (
@@ -428,7 +435,7 @@ class Command(BaseCommand):
                 ]
             )
 
-        if run.attempt_count < run.max_attempts:
+        if run.attempt_count < run.max_attempts and retryable:
             # Requeue with backoff (CQM-S3: 60s fixed)
             run.status = "queued"
             run.next_retry_at = now + timedelta(seconds=60)
@@ -479,11 +486,20 @@ class Command(BaseCommand):
             # CQM-S4: Attempt to close batch after terminal failure
             self._try_close_batch(run.batch)
 
-            self.stderr.write(
-                f"  Run #{run.pk} failed permanently "
-                f"(attempt {run.attempt_count}/{run.max_attempts}, "
-                f"reason={failure_reason})"
-            )
+            if retryable:
+                self.stderr.write(
+                    f"  Run #{run.pk} failed permanently "
+                    f"(attempt {run.attempt_count}/{run.max_attempts}, "
+                    f"reason={failure_reason})"
+                )
+            else:
+                # FX-S1: deterministic fail-fast log — aggregate-only (run
+                # label + reason), distinct from the requeue line, no
+                # str(exc) and no identifiers.
+                self.stderr.write(
+                    f"  Run #{run.pk} failed deterministically "
+                    f"(reason={failure_reason}), fail-fast"
+                )
 
     def _process_run(
         self,

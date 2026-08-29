@@ -500,6 +500,12 @@ class TestCrossWorkerFailureParityMatrix:
         run_persistent.refresh_from_db()
 
         # --- Parity assertions ---
+        # FX-S1: invalid_payload is deterministic — it terminates fail-fast
+        # on the CURRENT attempt in BOTH modes (retryable and terminal).
+        # The current attempt number still comes from the seeded mode.
+        expected_attempt_number = 1 if mode == "retryable" else 3
+        expected_mode = "terminal" if category_id == "invalid_payload" else mode
+
         # Classification on both run and latest attempt must match.
         assert run_current.failure_reason == expected_reason
         assert run_current.timed_out is expected_timed_out
@@ -510,7 +516,6 @@ class TestCrossWorkerFailureParityMatrix:
         # PSW-S17 contract freeze (R1): independently assert attempt
         # lifecycle values for BOTH workers and BOTH modes, not only via
         # worker-to-worker equality.
-        expected_attempt_number = 1 if mode == "retryable" else 3
         for run in (run_current, run_persistent):
             latest = (
                 IngestionRunAttempt.objects.filter(run=run)
@@ -526,7 +531,7 @@ class TestCrossWorkerFailureParityMatrix:
             assert latest.attempt_number == expected_attempt_number
 
         # Mode-specific parity.
-        if mode == "retryable":
+        if expected_mode == "retryable":
             for run in (run_current, run_persistent):
                 assert run.status == "queued"
                 assert run.next_retry_at is not None
@@ -639,7 +644,7 @@ class TestCrossWorkerFailureParityMatrix:
             assert stage.finished_at is not None
 
         # Idempotency: re-finalizing the persistent run does not duplicate.
-        if mode == "terminal":
+        if expected_mode == "terminal":
             # D15: explicit FinalRunFailure field snapshot.
             for run in (run_current, run_persistent):
                 ff = FinalRunFailure.objects.filter(run=run).first()

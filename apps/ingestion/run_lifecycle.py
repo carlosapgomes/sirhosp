@@ -109,6 +109,41 @@ def classify_failure_reason(exc: Exception) -> tuple[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# Retry policy (FX-S1): deterministic payload failures must not burn attempts
+# ---------------------------------------------------------------------------
+
+
+_DETERMINISTIC_FAILURE_REASONS: frozenset[str] = frozenset({"invalid_payload"})
+"""Failure reasons that are deterministic by construction (FX-S1).
+
+A deterministic payload failure cannot heal with retries: the same
+input validates the same way on every attempt. Retrying it only burns
+``max_attempts`` executions (session + download + parse) against the
+legacy system. ``timeout`` and every other reason stay retryable.
+"""
+
+
+def should_retry_failure_reason(failure_reason: str) -> bool:
+    """Decide whether a failure reason is worth retrying (FX-S1).
+
+    Pure policy shared by both ingestion workers: ``invalid_payload``
+    (deterministic payload invalidity) returns ``False`` so the run ends
+    fail-fast on the first attempt; any other reason (including
+    ``timeout`` and empty) returns ``True``, preserving the existing
+    retry/backoff behavior.
+
+    Args:
+        failure_reason: Normalized reason from
+            :func:`classify_failure_reason` ("" allowed).
+
+    Returns:
+        ``True`` when the run should be requeued, ``False`` for a
+        deterministic fail-fast.
+    """
+    return failure_reason not in _DETERMINISTIC_FAILURE_REASONS
+
+
+# ---------------------------------------------------------------------------
 # Safe failure-line text (R4)
 # ---------------------------------------------------------------------------
 

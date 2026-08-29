@@ -2446,7 +2446,7 @@ class TestFullSyncPdfFallback:
         assert event.patient_id == patient.pk
         assert event.patient.patient_source_key == "FS001"
 
-    def test_full_sync_pdf_failure_is_recoverable_and_cleans_tab(self) -> None:
+    def test_full_sync_pdf_failure_fails_fast_and_cleans_tab(self) -> None:
         from apps.ingestion.extractors.persistent_evolution_pdf import (
             EvolutionPdfError,
         )
@@ -2465,9 +2465,11 @@ class TestFullSyncPdfFallback:
             call_command("process_ingestion_runs_persistent_session")
 
         run.refresh_from_db()
-        # Recoverable data-level failure: requeued for retry (attempts remain).
-        assert run.status == "queued"
+        # FX-S1: deterministic invalid_payload fails fast on the first
+        # attempt (terminal, no retry burning).
+        assert run.status == "failed"
         assert run.failure_reason == "invalid_payload"
+        assert run.next_retry_at is None
         # Sanitized: no secrets or raw payloads leaked into the error message.
         lowered = (run.error_message or "").lower()
         for secret in ("password", "cookie", "jsessionid", "authorization"):

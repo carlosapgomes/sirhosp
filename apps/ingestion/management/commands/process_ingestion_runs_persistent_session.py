@@ -2140,9 +2140,16 @@ class Command(BaseCommand):
         # PSW-S17 R4 (final closure): strict normalized error_message
         # derived solely from the failure category constant. No str(exc)
         # is persisted for any exception class.
-        from apps.ingestion.run_lifecycle import safe_error_message
+        from apps.ingestion.run_lifecycle import (
+            safe_error_message,
+            should_retry_failure_reason,
+        )
 
         safe_msg = safe_error_message(exc, failure_reason)
+        # FX-S1: deterministic payload failures (invalid_payload) must not
+        # burn retry attempts — they cannot heal with a retry. The decision
+        # lives in the shared run_lifecycle policy, never inline here.
+        retryable = should_retry_failure_reason(failure_reason)
 
         # Update the existing attempt record
         attempt = (
@@ -2167,7 +2174,7 @@ class Command(BaseCommand):
                 ]
             )
 
-        if run.attempt_count < run.max_attempts:
+        if run.attempt_count < run.max_attempts and retryable:
             run.status = "queued"
             run.next_retry_at = now + timedelta(seconds=60)
             run.failure_reason = failure_reason
@@ -2211,8 +2218,17 @@ class Command(BaseCommand):
 
             record_final_run_failure(run)
             self._try_close_batch(run.batch)
-            self.stderr.write(
-                f"  {self._run_label(run)} failed permanently "
-                f"(attempt {run.attempt_count}/{run.max_attempts}, "
-                f"reason={failure_reason})"
-            )
+            if retryable:
+                self.stderr.write(
+                    f"  {self._run_label(run)} failed permanently "
+                    f"(attempt {run.attempt_count}/{run.max_attempts}, "
+                    f"reason={failure_reason})"
+                )
+            else:
+                # FX-S1: deterministic fail-fast log — aggregate-only (run
+                # label + reason), distinct from the requeue line, no
+                # str(exc) and no identifiers.
+                self.stderr.write(
+                    f"  {self._run_label(run)} failed deterministically "
+                    f"(reason={failure_reason}), fail-fast"
+                )
