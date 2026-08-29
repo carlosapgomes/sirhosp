@@ -144,6 +144,7 @@ from apps.ingestion.extractors.legacy_navigation import (
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
     EvolutionPdfError,
+    evolution_window_budget_seconds,
 )
 from apps.ingestion.extractors.persistent_extraction_adapter import (
     PersistentExtractionAdapter,
@@ -1962,7 +1963,9 @@ class Command(BaseCommand):
                     patient_record=patient_record,
                     start_date=window["start_date"],
                     end_date=window["end_date"],
-                    timeout=120,
+                    timeout=evolution_window_budget_seconds(
+                        window["start_date"], window["end_date"]
+                    ),
                 )
                 all_evolutions.extend(evolutions)
         except (InvalidJsonError, SnapshotContainerMissingError, EvolutionPdfError) as exc:

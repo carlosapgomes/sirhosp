@@ -45,7 +45,7 @@ import logging
 import math
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -151,6 +151,93 @@ def _bound_ms(deadline_s: float, default_ms: int) -> int:
     Expired deadline raises typed timeout (never returns zero).
     """
     return min(default_ms, _remaining_ms(deadline_s))
+
+
+# ---------------------------------------------------------------------------
+# FX-S2 (D2/H1): per-window evolution extraction budget.
+# Pure, deterministic, side-effect-free: no Django, no I/O, no clock. Lives in
+# this module next to the deadline primitives so the persistent worker can
+# import it without touching the flow's bounded semantics (D14 intact).
+# ---------------------------------------------------------------------------
+
+_EVOLUTION_BUDGET_INVALID_DATE_MESSAGE = (
+    "Invalid date window for the evolution budget"
+)
+"""Constant sanitized message for unparseable/inverted window dates.
+
+    Never echoes the input values (PSW-S17 R4 sanitization rule).
+"""
+
+_EVOLUTION_BUDGET_INVALID_PARAMETER_MESSAGE = (
+    "Invalid evolution budget parameters"
+)
+"""Constant sanitized message for non-positive budget arguments.
+
+    Never echoes the offending value (PSW-S17 R4 sanitization rule).
+"""
+
+
+def evolution_window_budget_seconds(
+    start_date: str,
+    end_date: str,
+    *,
+    base_seconds: int = 120,
+    seconds_per_day: int = 2,
+    cap_seconds: int = 600,
+) -> int:
+    """Return a bounded extraction budget (seconds) for one gap window.
+
+    FX-S2 (D2/H1 of ``fix-fullsync-failure-exhaustion``): the persistent
+    evolution PDF flow shares one monotonic deadline across all phases, and
+    production evidence (ADR-0008) showed the fixed 120s budget is exhausted
+    by long legitimate evolution lists (p90 = 124s). This pure function
+    scales the budget linearly by the window span (days), with a configurable
+    cap, so short windows keep the base behavior and oversized volumes remain
+    bounded (``EvolutionPdfTimeoutError`` -> ``timeout``).
+
+    Args:
+        start_date: Window start in public ISO ``YYYY-MM-DD``.
+        end_date: Window end in public ISO ``YYYY-MM-DD`` (must be >= start).
+        base_seconds: Budget for a zero-span (same-day) window. Must be a
+            positive integer.
+        seconds_per_day: Linear growth per day of window span. Must be a
+            positive integer.
+        cap_seconds: Hard ceiling for the scaled budget. Must be a positive
+            integer.
+
+    Returns:
+        ``min(cap_seconds, base_seconds + seconds_per_day * span_days)``
+        where ``span_days`` is the number of days between ``start_date`` and
+        ``end_date`` (0 for the same day -> ``base_seconds``).
+
+    Raises:
+        EvolutionPdfError: Sanitized constant message when a date is
+            unparseable, the window is inverted, or a budget argument is not
+            a positive integer. Inputs are never echoed.
+    """
+    parameters = (
+        ("base_seconds", base_seconds),
+        ("seconds_per_day", seconds_per_day),
+        ("cap_seconds", cap_seconds),
+    )
+    for _name, value in parameters:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise EvolutionPdfError(
+                _EVOLUTION_BUDGET_INVALID_PARAMETER_MESSAGE
+            )
+    try:
+        start = date.fromisoformat(start_date)
+        end = date.fromisoformat(end_date)
+    except (ValueError, TypeError):
+        raise EvolutionPdfError(
+            _EVOLUTION_BUDGET_INVALID_DATE_MESSAGE
+        ) from None
+    if end < start:
+        raise EvolutionPdfError(
+            _EVOLUTION_BUDGET_INVALID_DATE_MESSAGE
+        ) from None
+    span_days = (end - start).days
+    return min(cap_seconds, base_seconds + seconds_per_day * span_days)
 
 
 # ===========================================================================
