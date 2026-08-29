@@ -23,6 +23,16 @@ evidência (somente agregados):
 3. **Execução do command read-only em ambiente controlado (CFC-S4):** exit
    0, contagens de models antes/depois idênticas e saída estritamente
    agregada (relatório de caracterização com as cinco seções fixas).
+4. **One-shot em produção (`v0.1.0-rc.14`, 2026-08-29, janela 7d):** coorte
+   fail-only de **23 pacientes**, 453 runs falhos, mediana de 15 tentativas
+   por paciente (máximo 112), reasons `timeout`=382 (84%) e
+   `invalid_payload`=71 (16%); **estágio terminal falho =
+   `evolution_extraction` em 100% dos 453 runs**; perfis por estágio:
+   `evolution_extraction` mediana 43,6s / p90 124,0s contra
+   `admissions_capture` 9,6s / 14,1s; histograma horário achatado (sem
+   pico); contraste fail-then-ok na mesma janela: 1.477 falhas recuperadas
+   (`timeout`=883, `invalid_payload`=594). ADR validada dentro do container
+   de produção (`decision ADR valid`).
 
 Regra não negociável: este documento contém somente agregados. Nenhum
 identificador de paciente, run, parâmetro, texto clínico, URL ou erro
@@ -93,11 +103,11 @@ Rastreabilidade: ADR-0008 (este documento) e o change
 ### Negativas / Trade-offs
 
 - Fixtures sintéticas não reproduzem integralmente o ambiente legado; a
-  distribuição exata entre as duas causas em produção permanece hipótese
-  residual até a execução do one-shot read-only do command em produção
-  (pendência operacional, comando no runbook §6.2.1).
+  distribuição exata entre as duas causas por paciente permanece
+  hipótese residual (o one-shot de produção agregou a coorte, sem
+  identificação individual por causa).
 - Deadline progressivo pode aumentar o tempo de extração por run em listas
-  longas legítimas.
+  longas legítimas (mediana atual de 43,6s por `evolution_extraction`).
 
 ## Validação
 
