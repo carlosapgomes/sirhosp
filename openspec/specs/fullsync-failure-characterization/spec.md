@@ -1,8 +1,13 @@
 # fullsync-failure-characterization Specification
 
 ## Purpose
-TBD - created by archiving change characterize-fullsync-chronic-failures. Update Purpose after archive.
+
+Characterizes the chronic full-sync failure cohort through read-only
+aggregates and synthetic lab reproduction, producing a decision artifact
+(ADR) that recommends the fix with proven cause.
+
 ## Requirements
+
 ### Requirement: Chronic full-sync failure cohort is characterizable through read-only aggregates
 
 The system SHALL expose a Django management command that characterizes the
@@ -85,4 +90,3 @@ verdicts into a decision artifact that recommends the corrective change.
 - **AND** recommends the corrective change to open, or the next experiment
   when no hypothesis is confirmed
 - **AND** contains no patient identifiers or clinical content
-
