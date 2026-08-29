@@ -9,3 +9,4 @@
 - [ADR-0005 — Duas realidades em /beds: capacidade oficial e posições do legado](ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado.md)
 - [ADR-0006 — Ocupação v4 acionável: conflitos tipados, elegibilidade com ressalvas e lista única em /beds](ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica.md)
 - [ADR-0007 — Ocupação v5 por pacientes identificados e apresentação de /beds](ADR-0007-ocupacao-v5-pacientes-identificados.md)
+- [ADR-0008 — Decisão de correção da coorte fail-only de full-sync](ADR-0008-fullsync-failure-characterization-decision.md)
