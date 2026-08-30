@@ -858,32 +858,140 @@ def open_internacao_detail(
     page.wait_for_timeout(_bound_ms(deadline_s, 1500))
 
 
-def click_evolucao(page: Any, *, timeout_ms: int | None = None) -> None:
-    """Click the 'Evolução' button inside ``frame_pol``.
+# ---------------------------------------------------------------------------
+# HTEFS-S1: resilient, bounded activation of the Evolução action (D2)
+# ---------------------------------------------------------------------------
+#
+# Production evidence: the Evolução button was VISIBLE while Playwright's
+# actionability click retried for ~30 s (``_DEFAULT_ACTION_TIMEOUT_MS``). The
+# same-element DOM click proven by ``path2.click_with_fallback`` opened the
+# flow. The primary Playwright click stays FIRST but gets a short named
+# budget; only a primary TIMEOUT with the modal still closed runs the
+# controlled DOM fallback on the SAME validated locator. Both routes converge
+# on one postcondition: BOTH required date inputs visible.
 
-    Modeled after ``path2.open_report_for_interval()``.
+_EVOLUCAO_CLICK_BUDGET_MS = 5000
+"""Short primary-click budget for the Evolução action (HTEFS-S1 R1).
+
+The normal click attempt may not consume ``_DEFAULT_ACTION_TIMEOUT_MS``
+(30 s): it is capped at this named constant and always re-bounded by the
+remaining shared deadline.
+"""
+
+_EVOLUCAO_MODAL_WAIT_MS = 10000
+"""Default budget for the shared two-input modal postcondition wait (R4)."""
+
+_EVOLUCAO_DOM_CLICK_JS = "(element) => element.click()"
+"""Same-element DOM click expression for the controlled fallback (R2).
+
+Runs on the already-validated button locator — never a global selector, a
+new page, or JavaScript that searches for another element.
+"""
+
+_EVOLUCAO_ACTION_MESSAGE = "Falha ao acionar o botão Evolução."
+"""Constant sanitized message for Evolução click/fallback failures (R5)."""
+
+_EVOLUCAO_MODAL_MISSING_MESSAGE = (
+    "Os campos obrigatórios do modal de evolução não ficaram visíveis."
+)
+"""Constant sanitized message when the two-input postcondition fails (R4/R5)."""
+
+_EVOLUCAO_IFRAME_MISSING_MESSAGE = (
+    "O iframe de internações não estava disponível ao acionar "
+    "o botão Evolução."
+)
+"""Constant sanitized message when ``frame_pol`` is absent (R5/R6).
+
+Contains no frame name/selector, URL, date, identity, or raw exception.
+"""
+
+
+def _evolution_dates_visible(frame: Any) -> bool:
+    """Return True iff BOTH required evolution date inputs are visible.
+
+    HTEFS-S1 R3/R4: a single non-blocking probe shared by the already-open
+    modal check and the fallback decision. One visible input is NOT enough.
+    Any locator failure counts as not visible.
+    """
+    for selector in (SEL_DATE_START, SEL_DATE_END):
+        try:
+            if not frame.locator(selector).first.is_visible():
+                return False
+        except Exception:
+            return False
+    return True
+
+
+def _wait_evolution_dates_visible(
+    frame: Any,
+    deadline_s: float | None,
+) -> None:
+    """Wait for BOTH required evolution date inputs within the deadline.
+
+    HTEFS-S1 R4/R5: the single postcondition of :func:`click_evolucao`. Each
+    wait is re-bounded by the remaining shared deadline (never zero); a
+    Playwright timeout maps to ``NavigationTimeoutError`` and any other
+    failure to a constant sanitized ``NavigationError``.
+    """
+    for selector in (SEL_DATE_START, SEL_DATE_END):
+        try:
+            frame.locator(selector).first.wait_for(
+                state="visible",
+                timeout=_bound_ms(deadline_s, _EVOLUCAO_MODAL_WAIT_MS),
+            )
+        except NavigationError:
+            raise
+        except Exception as exc:
+            _raise_required_action_error(
+                exc,
+                fallback_message=_EVOLUCAO_MODAL_MISSING_MESSAGE,
+            )
+
+
+def click_evolucao(page: Any, *, timeout_ms: int | None = None) -> None:
+    """Activate the 'Evolução' action inside ``frame_pol``.
+
+    HTEFS-S1 (D2): resilient and bounded activation. The production page
+    showed the button VISIBLE while Playwright's actionability click retried
+    for ~30 s; a controlled same-element DOM click opened the flow. Flow:
+
+    1. Wait for the button to be visible (bounded by the shared deadline).
+    2. Primary strategy: ``locator.first.click()`` with the short named
+       budget ``_EVOLUCAO_CLICK_BUDGET_MS`` (at most 5 s), always re-bounded
+       by the remaining deadline.
+    3. If the primary click fails AND both required modal date inputs are
+       already visible, the modal is considered open — no second click.
+    4. Only a primary-click TIMEOUT with the modal still closed triggers the
+       controlled fallback ``evaluate("(element) => element.click()")`` on
+       the SAME validated button.
+    5. Both routes converge on one postcondition: BOTH ``SEL_DATE_START``
+       and ``SEL_DATE_END`` visible within the remaining deadline
+       (:func:`_wait_evolution_dates_visible`).
+
+    Never uses ``force=True``, a global selector, ``timeout=0``, a new page,
+    or JavaScript that locates another element. Timeout failures raise a
+    typed sanitized ``NavigationTimeoutError``; non-timeout failures raise a
+    constant sanitized ``NavigationError``.
 
     Args:
         page: A Playwright ``Page`` object.
 
     Raises:
-        NavigationTimeoutError: on a Playwright timeout from wait/click
-            (PSW-S17 final closure D1: previously raised as generic
-            NavigationError with a raw cause chain).
-        NavigationError: If the button is not found or is disabled for
-            non-timeout reasons.
+        NavigationTimeoutError: on any bounded Playwright timeout or deadline
+            expiry (wait, primary click, fallback, or postcondition).
+        NavigationError: for non-timeout failures with a constant sanitized
+            message.
     """
     deadline_s = _deadline_s(timeout_ms)
     frame = page.frame(name=SEL_FRAME_POL)
     if frame is None:
-        raise NavigationError(
-            f"Iframe '{SEL_FRAME_POL}' não encontrado ao tentar "
-            "clicar em Evolução."
-        )
+        raise NavigationError(_EVOLUCAO_IFRAME_MISSING_MESSAGE)
 
     evo_button = frame.get_by_role("button", name="Evolução")
     try:
-        evo_button.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 15000))
+        evo_button.first.wait_for(
+            state="visible", timeout=_bound_ms(deadline_s, 15000)
+        )
     except NavigationError:
         raise
     except Exception as exc:
@@ -896,16 +1004,31 @@ def click_evolucao(page: Any, *, timeout_ms: int | None = None) -> None:
         )
 
     try:
-        evo_button.first.click(**_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS))
+        evo_button.first.click(
+            timeout=_bound_ms(deadline_s, _EVOLUCAO_CLICK_BUDGET_MS)
+        )
     except NavigationError:
         raise
     except Exception as exc:
-        _raise_required_action_error(
-            exc,
-            fallback_message="Falha ao acionar o botão Evolução.",
-        )
+        if _evolution_dates_visible(frame):
+            # R3: the modal is already open — the action is done.
+            return
+        if not is_playwright_timeout_error(exc):
+            _raise_required_action_error(
+                exc, fallback_message=_EVOLUCAO_ACTION_MESSAGE
+            )
+        # R2: controlled DOM click on the SAME validated locator.
+        try:
+            evo_button.first.evaluate(_EVOLUCAO_DOM_CLICK_JS)
+        except NavigationError:
+            raise
+        except Exception as fallback_exc:
+            _raise_required_action_error(
+                fallback_exc, fallback_message=_EVOLUCAO_ACTION_MESSAGE
+            )
 
-    page.wait_for_timeout(_bound_ms(deadline_s, 1000))
+    # R4: single shared postcondition — both required inputs visible.
+    _wait_evolution_dates_visible(frame, deadline_s)
 
 
 def fill_evolution_dates(

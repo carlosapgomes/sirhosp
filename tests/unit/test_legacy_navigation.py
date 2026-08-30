@@ -282,6 +282,8 @@ class FakeNavigationLocator:
         click_callback=None,
         fill_timeout_callback=None,
         action_hook=None,
+        evaluate_callback=None,
+        evaluate_recorder=None,
     ) -> None:
         self._selector = selector
         self._visible_getter = visible_getter
@@ -291,13 +293,38 @@ class FakeNavigationLocator:
         self._click_callback = click_callback
         self._fill_timeout_callback = fill_timeout_callback
         self._action_hook = action_hook
+        self._evaluate_callback = evaluate_callback
+        self._evaluate_recorder = evaluate_recorder
         self._clicked = False
         self._filled_value: str | None = None
+        self._evaluate_calls: list[str] = []
 
     @property
     def first(self):
         """Simulate Playwright's ``locator.first``."""
         return self
+
+    def evaluate(self, expression: str, arg: Any = None) -> Any:
+        """Simulate Playwright's ``locator.evaluate(expression, arg)``.
+
+        Records the expression, fires the shared action hook, and records to
+        the creating frame (``locator_evaluate_calls``) BEFORE delegating to
+        the optional ``evaluate_callback``. With no callback configured it
+        raises ``AttributeError`` — exactly the behavior the fakes had before
+        ``locator.evaluate`` existed, so unrelated tests that rely on the
+        AttributeError-triggered fallback path stay untouched.
+        """
+        self._evaluate_calls.append(expression)
+        if self._action_hook is not None:
+            self._action_hook("evaluate", self._selector, None)
+        if self._evaluate_recorder is not None:
+            self._evaluate_recorder(self._selector, expression)
+        if self._evaluate_callback is not None:
+            return self._evaluate_callback(expression, arg)
+        raise AttributeError(
+            f"FakeNavigationLocator.evaluate is not configured for "
+            f"{self._selector!r}"
+        )
 
     def wait_for(self, *, state: str = "visible", timeout: int | None = None) -> None:  # noqa: ARG002
         if self._wait_callback is not None:
@@ -376,6 +403,9 @@ class FakeNavigationFrame:
         self._fill_timeouts: list[int] = []
         self._action_timeouts: list[int] = []
         self._action_hook = None
+        self._click_callbacks: dict[str, list[str]] = {}
+        self._locator_evaluate_hooks: dict[str, Any] = {}
+        self._locator_evaluate_calls: list[tuple[str, str]] = []
 
     def set_html(self, html: str) -> None:
         self._html = html
@@ -399,6 +429,24 @@ class FakeNavigationFrame:
     def make_selector_visible(self, selector: str) -> None:
         self._visible_selectors.add(selector)
 
+    def on_click_make_visible(self, clicked_selector: str, make_visible: str) -> None:
+        """Register that clicking ``clicked_selector`` makes ``make_visible``
+        visible (state transition modeled for frame-owned locators)."""
+        self._click_callbacks.setdefault(clicked_selector, []).append(make_visible)
+
+    def _on_click_hook(self, clicked_selector: str) -> None:
+        """Internal callback when a frame locator is clicked."""
+        for make_visible in self._click_callbacks.get(clicked_selector, []):
+            self._visible_selectors.add(make_visible)
+
+    def set_locator_evaluate_hook(self, key: str, hook) -> None:
+        """Install ``hook(expression, arg)`` for ``locator.evaluate()`` on
+        ``key`` (used to model the controlled DOM-click fallback)."""
+        self._locator_evaluate_hooks[key] = hook
+
+    def _record_locator_evaluate(self, key: str, expression: str) -> None:
+        self._locator_evaluate_calls.append((key, expression))
+
     def content(self) -> str:
         return self._html
 
@@ -411,10 +459,13 @@ class FakeNavigationFrame:
         return FakeNavigationLocator(
             selector=selector,
             visible_getter=lambda: selector in self._visible_selectors,
+            on_click_callback=lambda: self._on_click_hook(selector),
             wait_callback=self._record_wait,
             click_callback=self._record_click,
             fill_timeout_callback=self._record_fill,
             action_hook=self._fire_action,
+            evaluate_callback=self._locator_evaluate_hooks.get(selector),
+            evaluate_recorder=self._record_locator_evaluate,
         )
 
     def get_by_role(self, role: str, *, name: str | None = None) -> FakeNavigationLocator:
@@ -423,10 +474,13 @@ class FakeNavigationFrame:
         return FakeNavigationLocator(
             selector=key,
             visible_getter=lambda: key in self._visible_selectors,
+            on_click_callback=lambda: self._on_click_hook(key),
             wait_callback=self._record_wait,
             click_callback=self._record_click,
             fill_timeout_callback=self._record_fill,
             action_hook=self._fire_action,
+            evaluate_callback=self._locator_evaluate_hooks.get(key),
+            evaluate_recorder=self._record_locator_evaluate,
         )
 
     def eval_on_selector_all(self, selector: str, expression: str) -> list[dict]:  # noqa: ARG002
@@ -472,6 +526,12 @@ class FakeNavigationFrame:
     def click_timeouts(self) -> list[int]:
         """Timeout values passed to ``click`` on locators from this frame."""
         return list(self._click_timeouts)
+
+    @property
+    def locator_evaluate_calls(self) -> list[tuple[str, str]]:
+        """``(key, expression)`` pairs passed to ``locator.evaluate()`` in
+        call order (DOM-click fallback observability)."""
+        return list(self._locator_evaluate_calls)
 
     @property
     def fill_timeouts(self) -> list[int]:
@@ -1406,20 +1466,37 @@ class TestEvolutionNavigationHelpers:
         assert sentinel_key not in message
 
     def test_click_evolucao_button(self) -> None:
-        """click_evolucao clicks the Evolução button in frame_pol."""
+        """HTEFS-S1 R1/R4/R6: the normal click opens the modal; no fallback.
+
+        The primary Playwright click is attempted exactly once with the short
+        named budget and BOTH required date inputs must be visible before
+        ``click_evolucao`` returns (single two-input postcondition).
+        """
         from apps.ingestion.extractors.legacy_navigation import (
+            SEL_DATE_END,
+            SEL_DATE_START,
             click_evolucao,
         )
 
         page = FakeNavigationPage()
         frame = FakeNavigationFrame(html="")
         frame.make_selector_visible("role:button:Evolução")
+        # Clicking Evolução opens the modal with both date inputs.
+        frame.on_click_make_visible("role:button:Evolução", SEL_DATE_START)
+        frame.on_click_make_visible("role:button:Evolução", SEL_DATE_END)
         page.set_frame(frame)
 
         click_evolucao(page)
 
         # The frame's get_by_role was called for button + Evolução
         assert ("button", "Evolução") in frame._role_calls
+        # Primary click attempted exactly once, bounded by the 5 s budget.
+        assert frame.click_timeouts == [5000]
+        # No DOM fallback on a successful normal click.
+        assert frame.locator_evaluate_calls == []
+        # The single postcondition verified BOTH required inputs.
+        assert SEL_DATE_START in frame._locator_calls
+        assert SEL_DATE_END in frame._locator_calls
 
     def test_fill_evolution_dates_fills_br_format(self) -> None:
         """fill_evolution_dates fills DD/MM/YYYY dates."""
@@ -1586,14 +1663,22 @@ class TestEvolutionNavigationHelpers:
         finally:
             FakeNavigationLocator.wait_for = original_wait_for  # type: ignore[method-assign]
 
-    def test_click_evolucao_click_timeout_becomes_navigation_timeout(self) -> None:
-        """D1: a real Playwright TimeoutError from the Evolução button click
-        becomes NavigationTimeoutError (typed), not a generic NavigationError."""
-        import pytest
+    def test_click_evolucao_actionability_timeout_uses_dom_fallback(self) -> None:
+        """HTEFS-S1 D2: an actionability timeout on the primary click runs
+        the controlled same-element DOM fallback exactly once and returns
+        once BOTH modal date inputs are visible.
+
+        The pre-S1 expectation (primary-click timeout raises immediately) is
+        superseded: the visible button is validated first, the normal click
+        gets a short bounded budget (5 s), and only a still-closed modal
+        after a primary TIMEOUT triggers
+        ``evaluate("(element) => element.click()")`` on the SAME locator.
+        """
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
         from apps.ingestion.extractors.legacy_navigation import (
-            NavigationTimeoutError,
+            SEL_DATE_END,
+            SEL_DATE_START,
             click_evolucao,
         )
 
@@ -1602,17 +1687,38 @@ class TestEvolutionNavigationHelpers:
         frame.make_selector_visible("role:button:Evolução")
         page.set_frame(frame)
 
+        timeline: list[str] = []
+
+        def _dom_click(expression: str, arg: Any) -> None:
+            # The DOM click on the validated button opens the modal.
+            timeline.append("evaluate")
+            frame.make_selector_visible(SEL_DATE_START)
+            frame.make_selector_visible(SEL_DATE_END)
+
+        frame.set_locator_evaluate_hook("role:button:Evolução", _dom_click)
+
         original_click = FakeNavigationLocator.click
 
-        def _raise_timeout(self, *, timeout=None):
-            raise PlaywrightTimeoutError("Timeout 30000ms")
+        def _timeout_click(self, *, timeout=None):
+            timeline.append("click")
+            if self._click_callback is not None:
+                self._click_callback(timeout)
+            raise PlaywrightTimeoutError("Timeout 5000ms")
 
-        FakeNavigationLocator.click = _raise_timeout  # type: ignore[method-assign]
+        FakeNavigationLocator.click = _timeout_click  # type: ignore[method-assign]
         try:
-            with pytest.raises(NavigationTimeoutError):
-                click_evolucao(page)
+            # The DOM fallback opens the modal, so the helper must return
+            # without raising.
+            click_evolucao(page)
         finally:
             FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
+
+        # Normal click FIRST (short budget), DOM fallback SECOND, once each.
+        assert timeline == ["click", "evaluate"]
+        assert frame.click_timeouts == [5000]
+        assert frame.locator_evaluate_calls == [
+            ("role:button:Evolução", "(element) => element.click()")
+        ]
 
     def test_evolucao_button_disabled_raises(self) -> None:
         """Disabled Evolução button raises NavigationError."""
@@ -1631,6 +1737,247 @@ class TestEvolutionNavigationHelpers:
             match="Botão Evolução não encontrado",
         ):
             click_evolucao(page)
+
+
+class TestClickEvolucaoResilientActivation:
+    """HTEFS-S1 (D2): bounded primary click, controlled DOM fallback and the
+    single two-input modal postcondition.
+
+    Production evidence: the Evolução button was VISIBLE while Playwright's
+    actionability click retried for ~30 s; a controlled same-element DOM
+    click opened the flow. These tests model that behavior synthetically
+    (no real legacy access, no real sleeps).
+    """
+
+    def test_modal_already_open_skips_fallback(self) -> None:
+        """R3: primary click times out but BOTH inputs are already visible →
+        the action is considered done and the DOM fallback is NOT run
+        (no double click)."""
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            SEL_DATE_END,
+            SEL_DATE_START,
+            click_evolucao,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        frame.make_selector_visible("role:button:Evolução")
+        # Modal ALREADY open: both required inputs visible before the click.
+        frame.make_selector_visible(SEL_DATE_START)
+        frame.make_selector_visible(SEL_DATE_END)
+        page.set_frame(frame)
+
+        def _unexpected_dom_click(expression: str, arg: Any) -> Any:
+            raise AssertionError(
+                "DOM fallback must not run when the modal is already open"
+            )
+
+        frame.set_locator_evaluate_hook(
+            "role:button:Evolução", _unexpected_dom_click
+        )
+
+        original_click = FakeNavigationLocator.click
+
+        def _timeout_click(self, *, timeout=None):
+            if self._click_callback is not None:
+                self._click_callback(timeout)
+            raise PlaywrightTimeoutError("Timeout 5000ms")
+
+        FakeNavigationLocator.click = _timeout_click  # type: ignore[method-assign]
+        try:
+            click_evolucao(page)  # must NOT raise
+        finally:
+            FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
+
+        # Exactly ONE primary click attempt; zero fallback evaluations.
+        assert frame.click_timeouts == [5000]
+        assert frame.locator_evaluate_calls == []
+
+    def test_fallback_without_postcondition_raises_sanitized(self) -> None:
+        """R4/R5: fallback runs but the inputs never appear → constant
+        sanitized NavigationError (one visible input is never enough)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            NavigationTimeoutError,
+            click_evolucao,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        frame.make_selector_visible("role:button:Evolução")
+        page.set_frame(frame)
+
+        # DOM fallback succeeds but does NOT open the modal.
+        frame.set_locator_evaluate_hook(
+            "role:button:Evolução", lambda expression, arg: None
+        )
+
+        original_click = FakeNavigationLocator.click
+
+        def _timeout_click(self, *, timeout=None):
+            if self._click_callback is not None:
+                self._click_callback(timeout)
+            raise PlaywrightTimeoutError("Timeout 5000ms")
+
+        FakeNavigationLocator.click = _timeout_click  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationError) as exc_info:
+                click_evolucao(page)
+        finally:
+            FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
+
+        assert not isinstance(exc_info.value, NavigationTimeoutError)
+        # Constant sanitized message — no selector/URL/date/identity content.
+        assert str(exc_info.value) == (
+            "Os campos obrigatórios do modal de evolução não ficaram visíveis."
+        )
+
+    def test_postcondition_playwright_timeout_is_typed(self) -> None:
+        """R5: a real Playwright TimeoutError from the postcondition wait
+        becomes a typed NavigationTimeoutError (deadline classification)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            SEL_DATE_START,
+            NavigationTimeoutError,
+            click_evolucao,
+        )
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        frame.make_selector_visible("role:button:Evolução")
+        page.set_frame(frame)
+        frame.set_locator_evaluate_hook(
+            "role:button:Evolução", lambda expression, arg: None
+        )
+
+        original_click = FakeNavigationLocator.click
+        original_wait_for = FakeNavigationLocator.wait_for
+
+        def _timeout_click(self, *, timeout=None):
+            if self._click_callback is not None:
+                self._click_callback(timeout)
+            raise PlaywrightTimeoutError("Timeout 5000ms")
+
+        def _conditional_wait(self, *, state="visible", timeout=None):
+            if self._selector == SEL_DATE_START:
+                raise PlaywrightTimeoutError("Timeout 10000ms")
+            original_wait_for(self, state=state, timeout=timeout)
+
+        FakeNavigationLocator.click = _timeout_click  # type: ignore[method-assign]
+        FakeNavigationLocator.wait_for = _conditional_wait  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationTimeoutError):
+                click_evolucao(page)
+        finally:
+            FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
+            FakeNavigationLocator.wait_for = original_wait_for  # type: ignore[method-assign]
+
+    def test_non_timeout_failure_does_not_leak_sentinels(self) -> None:
+        """R5: a non-timeout fallback failure must not leak sentinels placed
+        in the fake raw error (record, URL, cookie, selector)."""
+        import pytest
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            click_evolucao,
+        )
+
+        sentinels = [
+            "REGISTRO-SENTINELA-12345",
+            "http://internal.example/evolucoes",
+            "PHPSESSID=abc123",
+            "#prontuarioInput",
+        ]
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        frame.make_selector_visible("role:button:Evolução")
+        page.set_frame(frame)
+
+        def _broken_dom_click(expression: str, arg: Any) -> Any:
+            raise RuntimeError(" | ".join(sentinels))
+
+        frame.set_locator_evaluate_hook("role:button:Evolução", _broken_dom_click)
+
+        original_click = FakeNavigationLocator.click
+
+        def _timeout_click(self, *, timeout=None):
+            if self._click_callback is not None:
+                self._click_callback(timeout)
+            raise PlaywrightTimeoutError("Timeout 5000ms")
+
+        FakeNavigationLocator.click = _timeout_click  # type: ignore[method-assign]
+        try:
+            with pytest.raises(NavigationError) as exc_info:
+                click_evolucao(page)
+        finally:
+            FakeNavigationLocator.click = original_click  # type: ignore[method-assign]
+
+        message = str(exc_info.value)
+        assert message == "Falha ao acionar o botão Evolução."
+        for sentinel in sentinels:
+            assert sentinel not in message
+
+    def test_no_zero_timeouts_and_primary_click_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R1/R5: with sufficient budget every timeout passed to the fakes is
+        strictly positive and the primary click receives at most 5000 ms."""
+        from apps.ingestion.extractors.legacy_navigation import (
+            SEL_DATE_END,
+            SEL_DATE_START,
+            click_evolucao,
+        )
+
+        clock = FakeClock(start=1000.0, step=0.0)
+        monkeypatch.setattr("time.monotonic", clock.monotonic)
+
+        page = FakeNavigationPage()
+        frame = FakeNavigationFrame(html="")
+        frame.make_selector_visible("role:button:Evolução")
+        frame.on_click_make_visible("role:button:Evolução", SEL_DATE_START)
+        frame.on_click_make_visible("role:button:Evolução", SEL_DATE_END)
+        page.set_frame(frame)
+
+        events: list[tuple[str, str, int | None]] = []
+        frame.set_action_hook(
+            lambda action, selector, timeout: events.append(
+                (action, selector, timeout)
+            )
+        )
+
+        click_evolucao(page, timeout_ms=30000)
+
+        click_timeouts = [t for a, s, t in events if a == "click"]
+        assert click_timeouts == [5000]
+        all_timeouts = [t for a, s, t in events if t is not None]
+        assert all_timeouts, "the flow must pass bounded timeouts"
+        assert all(t >= 1 for t in all_timeouts)
+
+    def test_missing_iframe_still_fails_sanitized(self) -> None:
+        """R6 regression: an absent frame_pol keeps failing with a constant
+        sanitized NavigationError (never a raw payload or selector)."""
+        import pytest
+
+        from apps.ingestion.extractors.legacy_navigation import (
+            NavigationError,
+            click_evolucao,
+        )
+
+        page = FakeNavigationPage()
+        # No frame set at all.
+        with pytest.raises(NavigationError) as exc_info:
+            click_evolucao(page)
+        message = str(exc_info.value)
+        assert "frame_pol" not in message
+        assert "http" not in message.lower()
 
 
 class TestWaitForReportOrNoEvolutions:
@@ -2704,6 +3051,12 @@ class TestGoBackToDetailFromReport:
 # recovery actually restored detail state instead of mocking it away.
 
 from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
+    SEL_DATE_END as _C1_DATE_END,
+)
+from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
+    SEL_DATE_START as _C1_DATE_START,
+)
+from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
     SEL_DIALOG_CLOSE as _C1_DIALOG_CLOSE,
 )
 from apps.ingestion.extractors.legacy_navigation import (  # noqa: E402
@@ -2764,6 +3117,11 @@ class _EvolutionUiState:
             return s == "report"
         if key == _C1_NO_EVOLUTIONS_DIALOG:
             return s == "no_evolutions" and not self._msg_dialog_hidden
+        if key in (_C1_DATE_START, _C1_DATE_END):
+            # HTEFS-S1: both required date inputs live inside the evolution
+            # modal and stay visible while it is open (also under the
+            # no-evolutions warning), exactly like ``SEL_EVOLUTION_MODAL``.
+            return s in ("modal", "no_evolutions") and not self._modal_hidden
         if key == _C1_EVOLUTION_MODAL:
             return s in ("modal", "no_evolutions") and not self._modal_hidden
         return False
@@ -2790,6 +3148,11 @@ class _EvolutionUiState:
             return
         if key == "role:button:Evolução" and self._state == "detail":
             self._state = "modal"
+            # A fresh modal opens: both the no-evolutions warning and the
+            # modal itself become visible again (recovery flags reset), as in
+            # the real UI after the empty-state recovery restored detail.
+            self._msg_dialog_hidden = False
+            self._modal_hidden = False
         elif key == _C1_VISUALIZAR_BUTTON and self._state == "modal":
             outcome = self._next_outcome()
             self._state = outcome
