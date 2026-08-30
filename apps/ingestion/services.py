@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -558,6 +558,57 @@ def queue_demographics_only_run(
     )
 
 
+_AUTOMATIC_FULL_SYNC_GUARD = timedelta(minutes=60)
+"""Fixed cross-run deferral after a terminal targeted failure (HTEFS-S4).
+
+Upper bound is fixed (never exponential, never extended by re-enqueues);
+the intra-run retry of each worker stays ~+60 seconds (run_lifecycle).
+"""
+
+_GUARD_TARGETED_INTENTS = ("full_sync", "full_admission_sync")
+
+
+def _latest_terminal_targeted_run(admission_id: str) -> IngestionRun | None:
+    """Latest terminal targeted sync result for ONE admission.
+
+    Terminal means status ``succeeded``/``failed`` with a non-null
+    ``finished_at``; ordering is by finish time with the PK as the
+    deterministic tie-break. Queued/running rows and terminal-status rows
+    without ``finished_at`` never become the guard input.
+    """
+    return (
+        IngestionRun.objects.filter(
+            intent__in=_GUARD_TARGETED_INTENTS,
+            status__in=["succeeded", "failed"],
+            finished_at__isnull=False,
+            parameters_json__admission_id=admission_id,
+        )
+        .order_by("-finished_at", "-pk")
+        .first()
+    )
+
+
+def _automatic_full_sync_not_before(
+    latest_terminal: IngestionRun | None,
+) -> datetime | None:
+    """Fixed guard deadline derived only from the terminal failure.
+
+    A recent failure defers the automatic follow-up to
+    ``finished_at + 60 minutes``; an expired failure or a latest success
+    returns ``None`` (immediately eligible). The deadline is never
+    computed from the current time and never extended.
+    """
+    if latest_terminal is None or latest_terminal.status != "failed":
+        return None
+    finished_at = latest_terminal.finished_at
+    if finished_at is None:
+        return None
+    not_before = finished_at + _AUTOMATIC_FULL_SYNC_GUARD
+    if not_before <= timezone.now():
+        return None
+    return not_before
+
+
 def enqueue_most_recent_admission_full_sync(
     patient: Patient,
     *,
@@ -568,6 +619,13 @@ def enqueue_most_recent_admission_full_sync(
     Shared by the current (``process_ingestion_runs``) and persistent-session
     (``process_ingestion_runs_persistent_session``) workers so both enqueue the
     same follow-up with equivalent parameters and batch relationship.
+
+    HTEFS-S4: when the latest terminal targeted result of this admission is a
+    failure younger than the fixed 60-minute guard, the run is still created
+    (same batch, same parameters) but with ``next_retry_at`` at that failure's
+    deadline, so the existing worker eligibility filter defers it without
+    losing the follow-up. The manual ``full_admission_sync`` path (views) does
+    not go through this helper and stays immediate.
 
     Returns the created ``IngestionRun``, or ``None`` when the patient has no
     admission (no full-sync work to schedule).
@@ -585,10 +643,15 @@ def enqueue_most_recent_admission_full_sync(
     else:
         end_date = timezone.now().strftime("%Y-%m-%d")
 
+    not_before = _automatic_full_sync_not_before(
+        _latest_terminal_targeted_run(str(latest.pk))
+    )
+
     return IngestionRun.objects.create(
         status="queued",
         intent="full_sync",
         batch=batch,
+        next_retry_at=not_before,
         parameters_json={
             "patient_record": patient.patient_source_key,
             "admission_id": str(latest.pk),
