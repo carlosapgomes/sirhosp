@@ -494,6 +494,7 @@ class PersistentExtractionAdapter:
         end_date: str,
         timeout: int = 120,
         target_admission: TargetAdmissionContext | None = None,
+        progress_callback: Any = None,
     ) -> list[dict[str, Any]]:
         """Extract clinical evolutions through the persistent session.
 
@@ -529,6 +530,10 @@ class PersistentExtractionAdapter:
             target_admission: Optional named context of the resolved local
                 target admission (HTEFS-S2). ``None`` keeps the legacy
                 all-overlapping-admissions mode.
+            progress_callback: HTEFS-S5 R2 optional sanitized telemetry —
+                forwarded ONLY to the real action method and ONLY when
+                supplied; the stub path and legacy dispatch contracts stay
+                byte-identical. The adapter itself never invokes it.
 
         Returns:
             List of normalised evolution dicts with canonical field names.
@@ -573,24 +578,25 @@ class PersistentExtractionAdapter:
             # EvolutionPdfTimeoutError) and typed EvolutionPdfError
             # propagate unchanged; the command classifies them. A genuine
             # empty window stays an empty list (R5), distinct from a timeout.
+            # HTEFS-S5 R2: kwargs are built explicitly so every legacy
+            # dispatch contract stays byte-identical — ``target_admission``
+            # only when a target exists (HTEFS-S2 R2) and the optional
+            # sanitized ``progress_callback`` only when supplied. The stub
+            # path never receives it.
+            action_kwargs: dict[str, Any] = {
+                "patient_record": patient_record,
+                "start_date": start_date,
+                "end_date": end_date,
+                "timeout": timeout,
+            }
             if target_admission is not None:
                 # HTEFS-S2 R2: targeted runs forward the named context. The
                 # kwarg is added ONLY when a target exists so the legacy
                 # dispatch contract stays byte-identical.
-                result = action_method(
-                    patient_record=patient_record,
-                    start_date=start_date,
-                    end_date=end_date,
-                    timeout=timeout,
-                    target_admission=target_admission,
-                )
-            else:
-                result = action_method(
-                    patient_record=patient_record,
-                    start_date=start_date,
-                    end_date=end_date,
-                    timeout=timeout,
-                )
+                action_kwargs["target_admission"] = target_admission
+            if progress_callback is not None:
+                action_kwargs["progress_callback"] = progress_callback
+            result = action_method(**action_kwargs)
         elif capability_value is False:
             # Stub/test path: URL template + container + PSW-S11 PDF fallback.
             url = _build_admissions_url(

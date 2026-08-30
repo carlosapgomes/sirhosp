@@ -122,7 +122,9 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from collections.abc import Callable
 from datetime import date, timedelta
+from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
@@ -151,6 +153,12 @@ from apps.ingestion.extractors.persistent_evolution_pdf import (
 )
 from apps.ingestion.extractors.persistent_extraction_adapter import (
     PersistentExtractionAdapter,
+)
+from apps.ingestion.extractors.real_handle_bridge import (
+    SUBSTEP_STATUS_FAILED,
+    SUBSTEP_STATUS_STARTED,
+    SUBSTEP_STATUS_SUCCEEDED,
+    EvolutionSubstep,
 )
 from apps.ingestion.extractors.session_policy import TabCleanupOutcome
 from apps.ingestion.gap_planner import (
@@ -216,6 +224,14 @@ Raised when ``admission_id`` is not the primary key of an ``Admission`` of
 the run's persisted patient, or when that admission lacks a usable start
 date. Never contains the admission id, key, patient record, or any received
 value.
+"""
+
+_SUBSTEP_TELEMETRY_FAILURE_MESSAGE = (
+    "Evolution substep telemetry could not be persisted (sanitized)."
+)
+"""HTEFS-S5 R5: constant sanitized message emitted when the best-effort
+substep stage-metric persistence fails. Never carries the exception, its
+text, or any run/run-parameter context.
 """
 
 _DJANGO_ALLOW_ASYNC_UNSAFE_ENV = "DJANGO_ALLOW_ASYNC_UNSAFE"
@@ -2198,11 +2214,32 @@ class Command(BaseCommand):
         previously committed chunks survive and the run follows the current
         retry/finalization policy. Retries replan from the ledger and skip
         fully covered chunks.
+
+        HTEFS-S5: targeted runs also receive the optional sanitized substep
+        progress callback (R4) and every aggregate stage record carries the
+        integer-only chunk counters ``chunks_planned``/``chunks_committed``/
+        ``chunks_failed``/``events_processed`` (R6), updated in the failure
+        branches too (R8).
         """
         ev_stage_start = timezone.now()
         ingest_stage_start = timezone.now()
         total_created = total_skipped = total_revised = 0
         chunks_committed = 0
+        chunks_failed = 0
+        # HTEFS-S5 R6: planned chunks come from the canonical chunker up
+        # front so failure branches can still report the full plan size.
+        chunks_planned = sum(
+            len(
+                build_chunks_for_interval(
+                    date.fromisoformat(window["start_date"]),
+                    date.fromisoformat(window["end_date"]),
+                )
+            )
+            for window in plan["windows"]
+        )
+        # HTEFS-S5 R4: optional sanitized substep telemetry for targeted
+        # runs — bridge/adapter events materialize as stage metrics.
+        progress = self._build_substep_progress(run)
 
         for window in plan["windows"]:
             chunks = build_chunks_for_interval(
@@ -2220,29 +2257,52 @@ class Command(BaseCommand):
                             chunk_start.isoformat(), chunk_end.isoformat()
                         ),
                         target_admission=target_admission,
+                        progress_callback=progress,
                     )
                 except ExtractionError as exc:
                     # Recoverable data-level failure (InvalidJsonError,
                     # SnapshotContainerMissingError and EvolutionPdfError
                     # are ExtractionError subclasses) with tab opened —
                     # safe cleanup before another claim.
+                    chunks_failed += 1
                     self._record_stage(
                         run, "evolution_extraction", "failed", ev_stage_start,
-                        details_json=self._stage_error_details(exc),
+                        details_json={
+                            **self._stage_error_details(exc),
+                            **self._chunk_aggregate_details(
+                                chunks_planned=chunks_planned,
+                                chunks_committed=chunks_committed,
+                                chunks_failed=chunks_failed,
+                                events_processed=run.events_processed,
+                            ),
+                        },
                     )
                     adapter.cleanup_after_failure()
                     self._mark_run_failed(run, exc)
                     return
                 except Exception as exc:
+                    chunks_failed += 1
                     self._record_stage(
                         run, "evolution_extraction", "failed", ev_stage_start,
-                        details_json=self._stage_error_details(exc),
+                        details_json={
+                            **self._stage_error_details(exc),
+                            **self._chunk_aggregate_details(
+                                chunks_planned=chunks_planned,
+                                chunks_committed=chunks_committed,
+                                chunks_failed=chunks_failed,
+                                events_processed=run.events_processed,
+                            ),
+                        },
                     )
                     self._mark_run_failed(run, exc)
                     return
 
                 # --- Atomic chunk commit: events + coverage + counters ----
                 ingest_stage_start = timezone.now()
+                # HTEFS-S5 R7: the chunk-commit substep only SUCCEEDS after
+                # the outer transaction confirms; a failure inside it emits
+                # the failed terminal and never increments chunks_committed.
+                progress(EvolutionSubstep.CHUNK_COMMIT, SUBSTEP_STATUS_STARTED)
                 try:
                     with transaction.atomic():
                         (
@@ -2276,14 +2336,31 @@ class Command(BaseCommand):
                 except Exception as exc:
                     # Rollback already done: events, coverage and counter
                     # changes of THIS chunk are reverted atomically.
+                    chunks_failed += 1
+                    progress(
+                        EvolutionSubstep.CHUNK_COMMIT,
+                        SUBSTEP_STATUS_FAILED,
+                    )
                     self._record_stage(
                         run, "ingestion_persistence", "failed",
                         ingest_stage_start,
-                        details_json=self._stage_error_details(exc),
+                        details_json={
+                            **self._stage_error_details(exc),
+                            **self._chunk_aggregate_details(
+                                chunks_planned=chunks_planned,
+                                chunks_committed=chunks_committed,
+                                chunks_failed=chunks_failed,
+                                events_processed=run.events_processed,
+                            ),
+                        },
                     )
                     self._mark_run_failed(run, exc)
                     return
 
+                progress(
+                    EvolutionSubstep.CHUNK_COMMIT,
+                    SUBSTEP_STATUS_SUCCEEDED,
+                )
                 total_created += ev_created
                 total_skipped += ev_skipped
                 total_revised += ev_revised
@@ -2291,6 +2368,12 @@ class Command(BaseCommand):
 
         self._record_stage(
             run, "evolution_extraction", "succeeded", ev_stage_start,
+            details_json=self._chunk_aggregate_details(
+                chunks_planned=chunks_planned,
+                chunks_committed=chunks_committed,
+                chunks_failed=chunks_failed,
+                events_processed=run.events_processed,
+            ),
         )
         self._record_stage(
             run, "ingestion_persistence", "succeeded", ingest_stage_start,
@@ -2299,6 +2382,12 @@ class Command(BaseCommand):
                 "created": total_created,
                 "skipped": total_skipped,
                 "revised": total_revised,
+                **self._chunk_aggregate_details(
+                    chunks_planned=chunks_planned,
+                    chunks_committed=chunks_committed,
+                    chunks_failed=chunks_failed,
+                    events_processed=run.events_processed,
+                ),
             },
         )
 
@@ -2330,6 +2419,76 @@ class Command(BaseCommand):
             f"skipped={total_skipped}, "
             f"revised={total_revised})"
         )
+
+    # ------------------------------------------------------------------
+    # HTEFS-S5: sanitized substep telemetry and aggregate counters
+    # ------------------------------------------------------------------
+
+    def _build_substep_progress(
+        self, run: IngestionRun
+    ) -> Callable[[EvolutionSubstep, str], None]:
+        """Build the best-effort substep progress callback (HTEFS-S5 R4/R5).
+
+        The bridge/adapter callback carries ONLY an :class:`EvolutionSubstep`
+        member and a closed status string — never a payload, identifier,
+        date, selector, or exception. ``started`` events are recorded in
+        memory with a timezone timestamp and are NEVER persisted (the stage
+        metric model has no ``started`` status); each terminal event
+        materializes exactly one ``IngestionRunStageMetric`` row whose stage
+        name is the enum value, whose status is the received terminal, and
+        whose timestamps pair the recorded start with the terminal time.
+        Any failure (including ORM errors) is swallowed at this sanitized
+        boundary so telemetry can never change the extraction outcome, the
+        returned data, or the failure taxonomy (R5).
+        """
+        from apps.ingestion.models import IngestionRunStageMetric
+
+        started_at: dict[EvolutionSubstep, Any] = {}
+
+        def _on_progress(substep: EvolutionSubstep, status: str) -> None:
+            try:
+                now = timezone.now()
+                if status == SUBSTEP_STATUS_STARTED:
+                    started_at[substep] = now
+                    return
+                if status not in (SUBSTEP_STATUS_SUCCEEDED, SUBSTEP_STATUS_FAILED):
+                    return
+                start = started_at.pop(substep, now)
+                IngestionRunStageMetric.objects.create(
+                    run=run,
+                    stage_name=substep.value,
+                    started_at=start,
+                    finished_at=now,
+                    status=status,
+                    details_json={},
+                )
+            except Exception:
+                # HTEFS-S5 R5: telemetry is best-effort — swallowed at this
+                # sanitized boundary with a constant stderr line, never
+                # masking the extraction or its failure classification.
+                self.stderr.write(_SUBSTEP_TELEMETRY_FAILURE_MESSAGE)
+
+        return _on_progress
+
+    @staticmethod
+    def _chunk_aggregate_details(
+        *,
+        chunks_planned: int,
+        chunks_committed: int,
+        chunks_failed: int,
+        events_processed: int,
+    ) -> dict[str, int]:
+        """Aggregate targeted chunk counters (HTEFS-S5 R6).
+
+        Integer counters ONLY — never dates, bounds, identifiers, text,
+        URLs, selectors, HTML/PDF content, or any dynamic payload (R9).
+        """
+        return {
+            "chunks_planned": chunks_planned,
+            "chunks_committed": chunks_committed,
+            "chunks_failed": chunks_failed,
+            "events_processed": events_processed,
+        }
 
     # ------------------------------------------------------------------
     # Failure handling (reuses taxonomy from current worker)

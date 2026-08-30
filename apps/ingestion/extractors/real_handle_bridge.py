@@ -40,6 +40,7 @@ Usage::
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import re
@@ -118,6 +119,80 @@ _NO_OVERLAP_MESSAGE = (
 _TARGET_REQUIRED_ACTION_FAILED_MESSAGE = (
     "Uma ação obrigatória da internação alvo falhou."
 )
+
+# ---------------------------------------------------------------------------
+# HTEFS-S5: sanitized substep progress protocol (design D6)
+# ---------------------------------------------------------------------------
+
+
+class EvolutionSubstep(enum.Enum):
+    """Closed set of sanitized evolution substep names (HTEFS-S5 R1).
+
+    Exactly these members exist and every emitter must pass a member, so no
+    dynamic stage name can ever be produced. Values are the persisted stage
+    names (unique, ``evolution_``-prefixed, and each within the
+    ``IngestionRunStageMetric.stage_name`` 50-char capacity).
+    """
+
+    SEARCH_NAVIGATION = "evolution_search_navigation"
+    ADMISSIONS_CAPTURE = "evolution_admissions_capture"
+    TARGET_SELECTION = "evolution_target_selection"
+    DETAIL_OPEN = "evolution_detail_open"
+    ACTION_ACTIVATION = "evolution_action_activation"
+    REPORT_GENERATION = "evolution_report_generation"
+    PDF_DOWNLOAD = "evolution_pdf_download"
+    PDF_PARSE = "evolution_pdf_parse"
+    CHUNK_COMMIT = "evolution_chunk_commit"
+
+
+SUBSTEP_STATUS_STARTED = "started"
+SUBSTEP_STATUS_SUCCEEDED = "succeeded"
+SUBSTEP_STATUS_FAILED = "failed"
+
+SUBSTEP_STATUSES = frozenset(
+    {SUBSTEP_STATUS_STARTED, SUBSTEP_STATUS_SUCCEEDED, SUBSTEP_STATUS_FAILED}
+)
+"""Closed status set of the substep protocol (HTEFS-S5 R2)."""
+
+_PROGRESS_CALLBACK_FAILED_MESSAGE = (
+    "Evolution progress telemetry failed (sanitized)."
+)
+"""Constant sanitized log line for a raising progress callback (R5).
+
+Never carries the exception, its text, or any caller context.
+"""
+
+
+class _SubstepReporter:
+    """Emit best-effort started/terminal substep pairs (HTEFS-S5 R2/R5).
+
+    The optional callback receives ONLY ``(EvolutionSubstep, status)`` —
+    never a payload, date, identifier, URL, selector, cookie, HTML/PDF
+    content, or exception. A missing callback disables telemetry entirely
+    (legacy contracts unchanged), and a raising callback is swallowed at
+    this sanitized boundary with a constant log line so it can never mask
+    an action outcome or replace an action exception.
+    """
+
+    def __init__(self, callback: Any) -> None:
+        self._callback = callback
+
+    def _emit(self, substep: EvolutionSubstep, status: str) -> None:
+        if self._callback is None:
+            return
+        try:
+            self._callback(substep, status)
+        except Exception:  # HTEFS-S5 R5: telemetry is best-effort
+            logger.warning(_PROGRESS_CALLBACK_FAILED_MESSAGE)
+
+    def started(self, substep: EvolutionSubstep) -> None:
+        self._emit(substep, SUBSTEP_STATUS_STARTED)
+
+    def succeeded(self, substep: EvolutionSubstep) -> None:
+        self._emit(substep, SUBSTEP_STATUS_SUCCEEDED)
+
+    def failed(self, substep: EvolutionSubstep) -> None:
+        self._emit(substep, SUBSTEP_STATUS_FAILED)
 
 # PSW-S22 R2/R6: the real legacy report page exposes a JSF ``#printLinks``
 # form whose POST returns the PDF bytes when no direct PDF URL is resolvable.
@@ -668,6 +743,7 @@ class RealHandleBridge:
         end_date: str,
         timeout: int = 120,
         target_admission: TargetAdmissionContext | None = None,
+        progress_callback: Any = None,
     ) -> list[dict[str, Any]]:
         """Extract evolutions by navigating the real legacy UI action flow.
 
@@ -708,6 +784,11 @@ class RealHandleBridge:
             timeout: Overall hint in seconds for waits/downloads.
             target_admission: Optional named context of the resolved local
                 target admission. ``None`` preserves the legacy mode.
+            progress_callback: HTEFS-S5 R2 optional sanitized telemetry —
+                a callable receiving ONLY ``(EvolutionSubstep, status)``
+                pairs from the closed enum/status sets. It never carries
+                payloads or context; ``None`` (default) disables telemetry
+                and keeps the previous behavior byte-identical.
 
         Returns:
             List of normalised evolution dicts (possibly empty).
@@ -722,6 +803,10 @@ class RealHandleBridge:
         # RPAP-S1 R2: this action flow navigates the legacy UI — the
         # previous job's admissions snapshot must not survive it.
         self._clear_admissions_snapshot()
+
+        # HTEFS-S5: optional sanitized substep telemetry (R2). Without a
+        # callback every emission below is a no-op — behavior unchanged.
+        progress = _SubstepReporter(progress_callback)
 
         page = self._resolve_active_page()
         if page is None:
@@ -740,12 +825,15 @@ class RealHandleBridge:
         # download. Created before any action; never reset per admission/helper.
         deadline_s = _pdf_deadline_s(timeout)
 
+        progress.started(EvolutionSubstep.SEARCH_NAVIGATION)
         # Step 1: Ensure search screen visible (reuse PSW-S12 helpers)
         try:
             ensure_search_screen(page, timeout_ms=_pdf_remaining_ms(deadline_s))
-        except NavigationTimeoutError:
+        except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+            progress.failed(EvolutionSubstep.SEARCH_NAVIGATION)
             raise
         except NavigationError:
+            progress.failed(EvolutionSubstep.SEARCH_NAVIGATION)
             logger.warning(
                 "Evolution action flow: search screen not available (sanitized)"
             )
@@ -758,9 +846,11 @@ class RealHandleBridge:
                 patient_record=patient_record,
                 timeout_ms=_pdf_remaining_ms(deadline_s),
             )
-        except NavigationTimeoutError:
+        except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+            progress.failed(EvolutionSubstep.SEARCH_NAVIGATION)
             raise
         except NavigationError:
+            progress.failed(EvolutionSubstep.SEARCH_NAVIGATION)
             logger.warning(
                 "Evolution action flow: patient search failed (sanitized)"
             )
@@ -769,22 +859,29 @@ class RealHandleBridge:
         # Step 3: Click Interna\u00e7\u00f5es
         try:
             click_internacoes(page, timeout_ms=_pdf_remaining_ms(deadline_s))
-        except NavigationTimeoutError:
+        except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+            progress.failed(EvolutionSubstep.SEARCH_NAVIGATION)
             raise
         except NavigationError:
+            progress.failed(EvolutionSubstep.SEARCH_NAVIGATION)
             logger.warning(
                 "Evolution action flow: Interna\u00e7\u00f5es click failed (sanitized)"
             )
             return []
 
+        progress.succeeded(EvolutionSubstep.SEARCH_NAVIGATION)
+
+        progress.started(EvolutionSubstep.ADMISSIONS_CAPTURE)
         # Step 4: Read admissions and select overlapping ones
         try:
             admissions = _read_and_build_snapshot(
                 page, timeout_ms=_pdf_remaining_ms(deadline_s)
             )
-        except NavigationTimeoutError:
+        except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+            progress.failed(EvolutionSubstep.ADMISSIONS_CAPTURE)
             raise
         except NavigationError:
+            progress.failed(EvolutionSubstep.ADMISSIONS_CAPTURE)
             logger.warning(
                 "Evolution action flow: admissions snapshot failed (sanitized)"
             )
@@ -795,8 +892,14 @@ class RealHandleBridge:
         # the snapshot as a selection input — an overrun must not masquerade as
         # an empty/no-overlap functional result. Propagates a typed
         # EvolutionPdfTimeoutError through the PSW-S17 taxonomy.
-        _pdf_remaining_ms(deadline_s)
+        try:
+            _pdf_remaining_ms(deadline_s)
+        except EvolutionPdfTimeoutError:
+            progress.failed(EvolutionSubstep.ADMISSIONS_CAPTURE)
+            raise
+        progress.succeeded(EvolutionSubstep.ADMISSIONS_CAPTURE)
 
+        progress.started(EvolutionSubstep.TARGET_SELECTION)
         overlap_failed = False
         overlap_message = _NO_OVERLAP_MESSAGE
         try:
@@ -831,9 +934,15 @@ class RealHandleBridge:
         # deadline BEFORE converting the failure to a no-overlap error or
         # interpreting an empty result. Propagates a typed
         # EvolutionPdfTimeoutError (never caught/wrapped here).
-        _pdf_remaining_ms(deadline_s)
+        try:
+            _pdf_remaining_ms(deadline_s)
+        except EvolutionPdfTimeoutError:
+            progress.failed(EvolutionSubstep.TARGET_SELECTION)
+            raise
         if overlap_failed:
+            progress.failed(EvolutionSubstep.TARGET_SELECTION)
             raise EvolutionPdfError(overlap_message)
+        progress.succeeded(EvolutionSubstep.TARGET_SELECTION)
 
         if not overlapping:
             return []
@@ -897,6 +1006,7 @@ class RealHandleBridge:
             # Step 5a: Open admission detail once per admission. In target
             # mode (R6/R7) the detail opens STRICTLY for the selected row —
             # no first-row fallback — and a failure propagates typed.
+            progress.started(EvolutionSubstep.DETAIL_OPEN)
             try:
                 open_internacao_detail(
                     page,
@@ -904,15 +1014,18 @@ class RealHandleBridge:
                     timeout_ms=_pdf_remaining_ms(deadline_s),
                     strict=target_admission is not None,
                 )
-            except NavigationTimeoutError:
+            except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+                progress.failed(EvolutionSubstep.DETAIL_OPEN)
                 raise
             except NavigationError:
+                progress.failed(EvolutionSubstep.DETAIL_OPEN)
                 if target_admission is not None:
                     raise
                 logger.warning(
                     "Evolution action flow: detail open failed (sanitized)"
                 )
                 continue
+            progress.succeeded(EvolutionSubstep.DETAIL_OPEN)
 
             # PSW-S21 R6: between consecutive chunks of the SAME admission,
             # restore the detail page before re-opening the evolution modal.
@@ -939,11 +1052,16 @@ class RealHandleBridge:
                         break
 
                 # Step 5b: Click Evolu\u00e7\u00e3o to open the date modal.
+                progress.started(EvolutionSubstep.ACTION_ACTIVATION)
                 try:
                     click_evolucao(page, timeout_ms=_pdf_remaining_ms(deadline_s))
-                except NavigationTimeoutError:
+                except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+                    # R3: the SAME typed timeout propagates after the failed
+                    # terminal — activation stays localized, never reclassified.
+                    progress.failed(EvolutionSubstep.ACTION_ACTIVATION)
                     raise
                 except NavigationError:
+                    progress.failed(EvolutionSubstep.ACTION_ACTIVATION)
                     if target_admission is not None:
                         # R7: target activation failure is a typed failure,
                         # never a skipped chunk or empty result.
@@ -955,8 +1073,13 @@ class RealHandleBridge:
                         chunk_end,
                     )
                     break
+                progress.succeeded(EvolutionSubstep.ACTION_ACTIVATION)
 
                 # Step 5c: Fill the BOUNDED chunk dates (convert to DD/MM/YYYY).
+                # HTEFS-S5 R3: one report-generation substep spans the date
+                # fill, the optional ascending order, the visualize click and
+                # the report wait — exactly one terminal is emitted.
+                progress.started(EvolutionSubstep.REPORT_GENERATION)
                 # PSW-S20 R4: the date inputs are REQUIRED for a correct
                 # report window. A fill failure (input present but not
                 # fillable) OR absent inputs MUST stop report generation with
@@ -975,7 +1098,8 @@ class RealHandleBridge:
                         end_date_br=br_end,
                         timeout_ms=_pdf_remaining_ms(deadline_s),
                     )
-                except NavigationTimeoutError:
+                except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+                    progress.failed(EvolutionSubstep.REPORT_GENERATION)
                     raise
                 except NavigationError:
                     date_fill_failed = True
@@ -986,6 +1110,7 @@ class RealHandleBridge:
                         chunk_start,
                         chunk_end,
                     )
+                    progress.failed(EvolutionSubstep.REPORT_GENERATION)
                     raise EvolutionPdfError(_EVOLUTION_DATE_FILL_REQUIRED_MESSAGE)
 
                 # Step 5d: Select ascending order (optional no-op on failure).
@@ -1007,9 +1132,11 @@ class RealHandleBridge:
                     click_visualizar_report(
                         page, timeout_ms=_pdf_remaining_ms(deadline_s)
                     )
-                except NavigationTimeoutError:
+                except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+                    progress.failed(EvolutionSubstep.REPORT_GENERATION)
                     raise
                 except NavigationError:
+                    progress.failed(EvolutionSubstep.REPORT_GENERATION)
                     if target_admission is not None:
                         # R7: report generation is REQUIRED in target mode.
                         raise
@@ -1032,8 +1159,14 @@ class RealHandleBridge:
                         page,
                         timeout_ms=_pdf_bound_ms(deadline_s, 120_000),
                     )
-                except NavigationTimeoutError:
+                except (NavigationTimeoutError, EvolutionPdfTimeoutError):
+                    progress.failed(EvolutionSubstep.REPORT_GENERATION)
                     raise
+                # R3: the report-generation substep SUCCEEDS both when the
+                # report is ready and when the source explicitly reports no
+                # evolutions for this chunk (explicit empty is success for
+                # the actions that reached it).
+                progress.succeeded(EvolutionSubstep.REPORT_GENERATION)
                 if not report_ready:
                     logger.debug(
                         "Evolution action flow: explicit no-evolutions dialog "
@@ -1048,11 +1181,13 @@ class RealHandleBridge:
                 # POST fallback is attempted. PSW-S17 post-cbf50c1 (D17): a
                 # typed bounded-locator timeout during URL resolution MUST
                 # propagate as a typed timeout.
+                progress.started(EvolutionSubstep.PDF_DOWNLOAD)
                 try:
                     pdf_url = self._resolve_pdf_url_from_report_page(
                         page, deadline_s
                     )
                 except EvolutionPdfTimeoutError:
+                    progress.failed(EvolutionSubstep.PDF_DOWNLOAD)
                     raise
                 except Exception:
                     # Non-timeout resolution failure: fall through to the
@@ -1070,8 +1205,10 @@ class RealHandleBridge:
                             page, deadline_s
                         )
                 except EvolutionPdfTimeoutError:
+                    progress.failed(EvolutionSubstep.PDF_DOWNLOAD)
                     raise
                 except Exception as exc:
+                    progress.failed(EvolutionSubstep.PDF_DOWNLOAD)
                     if target_admission is not None:
                         # R7: a required download failure propagates typed;
                         # R9: unexpected failures are re-wrapped into a
@@ -1092,15 +1229,19 @@ class RealHandleBridge:
                     )
                     last_chunk_had_report = True
                     continue
+                progress.succeeded(EvolutionSubstep.PDF_DOWNLOAD)
 
                 # Step 5h: Extract text and normalise (D21: deadline-checked
                 # boundaries; typed timeouts propagate, non-timeout
                 # EvolutionPdfError skips this chunk but preserves priors).
+                progress.started(EvolutionSubstep.PDF_PARSE)
                 try:
                     raw_text = extract_pdf_text(pdf_bytes)
                 except EvolutionPdfTimeoutError:
+                    progress.failed(EvolutionSubstep.PDF_PARSE)
                     raise
                 except EvolutionPdfError:
+                    progress.failed(EvolutionSubstep.PDF_PARSE)
                     if target_admission is not None:
                         # R7: parse is REQUIRED in target mode.
                         raise
@@ -1113,15 +1254,21 @@ class RealHandleBridge:
                     last_chunk_had_report = True
                     continue
                 # After extraction / before normalization.
-                _pdf_remaining_ms(deadline_s)
+                try:
+                    _pdf_remaining_ms(deadline_s)
+                except EvolutionPdfTimeoutError:
+                    progress.failed(EvolutionSubstep.PDF_PARSE)
+                    raise
                 try:
                     events = normalize_pdf_report_text(
                         raw_text,
                         admission_key=admission_key,
                     )
                 except EvolutionPdfTimeoutError:
+                    progress.failed(EvolutionSubstep.PDF_PARSE)
                     raise
                 except EvolutionPdfError:
+                    progress.failed(EvolutionSubstep.PDF_PARSE)
                     if target_admission is not None:
                         # R7: normalization is REQUIRED in target mode.
                         raise
@@ -1134,7 +1281,12 @@ class RealHandleBridge:
                     last_chunk_had_report = True
                     continue
                 # After normalization.
-                _pdf_remaining_ms(deadline_s)
+                try:
+                    _pdf_remaining_ms(deadline_s)
+                except EvolutionPdfTimeoutError:
+                    progress.failed(EvolutionSubstep.PDF_PARSE)
+                    raise
+                progress.succeeded(EvolutionSubstep.PDF_PARSE)
                 all_events.extend(events)
                 last_chunk_had_report = True
 
