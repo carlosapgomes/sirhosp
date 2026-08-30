@@ -1,7 +1,9 @@
 """IngestionRun, CensusExecutionBatch, IngestionRunAttempt,
-FinalRunFailure, and IngestionRunStageMetric - operational tracking."""
+FinalRunFailure, IngestionRunStageMetric, and EvolutionExtractionCoverage
+- operational tracking."""
 
 from django.db import models
+from django.db.models import F, Q
 from django.utils import timezone
 
 
@@ -295,6 +297,73 @@ class FinalRunFailure(models.Model):
             f"FinalRunFailure #{self.pk} "
             f"patient={self.patient_record} "
             f"intent={self.intent}"
+        )
+
+
+class EvolutionExtractionCoverage(models.Model):
+    """Completed evolution-extraction coverage for a local admission.
+
+    HTEFS-S3 (D3): one row per (admission, source_system, inclusive
+    [start_date, end_date]) chunk whose extraction was confirmed committed
+    in the same transaction as its clinical events. The ABSENCE of a row
+    means coverage is not proven — there are intentionally no pending or
+    failed states (failures live in the existing run lifecycle).
+
+    An explicitly empty chunk (event_count=0) is a confirmed fact and is
+    recorded, distinguishing "consulted and empty" from "never consulted".
+    """
+
+    admission = models.ForeignKey(
+        "patients.Admission",
+        on_delete=models.CASCADE,
+        related_name="evolution_extraction_coverage",
+    )
+    source_system = models.CharField(max_length=100, default="tasy")
+    start_date = models.DateField(help_text="Inclusive chunk start date.")
+    end_date = models.DateField(help_text="Inclusive chunk end date.")
+    completed_by_run = models.ForeignKey(
+        IngestionRun,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="evolution_coverage_commits",
+        help_text="Run that confirmed this coverage chunk.",
+    )
+    event_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Aggregate number of evolutions observed in the chunk.",
+    )
+    completed_at = models.DateTimeField(
+        default=timezone.now,
+        help_text="When the chunk was (re)confirmed as covered.",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["admission", "source_system", "start_date", "end_date"],
+                name="uq_eec_admission_source_bounds",
+            ),
+            models.CheckConstraint(
+                condition=Q(end_date__gte=F("start_date")),
+                name="ck_eec_bounds_ordered",
+            ),
+            models.CheckConstraint(
+                condition=Q(event_count__gte=0),
+                name="ck_eec_event_count_nonnegative",
+            ),
+        ]
+        # The unique constraint above already provides the composite index
+        # (admission, source_system, start_date, end_date) used by the
+        # targeted planner's admission/source/range queries; no extra index.
+        ordering = ["start_date", "end_date"]
+
+    def __str__(self) -> str:
+        return (
+            f"EvolutionExtractionCoverage #{self.pk} "
+            f"admission={self.admission_id} "
+            f"{self.start_date}..{self.end_date} "
+            f"events={self.event_count}"
         )
 
 

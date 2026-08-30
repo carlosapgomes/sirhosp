@@ -13,6 +13,7 @@ from typing import Any
 from django.utils import timezone as dj_timezone
 
 from apps.clinical_docs.models import ClinicalEvent
+from apps.ingestion.models import EvolutionExtractionCoverage
 from apps.patients.models import Patient
 
 
@@ -64,29 +65,61 @@ def compute_coverage_gaps(
         for happened_at in events:
             covered_dates.add(dj_timezone.localtime(happened_at).date())
 
-    # Build all dates in the window
-    all_dates: list[date] = []
-    current = window_start
-    while current <= window_end:
-        all_dates.append(current)
-        current += timedelta(days=1)
+    return _gaps_from_covered_dates(
+        covered_dates, window_start, window_end, overlap_days,
+    )
 
-    # Find uncovered dates and group into contiguous gaps
-    uncovered = [d for d in all_dates if d not in covered_dates]
 
-    gaps = _group_contiguous_dates(uncovered)
+def compute_targeted_coverage_gaps(
+    *,
+    admission_id: int,
+    source_system: str,
+    start_date: str,
+    end_date: str,
+    overlap_days: int = 1,
+) -> list[dict[str, str]]:
+    """Compute uncovered windows for a targeted admission (HTEFS-S3).
 
-    # Extend the first gap backward by overlap_days to capture events
-    # registered after the last extraction (e.g. census ran at 21:00 but
-    # events were created at 22:30 on a date already marked as covered).
-    if overlap_days > 0 and gaps:
-        extended_start = max(
-            window_start,
-            date.fromisoformat(gaps[0]["start_date"]) - timedelta(days=overlap_days),
-        )
-        gaps[0]["start_date"] = extended_start.isoformat()
+    Coverage comes ONLY from the explicit
+    :class:`~apps.ingestion.models.EvolutionExtractionCoverage` ledger —
+    the presence of a ``ClinicalEvent`` never proves that a targeted
+    extraction completed. Covered intervals are clipped to the requested
+    window and united; the remaining uncovered dates form contiguous gaps.
 
-    return gaps
+    Args:
+        admission_id: Local ``Admission`` primary key (the target).
+        source_system: Source system identifier (e.g. "tasy").
+        start_date: Requested window start (YYYY-MM-DD).
+        end_date: Requested window end (YYYY-MM-DD).
+        overlap_days: Days to extend the first gap backward to capture
+            events registered after the last extraction (default: 1).
+
+    Returns:
+        List of dicts with "start_date" and "end_date" keys representing
+        contiguous uncovered windows. Empty list means full coverage.
+    """
+    window_start = date.fromisoformat(start_date)
+    window_end = date.fromisoformat(end_date)
+
+    covered_dates: set[date] = set()
+    coverage_rows = EvolutionExtractionCoverage.objects.filter(
+        admission_id=admission_id,
+        source_system=source_system,
+        end_date__gte=window_start,
+        start_date__lte=window_end,
+    ).order_by("start_date", "end_date")
+
+    for coverage in coverage_rows:
+        span_start = max(coverage.start_date, window_start)
+        span_end = min(coverage.end_date, window_end)
+        current = span_start
+        while current <= span_end:
+            covered_dates.add(current)
+            current += timedelta(days=1)
+
+    return _gaps_from_covered_dates(
+        covered_dates, window_start, window_end, overlap_days,
+    )
 
 
 def plan_extraction_windows(
@@ -125,6 +158,87 @@ def plan_extraction_windows(
         "windows": gaps,
         "gaps": gaps,
     }
+
+
+def plan_targeted_extraction_windows(
+    *,
+    admission_id: int,
+    source_system: str,
+    start_date: str,
+    end_date: str,
+    overlap_days: int = 1,
+) -> dict[str, Any]:
+    """Determine a targeted extraction plan from the coverage ledger.
+
+    Same contract as :func:`plan_extraction_windows`, but coverage is
+    derived exclusively from explicit
+    :class:`~apps.ingestion.models.EvolutionExtractionCoverage` rows of the
+    targeted admission (HTEFS-S3 R3). Runs without a target admission must
+    keep using :func:`plan_extraction_windows`.
+
+    Args:
+        admission_id: Local ``Admission`` primary key (the target).
+        source_system: Source system identifier.
+        start_date: Requested window start (YYYY-MM-DD).
+        end_date: Requested window end (YYYY-MM-DD).
+        overlap_days: Days to extend the first gap backward.
+
+    Returns:
+        Dict with:
+            - skip_extraction: True if full coverage (no extraction needed).
+            - windows: List of date-range dicts to extract (gaps).
+            - gaps: Same as windows (alias for audit/logging).
+    """
+    gaps = compute_targeted_coverage_gaps(
+        admission_id=admission_id,
+        source_system=source_system,
+        start_date=start_date,
+        end_date=end_date,
+        overlap_days=overlap_days,
+    )
+
+    return {
+        "skip_extraction": len(gaps) == 0,
+        "windows": gaps,
+        "gaps": gaps,
+    }
+
+
+def _gaps_from_covered_dates(
+    covered_dates: set[date],
+    window_start: date,
+    window_end: date,
+    overlap_days: int,
+) -> list[dict[str, str]]:
+    """Group uncovered window dates into contiguous gaps.
+
+    Shared tail of the legacy and targeted planners: builds the full window
+    day list, keeps dates without coverage, groups them into contiguous
+    blocks, and extends the FIRST gap backward by ``overlap_days`` to
+    capture events registered after the last extraction (e.g. census ran at
+    21:00 but events were created at 22:30 on a date already marked as
+    covered).
+    """
+    # Build all dates in the window
+    all_dates: list[date] = []
+    current = window_start
+    while current <= window_end:
+        all_dates.append(current)
+        current += timedelta(days=1)
+
+    # Find uncovered dates and group into contiguous gaps
+    uncovered = [d for d in all_dates if d not in covered_dates]
+
+    gaps = _group_contiguous_dates(uncovered)
+
+    if overlap_days > 0 and gaps:
+        extended_start = max(
+            window_start,
+            date.fromisoformat(gaps[0]["start_date"]) - timedelta(days=overlap_days),
+        )
+        gaps[0]["start_date"] = extended_start.isoformat()
+
+    return gaps
 
 
 def _group_contiguous_dates(dates: list[date]) -> list[dict[str, str]]:

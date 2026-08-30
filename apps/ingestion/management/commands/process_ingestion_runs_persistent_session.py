@@ -122,7 +122,7 @@ from __future__ import annotations
 import argparse
 import os
 import time
-from datetime import timedelta
+from datetime import date, timedelta
 
 from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
@@ -142,6 +142,7 @@ from apps.ingestion.extractors.errors import (
 from apps.ingestion.extractors.legacy_navigation import (
     DEMOGRAPHICS_IDENTITY_MESSAGE,
     TargetAdmissionContext,
+    build_chunks_for_interval,
     demographics_identity_matches,
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
@@ -152,7 +153,10 @@ from apps.ingestion.extractors.persistent_extraction_adapter import (
     PersistentExtractionAdapter,
 )
 from apps.ingestion.extractors.session_policy import TabCleanupOutcome
-from apps.ingestion.gap_planner import plan_extraction_windows
+from apps.ingestion.gap_planner import (
+    plan_extraction_windows,
+    plan_targeted_extraction_windows,
+)
 
 # ---------------------------------------------------------------------------
 # Reuse WorkerHeartbeat from the existing worker
@@ -160,7 +164,11 @@ from apps.ingestion.gap_planner import plan_extraction_windows
 from apps.ingestion.management.commands.process_ingestion_runs import (
     WorkerHeartbeat,
 )
-from apps.ingestion.models import IngestionRun, IngestionRunAttempt
+from apps.ingestion.models import (
+    EvolutionExtractionCoverage,
+    IngestionRun,
+    IngestionRunAttempt,
+)
 from apps.ingestion.services import (
     enqueue_most_recent_admission_full_sync,
     persist_admissions_snapshot,
@@ -1985,12 +1993,25 @@ class Command(BaseCommand):
         # ------------------------------------------------------------------
         gap_stage_start = timezone.now()
         try:
-            plan = plan_extraction_windows(
-                patient_source_key=patient_record,
-                source_system="tasy",
-                start_date=snap_start,
-                end_date=snap_end,
-            )
+            if target_admission is not None:
+                # HTEFS-S3 (R3): targeted coverage comes ONLY from the
+                # explicit ledger — never from ClinicalEvent presence.
+                target_admission_id = int(
+                    str(params.get("admission_id") or "").strip()
+                )
+                plan = plan_targeted_extraction_windows(
+                    admission_id=target_admission_id,
+                    source_system="tasy",
+                    start_date=snap_start,
+                    end_date=snap_end,
+                )
+            else:
+                plan = plan_extraction_windows(
+                    patient_source_key=patient_record,
+                    source_system="tasy",
+                    start_date=snap_start,
+                    end_date=snap_end,
+                )
         except Exception as exc:
             self._record_stage(
                 run, "gap_planning", "failed", gap_stage_start,
@@ -2033,6 +2054,21 @@ class Command(BaseCommand):
         # ------------------------------------------------------------------
         # Step 3: Extract evolutions for each gap window
         # ------------------------------------------------------------------
+        if target_admission is not None:
+            # HTEFS-S3 (D4): targeted runs commit ONE canonical chunk at a
+            # time — events, coverage and counters in the same transaction.
+            self._run_targeted_incremental_chunks(
+                run=run,
+                adapter=adapter,
+                patient=patient,
+                patient_record=patient_record,
+                plan=plan,
+                target_admission=target_admission,
+                admission_id=target_admission_id,
+                adm_metrics=adm_metrics,
+            )
+            return
+
         ev_stage_start = timezone.now()
         all_evolutions: list[dict] = []
         try:
@@ -2131,6 +2167,168 @@ class Command(BaseCommand):
             f"created={ev_created}, "
             f"skipped={ev_skipped}, "
             f"revised={ev_revised})"
+        )
+
+    def _run_targeted_incremental_chunks(
+        self,
+        *,
+        run: IngestionRun,
+        adapter: PersistentExtractionAdapter,
+        patient: Patient,
+        patient_record: str,
+        plan: dict,
+        target_admission: TargetAdmissionContext,
+        admission_id: int,
+        adm_metrics: dict,
+    ) -> None:
+        """Extract and commit targeted chunks one at a time (HTEFS-S3 D4).
+
+        Each planned gap window is split by the canonical chunker (max 15
+        days, deterministic overlap — no algorithm copied here). For every
+        chunk the adapter is called once (extraction stays OUTSIDE the
+        commit transaction — it is a long remote operation), then an outer
+        PostgreSQL transaction wraps:
+
+        1. ``ingest_evolutions`` (shared clinical persistence service);
+        2. idempotent ``EvolutionExtractionCoverage`` upsert;
+        3. cumulative run counter increment.
+
+        Only after that commit does the loop advance. A failure anywhere in
+        a chunk reverts that chunk entirely (events + coverage + counters);
+        previously committed chunks survive and the run follows the current
+        retry/finalization policy. Retries replan from the ledger and skip
+        fully covered chunks.
+        """
+        ev_stage_start = timezone.now()
+        ingest_stage_start = timezone.now()
+        total_created = total_skipped = total_revised = 0
+        chunks_committed = 0
+
+        for window in plan["windows"]:
+            chunks = build_chunks_for_interval(
+                date.fromisoformat(window["start_date"]),
+                date.fromisoformat(window["end_date"]),
+            )
+            for chunk_start, chunk_end in chunks:
+                # --- Extraction (long, remote — outside the transaction) --
+                try:
+                    evolutions = adapter.extract_evolutions(
+                        patient_record=patient_record,
+                        start_date=chunk_start.isoformat(),
+                        end_date=chunk_end.isoformat(),
+                        timeout=evolution_window_budget_seconds(
+                            chunk_start.isoformat(), chunk_end.isoformat()
+                        ),
+                        target_admission=target_admission,
+                    )
+                except ExtractionError as exc:
+                    # Recoverable data-level failure (InvalidJsonError,
+                    # SnapshotContainerMissingError and EvolutionPdfError
+                    # are ExtractionError subclasses) with tab opened —
+                    # safe cleanup before another claim.
+                    self._record_stage(
+                        run, "evolution_extraction", "failed", ev_stage_start,
+                        details_json=self._stage_error_details(exc),
+                    )
+                    adapter.cleanup_after_failure()
+                    self._mark_run_failed(run, exc)
+                    return
+                except Exception as exc:
+                    self._record_stage(
+                        run, "evolution_extraction", "failed", ev_stage_start,
+                        details_json=self._stage_error_details(exc),
+                    )
+                    self._mark_run_failed(run, exc)
+                    return
+
+                # --- Atomic chunk commit: events + coverage + counters ----
+                ingest_stage_start = timezone.now()
+                try:
+                    with transaction.atomic():
+                        (
+                            ev_created,
+                            ev_skipped,
+                            ev_revised,
+                        ) = ingest_evolutions(
+                            evolutions, run, patient=patient,
+                        )
+                        EvolutionExtractionCoverage.objects.update_or_create(
+                            admission_id=admission_id,
+                            source_system="tasy",
+                            start_date=chunk_start,
+                            end_date=chunk_end,
+                            defaults={
+                                "completed_by_run": run,
+                                "event_count": len(evolutions),
+                                "completed_at": timezone.now(),
+                            },
+                        )
+                        run.events_processed += len(evolutions)
+                        run.events_created += ev_created
+                        run.events_skipped += ev_skipped
+                        run.events_revised += ev_revised
+                        run.save(update_fields=[
+                            "events_processed",
+                            "events_created",
+                            "events_skipped",
+                            "events_revised",
+                        ])
+                except Exception as exc:
+                    # Rollback already done: events, coverage and counter
+                    # changes of THIS chunk are reverted atomically.
+                    self._record_stage(
+                        run, "ingestion_persistence", "failed",
+                        ingest_stage_start,
+                        details_json=self._stage_error_details(exc),
+                    )
+                    self._mark_run_failed(run, exc)
+                    return
+
+                total_created += ev_created
+                total_skipped += ev_skipped
+                total_revised += ev_revised
+                chunks_committed += 1
+
+        self._record_stage(
+            run, "evolution_extraction", "succeeded", ev_stage_start,
+        )
+        self._record_stage(
+            run, "ingestion_persistence", "succeeded", ingest_stage_start,
+            details_json={
+                "processed": run.events_processed,
+                "created": total_created,
+                "skipped": total_skipped,
+                "revised": total_revised,
+            },
+        )
+
+        # Persist metrics and mark succeeded (counters were already
+        # committed incrementally per chunk; this full save also persists
+        # admissions metrics and the planned gaps for audit).
+        run.admissions_seen = adm_metrics["seen"]
+        run.admissions_created = adm_metrics["created"]
+        run.admissions_updated = adm_metrics["updated"]
+        run.status = "succeeded"
+        run.finished_at = timezone.now()
+        run.failure_reason = ""
+        run.timed_out = False
+        run.save()
+
+        self._mark_latest_attempt_succeeded(run)
+        self._try_close_batch(run.batch)
+
+        self.stdout.write(
+            f"  {self._run_label(run)} full-sync succeeded (persistent "
+            f"session, targeted incremental) "
+            f"(admissions_seen={adm_metrics['seen']}, "
+            f"admissions_created={adm_metrics['created']}, "
+            f"admissions_updated={adm_metrics['updated']}, "
+            f"gaps={len(plan['windows'])}, "
+            f"chunks={chunks_committed}, "
+            f"processed={run.events_processed}, "
+            f"created={total_created}, "
+            f"skipped={total_skipped}, "
+            f"revised={total_revised})"
         )
 
     # ------------------------------------------------------------------
