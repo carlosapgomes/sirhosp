@@ -25,6 +25,7 @@ import logging
 import math
 import re
 import time
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -781,11 +782,186 @@ def choose_overlapping_admissions(
     return selected
 
 
+# ---------------------------------------------------------------------------
+# HTEFS-S2: strict targeted-admission selection (D1)
+# ---------------------------------------------------------------------------
+
+_TARGET_NOT_FOUND_MESSAGE = (
+    "Nenhuma linha legada compatível com a internação alvo local foi "
+    "encontrada."
+)
+"""Constant sanitized zero-candidate failure (HTEFS-S2 R5).
+
+Carries no admission key, patient record, date, URL, selector, or raw
+exception text.
+"""
+
+_TARGET_AMBIGUOUS_MESSAGE = (
+    "Mais de uma linha legada compatível com a internação alvo local foi "
+    "encontrada e a dica de chave não resolve a ambiguidade."
+)
+"""Constant sanitized residual-ambiguity failure (HTEFS-S2 R5).
+
+The caller must never pick the first/most-recent row; fail closed instead.
+"""
+
+
+@dataclass(frozen=True)
+class TargetAdmissionContext:
+    """Minimal in-memory context of the resolved local target (HTEFS-S2 R2).
+
+    Built by the worker from the persisted local ``Admission`` and propagated
+    worker -> adapter -> bridge as named/typed data (never a magic dict). It
+    carries ONLY stable facts plus the legacy source key as a tie-break hint:
+
+    - ``start_date``: local admission start (ISO ``YYYY-MM-DD``, required);
+    - ``end_date``: local discharge date (ISO) or ``""`` when open;
+    - ``is_active``: True when the local admission has no discharge date;
+    - ``source_admission_key``: hint ONLY — it may tie-break candidates that
+      are already compatible by period/state, never authorize an incompatible
+      one, and is never treated as canonical identity (the legacy key is
+      volatile between captures).
+
+    Nothing here is persisted: no snapshot of the legacy row, no model/field.
+    """
+
+    start_date: str
+    end_date: str = ""
+    is_active: bool = True
+    source_admission_key: str = ""
+
+
+def _parse_stable_row_date(value: str) -> date | None:
+    """Parse a canonical snapshot row date, or ``None`` when unusable.
+
+    Defensive: a row whose dates cannot be parsed can never PROVE a stable
+    match, so it is skipped instead of crashing the selection or leaking the
+    raw value into an error.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return _parse_cli_date(text)
+    except NavigationError:
+        return None
+
+
+def select_target_admission(
+    admissions: list[dict[str, Any]],
+    *,
+    requested_start: str,
+    requested_end: str,
+    target: TargetAdmissionContext,
+) -> dict[str, Any]:
+    """Select the single legacy row compatible with the local target admission.
+
+    HTEFS-S2 (D1) pure selection — dict fixtures in, one row out, no I/O and
+    no page access. Selection order (exactly one winner or fail closed):
+
+    1. intersection with the requested window (reuses the single overlap
+       rule of :func:`choose_overlapping_admissions`);
+    2. legacy start equal to the local target start (the stable fact that
+       survives legacy key changes);
+    3. state compatibility: an active local target requires an OPEN legacy
+       row (``admissionEnd`` absent); a closed local target requires a legacy
+       end equal to the local end;
+    4. the legacy key may only tie-break candidates already compatible by
+       period/state — it NEVER authorizes an incompatible row.
+
+    Zero compatible candidates raise ``_TARGET_NOT_FOUND_MESSAGE``; more than
+    one compatible candidate that the hint cannot uniquely resolve raise
+    ``_TARGET_AMBIGUOUS_MESSAGE``. Both are constant sanitized messages — the
+    caller must never fall back to the first/most-recent row.
+
+    Args:
+        admissions: Canonical snapshot rows (``admissionKey``/``admissionStart``/
+            ``admissionEnd`` ISO strings; open rows carry no end).
+        requested_start: Requested window start in ``YYYY-MM-DD``.
+        requested_end: Requested window end in ``YYYY-MM-DD``.
+        target: The named :class:`TargetAdmissionContext` of the local row.
+
+    Returns:
+        The single compatible admission row dict.
+
+    Raises:
+        NavigationError: With a constant sanitized message when zero rows or
+            an ambiguous set of rows matches the target.
+    """
+    # Step 1: single overlap rule (a target incompatible with the requested
+    # window can never be the winner). Any overlap failure counts as zero
+    # candidates so the target-specific constant message is raised below.
+    try:
+        overlapping = choose_overlapping_admissions(
+            admissions,
+            start_date=requested_start,
+            end_date=requested_end,
+        )
+    except NavigationError:
+        overlapping = []
+
+    target_start = _parse_stable_row_date(target.start_date)
+    target_end = (
+        _parse_stable_row_date(target.end_date) if target.end_date else None
+    )
+
+    # Steps 2+3: stable period/state compatibility.
+    compatible: list[dict[str, Any]] = []
+    for adm in overlapping:
+        row_start = _parse_stable_row_date(
+            adm.get("admissionStart") or adm.get("admission_start") or ""
+        )
+        row_end = _parse_stable_row_date(
+            adm.get("admissionEnd") or adm.get("admission_end") or ""
+        )
+        if row_start is None or row_start != target_start:
+            continue
+        if target.is_active:
+            # Local active -> legacy row must be open.
+            if row_end is not None:
+                continue
+        else:
+            # Local closed -> legacy row must have the compatible end.
+            if row_end is None or target_end is None or row_end != target_end:
+                continue
+        compatible.append(adm)
+
+    if not compatible:
+        raise NavigationError(_TARGET_NOT_FOUND_MESSAGE)
+
+    if len(compatible) == 1:
+        return compatible[0]
+
+    # Step 4: the key hint may only tie-break ALREADY-compatible rows.
+    hint = str(target.source_admission_key or "").strip()
+    if hint:
+        keyed = [
+            adm
+            for adm in compatible
+            if str(adm.get("admissionKey") or adm.get("admission_key") or "")
+            == hint
+        ]
+        if len(keyed) == 1:
+            return keyed[0]
+
+    raise NavigationError(_TARGET_AMBIGUOUS_MESSAGE)
+
+
+_ADMISSION_ROW_NOT_FOUND_MESSAGE = (
+    "Could not locate the admission row in the table."
+)
+"""Constant sanitized message when the admission row cannot be located.
+
+Never contains the admission key, patient record, URL, or selector.
+"""
+
+
 def open_internacao_detail(
     page: Any,
     *,
     admission_key: str,
     timeout_ms: int | None = None,
+    strict: bool = False,
 ) -> None:
     """Open the admission detail page by clicking the details link.
 
@@ -796,10 +972,17 @@ def open_internacao_detail(
     PSW-S17 R6 (second corrective closure): error messages and logs no
     longer include ``admission_key`` or any source identifier.
 
+    HTEFS-S2 R6: with ``strict=True`` (targeted mode) the historical
+    first-row fallback is FORBIDDEN — the row must resolve by its key or
+    the navigation fails closed. The default (``strict=False``) preserves
+    the legacy behavior for the all-overlapping-admissions mode.
+
     Args:
         page: A Playwright ``Page`` object.
         admission_key: The ``data-rk`` value identifying the admission.
             Used only to locate the row; never surfaced in errors/logs.
+        timeout_ms: Optional shared deadline budget in milliseconds.
+        strict: When True, never fall back to the first visible row.
 
     Raises:
         NavigationTimeoutError: on Playwright timeout.
@@ -821,7 +1004,14 @@ def open_internacao_detail(
     row_locator = frame.locator(row_selector)
     try:
         row_locator.first.wait_for(state="visible", timeout=_bound_ms(deadline_s, 10000))
-    except Exception:
+    except Exception as exc:
+        if strict:
+            # HTEFS-S2 R6: targeted mode forbids the first-row fallback —
+            # a missing keyed row fails closed (typed, sanitized).
+            _raise_required_action_error(
+                exc,
+                fallback_message=_ADMISSION_ROW_NOT_FOUND_MESSAGE,
+            )
         # Fallback: try first row with details link (sanitized log; no key).
         logger.debug(
             "Admission row not found by key; trying first visible "
@@ -835,9 +1025,7 @@ def open_internacao_detail(
         except Exception as exc:
             _raise_required_action_error(
                 exc,
-                fallback_message=(
-                    "Could not locate the admission row in the table."
-                ),
+                fallback_message=_ADMISSION_ROW_NOT_FOUND_MESSAGE,
             )
 
     details_row_selector = (

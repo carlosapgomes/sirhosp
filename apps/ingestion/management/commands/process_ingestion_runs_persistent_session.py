@@ -124,6 +124,7 @@ import os
 import time
 from datetime import timedelta
 
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, transaction
 from django.db.utils import OperationalError, ProgrammingError
@@ -140,6 +141,7 @@ from apps.ingestion.extractors.errors import (
 )
 from apps.ingestion.extractors.legacy_navigation import (
     DEMOGRAPHICS_IDENTITY_MESSAGE,
+    TargetAdmissionContext,
     demographics_identity_matches,
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
@@ -165,6 +167,7 @@ from apps.ingestion.services import (
     queue_demographics_only_run,
     upsert_patient_demographics,
 )
+from apps.patients.models import Admission, Patient
 
 # ---------------------------------------------------------------------------
 # Default configuration
@@ -195,6 +198,17 @@ _DEMOGRAPHICS_FIELD_COUNT_FIELDS: tuple[str, ...] = (
 
 _LOGIN_TIMEOUT_SECONDS = 180
 """Production-proven timeout for every real legacy login page action."""
+
+_TARGET_ADMISSION_INVALID_MESSAGE = (
+    "A internação alvo do run não pôde ser resolvida para o paciente local."
+)
+"""HTEFS-S2 R1/R9: constant sanitized target-resolution failure.
+
+Raised when ``admission_id`` is not the primary key of an ``Admission`` of
+the run's persisted patient, or when that admission lacks a usable start
+date. Never contains the admission id, key, patient record, or any received
+value.
+"""
 
 _DJANGO_ALLOW_ASYNC_UNSAFE_ENV = "DJANGO_ALLOW_ASYNC_UNSAFE"
 """Django guard required while Playwright's synchronous event loop is active."""
@@ -1821,6 +1835,56 @@ class Command(BaseCommand):
     # Full-sync processing via persistent adapter (PSW-S8)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_target_admission_context(
+        patient: Patient,
+        params: dict,
+    ) -> TargetAdmissionContext | None:
+        """Resolve the run's targeted local admission (HTEFS-S2 R1/R2).
+
+        A non-empty ``admission_id`` MUST be the primary key of an
+        ``Admission`` belonging to the run's persisted patient AND carry a
+        usable start date (the stable matching fact). Any other case raises
+        :class:`~django.core.exceptions.ValidationError` with a constant
+        sanitized message — BEFORE any evolution extraction happens.
+
+        Returns ``None`` when the run has no ``admission_id`` (legacy
+        all-overlapping-admissions mode, R8).
+
+        Args:
+            patient: The persisted/resolved local ``Patient`` of the run.
+            params: The run's ``parameters_json`` payload.
+
+        Returns:
+            The named :class:`TargetAdmissionContext` for the target, or
+            ``None`` when the run does not target an admission.
+
+        Raises:
+            ValidationError: On unknown/foreign/undatable admission ids.
+        """
+        admission_id = str(params.get("admission_id") or "").strip()
+        if not admission_id:
+            return None
+        try:
+            admission_pk = int(admission_id)
+        except ValueError:
+            raise ValidationError(_TARGET_ADMISSION_INVALID_MESSAGE) from None
+        admission = (
+            Admission.objects.filter(pk=admission_pk, patient=patient).first()
+        )
+        if admission is None or admission.admission_date is None:
+            raise ValidationError(_TARGET_ADMISSION_INVALID_MESSAGE)
+        return TargetAdmissionContext(
+            start_date=admission.admission_date.date().isoformat(),
+            end_date=(
+                admission.discharge_date.date().isoformat()
+                if admission.discharge_date
+                else ""
+            ),
+            is_active=admission.discharge_date is None,
+            source_admission_key=admission.source_admission_key,
+        )
+
     def _process_full_sync(
         self,
         run: IngestionRun,
@@ -1903,6 +1967,20 @@ class Command(BaseCommand):
         )
 
         # ------------------------------------------------------------------
+        # Step 1b (HTEFS-S2 R1): resolve the targeted local admission BEFORE
+        # any extraction work. An unknown/foreign/undatable admission id
+        # fails closed with a constant sanitized ValidationError.
+        # ------------------------------------------------------------------
+        try:
+            target_admission = self._resolve_target_admission_context(
+                patient, params,
+            )
+        except ValidationError as exc:
+            adapter.cleanup_after_failure()
+            self._mark_run_failed(run, exc)
+            return
+
+        # ------------------------------------------------------------------
         # Step 2: Plan extraction windows (cache-first)
         # ------------------------------------------------------------------
         gap_stage_start = timezone.now()
@@ -1966,6 +2044,7 @@ class Command(BaseCommand):
                     timeout=evolution_window_budget_seconds(
                         window["start_date"], window["end_date"]
                     ),
+                    target_admission=target_admission,
                 )
                 all_evolutions.extend(evolutions)
         except (InvalidJsonError, SnapshotContainerMissingError, EvolutionPdfError) as exc:

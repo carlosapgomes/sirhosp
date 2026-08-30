@@ -56,6 +56,7 @@ from apps.ingestion.extractors.legacy_navigation import (
     SEL_FRAME_POL,
     NavigationError,
     NavigationTimeoutError,
+    TargetAdmissionContext,
     _read_and_build_snapshot,
     _remaining_ms,
     build_chunks_for_interval,
@@ -70,6 +71,7 @@ from apps.ingestion.extractors.legacy_navigation import (
     open_internacao_detail,
     search_patient,
     select_ascending_order,
+    select_target_admission,
     wait_for_report_or_no_evolutions,
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
@@ -104,6 +106,17 @@ logger = logging.getLogger(__name__)
 # value, selector, URL, cookie, credential, or raw exception text.
 _EVOLUTION_DATE_FILL_REQUIRED_MESSAGE = (
     "Required evolution date inputs could not be filled."
+)
+
+# HTEFS-S2: constant sanitized no-overlap message (legacy mode) and the
+# constant sanitized wrapper for unexpected target-action failures (R7/R9).
+# Neither carries identifiers, dates, URLs, selectors, or raw exception text.
+_NO_OVERLAP_MESSAGE = (
+    "Nenhuma internação com interseção foi encontrada "
+    "para o intervalo solicitado."
+)
+_TARGET_REQUIRED_ACTION_FAILED_MESSAGE = (
+    "Uma ação obrigatória da internação alvo falhou."
 )
 
 # PSW-S22 R2/R6: the real legacy report page exposes a JSF ``#printLinks``
@@ -654,6 +667,7 @@ class RealHandleBridge:
         start_date: str,
         end_date: str,
         timeout: int = 120,
+        target_admission: TargetAdmissionContext | None = None,
     ) -> list[dict[str, Any]]:
         """Extract evolutions by navigating the real legacy UI action flow.
 
@@ -677,11 +691,23 @@ class RealHandleBridge:
         browser/context. Reuses the already-open handle and its page
         (from ``ensure_current_page()``).
 
+        HTEFS-S2 (D1): with ``target_admission`` set, the flow becomes
+        STRICT — the single legacy row compatible with the local target is
+        selected by stable period/state facts (the legacy key is only a
+        tie-break hint), its detail opens with ``strict=True`` (no first-row
+        fallback), and every REQUIRED action failure (detail, activation,
+        dates, report, download, parse) propagates a typed sanitized error
+        instead of being swallowed into an empty/partial result. Only an
+        explicit no-evolutions dialog yields an empty chunk. Without a
+        target, the legacy all-overlapping-admissions mode is preserved.
+
         Args:
             patient_record: Patient record (prontu\u00e1rio) string.
             start_date: Window start in ``YYYY-MM-DD``.
             end_date: Window end in ``YYYY-MM-DD``.
             timeout: Overall hint in seconds for waits/downloads.
+            target_admission: Optional named context of the resolved local
+                target admission. ``None`` preserves the legacy mode.
 
         Returns:
             List of normalised evolution dicts (possibly empty).
@@ -689,8 +715,9 @@ class RealHandleBridge:
         Raises:
             EvolutionPdfError: On any sanitised failure during the
                 evolution action flow (e.g. no overlapping admission,
-                detail not found, evolution button disabled, PDF
-                download failure, invalid PDF).
+                ambiguous/missing target, detail not found, evolution
+                button disabled, PDF download failure, invalid PDF).
+            NavigationTimeoutError: On typed navigation/wait timeouts.
         """
         # RPAP-S1 R2: this action flow navigates the legacy UI — the
         # previous job's admissions snapshot must not survive it.
@@ -771,19 +798,34 @@ class RealHandleBridge:
         _pdf_remaining_ms(deadline_s)
 
         overlap_failed = False
+        overlap_message = _NO_OVERLAP_MESSAGE
         try:
-            overlapping = choose_overlapping_admissions(
-                admissions,
-                start_date=start_date,
-                end_date=end_date,
-            )
-        except NavigationError:
+            if target_admission is not None:
+                # HTEFS-S2 R3/R4/R5: strict single-row selection by stable
+                # facts. The selector only raises constant sanitized
+                # messages, so capturing str(exc) here is leak-safe.
+                selected = select_target_admission(
+                    admissions,
+                    requested_start=start_date,
+                    requested_end=end_date,
+                    target=target_admission,
+                )
+                overlapping = [selected]
+            else:
+                overlapping = choose_overlapping_admissions(
+                    admissions,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+        except NavigationError as exc:
             # PSW-S17 post-31dd3c0 (D22): a constant sanitized wrapper raised
             # OUTSIDE the handler so neither ``__cause__`` nor ``__context__``
             # carries the raw NavigationError. Raising ``from None`` inside
             # the handler only suppresses *display* of the context; the raw
             # reference would still be attached.
             overlap_failed = True
+            if target_admission is not None:
+                overlap_message = str(exc)
         # PSW-S20-C2: overlap selection is non-interruptible. After it returns
         # or raises a functional NavigationError, classify an expired shared
         # deadline BEFORE converting the failure to a no-overlap error or
@@ -791,10 +833,7 @@ class RealHandleBridge:
         # EvolutionPdfTimeoutError (never caught/wrapped here).
         _pdf_remaining_ms(deadline_s)
         if overlap_failed:
-            raise EvolutionPdfError(
-                "Nenhuma interna\u00e7\u00e3o com interse\u00e7\u00e3o "
-                "foi encontrada para o intervalo solicitado."
-            )
+            raise EvolutionPdfError(overlap_message)
 
         if not overlapping:
             return []
@@ -855,16 +894,21 @@ class RealHandleBridge:
 
             chunks = build_chunks_for_interval(effective_start, effective_end)
 
-            # Step 5a: Open admission detail once per admission.
+            # Step 5a: Open admission detail once per admission. In target
+            # mode (R6/R7) the detail opens STRICTLY for the selected row —
+            # no first-row fallback — and a failure propagates typed.
             try:
                 open_internacao_detail(
                     page,
                     admission_key=admission_key,
                     timeout_ms=_pdf_remaining_ms(deadline_s),
+                    strict=target_admission is not None,
                 )
             except NavigationTimeoutError:
                 raise
             except NavigationError:
+                if target_admission is not None:
+                    raise
                 logger.warning(
                     "Evolution action flow: detail open failed (sanitized)"
                 )
@@ -882,6 +926,10 @@ class RealHandleBridge:
                     except NavigationTimeoutError:
                         raise
                     except NavigationError:
+                        if target_admission is not None:
+                            # R7: a required restore failure must not shrink
+                            # the targeted result silently.
+                            raise
                         _log_recoverable_chunk_failure(
                             "Evolution action flow: between-chunk restore "
                             "failed (sanitized)",
@@ -896,6 +944,10 @@ class RealHandleBridge:
                 except NavigationTimeoutError:
                     raise
                 except NavigationError:
+                    if target_admission is not None:
+                        # R7: target activation failure is a typed failure,
+                        # never a skipped chunk or empty result.
+                        raise
                     _log_recoverable_chunk_failure(
                         "Evolution action flow: Evolu\u00e7\u00e3o click "
                         "failed (sanitized)",
@@ -958,6 +1010,9 @@ class RealHandleBridge:
                 except NavigationTimeoutError:
                     raise
                 except NavigationError:
+                    if target_admission is not None:
+                        # R7: report generation is REQUIRED in target mode.
+                        raise
                     _log_recoverable_chunk_failure(
                         "Evolution action flow: visualize click "
                         "failed (sanitized)",
@@ -1016,7 +1071,16 @@ class RealHandleBridge:
                         )
                 except EvolutionPdfTimeoutError:
                     raise
-                except Exception:
+                except Exception as exc:
+                    if target_admission is not None:
+                        # R7: a required download failure propagates typed;
+                        # R9: unexpected failures are re-wrapped into a
+                        # constant sanitized typed error (never raw).
+                        if isinstance(exc, EvolutionPdfError):
+                            raise
+                        raise EvolutionPdfError(
+                            _TARGET_REQUIRED_ACTION_FAILED_MESSAGE
+                        ) from None
                     # R6: typed sanitized failures (missing form/action/
                     # ViewState, non-success HTTP, non-PDF body) are
                     # recoverable per-chunk skips that preserve priors.
@@ -1037,6 +1101,9 @@ class RealHandleBridge:
                 except EvolutionPdfTimeoutError:
                     raise
                 except EvolutionPdfError:
+                    if target_admission is not None:
+                        # R7: parse is REQUIRED in target mode.
+                        raise
                     _log_recoverable_chunk_failure(
                         "Evolution action flow: PDF text extraction "
                         "failed (sanitized)",
@@ -1055,6 +1122,9 @@ class RealHandleBridge:
                 except EvolutionPdfTimeoutError:
                     raise
                 except EvolutionPdfError:
+                    if target_admission is not None:
+                        # R7: normalization is REQUIRED in target mode.
+                        raise
                     _log_recoverable_chunk_failure(
                         "Evolution action flow: PDF text normalization "
                         "failed (sanitized)",

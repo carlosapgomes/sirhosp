@@ -31,6 +31,7 @@ from apps.ingestion.extractors.errors import (
 )
 from apps.ingestion.extractors.legacy_navigation import (
     DEMOGRAPHICS_IDENTITY_MESSAGE,
+    TargetAdmissionContext,
     demographics_identity_matches,
 )
 from apps.ingestion.extractors.playwright_extractor import _TYPE_MAP
@@ -492,6 +493,7 @@ class PersistentExtractionAdapter:
         start_date: str,
         end_date: str,
         timeout: int = 120,
+        target_admission: TargetAdmissionContext | None = None,
     ) -> list[dict[str, Any]]:
         """Extract clinical evolutions through the persistent session.
 
@@ -503,6 +505,12 @@ class PersistentExtractionAdapter:
         - Stub/test session: URL template (``open_tab``) + evolution container
           + PSW-S11 PDF fallback (the only path where JSON/pre fast paths run,
           reached legitimately via ``open_tab``).
+
+        HTEFS-S2 R2/R8: ``target_admission`` carries the named context of the
+        resolved local target admission. It is forwarded ONLY to the real
+        action path (and only when set, preserving the exact legacy dispatch
+        kwargs); the stub path and runs without a target keep their previous
+        contracts unchanged.
 
         Lifecycle:
         1. Check session readiness (``ensure_ready``).
@@ -518,6 +526,9 @@ class PersistentExtractionAdapter:
             end_date: End date in YYYY-MM-DD format.
             timeout: Maximum execution time in seconds, propagated to the
                 session handle's navigation/wait path.
+            target_admission: Optional named context of the resolved local
+                target admission (HTEFS-S2). ``None`` keeps the legacy
+                all-overlapping-admissions mode.
 
         Returns:
             List of normalised evolution dicts with canonical field names.
@@ -562,12 +573,24 @@ class PersistentExtractionAdapter:
             # EvolutionPdfTimeoutError) and typed EvolutionPdfError
             # propagate unchanged; the command classifies them. A genuine
             # empty window stays an empty list (R5), distinct from a timeout.
-            result = action_method(
-                patient_record=patient_record,
-                start_date=start_date,
-                end_date=end_date,
-                timeout=timeout,
-            )
+            if target_admission is not None:
+                # HTEFS-S2 R2: targeted runs forward the named context. The
+                # kwarg is added ONLY when a target exists so the legacy
+                # dispatch contract stays byte-identical.
+                result = action_method(
+                    patient_record=patient_record,
+                    start_date=start_date,
+                    end_date=end_date,
+                    timeout=timeout,
+                    target_admission=target_admission,
+                )
+            else:
+                result = action_method(
+                    patient_record=patient_record,
+                    start_date=start_date,
+                    end_date=end_date,
+                    timeout=timeout,
+                )
         elif capability_value is False:
             # Stub/test path: URL template + container + PSW-S11 PDF fallback.
             url = _build_admissions_url(
