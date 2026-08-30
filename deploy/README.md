@@ -953,23 +953,32 @@ Limiares:
   somente quando a flag correspondente é fornecida; ausência do dado com a
   flag ativa também é unhealthy.
 
-#### 6.1.2 Exemplo systemd genérico
+#### 6.1.2 Timer systemd (canário contínuo)
+
+**Instalação de produção (variant Docker, instalada em `eon` em
+2026-08-29, release `v0.1.0-rc.15`):** a aplicação roda em Docker Compose,
+portanto o health check executa dentro do container `web` a partir do
+diretório de instalação:
 
 ```ini
-# /etc/systemd/system/sirhosp-ingestion-health.service
+# /etc/systemd/system/sirhosp-ingestion-health.service (produção eon)
 [Unit]
-Description=SIRHOSP ingestion pipeline health check
-After=network-online.target
+Description=SIRHOSP ingestion pipeline health check (canary 6.1.2)
+After=docker.service network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/uv run --no-sync python \
-    manage.py check_ingestion_pipeline_health \
+WorkingDirectory=/srv/apps/prisma
+ExecStart=/usr/bin/docker compose --env-file .env -f compose.hospital.yml \
+    exec -T web uv run --no-sync python manage.py \
+    check_ingestion_pipeline_health \
     --max-movement-age-hours 12 --max-event-age-hours 24
+TimeoutStartSec=900
 ```
 
 ```ini
-# /etc/systemd/system/sirhosp-ingestion-health.timer
+# /etc/systemd/system/sirhosp-ingestion-health.timer (produção eon)
 [Unit]
 Description=Run SIRHOSP ingestion health check hourly
 
@@ -979,6 +988,28 @@ Persistent=true
 
 [Install]
 WantedBy=timers.target
+```
+
+Ativação e observação (saída agregada fica no journald):
+
+```bash
+systemctl daemon-reload
+systemctl enable --now sirhosp-ingestion-health.timer
+systemctl list-timers sirhosp-ingestion-health.timer
+systemctl start sirhosp-ingestion-health.service   # validação manual
+journalctl -u sirhosp-ingestion-health.service -n 20
+```
+
+**Variante genérica (instalações sem Docker):** ajuste apenas o `ExecStart`
+para o ambiente local, por exemplo:
+
+```ini
+# variante host (não usada na produção hospitalar atual)
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/uv run --no-sync python \
+    manage.py check_ingestion_pipeline_health \
+    --max-movement-age-hours 12 --max-event-age-hours 24
 ```
 
 O exit code 1 é o sinal de alarme: pode alimentar `OnFailure=` de um
