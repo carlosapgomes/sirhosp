@@ -14,12 +14,14 @@ Slice S3 adds:
 
 from __future__ import annotations
 
+import enum
 import os
 import socket
 import threading
 import time
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from django.core.management.base import BaseCommand
 from django.db import close_old_connections, transaction
@@ -28,8 +30,19 @@ from django.utils import timezone
 
 from apps.ingestion.batch_closure import try_close_batch
 from apps.ingestion.evolution_ingestion import ingest_evolutions as shared_ingest_evolutions
-from apps.ingestion.extractors.errors import ensure_nonempty_batch_admissions
-from apps.ingestion.extractors.playwright_extractor import PlaywrightEvolutionExtractor
+from apps.ingestion.extractors.errors import (
+    EmptyAdmissionsSnapshotError,
+    ensure_nonempty_batch_admissions,
+)
+from apps.ingestion.extractors.patient_flow_snapshot import (
+    OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
+    EncounterRecency,
+    PatientFlowSnapshot,
+)
+from apps.ingestion.extractors.playwright_extractor import (
+    DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+    PlaywrightEvolutionExtractor,
+)
 from apps.ingestion.gap_planner import plan_extraction_windows
 from apps.ingestion.models import (
     CensusExecutionBatch,
@@ -55,6 +68,20 @@ DEMOGRAPHICS_SCRIPT_PATH = str(
     / "patient_demographics"
     / "extract_patient_demographics.py"
 )
+
+
+class _EncounterFallbackOutcome(enum.Enum):
+    """Closed outcomes of the classic encounter fallback (PFIF-S2 R3).
+
+    Mirrors the persistent worker's decision vocabulary (PFIF-S1): only a
+    confirmed recent encounter accepts the empty capture; everything else —
+    including fallback capture failures — keeps the existing fail-closed or
+    retry path.
+    """
+
+    RECOGNIZED = "recognized"
+    FAILED = "failed"
+    NOT_RECENT = "not_recent"
 
 
 class WorkerHeartbeat:
@@ -563,7 +590,16 @@ class Command(BaseCommand):
         script_path: str,
         headless: bool,
     ) -> None:
-        """Process admissions-only run: capture snapshot, no evolution extraction."""
+        """Process admissions-only run: capture snapshot, no evolution extraction.
+
+        PFIF-S2: the capture requests the optional encounter sidecar (ONE
+        subprocess serves admissions + encounters), and a batch-bound empty
+        capture applies the SAME decision and stage codes as the persistent
+        worker (PFIF-S1): only a confirmed recent encounter (today/yesterday)
+        accepts the empty capture; boundary/stale/none keep the existing
+        fail-closed path. Standalone and full-sync captures never trigger the
+        fallback.
+        """
         params = run.parameters_json or {}
         patient_record = params.get("patient_record", "")
 
@@ -580,7 +616,34 @@ class Command(BaseCommand):
                 patient_record=patient_record,
                 start_date="",
                 end_date="",
+                include_encounter_sidecar=True,
             )
+        except EmptyAdmissionsSnapshotError as exc:
+            # PFIF-S2 R3: same entry point and guard as the persistent worker
+            # (PFIF-S1) — only this batch-bound empty branch may consult the
+            # encounter evidence, exactly once.
+            if run.batch_id is not None:
+                outcome = self._run_encounter_fallback(
+                    run, extractor, adm_stage_start
+                )
+                if outcome is not _EncounterFallbackOutcome.NOT_RECENT:
+                    # RECOGNIZED: run already finalized as succeeded with
+                    # zero clinical effects. FAILED: run already finalized
+                    # through the existing typed failure path.
+                    return
+            self._record_stage(
+                run=run,
+                stage_name="admissions_capture",
+                status="failed",
+                started_at=adm_stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during admissions capture "
+                f"(reason={self._classify_failure_reason(exc)[0]})"
+            )
+            return
         except Exception as exc:
             self._record_stage(
                 run=run,
@@ -655,6 +718,124 @@ class Command(BaseCommand):
             f"(admissions_seen={adm_metrics['seen']}, "
             f"admissions_created={adm_metrics['created']}, "
             f"admissions_updated={adm_metrics['updated']})"
+        )
+
+    # ------------------------------------------------------------------
+    # Encounter fallback (PFIF-S2): parity with the persistent worker
+    # ------------------------------------------------------------------
+
+    def _run_encounter_fallback(
+        self,
+        run: IngestionRun,
+        extractor: PlaywrightEvolutionExtractor,
+        stage_start: Any,
+    ) -> _EncounterFallbackOutcome:
+        """Consult the captured encounter evidence once after a batch-bound
+        empty capture.
+
+        Eligibility was already established by the caller: this runs only
+        inside the ``EmptyAdmissionsSnapshotError`` branch of
+        ``_process_admissions_only`` for a run with ``batch_id`` set. The
+        evidence comes from the SAME subprocess artifacts already captured
+        for this job — no second browser/login/subprocess (PFIF-S2 R3).
+
+        - ``RECOGNIZED``: recent encounter proven — the run is finalized as
+          succeeded with zero clinical effects (no persist, no follow-up).
+        - ``FAILED``: extraction failure — the run is finalized through the
+          existing typed error/retry path.
+        - ``NOT_RECENT``: boundary/stale/none evidence — the caller keeps
+          the existing fail-closed path.
+        """
+        params = run.parameters_json or {}
+        patient_record = params.get("patient_record", "")
+        try:
+            flow = extractor.get_patient_flow_snapshot(
+                patient_record=patient_record,
+                today=timezone.localdate(),
+                timeout=DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+            )
+            recognized = (
+                isinstance(flow, PatientFlowSnapshot)
+                and flow.encounter_recency is EncounterRecency.RECENT_CONFIRMED
+                and flow.is_empty
+            )
+        except Exception as exc:
+            # Extraction failure keeps the existing fail-closed path: typed
+            # error, retry taxonomy (parity with PFIF-S1).
+            self._record_stage(
+                run=run,
+                stage_name="admissions_capture",
+                status="failed",
+                started_at=stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  Run #{run.pk} failed during encounter fallback "
+                f"(reason={self._classify_failure_reason(exc)[0]})"
+            )
+            return _EncounterFallbackOutcome.FAILED
+
+        if not recognized:
+            # Boundary/stale/none: never accepted.
+            return _EncounterFallbackOutcome.NOT_RECENT
+
+        self._finalize_recent_encounter_run(run, stage_start)
+        return _EncounterFallbackOutcome.RECOGNIZED
+
+    def _finalize_recent_encounter_run(
+        self, run: IngestionRun, stage_start: Any
+    ) -> None:
+        """Close a recognized recent-encounter run without clinical effects.
+
+        PFIF-S2 R3/D4 (same codes as the persistent worker): run/attempt
+        succeed with every clinical counter at zero; no
+        ``persist_admissions_snapshot`` call, no Patient/Admission, no
+        full-sync/demographics follow-up. Stage metrics record only the
+        closed outcome/recency enums — never a date or identifier. Batch
+        closure follows the canonical path so the batch can drain.
+        """
+        self._record_stage(
+            run=run,
+            stage_name="admissions_capture",
+            status="succeeded",
+            started_at=stage_start,
+        )
+        self._record_stage(
+            run=run,
+            stage_name="encounter_fallback",
+            status="succeeded",
+            started_at=stage_start,
+            details_json={
+                "outcome": OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
+                "recency": EncounterRecency.RECENT_CONFIRMED.value,
+            },
+        )
+
+        run.admissions_seen = 0
+        run.admissions_created = 0
+        run.admissions_updated = 0
+        run.events_processed = 0
+        run.events_created = 0
+        run.events_skipped = 0
+        run.events_revised = 0
+        run.status = "succeeded"
+        run.finished_at = timezone.now()
+        run.failure_reason = ""
+        run.timed_out = False
+        run.save()
+
+        self._mark_latest_attempt_succeeded(run)
+
+        # No persist_admissions_snapshot / follow-up enqueue: a recognized
+        # recent encounter must have zero clinical effect. Only the canonical
+        # batch closure runs so the batch can drain.
+        self._try_close_batch(run.batch)
+
+        self.stdout.write(
+            f"  Run #{run.pk} admissions-only succeeded "
+            f"(recognized recent encounter without admission, "
+            f"admissions_seen=0)"
         )
 
     # ------------------------------------------------------------------
@@ -1076,6 +1257,7 @@ class Command(BaseCommand):
         patient_record: str,
         start_date: str,
         end_date: str,
+        include_encounter_sidecar: bool = False,
     ) -> tuple:
         """Capture admissions snapshot for the patient.
 
@@ -1107,6 +1289,7 @@ class Command(BaseCommand):
             start_date=snap_start,
             end_date=snap_end,
             timeout=120,
+            include_encounter_sidecar=include_encounter_sidecar,
         )
 
         # RPAP-S2: an empty capture linked to a census/recovery batch is an

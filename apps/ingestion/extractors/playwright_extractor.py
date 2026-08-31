@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from apps.ingestion.extractors.errors import (
     ExtractionTimeoutError,
     InvalidJsonError,
 )
+from apps.ingestion.extractors.patient_flow_snapshot import PatientFlowSnapshot
 from apps.ingestion.extractors.ports import EvolutionExtractorPort
 from apps.ingestion.extractors.subprocess_utils import (
     SubprocessTimeoutError,
@@ -71,6 +73,10 @@ _TYPE_MAP: dict[str, str] = {
 DEFAULT_EVOLUTION_TIMEOUT_SECONDS = 900
 DEFAULT_ADMISSION_TIMEOUT_SECONDS = 120
 
+FLOW_SNAPSHOT_DEFAULT_START_DATE = "2000-01-01"
+"""Wide default window start for self-contained flow snapshot captures
+(PFIF-S2) — mirrors the classic worker's admissions-only default range."""
+
 
 # PSW-S17 R5 (second corrective closure): the previous
 # ``_build_timeout_context`` / ``_build_process_output_context`` helpers
@@ -96,6 +102,12 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
     ) -> None:
         self._script_path = script_path
         self._headless = headless
+        # PFIF-S2: job-scoped cache of the admissions subprocess artifacts
+        # (admissions list + encounter dates) so the enriched flow snapshot
+        # reuses the SAME subprocess — never a second browser/login/subprocess.
+        self._flow_capture_cache: tuple[list[dict[str, Any]], list[date]] | None = (
+            None
+        )
 
     def extract_evolutions(
         self,
@@ -200,6 +212,7 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
         start_date: str,
         end_date: str,
         timeout: int = DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+        include_encounter_sidecar: bool = False,
     ) -> list[dict[str, Any]]:
         """Extract patient admission snapshot from path2.py.
 
@@ -212,6 +225,10 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
             start_date: Start date in YYYY-MM-DD format (converted to DD/MM/YYYY).
             end_date: End date in YYYY-MM-DD format (converted to DD/MM/YYYY).
             timeout: Maximum execution time in seconds.
+            include_encounter_sidecar: PFIF-S2 — also request the optional
+                encounter-dates sidecar so a subsequent
+                :meth:`get_patient_flow_snapshot` on this instance reuses the
+                SAME subprocess artifacts (no second browser/login/subprocess).
 
         Returns:
             List of normalised admission dicts with canonical field names.
@@ -224,6 +241,82 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
         br_start = _convert_to_br_date(start_date)
         br_end = _convert_to_br_date(end_date)
 
+        admissions, _encounter_dates = self._capture_admissions_artifacts(
+            patient_record=patient_record,
+            br_start=br_start,
+            br_end=br_end,
+            include_encounter_sidecar=include_encounter_sidecar,
+            timeout=timeout,
+        )
+        return admissions
+
+    def get_patient_flow_snapshot(
+        self,
+        *,
+        patient_record: str,
+        today: date,
+        timeout: int = DEFAULT_ADMISSION_TIMEOUT_SECONDS,
+    ) -> PatientFlowSnapshot:
+        """Return the shared ``PatientFlowSnapshot`` contract (PFIF-S2 R2).
+
+        Reuses the artifacts of the job's single admissions subprocess when
+        available (cache filled by :meth:`get_admission_snapshot` with
+        ``include_encounter_sidecar=True``); otherwise runs ONE self-contained
+        subprocess. The encounter evidence was already collected by path2.py
+        inside that same subprocess (only for empty admissions-only captures),
+        so this method never opens a second browser/login/subprocess for the
+        same job.
+
+        Args:
+            patient_record: Patient record identifier (prontuário).
+            today: Local calendar date (``America/Bahia`` in production) used
+                by the shared S1 recency classifier.
+            timeout: Maximum subprocess execution time in seconds.
+
+        Returns:
+            The immutable shared snapshot with admissions, the latest valid
+            encounter date and its closed recency bucket.
+
+        Raises:
+            ExtractionTimeoutError / ExtractionError: same sanitized taxonomy
+                as :meth:`get_admission_snapshot` (incl. missing/malformed
+                sidecar when the admissions capture was empty).
+        """
+        if self._flow_capture_cache is None:
+            self._flow_capture_cache = self._capture_admissions_artifacts(
+                patient_record=patient_record,
+                br_start=_convert_to_br_date(FLOW_SNAPSHOT_DEFAULT_START_DATE),
+                br_end=_convert_to_br_date(today.isoformat()),
+                include_encounter_sidecar=True,
+                timeout=timeout,
+            )
+        admissions, encounter_dates = self._flow_capture_cache
+        return PatientFlowSnapshot.build(
+            admissions=admissions,
+            encounter_dates=encounter_dates,
+            today=today,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _capture_admissions_artifacts(
+        self,
+        *,
+        patient_record: str,
+        br_start: str,
+        br_end: str,
+        include_encounter_sidecar: bool,
+        timeout: int,
+    ) -> tuple[list[dict[str, Any]], list[date]]:
+        """Run ONE admissions-only path2.py subprocess and read its artifacts.
+
+        Returns ``(admissions, encounter_dates)``. ``encounter_dates`` is
+        non-empty only when the sidecar was requested AND the admissions list
+        was empty — the only condition under which path2.py consults the
+        legacy Atendimentos table (PFIF-S2 R1).
+        """
         script = Path(self._script_path)
         if not script.exists():
             raise ExtractionError(f"Extractor script not found: {script}")
@@ -243,9 +336,12 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
                 br_end,
                 "--admissions-output",
                 str(admissions_output_path),
-                "--admissions-only",
-                "--headless",
             ]
+            encounters_output_path: Path | None = None
+            if include_encounter_sidecar:
+                encounters_output_path = tmpdir_path / "encounters.json"
+                cmd += ["--encounters-output", str(encounters_output_path)]
+            cmd += ["--admissions-only", "--headless"]
 
             try:
                 result = run_subprocess(
@@ -272,11 +368,65 @@ class PlaywrightEvolutionExtractor(EvolutionExtractorPort):
                 )
 
             parser = AdmissionSnapshotParser()
-            return parser.parse_file(admissions_output_path)
+            admissions = parser.parse_file(admissions_output_path)
+            if encounters_output_path is None or admissions:
+                # Without the sidecar request, or with a non-empty capture,
+                # path2.py never consulted Atendimentos (no sidecar exists).
+                encounter_dates: list[date] = []
+            else:
+                encounter_dates = self._read_encounter_sidecar(
+                    encounters_output_path
+                )
+            if include_encounter_sidecar:
+                # PFIF-S2: job-scoped cache so a follow-up
+                # get_patient_flow_snapshot() call reuses the SAME
+                # subprocess artifacts — never a second subprocess.
+                self._flow_capture_cache = (admissions, encounter_dates)
+            return admissions, encounter_dates
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    def _read_encounter_sidecar(self, sidecar_path: Path) -> list[date]:
+        """Read the optional encounter-dates sidecar written by path2.py.
+
+        When the admissions list is empty the sidecar is REQUIRED: a missing
+        or malformed artifact is a sanitized failure — no raw content, path
+        or record token enters the message (PFIF-S2 R2/R5).
+        """
+        try:
+            data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise ExtractionError(
+                "Encounter sidecar artifact is missing for an empty "
+                "admissions capture."
+            ) from exc
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise ExtractionError(
+                "Encounter sidecar artifact is malformed for an empty "
+                "admissions capture."
+            ) from exc
+
+        if not isinstance(data, dict) or set(data.keys()) != {
+            "encounter_dates"
+        }:
+            raise ExtractionError(
+                "Encounter sidecar artifact has an unexpected shape."
+            )
+        raw_dates = data["encounter_dates"]
+        if not isinstance(raw_dates, list) or any(
+            not isinstance(value, str) for value in raw_dates
+        ):
+            raise ExtractionError(
+                "Encounter sidecar artifact has an unexpected shape."
+            )
+
+        parsed: list[date] = []
+        for value in raw_dates:
+            try:
+                parsed.append(date.fromisoformat(value))
+            except ValueError as exc:
+                raise ExtractionError(
+                    "Encounter sidecar artifact has an invalid date entry."
+                ) from exc
+        return parsed
 
     def _try_rescue_json_output(self, json_path: Path) -> list[dict[str, Any]] | None:
         """Attempt to read the JSON output file even after non-zero exit.

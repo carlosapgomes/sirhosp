@@ -132,6 +132,17 @@ def parse_args() -> argparse.Namespace:
             "evolutions, chunks, or PDFs."
         ),
     )
+    parser.add_argument(
+        "--encounters-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to write the minimal encounter-dates sidecar JSON "
+            "(PFIF-S2). Requires --admissions-only and --admissions-output. "
+            "The Atendimentos table is consulted ONLY when the admission list "
+            "is empty; otherwise the sidecar is not written."
+        ),
+    )
     parser.add_argument("--headless", action="store_true")
     return parser.parse_args()
 
@@ -524,6 +535,129 @@ def read_internacoes_rows(page: Page) -> list[dict[str, object]]:
 
     parsed.sort(key=lambda item: (item["admissionStart"], item["rowIndex"]))
     return parsed
+
+
+ATENDIMENTOS_TABLE_ROWS_SELECTOR: Final[str] = '#tabela_resultados\\:resultList_data > tr'
+"""Atendimentos table rows inside frame_pol (PFIF-S1/S2 structural contract)."""
+
+
+def wait_encounters_table(page: Page, timeout: int = 60000) -> Frame:
+    """Wait until the Atendimentos table is reachable inside frame_pol.
+
+    Bounded poll loop with the same conventions as ``wait_internacoes_table``;
+    the raised message is a constant (no frame description, no payload text).
+    """
+    started_at = time.monotonic()
+
+    while True:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        remaining_ms = timeout - elapsed_ms
+        if remaining_ms <= 0:
+            break
+
+        frame = page.frame(name=FRAME_NAME)
+        if frame is not None:
+            rows_locator = frame.locator(ATENDIMENTOS_TABLE_ROWS_SELECTOR)
+            step_timeout = min(FRAME_POLL_INTERVAL_MS, max(1, remaining_ms))
+
+            try:
+                rows_locator.first.wait_for(state='attached', timeout=step_timeout)
+                return frame
+            except Exception:
+                pass
+
+        page.wait_for_timeout(min(FRAME_POLL_INTERVAL_MS, remaining_ms))
+
+    raise RuntimeError(
+        f"Iframe {FRAME_NAME} não ficou disponível com a tabela de atendimentos "
+        f"dentro do timeout ({timeout} ms)."
+    )
+
+
+def read_encounter_dates(page: Page) -> list[date]:
+    """Read encounter dates from the Atendimentos table in frame_pol.
+
+    Structural parse only (PFIF-S2, mirroring the persistent worker's
+    parser): every row must carry at least four cells and ONLY the first
+    cell is parsed, as ``DD/MM/AAAA``. Rows that are structurally incomplete
+    or carry an invalid date are ignored. The returned list is sorted
+    ascending so the result is deterministic. No row text, type, specialty
+    or professional value ever leaves this function — only ``date`` objects.
+    """
+    frame = wait_encounters_table(page)
+
+    rows = frame.eval_on_selector_all(
+        ATENDIMENTOS_TABLE_ROWS_SELECTOR,
+        """
+        (rows) => rows.map((tr) => ({
+            cells: Array.from(tr.querySelectorAll('td')).map(
+                (td) => (td.textContent || '').trim()
+            ),
+        }))
+        """,
+    )
+
+    dates: list[date] = []
+    for row in rows or []:
+        cells = row.get("cells") or []
+        if len(cells) < 4:
+            continue
+
+        parsed = parse_br_date(cells[0])
+        if parsed is None:
+            continue
+        dates.append(parsed)
+
+    if not dates:
+        print(
+            "Nenhuma data válida foi encontrada na tabela "
+            "#tabela_resultados:resultList."
+        )
+        return []
+
+    return sorted(dates)
+
+
+def salvar_encounter_dates_json(encounter_dates: list[date], output_path: Path) -> None:
+    """Save the minimal encounter-dates sidecar JSON artifact (PFIF-S2).
+
+    The artifact carries ONLY ascending ISO dates — no row text, type,
+    specialty or professional value.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(
+            {"encounter_dates": [value.isoformat() for value in encounter_dates]},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"Encounter dates sidecar salvo em: {output_path}")
+
+
+def _capture_encounter_sidecar(
+    page: Page,
+    *,
+    all_admissions: list[dict[str, object]],
+    admissions_only: bool,
+    encounters_output_path: Path | None,
+) -> None:
+    """Write the encounter-dates sidecar after an EMPTY admissions-only capture.
+
+    PFIF-S2 R1: the Atendimentos table is consulted ONLY when the caller
+    explicitly requested the sidecar (``--encounters-output``) AND the
+    admission list is empty. Non-empty captures and absent options keep the
+    historical behavior untouched.
+    """
+    if not admissions_only or encounters_output_path is None:
+        return
+
+    if all_admissions:
+        return
+
+    encounter_dates = read_encounter_dates(page)
+    salvar_encounter_dates_json(encounter_dates, encounters_output_path)
 
 
 def admission_overlaps_interval(
@@ -1459,6 +1593,7 @@ def run(
     json_output_path: Path,
     admissions_output_path: Path | None = None,
     admissions_only: bool = False,
+    encounters_output_path: Path | None = None,
     headless: bool = False,
 ) -> None:
     patient_record = normalize_patient_record(patient_record)
@@ -1475,6 +1610,14 @@ def run(
         raise RuntimeError(
             "--admissions-only requires --admissions-output to be set. "
             "Provide a path to write the admission snapshot JSON."
+        )
+
+    # PFIF-S2: the encounter sidecar only exists in admissions-only mode.
+    if encounters_output_path is not None and not admissions_only:
+        raise RuntimeError(
+            "--encounters-output requires --admissions-only mode. "
+            "The Atendimentos table is consulted only for empty "
+            "admissions-only captures."
         )
 
     with sync_playwright() as playwright:
@@ -1533,6 +1676,12 @@ def run(
 
             # Early exit for admissions-only mode
             if admissions_only:
+                _capture_encounter_sidecar(
+                    page,
+                    all_admissions=all_admissions,
+                    admissions_only=admissions_only,
+                    encounters_output_path=encounters_output_path,
+                )
                 print("Modo admissions-only: snapshot exportado, encerrando.")
                 return
 
@@ -1769,6 +1918,7 @@ def main() -> None:
         json_output_path=args.json_output,
         admissions_output_path=args.admissions_output,
         admissions_only=args.admissions_only,
+        encounters_output_path=args.encounters_output,
         headless=args.headless,
     )
 
