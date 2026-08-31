@@ -636,6 +636,38 @@ def salvar_encounter_dates_json(encounter_dates: list[date], output_path: Path) 
     print(f"Encounter dates sidecar salvo em: {output_path}")
 
 
+_ATENDIMENTOS_MENU_FAILED_MESSAGE: Final[str] = (
+    "Could not find or click the 'Atendimentos' element."
+)
+"""Constant sanitized message for Atendimentos menu failures (PFIF-S2R R2).
+
+Carries no locator text, dynamic selector, URL, HTML, record, professional,
+cookie or credential — and never the Playwright exception repr.
+"""
+
+_ATENDIMENTOS_MENU_WAIT_TIMEOUT_MS: Final[int] = 15000
+"""Bounded visibility wait for the exact Atendimentos menu item."""
+
+
+def _click_atendimentos_menu(page: Page) -> None:
+    """Click the exact visible ``Atendimentos`` menu item (PFIF-S2R R1).
+
+    The admissions-only flow lands on ``Internações``; the encounters table
+    only becomes reachable after this EXACT click, within the SAME
+    page/session/subprocess (no extra browser, login or navigation). Any
+    absence, timeout or click failure raises the constant sanitized
+    message — never the raw Playwright exception (PFIF-S2R R2).
+    """
+    try:
+        atendimentos = page.get_by_text("Atendimentos", exact=True)
+        atendimentos.wait_for(
+            state="visible", timeout=_ATENDIMENTOS_MENU_WAIT_TIMEOUT_MS
+        )
+        atendimentos.click(timeout=_ATENDIMENTOS_MENU_WAIT_TIMEOUT_MS)
+    except Exception:
+        raise RuntimeError(_ATENDIMENTOS_MENU_FAILED_MESSAGE) from None
+
+
 def _capture_encounter_sidecar(
     page: Page,
     *,
@@ -645,10 +677,12 @@ def _capture_encounter_sidecar(
 ) -> None:
     """Write the encounter-dates sidecar after an EMPTY admissions-only capture.
 
-    PFIF-S2 R1: the Atendimentos table is consulted ONLY when the caller
+    PFIF-S2/S2R R1: the Atendimentos table is consulted ONLY when the caller
     explicitly requested the sidecar (``--encounters-output``) AND the
     admission list is empty. Non-empty captures and absent options keep the
-    historical behavior untouched.
+    historical behavior untouched. The frame still shows ``Internações`` at
+    this point, so the exact menu item is clicked FIRST (bounded, sanitized
+    failure) and ONLY THEN is the table waited for, read and written.
     """
     if not admissions_only or encounters_output_path is None:
         return
@@ -656,6 +690,7 @@ def _capture_encounter_sidecar(
     if all_admissions:
         return
 
+    _click_atendimentos_menu(page)
     encounter_dates = read_encounter_dates(page)
     salvar_encounter_dates_json(encounter_dates, encounters_output_path)
 

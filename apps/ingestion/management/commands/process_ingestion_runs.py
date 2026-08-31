@@ -592,13 +592,15 @@ class Command(BaseCommand):
     ) -> None:
         """Process admissions-only run: capture snapshot, no evolution extraction.
 
-        PFIF-S2: the capture requests the optional encounter sidecar (ONE
-        subprocess serves admissions + encounters), and a batch-bound empty
-        capture applies the SAME decision and stage codes as the persistent
-        worker (PFIF-S1): only a confirmed recent encounter (today/yesterday)
-        accepts the empty capture; boundary/stale/none keep the existing
-        fail-closed path. Standalone and full-sync captures never trigger the
-        fallback.
+        PFIF-S2/S2R: only batch-bound captures request the optional encounter
+        sidecar (ONE subprocess serves admissions + encounters); the flag is
+        decided from ``run.batch_id`` BEFORE the subprocess starts, so a
+        standalone capture keeps the historical admissions-only behavior. A
+        batch-bound empty capture applies the SAME decision and stage codes
+        as the persistent worker (PFIF-S1): only a confirmed recent encounter
+        (today/yesterday) accepts the empty capture; boundary/stale/none keep
+        the existing fail-closed path. Full-sync captures never trigger the
+        fallback nor the sidecar.
         """
         params = run.parameters_json or {}
         patient_record = params.get("patient_record", "")
@@ -616,7 +618,10 @@ class Command(BaseCommand):
                 patient_record=patient_record,
                 start_date="",
                 end_date="",
-                include_encounter_sidecar=True,
+                # PFIF-S2R R3: sidecar is batch-bound — decided BEFORE the
+                # subprocess starts. Standalone captures never request it;
+                # full-sync keeps its own untouched default.
+                include_encounter_sidecar=run.batch_id is not None,
             )
         except EmptyAdmissionsSnapshotError as exc:
             # PFIF-S2 R3: same entry point and guard as the persistent worker

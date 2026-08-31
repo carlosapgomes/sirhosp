@@ -33,6 +33,7 @@ are never compared; follow-up comparison uses call counts; worker-specific
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import sys
 from contextlib import ExitStack, contextmanager
@@ -315,6 +316,264 @@ class TestPath2EncounterSidecar:
                 encounters_output_path=tmp_path / "encounters.json",
                 headless=True,
             )
+
+
+# ---------------------------------------------------------------------------
+# PFIF-S2R R1/R2/R4: stateful fake classic UI (STARTS on Internações)
+# ---------------------------------------------------------------------------
+
+# The raised message is a sentinel-carrying Playwright-style timeout; the
+# production error must NEVER surface any of it (R2/R6).
+_FAKE_PLAYWRIGHT_TIMEOUT = (
+    "Timeout 15000ms exceeded while waiting for locator('text=Atendimentos') "
+    "SENTINEL-URL-legacy.invalid SENTINEL-COOKIE=abc "
+    "SENTINEL-PASSWORD=hunter2 SENTINEL-RECORD=7777 "
+    "SENTINEL-PROFESSIONAL=dr-x SECRET-HTML-BLOB"
+)
+
+# Four-cell Atendimentos rows: Data, Tipo, Especialidade, Profissional.
+# Invalid and short rows must be discarded; only dates ever leave the parser.
+_STATEFUL_ATENDIMENTOS_ROWS = [
+    {"cells": ["10/07/2026", "TIPO-B", "SERV-B", "PROF-B"]},
+    {"cells": ["09/07/2026", "TIPO-A", "SERV-A", "PROF-A"]},
+    {"cells": ["data-invalida", "TIPO-C", "SERV-C", "PROF-C"]},
+    {"cells": ["08/07/2026", "TIPO-D"]},
+]
+
+
+class _FakeMonotonicClock:
+    """Monotonic clock advancing one second per reading so the bounded
+    table-wait loop exhausts its budget in milliseconds of wall time
+    (RED ends fast; never a real 60s wait)."""
+
+    def __init__(self) -> None:
+        self._readings = 0
+
+    def monotonic(self) -> float:
+        self._readings += 1
+        return float(self._readings)
+
+
+@contextmanager
+def _fake_path2_clock():
+    with patch.object(_path2, "time", _FakeMonotonicClock()):
+        yield
+
+
+class _StatefulRowsHandle:
+    """Atendimentos rows handle: attached ONLY after the menu click."""
+
+    def __init__(self, page: "_StatefulLegacyPage") -> None:
+        self._page = page
+
+    @property
+    def first(self) -> "_StatefulRowsHandle":
+        return self
+
+    def wait_for(self, *, state: str, timeout: int) -> None:
+        if self._page.state != "atendimentos":
+            # Encounters rows are not in the DOM while the frame still
+            # shows Internações — reading before the click cannot work.
+            raise RuntimeError("rows not attached")
+        self._page.events.append(("rows_attached", state))
+
+
+class _StatefulFrame:
+    """``frame_pol`` double: encounters rows only post-click."""
+
+    def __init__(
+        self, page: "_StatefulLegacyPage", rows: list[dict[str, Any]]
+    ) -> None:
+        self._page = page
+        self._rows = rows
+
+    def locator(self, selector: str) -> _StatefulRowsHandle:
+        self._page.events.append(("locator", selector, self._page.state))
+        return _StatefulRowsHandle(self._page)
+
+    def eval_on_selector_all(self, selector: str, _script: str):
+        self._page.events.append(("eval_rows", selector, self._page.state))
+        if self._page.state != "atendimentos":
+            return []
+        return self._rows
+
+
+class _StatefulMenuLocator:
+    """Sidebar menu locator double recording text/exact/wait/click."""
+
+    def __init__(
+        self,
+        page: "_StatefulLegacyPage",
+        text: str,
+        exact: bool,
+        *,
+        fail_on_wait: bool = False,
+    ) -> None:
+        self._page = page
+        self._text = text
+        self._exact = exact
+        self._fail_on_wait = fail_on_wait
+
+    def wait_for(self, *, state: str, timeout: int) -> None:
+        self._page.events.append(("menu_wait_for", self._text, state))
+        if self._fail_on_wait:
+            raise RuntimeError(_FAKE_PLAYWRIGHT_TIMEOUT)
+        if self._text != "Atendimentos" or not self._exact:
+            raise RuntimeError("menu item mismatch")
+
+    def click(self, **_kwargs: Any) -> None:
+        self._page.events.append(("menu_click", self._text, self._exact))
+        if self._text == "Atendimentos" and self._exact:
+            self._page.state = "atendimentos"
+
+
+class _StatefulLegacyPage:
+    """Synthetic classic-UI page that STARTS on Internações.
+
+    The Atendimentos rows stay unattached until an EXACT, visible click on
+    the ``Atendimentos`` menu item flips the page state (PFIF-S2R R4).
+    Every interaction is recorded so the event order is verifiable.
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        menu_fails: bool = False,
+    ) -> None:
+        self.state = "internacoes"
+        self.events: list[tuple[Any, ...]] = []
+        self._rows = rows
+        self._menu_fails = menu_fails
+
+    def get_by_text(self, text: str, *, exact: bool):
+        self.events.append(("get_by_text", text, exact))
+        return _StatefulMenuLocator(
+            self, text, exact, fail_on_wait=self._menu_fails
+        )
+
+    def frame(self, name: str):
+        self.events.append(("frame", name, self.state))
+        return _StatefulFrame(self, self._rows)
+
+    def wait_for_timeout(self, ms: int) -> None:
+        self.events.append(("wait_for_timeout", ms))
+
+
+class TestPath2StatefulNavigation:
+    """PFIF-S2R R1/R2/R4: the classic sidecar flow must navigate the REAL
+    page state — exact visible click on Atendimentos BEFORE the table
+    wait/read — ending sidecar-only in the same session.
+
+    The positive test exercises the REAL ``_capture_encounter_sidecar``,
+    ``wait_encounters_table`` and ``read_encounter_dates``; none of them is
+    mocked. Only the clock is controlled so failures end in milliseconds.
+    """
+
+    def test_empty_capture_clicks_atendimentos_before_reading(
+        self, tmp_path
+    ) -> None:
+        page = _StatefulLegacyPage(_STATEFUL_ATENDIMENTOS_ROWS)
+        sidecar_path = tmp_path / "encounters.json"
+        with _fake_path2_clock():
+            _path2._capture_encounter_sidecar(
+                page,
+                all_admissions=[],
+                admissions_only=True,
+                encounters_output_path=sidecar_path,
+            )
+
+        # The page really switched states, exactly once, via the exact
+        # menu item.
+        assert page.state == "atendimentos"
+        texts = [e for e in page.events if e[0] == "get_by_text"]
+        assert texts == [("get_by_text", "Atendimentos", True)]
+        clicks = [e for e in page.events if e[0] == "menu_click"]
+        assert clicks == [("menu_click", "Atendimentos", True)]
+
+        # Enforced order: get_by_text -> wait visible -> click -> rows.
+        events = page.events
+        i_text = events.index(("get_by_text", "Atendimentos", True))
+        i_wait = events.index(("menu_wait_for", "Atendimentos", "visible"))
+        i_click = events.index(("menu_click", "Atendimentos", True))
+        i_rows = events.index(("rows_attached", "attached"))
+        assert i_text < i_wait < i_click < i_rows
+        for idx, event in enumerate(events):
+            if event[0] == "rows_attached":
+                assert idx > i_click
+
+        # The real parser only ever read rows AFTER the state switch, in
+        # the same frame_pol.
+        evals = [e for e in events if e[0] == "eval_rows"]
+        assert evals
+        assert all(e[2] == "atendimentos" for e in evals)
+        frames = [e for e in events if e[0] == "frame"]
+        assert frames
+        assert all(e[1] == _path2.FRAME_NAME for e in frames)
+
+        # Real parser consumed the synthetic rows: invalid/short rows
+        # discarded, dates sorted ascending, minimal sidecar.
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        assert payload == {"encounter_dates": ["2026-07-09", "2026-07-10"]}
+
+    def test_click_failure_raises_constant_sanitized_message(
+        self, tmp_path
+    ) -> None:
+        page = _StatefulLegacyPage([], menu_fails=True)
+        sidecar_path = tmp_path / "encounters.json"
+        with _fake_path2_clock(), pytest.raises(RuntimeError) as excinfo:
+            _path2._capture_encounter_sidecar(
+                page,
+                all_admissions=[],
+                admissions_only=True,
+                encounters_output_path=sidecar_path,
+            )
+        message = str(excinfo.value)
+        assert message == "Could not find or click the 'Atendimentos' element."
+        for sentinel in (
+            "SENTINEL",
+            "SECRET-HTML",
+            "locator(",
+            "Timeout 15000",
+        ):
+            assert sentinel not in message
+        assert page.state == "internacoes"
+        assert not sidecar_path.exists()
+
+    def test_nonempty_capture_never_navigates_stateful(self, tmp_path) -> None:
+        page = _StatefulLegacyPage(_STATEFUL_ATENDIMENTOS_ROWS)
+        sidecar_path = tmp_path / "encounters.json"
+        with _fake_path2_clock():
+            _path2._capture_encounter_sidecar(
+                page,
+                all_admissions=[
+                    {
+                        "admissionKey": "K-1",
+                        "admissionStart": "2026-05-01",
+                    }
+                ],
+                admissions_only=True,
+                encounters_output_path=sidecar_path,
+            )
+        assert page.state == "internacoes"
+        assert not [
+            e for e in page.events if e[0] in ("get_by_text", "menu_click")
+        ]
+        assert not sidecar_path.exists()
+
+    def test_missing_option_never_navigates_stateful(self, tmp_path) -> None:
+        page = _StatefulLegacyPage(_STATEFUL_ATENDIMENTOS_ROWS)
+        with _fake_path2_clock():
+            _path2._capture_encounter_sidecar(
+                page,
+                all_admissions=[],
+                admissions_only=True,
+                encounters_output_path=None,
+            )
+        assert page.state == "internacoes"
+        assert not [
+            e for e in page.events if e[0] in ("get_by_text", "menu_click")
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -940,6 +1199,110 @@ class TestEncounterFallbackParityMatrix:
             "capture_error", "persistent", "ENC-PER-CLEAN"
         )
         mock_per.cleanup_after_failure.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# PFIF-S2R R3/R5: worker sidecar eligibility (batch-bound BEFORE subprocess)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestWorkerSidecarEligibility:
+    """The classic worker decides the sidecar flag from ``run.batch_id``
+    BEFORE starting the subprocess: standalone never requests it, batch-bound
+    always does, full-sync keeps the default."""
+
+    def _create_admissions_run(self, batch):
+        return IngestionRun.objects.create(
+            status="queued",
+            intent="admissions_only",
+            batch=batch,
+            max_attempts=3,
+            parameters_json={
+                "patient_record": "PR-SIDECAR-FLAG",
+                "intent": "admissions_only",
+            },
+        )
+
+    def _run_current_worker(self, batch):
+        from apps.ingestion.management.commands import (
+            process_ingestion_runs as current_module,
+        )
+
+        self._create_admissions_run(batch)
+        capture_calls: list[dict[str, Any]] = []
+        real_capture = current_module.Command._capture_admissions
+
+        def spy_capture(capture_self, *, run, extractor, **kwargs):
+            capture_calls.append(dict(kwargs))
+            return real_capture(
+                capture_self, run=run, extractor=extractor, **kwargs
+            )
+
+        source_mock = MagicMock()
+        source_mock.get_admission_snapshot.return_value = []
+        with patch.object(
+            current_module.Command, "_capture_admissions", spy_capture
+        ), patch(
+            _CURRENT_EXTRACTOR_PATH, return_value=source_mock
+        ), _isolate_current_followups(_FollowupRecorder()):
+            call_command("process_ingestion_runs")
+        return capture_calls, source_mock
+
+    def test_standalone_empty_run_requests_no_sidecar(self) -> None:
+        capture_calls, source_mock = self._run_current_worker(batch=None)
+        assert capture_calls, "admissions capture must run"
+        assert capture_calls[0]["include_encounter_sidecar"] is False
+        sent = source_mock.get_admission_snapshot.call_args.kwargs[
+            "include_encounter_sidecar"
+        ]
+        assert sent is False
+
+    def test_batch_bound_empty_run_requests_sidecar(self) -> None:
+        batch = CensusExecutionBatch.objects.create(status="running")
+        capture_calls, source_mock = self._run_current_worker(batch=batch)
+        assert capture_calls, "admissions capture must run"
+        assert capture_calls[0]["include_encounter_sidecar"] is True
+        sent = source_mock.get_admission_snapshot.call_args.kwargs[
+            "include_encounter_sidecar"
+        ]
+        assert sent is True
+
+    def test_full_sync_keeps_default_sidecar_false(self) -> None:
+        from apps.ingestion.management.commands import (
+            process_ingestion_runs as current_module,
+        )
+
+        IngestionRun.objects.create(
+            status="queued",
+            intent="full_sync",
+            batch=None,
+            max_attempts=3,
+            parameters_json={
+                "patient_record": "PR-FULLSYNC-FLAG",
+                "intent": "full_sync",
+                "start_date": "2026-05-01",
+                "end_date": "2026-05-20",
+            },
+        )
+        capture_calls: list[dict[str, Any]] = []
+
+        def probing_capture(capture_self, **kwargs):
+            capture_calls.append(dict(kwargs))
+            raise ExtractionError("capture probe stop")
+
+        with patch.object(
+            current_module.Command, "_capture_admissions", probing_capture
+        ), patch(_CURRENT_EXTRACTOR_PATH, return_value=MagicMock()):
+            call_command("process_ingestion_runs")
+
+        assert len(capture_calls) == 1
+        # full_sync never passes the flag: default False preserved.
+        assert "include_encounter_sidecar" not in capture_calls[0]
+        default = inspect.signature(
+            current_module.Command._capture_admissions
+        ).parameters["include_encounter_sidecar"].default
+        assert default is False
 
 
 # ---------------------------------------------------------------------------
