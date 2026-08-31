@@ -58,6 +58,19 @@ SEL_INTERNACOES_TABLE_ROWS = "#tabelaInternacoes\\:resultList_data > tr"
 
 SEL_INTERNACOES_TABLE_BODY = "tbody#tabelaInternacoes\\:resultList_data"
 
+SEL_ATENDIMENTOS_TABLE_ROWS = "#tabela_resultados\\:resultList_data > tr"
+"""Encounter (Atendimentos) table row selector inside ``frame_pol``.
+
+Structure confirmed by a read-only legacy spike (PFIF-S1): the body uses
+``tabela_resultados:resultList_data`` and each row carries four cells —
+Data (``DD/MM/AAAA``), Tipo, Especialidade and Profissional. Only the
+first cell is ever parsed; the others are never read into memory."""
+
+_ATENDIMENTOS_CLICK_FAILED_MESSAGE = (
+    "Could not find or click the 'Atendimentos' element."
+)
+"""Constant sanitized message for Atendimentos menu failures."""
+
 # ---------------------------------------------------------------------------
 # NavigationError
 # ---------------------------------------------------------------------------
@@ -480,6 +493,42 @@ def click_internacoes(page: Any, *, timeout_ms: int | None = None) -> None:
     page.wait_for_timeout(_bound_ms(deadline_s, 500))
 
 
+def click_atendimentos(page: Any, *, timeout_ms: int | None = None) -> None:
+    """Click the exact visible 'Atendimentos' menu item.
+
+    Modeled after :func:`click_internacoes`: waits for the exact text
+    ``"Atendimentos"`` and clicks it. PFIF-S1 R2: used only after a
+    batch-bound admissions capture returned an empty list.
+
+    Args:
+        page: A Playwright ``Page`` object.
+        timeout_ms: Optional overall budget in milliseconds for this step.
+
+    Raises:
+        NavigationTimeoutError: If the wait/click times out (Playwright timeout).
+        NavigationError: If the Atendimentos element is not found for other
+            reasons (constant sanitized message).
+    """
+    deadline_s = _deadline_s(timeout_ms)
+    try:
+        atendimentos = page.get_by_text("Atendimentos", exact=True)
+        atendimentos.wait_for(
+            state="visible", timeout=_bound_ms(deadline_s, 15000)
+        )
+        atendimentos.click(
+            **_timeout_kwargs(deadline_s, _DEFAULT_ACTION_TIMEOUT_MS)
+        )
+    except NavigationError:
+        raise
+    except Exception as exc:
+        _raise_required_action_error(
+            exc,
+            fallback_message=_ATENDIMENTOS_CLICK_FAILED_MESSAGE,
+        )
+
+    page.wait_for_timeout(_bound_ms(deadline_s, 500))
+
+
 def wait_for_admissions_table(
     page: Any,
     timeout_ms: int = 30000,
@@ -608,6 +657,102 @@ def read_admissions_rows(page: Any) -> list[dict[str, Any]]:
         })
 
     return parsed
+
+
+def wait_for_encounters_table(
+    page: Any,
+    timeout_ms: int | None = None,
+) -> Any:
+    """Wait bounded for the ``frame_pol`` iframe with encounter table rows.
+
+    Polls for the ``frame_pol`` frame and checks that
+    ``#tabela_resultados:resultList_data > tr`` rows are attached (PFIF-S1
+    R2). Modeled after :func:`wait_for_admissions_table`.
+
+    Args:
+        page: A Playwright ``Page`` object.
+        timeout_ms: Maximum time to wait in milliseconds. ``None`` uses the
+            same 30s default as :func:`wait_for_admissions_table`.
+
+    Returns:
+        The Playwright ``Frame`` object for ``frame_pol`` with rows available.
+
+    Raises:
+        NavigationTimeoutError: If the frame or table is not available
+            within the timeout (constant sanitized message).
+    """
+    budget_ms = 30000 if timeout_ms is None else timeout_ms
+    started_at = time.monotonic()
+
+    while True:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        remaining_ms = budget_ms - elapsed_ms
+        if remaining_ms <= 0:
+            break
+
+        frame = page.frame(name=SEL_FRAME_POL)
+        if frame is not None:
+            rows_locator = frame.locator(SEL_ATENDIMENTOS_TABLE_ROWS)
+            step_timeout = min(500, max(1, remaining_ms))
+            try:
+                rows_locator.first.wait_for(
+                    state="attached", timeout=step_timeout
+                )
+                return frame
+            except Exception:
+                pass
+
+        page.wait_for_timeout(min(500, max(1, remaining_ms)))
+
+    raise NavigationTimeoutError(
+        _REQUIRED_ACTION_TIMEOUT_MESSAGE
+    )
+
+
+def read_encounter_dates(page: Any) -> list[date]:
+    """Read encounter dates from the Atendimentos table in ``frame_pol``.
+
+    Structural parse only (PFIF-S1 R2): every row must carry four cells and
+    ONLY the first cell is parsed, as ``DD/MM/AAAA``. Rows that are
+    structurally incomplete or carry an invalid date are ignored. The
+    returned list is sorted ascending so the result is deterministic. No
+    row text, type, specialty or professional value ever leaves this
+    function — only ``date`` objects.
+
+    Args:
+        page: A Playwright ``Page`` object whose ``frame_pol`` frame holds
+            the Atendimentos table.
+
+    Returns:
+        Ascending list of parsed encounter dates (empty when the frame or
+        rows are unavailable — the caller treats empty as fail-closed).
+    """
+    frame = page.frame(name=SEL_FRAME_POL)
+    if frame is None:
+        return []
+
+    rows = frame.eval_on_selector_all(
+        SEL_ATENDIMENTOS_TABLE_ROWS,
+        """
+        (rows) => rows.map((tr) => ({
+            cells: Array.from(tr.querySelectorAll('td')).map(
+                (td) => (td.textContent || '').trim()
+            ),
+        }))
+        """,
+    )
+
+    dates: list[date] = []
+    for row in rows or []:
+        cells = row.get("cells") or []
+        if len(cells) < 4:
+            continue
+        parsed = _parse_br_date(cells[0])
+        if parsed is None:
+            continue
+        dates.append(parsed)
+
+    return sorted(dates)
 
 
 # ---------------------------------------------------------------------------

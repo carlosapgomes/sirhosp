@@ -63,6 +63,7 @@ from apps.ingestion.extractors.legacy_navigation import (
     build_chunks_for_interval,
     build_demographics,
     choose_overlapping_admissions,
+    click_atendimentos,
     click_evolucao,
     click_internacoes,
     click_visualizar_report,
@@ -70,11 +71,14 @@ from apps.ingestion.extractors.legacy_navigation import (
     fill_evolution_dates,
     go_back_to_detail_from_report,
     open_internacao_detail,
+    read_encounter_dates,
     search_patient,
     select_ascending_order,
     select_target_admission,
+    wait_for_encounters_table,
     wait_for_report_or_no_evolutions,
 )
+from apps.ingestion.extractors.patient_flow_snapshot import PatientFlowSnapshot
 from apps.ingestion.extractors.persistent_evolution_pdf import (
     _EVOLUTION_PDF_DOWNLOAD_TIMEOUT_MESSAGE,
     DEFAULT_PDF_DOWNLOAD_TIMEOUT_MS,
@@ -640,6 +644,104 @@ class RealHandleBridge:
                 "Unexpected error during admissions navigation (sanitized)"
             )
             return False
+
+    # ------------------------------------------------------------------
+    # PFIF-S1: job-scoped patient flow snapshot action
+    # ------------------------------------------------------------------
+
+    _FLOW_TIMEOUT_MESSAGE = (
+        "Patient flow snapshot timeout must be positive."
+    )
+    _FLOW_NO_PAGE_MESSAGE = (
+        "No active page available for the patient flow snapshot."
+    )
+    _FLOW_UNEXPECTED_MESSAGE = (
+        "Unexpected failure during the patient flow snapshot."
+    )
+
+    def capture_patient_flow_snapshot(
+        self,
+        *,
+        patient_record: str,
+        today: date,
+        timeout: int = 120,
+    ) -> PatientFlowSnapshot:
+        """Capture admissions first; only when empty, read Atendimentos once.
+
+        PFIF-S1 R3: one job-scoped action on the already-authenticated
+        persistent page. Sequence: ensure search screen, search the patient,
+        click ``Internações`` and read the admissions table. ONLY when that
+        normalized list is empty, perform one additional bounded menu click
+        (``Atendimentos``) and one structural tabular read in the same
+        session, then classify recency against the injected local ``today``.
+
+        The result is returned directly — nothing about the encounter read is
+        stored on the bridge, so no evidence can cross a job/lifecycle
+        boundary (navigation start still drops any previous job's cached
+        admissions snapshot).
+
+        Args:
+            patient_record: Patient record (prontuário) string.
+            today: Local calendar date used for the recency classification.
+            timeout: Overall budget in seconds for the whole action sequence.
+
+        Returns:
+            The immutable :class:`PatientFlowSnapshot` value object.
+
+        Raises:
+            NavigationError: On no active page, non-positive timeout, or any
+                sanitized navigation/parser failure (constant messages; raw
+                chain suppressed).
+            NavigationTimeoutError: Typed timeout keeps the shared taxonomy.
+        """
+        # A new navigation starts a fresh job — drop any previous job's
+        # cached admissions snapshot BEFORE the first UI action (RPAP-S1 R2).
+        self._clear_admissions_snapshot()
+
+        if timeout <= 0:
+            raise NavigationError(self._FLOW_TIMEOUT_MESSAGE)
+
+        page = self._resolve_active_page()
+        if page is None:
+            raise NavigationError(self._FLOW_NO_PAGE_MESSAGE)
+
+        deadline_s = time.monotonic() + timeout
+        try:
+            ensure_search_screen(page, timeout_ms=_remaining_ms(deadline_s))
+            search_patient(
+                page,
+                patient_record=patient_record,
+                timeout_ms=_remaining_ms(deadline_s),
+            )
+            click_internacoes(page, timeout_ms=_remaining_ms(deadline_s))
+            admissions = _read_and_build_snapshot(
+                page, timeout_ms=_remaining_ms(deadline_s)
+            )
+
+            encounter_dates: list[date] = []
+            if not admissions:
+                # Empty batch-bound admissions: one additional menu click and
+                # one tabular read, in the same session (PFIF-S1). Non-empty
+                # captures never reach the Atendimentos menu.
+                click_atendimentos(page, timeout_ms=_remaining_ms(deadline_s))
+                wait_for_encounters_table(
+                    page,
+                    timeout_ms=_remaining_ms(deadline_s),
+                )
+                encounter_dates = read_encounter_dates(page)
+
+            return PatientFlowSnapshot.build(
+                admissions=admissions,
+                encounter_dates=encounter_dates,
+                today=today,
+            )
+        except NavigationError:
+            # Already a constant sanitized message; propagate unchanged.
+            raise
+        except Exception:
+            # Wrap any unexpected failure in a constant sanitized message.
+            # Suppress the raw chain so no underlying text can leak.
+            raise NavigationError(self._FLOW_UNEXPECTED_MESSAGE) from None
 
     # ------------------------------------------------------------------
     # PSW-S16: real legacy demographics action navigation

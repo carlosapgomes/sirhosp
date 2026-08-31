@@ -120,6 +120,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import enum
 import os
 import time
 from collections.abc import Callable
@@ -146,6 +147,11 @@ from apps.ingestion.extractors.legacy_navigation import (
     TargetAdmissionContext,
     build_chunks_for_interval,
     demographics_identity_matches,
+)
+from apps.ingestion.extractors.patient_flow_snapshot import (
+    OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
+    EncounterRecency,
+    PatientFlowSnapshot,
 )
 from apps.ingestion.extractors.persistent_evolution_pdf import (
     EvolutionPdfError,
@@ -389,6 +395,22 @@ Derived from ``_DISPATCH_MAP`` keys — cannot drift independently.
 Empty or unknown intents must never fall through to full-sync.
 """
 
+
+class _EncounterFallbackOutcome(enum.Enum):
+    """Closed outcomes of the PFIF-S1 encounter fallback (R5/R6).
+
+    RECOGNIZED: the fallback proved a recent encounter — the run was
+    finalized as succeeded with zero clinical effects.
+    FAILED: the fallback navigation/parser failed — the run was finalized
+    through the existing typed failure/cleanup/retry path.
+    NOT_RECENT: evidence is boundary/stale/none (or admissions re-captured
+    non-empty) — the caller keeps the existing empty-admissions
+    fail-closed path unchanged.
+    """
+
+    RECOGNIZED = "recognized"
+    FAILED = "failed"
+    NOT_RECENT = "not_recent"
 
 
 class _StubSessionHandle:
@@ -1548,6 +1570,17 @@ class Command(BaseCommand):
             # persistence or success bookkeeping.
             ensure_nonempty_batch_admissions(run.batch_id, result)
         except EmptyAdmissionsSnapshotError as exc:
+            # PFIF-S1 R5: a batch-bound empty capture may consult the legacy
+            # Atendimentos table ONCE before failing closed. Only this
+            # exception branch (batch-bound empty admissions) may use the
+            # fallback; standalone/full-sync/non-empty never reach it (R6).
+            if run.batch_id is not None:
+                outcome = self._run_encounter_fallback(run, adapter, stage_start)
+                if outcome is not _EncounterFallbackOutcome.NOT_RECENT:
+                    # RECOGNIZED: run already finalized as succeeded with
+                    # zero clinical effects. FAILED: run already finalized
+                    # through the existing typed failure/cleanup path.
+                    return
             # Data-level failure: a job tab was opened, so cleanup is required
             # before claiming another run.
             self._record_stage(
@@ -1691,6 +1724,115 @@ class Command(BaseCommand):
             f"(admissions_seen={adm_metrics['seen']}, "
             f"admissions_created={adm_metrics['created']}, "
             f"admissions_updated={adm_metrics['updated']})"
+        )
+
+    # ------------------------------------------------------------------
+    # PFIF-S1: encounter fallback helpers (R5/R6)
+    # ------------------------------------------------------------------
+
+    def _run_encounter_fallback(
+        self,
+        run: IngestionRun,
+        adapter: PersistentExtractionAdapter,
+        stage_start: Any,
+    ) -> _EncounterFallbackOutcome:
+        """Consult Atendimentos once after a batch-bound empty capture.
+
+        Eligibility was already established by the caller: this runs only
+        inside the ``EmptyAdmissionsSnapshotError`` branch of
+        ``_process_admissions_only`` for a run with ``batch_id`` set.
+
+        - ``RECOGNIZED``: recent encounter proven — the run is finalized as
+          succeeded with zero clinical effects (no persist, no follow-up).
+        - ``FAILED``: navigation/parser failure — the run is finalized
+          through the existing typed error/cleanup/retry path.
+        - ``NOT_RECENT``: boundary/stale/none evidence or a non-empty
+          re-capture — the caller keeps the existing fail-closed path.
+        """
+        params = run.parameters_json or {}
+        patient_record = params.get("patient_record", "")
+        try:
+            flow = adapter.get_patient_flow_snapshot(
+                patient_record=patient_record,
+                today=timezone.localdate(),
+                timeout=_ADMISSIONS_TIMEOUT,
+            )
+            recognized = (
+                isinstance(flow, PatientFlowSnapshot)
+                and flow.encounter_recency is EncounterRecency.RECENT_CONFIRMED
+                and flow.is_empty
+            )
+        except Exception as exc:
+            # Navigation/parser failure keeps the existing fail-closed path:
+            # typed error, cleanup, retry taxonomy (PFIF-S1 R6).
+            self._record_stage(
+                run, "admissions_capture", "failed", stage_start,
+                details_json=self._stage_error_details(exc),
+            )
+            adapter.cleanup_after_failure()
+            self._mark_run_failed(run, exc)
+            self.stderr.write(
+                f"  {self._run_label(run)} failed during encounter fallback "
+                f"(reason={self._classify_failure_reason(exc)[0]})"
+            )
+            return _EncounterFallbackOutcome.FAILED
+
+        if not recognized:
+            # Boundary/stale/none (or non-empty re-capture): never accepted.
+            return _EncounterFallbackOutcome.NOT_RECENT
+
+        self._finalize_recent_encounter_run(run, stage_start)
+        return _EncounterFallbackOutcome.RECOGNIZED
+
+    def _finalize_recent_encounter_run(
+        self, run: IngestionRun, stage_start: Any
+    ) -> None:
+        """Close a recognized recent-encounter run without clinical effects.
+
+        PFIF-S1 R5/D4: run/attempt succeed with every clinical counter at
+        zero; no ``persist_admissions_snapshot`` call, no Patient/Admission,
+        no full-sync/demographics follow-up. Stage metrics record only the
+        closed outcome/recency enums — never a date or identifier. Batch
+        closure follows the canonical path so the batch can drain.
+        """
+        self._record_stage(
+            run, "admissions_capture", "succeeded", stage_start,
+        )
+        self._record_stage(
+            run,
+            "encounter_fallback",
+            "succeeded",
+            stage_start,
+            details_json={
+                "outcome": OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
+                "recency": EncounterRecency.RECENT_CONFIRMED.value,
+            },
+        )
+
+        run.admissions_seen = 0
+        run.admissions_created = 0
+        run.admissions_updated = 0
+        run.events_processed = 0
+        run.events_created = 0
+        run.events_skipped = 0
+        run.events_revised = 0
+        run.status = "succeeded"
+        run.finished_at = timezone.now()
+        run.failure_reason = ""
+        run.timed_out = False
+        run.save()
+
+        self._mark_latest_attempt_succeeded(run)
+
+        # No persist_admissions_snapshot / follow-up enqueue: a recognized
+        # recent encounter must have zero clinical effect. Only the canonical
+        # batch closure runs so the batch can drain.
+        self._try_close_batch(run.batch)
+
+        self.stdout.write(
+            f"  {self._run_label(run)} admissions-only succeeded "
+            f"(persistent session, recognized recent encounter without "
+            f"admission, admissions_seen=0)"
         )
 
     # ------------------------------------------------------------------

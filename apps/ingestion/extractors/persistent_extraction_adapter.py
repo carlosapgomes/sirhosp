@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date
 from typing import Any
 from urllib.parse import quote
 
@@ -33,6 +34,10 @@ from apps.ingestion.extractors.legacy_navigation import (
     DEMOGRAPHICS_IDENTITY_MESSAGE,
     TargetAdmissionContext,
     demographics_identity_matches,
+)
+from apps.ingestion.extractors.patient_flow_snapshot import (
+    EncounterRecency,
+    PatientFlowSnapshot,
 )
 from apps.ingestion.extractors.playwright_extractor import _TYPE_MAP
 from apps.ingestion.extractors.session_controller import (
@@ -481,6 +486,79 @@ class PersistentExtractionAdapter:
         self._controller.mark_job_processed()
 
         return result
+
+    # ------------------------------------------------------------------
+    # PFIF-S1: enriched patient flow snapshot follow-up
+    # ------------------------------------------------------------------
+
+    def get_patient_flow_snapshot(
+        self,
+        *,
+        patient_record: str,
+        today: date,
+        timeout: int = 120,
+    ) -> PatientFlowSnapshot:
+        """Return the enriched flow snapshot for an empty batch-bound capture.
+
+        PFIF-S1 R4 follow-up: called by the worker ONLY after
+        :meth:`get_admission_snapshot` returned a valid empty snapshot for a
+        batch-bound run. Readiness, renewal and ``mark_job_processed`` were
+        already performed once for this job, so this method never repeats
+        them (the job stays counted exactly once); it never opens a new URL,
+        browser, session or subprocess.
+
+        - Real handle (bridge exposes ``capture_patient_flow_snapshot``):
+          the bridge captures admissions first and, only when empty, reads
+          the ``Atendimentos`` table in the same session; afterwards the
+          existing tab cleanup contract returns the session to a clean job
+          boundary (a safe no-op when the action path opened no tab).
+        - Stub/test sessions: no encounter capability — the adapter returns
+          an admissions-only snapshot with no encounter evidence
+          (``recency=none``), preserving the fail-closed behavior without
+          any navigation.
+
+        Args:
+            patient_record: Patient record identifier (prontuário).
+            today: Local calendar date (``America/Bahia`` in production) used
+                for the recency classification.
+            timeout: Maximum execution time in seconds, propagated to the
+                session handle's navigation path.
+
+        Returns:
+            The immutable :class:`PatientFlowSnapshot` value object.
+
+        Raises:
+            ExtractionError: If the real-handle action navigation fails.
+            ExtractionTimeoutError: Typed navigation timeouts propagate
+                unchanged (shared ``("timeout", True)`` taxonomy).
+        """
+        _capture_flow = getattr(
+            self._session, "capture_patient_flow_snapshot", None
+        )
+        if callable(_capture_flow):
+            try:
+                flow = _capture_flow(
+                    patient_record=patient_record, today=today, timeout=timeout
+                )
+            except ExtractionTimeoutError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - sanitized taxonomy
+                raise ExtractionError(
+                    "Failed to capture the patient flow snapshot via legacy "
+                    "UI actions."
+                ) from exc
+            # Return to a clean job boundary through the existing tab cleanup
+            # contract (safe no-op when the action path opened no tab).
+            self._controller.close_job_tab_if_present()
+            return flow
+
+        # Stub/test compatibility: no encounter capability — fail-closed
+        # empty evidence without any navigation.
+        return PatientFlowSnapshot(
+            admissions=(),
+            latest_encounter_date=None,
+            encounter_recency=EncounterRecency.NONE,
+        )
 
     # ------------------------------------------------------------------
     # Evolution extraction (PSW-S5)
