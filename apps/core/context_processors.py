@@ -1,9 +1,26 @@
-"""Context processor: injects sidebar navigation state and sync time.
+"""Context processors: sidebar navigation state and census photo freshness.
 
 Uses request path to determine which menu item is active.
+Injects the topbar badge values from the latest census photo
+(``CensusSnapshot`` with maximum ``captured_at``) — the badge never reads
+individual ingestion runs and never derives freshness from the request
+time.
 """
 
+from datetime import datetime, timedelta
+
+from django.db.models import Max
 from django.http import HttpRequest
+from django.utils import timezone
+
+# Age thresholds for the badge dot (design D3, operator decision).
+FRESH_WITHIN = timedelta(hours=2)
+STALE_WITHIN = timedelta(hours=6)
+
+# Fail-closed presentation when no census photo exists (or reads fail).
+NO_PHOTO_LABEL = "--:--"
+NO_PHOTO_TITLE = "Nenhuma foto de censo disponível"
+OUTDATED_CLASS = "is-outdated"
 
 # Map URL prefixes to sidebar active menu keys
 MENU_PATH_MAP = [
@@ -57,28 +74,72 @@ def _default_title(path: str) -> str:
     return "Prisma"
 
 
-def sync_status(request: HttpRequest) -> dict:
-    """Inject sync status time from the latest succeeded IngestionRun.
+def latest_census_photo() -> datetime | None:
+    """Return the capture time of the latest census photo, or ``None``.
 
-    Guards against database access failures (e.g. test environments without
-    django_db) by falling back to a safe default.
+    Single index-backed aggregate (``census_captured_idx``); the same
+    semantics as the dashboard "Última varredura completa" card.
+    """
+    from apps.census.models import CensusSnapshot
+
+    return CensusSnapshot.objects.aggregate(Max("captured_at"))[
+        "captured_at__max"
+    ]
+
+
+def census_badge_values(
+    captured_at: datetime | None, now: datetime
+) -> dict[str, str]:
+    """Pure presentation values for the census freshness badge.
+
+    Returns ``census_sync_label`` ("HH:MM" for a photo from today,
+    "dd/mm HH:MM" otherwise, "--:--" without a photo), ``census_sync_title``
+    (full local timestamp) and ``census_sync_age_class`` (closed classes:
+    ``is-fresh`` <= 2 h, ``is-stale`` <= 6 h, ``is-outdated`` beyond 6 h or
+    without a photo). The label prefix ("Censo: ") belongs to the template.
+    """
+    if captured_at is None:
+        return {
+            "census_sync_label": NO_PHOTO_LABEL,
+            "census_sync_title": NO_PHOTO_TITLE,
+            "census_sync_age_class": OUTDATED_CLASS,
+        }
+
+    local_dt = timezone.localtime(captured_at)
+    age = now - captured_at
+    if age <= FRESH_WITHIN:
+        age_class = "is-fresh"
+    elif age <= STALE_WITHIN:
+        age_class = "is-stale"
+    else:
+        age_class = OUTDATED_CLASS
+
+    if local_dt.date() == timezone.localtime(now).date():
+        label = local_dt.strftime("%H:%M")
+    else:
+        label = local_dt.strftime("%d/%m %H:%M")
+
+    return {
+        "census_sync_label": label,
+        "census_sync_title": local_dt.strftime(
+            "Foto do censo de %d/%m/%Y %H:%M"
+        ),
+        "census_sync_age_class": age_class,
+    }
+
+
+def sync_status(request: HttpRequest) -> dict[str, str]:
+    """Inject census photo freshness for the topbar badge.
+
+    Fail-closed: without a photo — or on any database failure (e.g. test
+    environments without django_db) — degrades to "--:--" + outdated.
     """
     try:
-        from django.utils import timezone
-
-        from apps.ingestion.models import IngestionRun
-
-        latest = (
-            IngestionRun.objects
-            .filter(status="succeeded", finished_at__isnull=False)
-            .order_by("-finished_at")
-            .first()
-        )
-
-        if latest is None:
-            return {"sync_time": "--:--"}
-
-        local_dt = timezone.localtime(latest.finished_at)
-        return {"sync_time": local_dt.strftime("%H:%M")}
+        captured_at = latest_census_photo()
+        return census_badge_values(captured_at, timezone.now())
     except Exception:
-        return {"sync_time": "--:--"}
+        return {
+            "census_sync_label": NO_PHOTO_LABEL,
+            "census_sync_title": NO_PHOTO_TITLE,
+            "census_sync_age_class": OUTDATED_CLASS,
+        }

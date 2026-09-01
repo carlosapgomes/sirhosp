@@ -191,6 +191,20 @@
   display: inline-block;
 }
 
+/* Census photo age classes (TCF-S1): fresh <= 2 h, stale <= 6 h,
+   outdated beyond 6 h or without a photo. */
+.sirhosp-topbar-sync .dot.is-fresh {
+  background: var(--bs-success);
+}
+
+.sirhosp-topbar-sync .dot.is-stale {
+  background: var(--bs-warning);
+}
+
+.sirhosp-topbar-sync .dot.is-outdated {
+  background: var(--bs-danger);
+}
+
 .sirhosp-topbar-toggle {
   display: none;
   background: none;
