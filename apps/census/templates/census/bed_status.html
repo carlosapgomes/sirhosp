@@ -1,4 +1,5 @@
 {% extends "base_sidebar.html" %}
+{% load patient_flow %}
 {% block page_title %}Leitos{% endblock %}
 
 {% block content %}
@@ -748,6 +749,12 @@
                           {% endfor %}
                           <span class="text-muted">({{ patient.record }})</span>
                         </span>
+                        {% finding_for finding_map patient.record as patient_finding %}
+                        {% if patient_finding %}
+                        <span class="badge {% if patient_finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+                              role="status"
+                              title="{{ patient_finding.label }}{% if patient_finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ patient_finding.label }}{% if patient_finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>
+                        {% endif %}
                         {% if patient.cross_group %}
                         <span class="badge bg-warning text-dark">Prontuário informado em mais de um setor oficial neste censo</span>
                         {% endif %}
@@ -815,6 +822,12 @@
                     <div class="list-group-item py-1 px-3 small d-flex flex-wrap align-items-center gap-2">
                       {% if inc.name %}<span>{{ inc.name }}</span>{% endif %}
                       {% if inc.record %}<span class="text-muted">({{ inc.record }})</span>{% endif %}
+                      {% finding_for finding_map inc.record as inc_finding %}
+                      {% if inc_finding %}
+                      <span class="badge {% if inc_finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+                            role="status"
+                            title="{{ inc_finding.label }}{% if inc_finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ inc_finding.label }}{% if inc_finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>
+                      {% endif %}
                       {% if inc.bed %}<code class="small">{{ inc.bed }}</code>{% endif %}
                       {% if inc.source_code %}<span class="badge bg-light text-dark border">código {{ inc.source_code }}</span>{% endif %}
                     </div>
@@ -987,6 +1000,12 @@
                         {% if pos.note %}
                         <span class="badge bg-warning text-dark">{{ pos.note }}</span>
                         {% endif %}
+                        {% finding_for finding_map pos.prontuario as pos_finding %}
+                        {% if pos_finding %}
+                        <span class="badge {% if pos_finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+                              role="status"
+                              title="{{ pos_finding.label }}{% if pos_finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ pos_finding.label }}{% if pos_finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>
+                        {% endif %}
                       </div>
                       <div class="text-end small">
                         {% if pos.prontuario %}
@@ -1054,6 +1073,12 @@
                         {% if alt.occurrence_count > 1 %}
                         <span class="badge bg-light text-dark border">{{ alt.occurrence_count }} linhas equivalentes</span>
                         {% endif %}
+                        {% finding_for finding_map alt.prontuario as alt_finding %}
+                        {% if alt_finding %}
+                        <span class="badge {% if alt_finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+                              role="status"
+                              title="{{ alt_finding.label }}{% if alt_finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ alt_finding.label }}{% if alt_finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>
+                        {% endif %}
                         <span class="badge bg-warning text-dark">registro divergente — não autoritativo</span>
                       </li>
                       {% endfor %}
@@ -1086,6 +1111,12 @@
                           {% endif %}
                         {% else %}
                           <span class="text-muted">—</span>
+                        {% endif %}
+                        {% finding_for finding_map case.prontuario as case_finding %}
+                        {% if case_finding %}
+                        <span class="badge {% if case_finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+                              role="status"
+                              title="{{ case_finding.label }}{% if case_finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ case_finding.label }}{% if case_finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>
                         {% endif %}
                         <span class="badge bg-secondary">não computada por ausência de posição</span>
                       </li>

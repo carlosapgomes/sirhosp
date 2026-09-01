@@ -30,6 +30,19 @@
           &middot; {{ patient.gender }}
         {% endif %}
       </div>
+      {% if finding %}
+      <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
+        <span class="badge {% if finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+              role="status"
+              title="{{ finding.label }}{% if finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ finding.label }}{% if finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>
+        {% if finding.requires_manual_review %}
+        <span class="small text-warning-emphasis">
+          <i class="bi bi-exclamation-triangle-fill me-1" aria-hidden="true"></i>
+          Requer revisão manual do prontuário.
+        </span>
+        {% endif %}
+      </div>
+      {% endif %}
       {% if ward %}
         <div class="mt-1 d-flex gap-2 align-items-center">
           <span class="badge" style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker);">

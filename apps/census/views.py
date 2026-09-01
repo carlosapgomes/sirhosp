@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from django.contrib.auth.decorators import login_required
 from django.db.models import Count, Max
 from django.shortcuts import render
+from django.utils import timezone
 
 from apps.census.flow_service import compute_hospital_flow, list_sectors
 from apps.census.models import CensusSnapshot
@@ -15,6 +16,10 @@ from apps.census.occupancy import (
     build_official_group_rows,
     build_units_presentation,
     resolve_exact_measurement,
+)
+from apps.ingestion.patient_flow_findings import (
+    PatientFindingInput,
+    build_patient_flow_findings,
 )
 from apps.patients.models import Patient
 
@@ -167,6 +172,23 @@ def bed_status_view(request):
         patient_map=patient_map,
     )
 
+    # ── PFIF-S4: current patient-flow findings for this census photo ──
+    # One bulk call (fixed query budget) for every identified registro in
+    # the most recent snapshot; measurement and reconciliation stay intact.
+    finding_map = build_patient_flow_findings(
+        [
+            PatientFindingInput(
+                prontuario=b.prontuario,
+                patient_id=patient_map.get(b.prontuario),
+                sector=b.setor or "",
+                sector_code=b.setor_codigo or "",
+            )
+            for b in bed_details
+            if b.prontuario
+        ],
+        now=timezone.now(),
+    )
+
     context = {
         "page_title": "Leitos",
         "captured_at": latest_captured,
@@ -175,6 +197,7 @@ def bed_status_view(request):
         "physical": presentation.physical,
         "units": presentation.units,
         "measured_groups": [],
+        "finding_map": finding_map,
     }
     if (
         measurement is not None

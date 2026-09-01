@@ -8,8 +8,13 @@ from django.contrib.auth.decorators import login_required
 from django.core.paginator import Paginator
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
+from django.utils import timezone
 
-from apps.census.models import PatientMovement
+from apps.census.models import CensusSnapshot, PatientMovement
+from apps.ingestion.patient_flow_findings import (
+    PatientFindingInput,
+    build_patient_flow_findings,
+)
 from apps.patients import services
 from apps.patients.models import Admission, Patient
 
@@ -156,8 +161,41 @@ def admission_list_view(
         "summary": summary_context,
         "sync": sync_context,
         "trajectory": trajectory,
+        "finding": _patient_flow_finding(patient),
     }
     return render(request, "patients/admission_list.html", context)
+
+
+def _patient_flow_finding(patient: Patient):
+    """Current patient-flow finding for the admissions banner (PFIF-S4).
+
+    Uses the same bulk classifier contract as ``/censo`` and ``/beds``
+    (single-item cohort, fixed query budget, nothing persisted). Sector
+    evidence comes from the patient's most recent census row, keeping the
+    classification inputs identical to the other two surfaces.
+    """
+    census_row = (
+        CensusSnapshot.objects.filter(
+            prontuario=patient.patient_source_key
+        )
+        .order_by("-captured_at")
+        .values("setor", "setor_codigo")
+        .first()
+    )
+    finding_map = build_patient_flow_findings(
+        [
+            PatientFindingInput(
+                prontuario=patient.patient_source_key,
+                patient_id=patient.pk,
+                sector=(census_row["setor"] or "") if census_row else "",
+                sector_code=(census_row["setor_codigo"] or "")
+                if census_row
+                else "",
+            )
+        ],
+        now=timezone.now(),
+    )
+    return finding_map.get(patient.patient_source_key)
 
 
 @login_required
