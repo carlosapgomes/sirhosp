@@ -2,6 +2,10 @@
 
 > **Status**: Implemented ✅
 
+## Purpose
+
+Defines the container-scoped Tailscale VPN sidecar and optional SOCKS5 proxy used for development-only legacy access.
+
 ## Requirements
 
 ### Requirement: Dev VPN access shall be container-scoped

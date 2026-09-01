@@ -1,6 +1,10 @@
 # sector-indicators-page Specification
 
-## ADDED Requirements
+## Purpose
+
+Defines the authenticated sector indicators page and its aggregated analytics (average stay, top destinations, long-stay patients).
+
+## Requirements
 
 ### Requirement: Sector indicators page shows aggregated analytics
 

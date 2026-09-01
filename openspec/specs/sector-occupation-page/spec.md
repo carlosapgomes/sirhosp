@@ -1,6 +1,10 @@
 # sector-occupation-page Specification
 
-## ADDED Requirements
+## Purpose
+
+Defines the authenticated sector occupation page listing patients by sector and period.
+
+## Requirements
 
 ### Requirement: Sector occupation page shows patients by sector and period
 

@@ -1,6 +1,10 @@
 # provider-cost-exchange-health Specification
 
-## ADDED Requirements
+## Purpose
+
+Define a indicação de origem do custo (real vs estimado) e a saúde da cotação USD/BRL na UI.
+
+## Requirements
 
 ### Requirement: UI indica origem do custo (real vs estimado)
 

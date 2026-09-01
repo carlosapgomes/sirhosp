@@ -1,6 +1,10 @@
 # patient-movement-model Specification
 
-## ADDED Requirements
+## Purpose
+
+Defines the PatientMovement ledger: sector transit history, temporal snapshots, optional Admission links and discharge typing.
+
+## Requirements
 
 ### Requirement: PatientMovement stores sector transit history
 

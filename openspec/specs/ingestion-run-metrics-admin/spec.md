@@ -1,6 +1,10 @@
 # ingestion-run-metrics-admin Specification
 
-## ADDED Requirements
+## Purpose
+
+Defines the Django Admin views for ingestion runs: list columns, diagnostic filters and per-stage metric detail.
+
+## Requirements
 
 ### Requirement: Django Admin lists ingestion runs with operational metric columns
 

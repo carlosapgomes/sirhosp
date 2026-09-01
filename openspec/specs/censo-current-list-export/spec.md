@@ -1,4 +1,10 @@
-## ADDED Requirements
+# censo-current-list-export Specification
+
+## Purpose
+
+Defines the authenticated `/censo/` current-census HTML list — filters, ordering and specialty labels — and the equivalent XLSX export contract.
+
+## Requirements
 
 ### Requirement: Censo specialty labels
 

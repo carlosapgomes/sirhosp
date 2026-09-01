@@ -1,6 +1,10 @@
 # sidebar-sectors-menu Specification
 
-## ADDED Requirements
+## Purpose
+
+Defines the Setores menu in the portal sidebar and its authentication-aware visibility.
+
+## Requirements
 
 ### Requirement: Sidebar includes Setores menu
 

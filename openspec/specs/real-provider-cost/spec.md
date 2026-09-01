@@ -1,6 +1,10 @@
 # real-provider-cost Specification
 
-## ADDED Requirements
+## Purpose
+
+Define a priorização do custo real do provider sobre estimativas e a persistência cumulativa por chunk/version da Fase 1.
+
+## Requirements
 
 ### Requirement: Custo real do provider é priorizado sobre estimativa
 

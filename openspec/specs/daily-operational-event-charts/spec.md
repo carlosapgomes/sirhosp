@@ -1,6 +1,10 @@
 # daily-operational-event-charts Specification
 
-## ADDED Requirements
+## Purpose
+
+Defines the daily operational event chart pages (admissions, deaths, discharges) with daily bars and weekday averages.
+
+## Requirements
 
 ### Requirement: Admission chart page shows daily bars
 

@@ -1,6 +1,10 @@
 # ingestion-run-metrics-portal Specification
 
-## ADDED Requirements
+## Purpose
+
+Defines the authenticated services-portal ingestion metrics surfaces: dashboard cards, drill-down, batch history and operational filtering.
+
+## Requirements
 
 ### Requirement: Dashboard shows ingestion operational metric cards
 
@@ -52,8 +56,6 @@ Operational metrics pages MUST require authenticated access.
 
 - **WHEN** an anonymous user accesses the ingestion metrics page route
 - **THEN** the user is redirected to login
-
-## ADDED Requirements (ingestion-worker-batch-observability)
 
 ### Requirement: Ingestion metrics page exposes latest batch worker efficiency
 

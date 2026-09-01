@@ -1,6 +1,10 @@
 # patient-trajectory-view Specification
 
-## ADDED Requirements
+## Purpose
+
+Defines the chronological patient trajectory section on the admission detail page.
+
+## Requirements
 
 ### Requirement: Admission detail page shows patient trajectory
 
