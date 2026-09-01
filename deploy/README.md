@@ -1050,6 +1050,67 @@ não é configurado aqui.
   e aguardar a drenagem; o health check permanece diagnóstico (read-only)
   durante todo o processo.
 
+#### 6.1.4 Rollout canário do reconhecimento de atendimentos (PFIF-S5)
+
+Procedimento **somente agregado** para ativar o reconhecimento de
+`Atendimentos` em produção. Nenhuma etapa lista run, batch, paciente,
+data de atendimento ou profissional; toda observação usa o health check
+e a página de métricas, que exibem apenas contagens e rótulos fechados.
+
+**Baseline (24 horas antes do rollout):** com a imagem atual ainda em
+execução, registre por 24 h a saída horária do health check e os cartões
+de métricas de ingestão (falhas por intent, taxa de timeout, fila). Estes
+números são a linha de base comparativa; não os reclassifique depois.
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml exec -T web \
+  uv run --no-sync python manage.py check_ingestion_pipeline_health
+```
+
+**Canário (um worker, um ciclo completo):** atualize a imagem de
+apenas um worker persistente (placeholder `WORKER_CANARIO` no Compose)
+e deixe-o processar exatamente um ciclo completo de censo, sem escalar
+para os demais workers.
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml up -d WORKER_CANARIO
+docker compose --env-file .env -f compose.hospital.yml logs --since 1h WORKER_CANARIO
+```
+
+**Critérios de avanço (todos obrigatórios, comparando com o baseline):**
+
+- `recognized_recent_encounter` sobe e `empty_success` permanece `0` na
+  saída do health check;
+- o percentual de `invalid_payload` em runs `admissions_only` cai na
+  página de métricas;
+- taxa de timeout de full-sync e idade de fila (`oldest_age_minutes`)
+  não pioram em relação ao baseline;
+- logs do worker canário permanecem sanitizados (sem HTML, URL do
+  legado, profissional ou dado de paciente).
+
+**Critérios de parada (qualquer um interrompe o canário imediatamente):**
+
+- qualquer `empty_success` novo ou contador de outcome desconhecido;
+- timeout ou fila crescendo além do baseline;
+- qualquer saída sensível (identificador, texto clínico, HTML, cookie)
+  em logs ou no health check;
+- instabilidade da sessão persistente do worker (reinicios repetidos).
+
+**Rollback:** reverta a imagem do worker canário para a anterior. Runs,
+stages e batches já persistidos NÃO são reescritos, reclassificados ou
+apagados: o outcome fechado no stage metric permanece auditável e é
+inócuo para a imagem antiga.
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml up -d --no-deps \
+  --force-recreate WORKER_CANARIO
+```
+
+**Proibido durante o canário:** requeue de runs, backfill, reprocesso
+manual de batch e qualquer reclassificação manual de histórico. O
+reconhecimento vale somente para execuções novas; evidências antigas
+nunca são reavaliadas em massa.
+
 ---
 
 ### 6.2 Caracterização da coorte fail-only de full-sync (CFC)

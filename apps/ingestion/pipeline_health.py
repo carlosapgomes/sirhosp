@@ -32,6 +32,10 @@ from django.utils import timezone
 
 from apps.census.models import PatientMovement
 from apps.clinical_docs.models import ClinicalEvent
+from apps.ingestion.extractors.patient_flow_snapshot import (
+    OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
+    EncounterRecency,
+)
 from apps.ingestion.models import IngestionRun
 from apps.patients.models import Admission
 
@@ -55,6 +59,16 @@ _ACTIVE_INTENTS = (
 )
 _FULL_SYNC_INTENTS = ("full_sync", "full_admission_sync")
 _NONE_REASON_LABEL = "none"
+
+# PFIF-S5: the only evidence that may exclude a batch-bound empty
+# admissions success from the ``empty_success`` invariant is the exact
+# closed stage outcome recorded by the S1/S2 workers: a succeeded
+# ``encounter_fallback`` stage whose details carry the allowlisted outcome
+# AND recency values. Anything else (unknown outcome, wrong stage,
+# boundary/stale/none recency, partial or forged details, failed stage)
+# stays an anomaly. Shared with the portal presentation (single source).
+ENCOUNTER_FALLBACK_STAGE = "encounter_fallback"
+RECENT_CONFIRMED_RECENCY = EncounterRecency.RECENT_CONFIRMED.value
 
 # Stable violation codes shared with the management command output.
 V_EMPTY_SUCCESS = "empty_success"
@@ -91,6 +105,7 @@ class BatchInvariants:
     empty_success_count: int = 0
     missing_full_sync_count: int = 0
     duplicate_demographics_count: int = 0
+    recognized_recent_encounter_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -183,13 +198,34 @@ def _evaluate_batch_invariants(
     since: datetime,
     violations: list[HealthViolation],
 ) -> BatchInvariants:
-    empty_success = IngestionRun.objects.filter(
+    window_empty = IngestionRun.objects.filter(
         status="succeeded",
         intent="admissions_only",
         batch_id__isnull=False,
         admissions_seen=0,
         finished_at__gte=since,
-    ).count()
+    )
+    empty_total = window_empty.count()
+
+    # PFIF-S5 (R1): an empty success is "recognized" only with the exact
+    # allowlisted encounter-fallback evidence; the strict join conditions
+    # below reject wrong stage, wrong status, unknown outcome and any
+    # recency other than ``recent_confirmed``. DISTINCT keeps the count
+    # correct even if a run ever carried more than one matching stage row.
+    recognized = (
+        window_empty.filter(
+            stage_metrics__stage_name=ENCOUNTER_FALLBACK_STAGE,
+            stage_metrics__status="succeeded",
+            stage_metrics__details_json__outcome=(
+                OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION
+            ),
+            stage_metrics__details_json__recency=RECENT_CONFIRMED_RECENCY,
+        )
+        .values("pk")
+        .distinct()
+        .count()
+    )
+    empty_success = empty_total - recognized
 
     # Succeeded non-empty batch-bound admissions (batch, patient) keys with
     # their finish time; only keys settled long enough are compared against
@@ -246,6 +282,7 @@ def _evaluate_batch_invariants(
         empty_success_count=empty_success,
         missing_full_sync_count=missing_full_sync,
         duplicate_demographics_count=duplicate_demographics,
+        recognized_recent_encounter_count=recognized,
     )
 
 

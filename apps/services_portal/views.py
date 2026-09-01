@@ -43,16 +43,21 @@ from apps.census.models import (
 )
 from apps.deaths.models import DailyDeathCount
 from apps.discharges.models import DailyDischargeCount, DischargeRecord
+from apps.ingestion.extractors.patient_flow_snapshot import (
+    OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
+)
 from apps.ingestion.models import (
     CensusExecutionBatch,
     FinalRunFailure,
     IngestionRun,
     IngestionRunAttempt,
+    IngestionRunStageMetric,
 )
 from apps.ingestion.patient_flow_findings import (
     PatientFindingInput,
     build_patient_flow_findings,
 )
+from apps.ingestion.pipeline_health import ENCOUNTER_FALLBACK_STAGE
 from apps.patients.models import Admission, Patient
 
 
@@ -1194,6 +1199,18 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
         else:
             batch_not_found = True
 
+    batch_findings = None
+    if show_batch_detail and selected_batch is not None:
+        findings_map = _summarize_batch_findings([selected_batch.pk])
+        technical_failures = IngestionRun.objects.filter(
+            batch=selected_batch, status="failed"
+        ).count()
+        batch_findings = _batch_findings_presentation(
+            selected_batch.status,
+            findings_map.get(selected_batch.pk, {}),
+            technical_failures,
+        )
+
     result = _build_filtered_queryset(
         periodo=periodo,
         status=status,
@@ -1249,6 +1266,8 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
         "selected_batch_runs_page": selected_batch_runs_page,
         "selected_batch_stats": selected_batch_stats,
         "batch_not_found": batch_not_found,
+        # PFIF-S5: derived (read-only) findings presentation for detail mode.
+        "batch_findings": batch_findings,
         "run_filters": {
             "status": status,
             "intent": intent,
@@ -1256,6 +1275,88 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
         },
     }
     return render(request, "services_portal/ingestion_metrics.html", context)
+
+
+# ── PFIF-S5: derived (read-only) patient-flow findings presentation ────
+
+# Closed allowlist of operational outcomes recognized on batch runs.
+# Source of truth for the values is the S1/S2 stage contract (outcome
+# constant and stage name come from the shared health module); labels
+# mirror the S3 classifier presentation (guarded by a test).
+_FINDING_OUTCOME_LABELS = {
+    OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION: (
+        "Atendimento recente sem internação"
+    ),
+}
+
+_DERIVED_STATUS_CONCLUDED_WITH_FINDINGS = "Concluído com achados"
+_DERIVED_STATUS_PARTIAL_FAILURE = "Falha parcial"
+
+
+def _summarize_batch_findings(
+    batch_ids: list[int],
+) -> dict[int, dict[str, int]]:
+    """Aggregate allowlisted finding outcomes per batch in ONE query.
+
+    Returns ``{batch_id: {outcome_code: count}}``. Strictly aggregate:
+    only closed outcome codes and counts cross this boundary — never run,
+    patient or stage identifiers, dates or details payloads.
+    """
+    if not batch_ids:
+        return {}
+    rows = (
+        IngestionRunStageMetric.objects.filter(
+            run__batch_id__in=batch_ids,
+            stage_name=ENCOUNTER_FALLBACK_STAGE,
+            status="succeeded",
+            details_json__outcome__in=_FINDING_OUTCOME_LABELS,
+        )
+        .values("run__batch_id", "details_json__outcome")
+        .annotate(total=Count("pk"))
+    )
+    summary: dict[int, dict[str, int]] = {}
+    for row in rows:
+        by_code = summary.setdefault(row["run__batch_id"], {})
+        by_code[row["details_json__outcome"]] = row["total"]
+    return summary
+
+
+def _batch_findings_presentation(
+    batch_status: str | None,
+    findings_by_code: dict[str, int],
+    technical_failures: int,
+) -> dict[str, Any]:
+    """Derive aggregate presentation keys from already-persisted state.
+
+    ``Concluído com achados`` for a succeeded batch with findings;
+    ``Falha parcial`` when a failed batch has both findings and technical
+    failures; otherwise ``None`` keeps the existing presentation. The
+    persisted ``CensusExecutionBatch.status`` is never read as writable
+    here and never changed.
+    """
+    total = sum(findings_by_code.values())
+    derived_status = None
+    if total > 0:
+        if batch_status == "succeeded":
+            derived_status = _DERIVED_STATUS_CONCLUDED_WITH_FINDINGS
+        elif (
+            batch_status == "failed" and technical_failures > 0
+        ):
+            derived_status = _DERIVED_STATUS_PARTIAL_FAILURE
+    return {
+        "has_findings": total > 0,
+        "findings_total": total,
+        "findings_items": [
+            {
+                "code": code,
+                "label": _FINDING_OUTCOME_LABELS[code],
+                "count": count,
+            }
+            for code, count in sorted(findings_by_code.items())
+        ],
+        "derived_status": derived_status,
+        "technical_failures": technical_failures,
+    }
 
 
 def _get_latest_batch_failure_stats() -> dict:
@@ -1278,6 +1379,9 @@ def _get_latest_batch_failure_stats() -> dict:
         observed_peak_concurrency, observed_avg_concurrency — concurrency.
         throughput_jobs_per_minute — jobs / drain minutes.
         avg_processing_duration_seconds, avg_attempt_duration_seconds.
+        has_findings, findings_total, findings_items, derived_status,
+        technical_failures — PFIF-S5 derived findings presentation
+        (aggregate only).
 
     CQM-S5: Safe fallback to empty structure when no batch is available.
     """
@@ -1400,6 +1504,14 @@ def _get_latest_batch_failure_stats() -> dict:
         if attempt_durations else 0
     )
 
+    # PFIF-S5: aggregate findings for this batch (one bounded query).
+    findings_map = _summarize_batch_findings([batch.pk])
+    findings_presentation = _batch_findings_presentation(
+        batch.status,
+        findings_map.get(batch.pk, {}),
+        runs_failed,
+    )
+
     return {
         "has_batch": True,
         "batch_id": batch.pk,
@@ -1424,6 +1536,8 @@ def _get_latest_batch_failure_stats() -> dict:
         "throughput_jobs_per_minute": throughput,
         "avg_processing_duration_seconds": avg_processing,
         "avg_attempt_duration_seconds": avg_attempt,
+        # PFIF-S5: derived findings presentation (aggregate only).
+        **findings_presentation,
     }
 
 
@@ -1458,6 +1572,12 @@ def _empty_batch_stats() -> dict:
         "avg_attempt_duration_seconds": 0,
         # IWBO-S2: Batch history table fields
         "drain_duration_seconds": None,
+        # PFIF-S5: derived findings presentation defaults (no batch).
+        "has_findings": False,
+        "findings_total": 0,
+        "findings_items": [],
+        "derived_status": None,
+        "technical_failures": 0,
     }
 
 
@@ -1467,12 +1587,19 @@ def _empty_batch_stats() -> dict:
 _BATCH_PAGE_SIZE = 20
 
 
-def _compute_batch_metrics(batch: CensusExecutionBatch) -> dict:
+def _compute_batch_metrics(
+    batch: CensusExecutionBatch,
+    findings_by_code: dict[str, int] | None = None,
+) -> dict:
     """Compute derived metrics for a single CensusExecutionBatch.
 
     Calculates run counts, worker identity, concurrency, throughput,
     and average durations from the batch's IngestionRun and
     IngestionRunAttempt records.
+
+    ``findings_by_code`` is an optional precomputed aggregate (PFIF-S5)
+    so batch history can reuse one query for the whole page; when
+    omitted, it is computed for this single batch.
 
     Returns dict with keys:
         batch_id, status, started_at, enqueue_finished_at, finished_at,
@@ -1480,7 +1607,8 @@ def _compute_batch_metrics(batch: CensusExecutionBatch) -> dict:
         runs_active, observed_worker_count, observed_worker_labels,
         observed_peak_concurrency, observed_avg_concurrency,
         throughput_jobs_per_minute, avg_processing_duration_seconds,
-        avg_attempt_duration_seconds.
+        avg_attempt_duration_seconds, has_findings, findings_total,
+        findings_items, derived_status, technical_failures.
     """
     batch_runs = IngestionRun.objects.filter(batch=batch)
     runs_total = batch_runs.count()
@@ -1567,6 +1695,18 @@ def _compute_batch_metrics(batch: CensusExecutionBatch) -> dict:
         if attempt_durations else 0
     )
 
+    # PFIF-S5: aggregate findings (precomputed per page or one query).
+    resolved_findings = (
+        findings_by_code
+        if findings_by_code is not None
+        else _summarize_batch_findings([batch.pk]).get(batch.pk, {})
+    )
+    findings_presentation = _batch_findings_presentation(
+        batch.status,
+        resolved_findings,
+        runs_failed,
+    )
+
     return {
         "batch_id": batch.pk,
         "status": batch.status,
@@ -1586,6 +1726,8 @@ def _compute_batch_metrics(batch: CensusExecutionBatch) -> dict:
         "throughput_jobs_per_minute": throughput,
         "avg_processing_duration_seconds": avg_processing,
         "avg_attempt_duration_seconds": avg_attempt,
+        # PFIF-S5: derived findings presentation (aggregate only).
+        **findings_presentation,
     }
 
 
@@ -1622,10 +1764,19 @@ def _get_batch_history_context(request: HttpRequest) -> dict:
     except EmptyPage:
         page = paginator.page(paginator.num_pages)
 
-    # Compute metrics only for batches on this page
+    # Compute metrics only for batches on this page; PFIF-S5 findings are
+    # aggregated for the whole page in ONE bounded query (never per batch
+    # row, never per finding).
+    page_batches = list(page.object_list)
+    findings_map = _summarize_batch_findings([b.pk for b in page_batches])
     batch_metrics = []
-    for batch in page.object_list:
-        batch_metrics.append(_compute_batch_metrics(batch))
+    for batch in page_batches:
+        batch_metrics.append(
+            _compute_batch_metrics(
+                batch,
+                findings_map.get(batch.pk, {}),
+            )
+        )
 
     return {
         "batch_history": batch_metrics,

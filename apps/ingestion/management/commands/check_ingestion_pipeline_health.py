@@ -159,7 +159,9 @@ class Command(BaseCommand):
             "batch_invariants: "
             f"empty_success={invariants.empty_success_count} "
             f"missing_full_sync={invariants.missing_full_sync_count} "
-            f"duplicate_demographics={invariants.duplicate_demographics_count}"
+            f"duplicate_demographics={invariants.duplicate_demographics_count} "
+            f"recognized_recent_encounter="
+            f"{invariants.recognized_recent_encounter_count}"
         )
         queue = result.queue
         self.stdout.write(

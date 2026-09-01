@@ -53,12 +53,25 @@
       {{ selected_batch.started_at|date:"d/m/Y H:i"|default:"—" }} → {{ selected_batch.finished_at|date:"d/m/Y H:i"|default:"—" }}
       &nbsp;|&nbsp;
       Status:
-      {% if selected_batch.status == "succeeded" %}
+      {% if batch_findings.derived_status %}
+        {% if batch_findings.derived_status == "Falha parcial" %}
+          <span class="badge bg-warning text-dark">{{ batch_findings.derived_status }}</span>
+        {% else %}
+          <span class="badge bg-info text-dark">{{ batch_findings.derived_status }}</span>
+        {% endif %}
+      {% elif selected_batch.status == "succeeded" %}
         <span class="badge bg-success">Sucesso</span>
       {% elif selected_batch.status == "failed" %}
         <span class="badge bg-danger">Falhou</span>
       {% else %}
         <span class="badge bg-secondary">{{ selected_batch.status }}</span>
+      {% endif %}
+      {% if batch_findings.has_findings %}
+        &nbsp;|&nbsp;
+        <span class="small">Achados operacionais (agregado):</span>
+        {% for item in batch_findings.findings_items %}
+          <span class="badge bg-light text-dark small">{{ item.label }}: {{ item.count }}</span>
+        {% endfor %}
       {% endif %}
     </p>
   </div>
@@ -363,7 +376,16 @@
               </a>
             </td>
             <td>
-              {% if batch.status == "succeeded" %}
+              {% if batch.derived_status %}
+                {% if batch.derived_status == "Falha parcial" %}
+                  <span class="badge bg-warning text-dark">{{ batch.derived_status }}</span>
+                {% else %}
+                  <span class="badge bg-info text-dark">{{ batch.derived_status }}</span>
+                {% endif %}
+                {% if batch.has_findings %}
+                  <span class="badge bg-light text-dark small ms-1">Achados: {{ batch.findings_total }}</span>
+                {% endif %}
+              {% elif batch.status == "succeeded" %}
                 <span class="badge bg-success">Sucesso</span>
               {% elif batch.status == "failed" %}
                 <span class="badge bg-danger">Falhou</span>
@@ -541,6 +563,30 @@
         {% for label in batch_failure_stats.observed_worker_labels %}
           <span class="badge bg-light text-dark me-1 small">{{ label }}</span>
         {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- PFIF-S5: Achados operacionais agregados (somente leitura) -->
+{% if batch_failure_stats.has_findings %}
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card border-0 shadow-sm">
+      <div class="card-body py-3 d-flex flex-wrap align-items-center gap-2">
+        <i class="bi bi-clipboard-pulse" style="color: #0D9488; font-size: 1.25rem;"></i>
+        {% if batch_failure_stats.derived_status == "Falha parcial" %}
+          <span class="badge bg-warning text-dark">{{ batch_failure_stats.derived_status }}</span>
+        {% else %}
+          <span class="badge bg-info text-dark">{{ batch_failure_stats.derived_status }}</span>
+        {% endif %}
+        <span class="fw-semibold small">Achados operacionais (agregado):</span>
+        <span class="badge bg-secondary">{{ batch_failure_stats.findings_total }}</span>
+        {% for item in batch_failure_stats.findings_items %}
+          <span class="badge bg-light text-dark small">{{ item.label }}: {{ item.count }}</span>
+        {% endfor %}
+        <span class="text-muted small ms-auto">Somente leitura — não altera o status do lote</span>
       </div>
     </div>
   </div>
