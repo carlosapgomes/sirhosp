@@ -640,6 +640,7 @@
         <thead class="table-light">
           <tr>
             <th class="ps-3 small">Prontuário</th>
+            <th class="small">Situação</th>
             <th class="small">Intenção</th>
             <th class="small">Tentativas</th>
             <th class="small">Falha em</th>
@@ -649,6 +650,9 @@
           {% for patient in batch_failure_stats.failure_patients %}
           <tr>
             <td class="ps-3 fw-semibold small">{{ patient.patient_record }}</td>
+            <td class="small">{% if patient.finding %}<span class="badge {% if patient.finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+                  role="status"
+                  title="{{ patient.finding.label }}{% if patient.finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ patient.finding.label }}{% if patient.finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>{% endif %}</td>
             <td><span class="badge bg-light text-dark small">{{ patient.intent }}</span></td>
             <td class="small text-muted">{{ patient.attempts_exhausted }}</td>
             <td class="small text-muted">{{ patient.failed_at|date:"d/m/Y H:i" }}</td>

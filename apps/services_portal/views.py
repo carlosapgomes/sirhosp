@@ -1359,6 +1359,61 @@ def _batch_findings_presentation(
     }
 
 
+def _attach_current_findings(failure_patients: list[dict]) -> None:
+    """MSA-S2: attach each row's current patient-flow finding (bulk).
+
+    Resolves the distinct failure records against the latest census
+    snapshot and classifies the whole cohort once via the shared bulk
+    classifier (fixed internal budget of five queries) — no per-row
+    query. A record absent from the current census gets no finding:
+    the projection is current, so leaving the census resolves it.
+    """
+    records = sorted({
+        row["patient_record"]
+        for row in failure_patients
+        if row["patient_record"]
+    })
+    if not records:
+        return
+
+    latest = CensusSnapshot.objects.aggregate(
+        latest=Max("captured_at")
+    )["latest"]
+    if latest is None:
+        return
+
+    snapshot_map = {
+        snap.prontuario: snap
+        for snap in CensusSnapshot.objects.filter(
+            captured_at=latest,
+            prontuario__in=records,
+        ).only("prontuario", "setor", "setor_codigo")
+    }
+    if not snapshot_map:
+        return
+
+    patient_map = {
+        patient.patient_source_key: patient.pk
+        for patient in Patient.objects.filter(
+            patient_source_key__in=snapshot_map
+        )
+    }
+    finding_map = build_patient_flow_findings(
+        [
+            PatientFindingInput(
+                prontuario=pront,
+                patient_id=patient_map.get(pront),
+                sector=snap.setor,
+                sector_code=snap.setor_codigo,
+            )
+            for pront, snap in snapshot_map.items()
+        ],
+        now=timezone.now(),
+    )
+    for row in failure_patients:
+        row["finding"] = finding_map.get(row["patient_record"])
+
+
 def _get_latest_batch_failure_stats() -> dict:
     """Aggregate final-failure stats for the latest finished census batch.
 
@@ -1373,7 +1428,8 @@ def _get_latest_batch_failure_stats() -> dict:
         failures_by_intent: dict[str, int] — count per operational intent.
         failure_patients: list[dict] — sorted by failed_at descending;
             each dict has patient_record, intent, failed_at,
-            attempts_exhausted.
+            attempts_exhausted, finding (current PatientFlowFinding DTO
+            or None — MSA-S2, bulk-resolved once per render).
         runs_total, runs_succeeded, runs_failed, runs_active — job counts.
         observed_worker_count, observed_worker_labels — worker identity.
         observed_peak_concurrency, observed_avg_concurrency — concurrency.
@@ -1411,7 +1467,12 @@ def _get_latest_batch_failure_stats() -> dict:
             "intent": f.intent,
             "failed_at": f.failed_at,
             "attempts_exhausted": f.attempts_exhausted,
+            "finding": None,
         })
+
+    # MSA-S2: current patient-flow finding per failure patient
+    # (bulk, bounded — no query per row).
+    _attach_current_findings(failure_patients)
 
     total_duration_hours: float | None = None
     if batch.total_duration_seconds is not None:

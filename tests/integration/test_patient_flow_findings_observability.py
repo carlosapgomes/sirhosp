@@ -40,19 +40,26 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
+from apps.census.models import BedStatus, CensusSnapshot, PatientMovement
+from apps.clinical_docs.models import ClinicalEvent
 from apps.ingestion.extractors.patient_flow_snapshot import (
     OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
 )
 from apps.ingestion.models import (
     CensusExecutionBatch,
+    FinalRunFailure,
     IngestionRun,
     IngestionRunStageMetric,
 )
 from apps.ingestion.patient_flow_findings import (
     _FINDING_SPECS,
+    CODE_MIRROR_STALE_ADMISSION,
+    CODE_NEWBORN_WAITING_REGISTRATION,
+    CODE_POSSIBLE_NEWBORN_COMPANION,
     CODE_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
 )
 from apps.ingestion.pipeline_health import HealthConfig, evaluate_pipeline_health
+from apps.patients.models import Admission, Patient
 from apps.services_portal import views as portal_views
 
 COMMAND_NAME = "check_ingestion_pipeline_health"
@@ -533,3 +540,207 @@ class TestPresentationLabelConsistency:
                 CODE_RECENT_ENCOUNTER_WITHOUT_ADMISSION
             ][0],
         }
+
+
+# ── MSA-S2: patients tab current situation column ───────────────────
+
+LABEL_MIRROR_STALE = _FINDING_SPECS[CODE_MIRROR_STALE_ADMISSION][0]
+LABEL_NEWBORN = _FINDING_SPECS[CODE_NEWBORN_WAITING_REGISTRATION][0]
+LABEL_COMPANION = _FINDING_SPECS[CODE_POSSIBLE_NEWBORN_COMPANION][0]
+MANUAL_REVIEW_MARK = "requer revisão manual"
+OBSTETRIC_3A_NAME = "3 6 - 3A - OBSTETRÍCIA CLÍNICA - HGRS"
+OBSTETRIC_3A_CODE = "654"
+
+
+def _failure(
+    batch: CensusExecutionBatch,
+    *,
+    patient_record: str,
+    intent: str = "admissions_only",
+    attempts_exhausted: int = 3,
+) -> FinalRunFailure:
+    """Synthesize a terminal full-sync failure for the given record."""
+    run = _run(
+        batch, status="failed", patient_record=patient_record, intent=intent
+    )
+    return FinalRunFailure.objects.create(
+        batch=batch,
+        run=run,
+        patient_record=patient_record,
+        intent=intent,
+        attempts_exhausted=attempts_exhausted,
+    )
+
+
+def _census_row(
+    prontuario: str,
+    *,
+    captured_at=None,
+    setor: str = "ENFERMARIA SINTEtica",
+    setor_codigo: str = "640",
+) -> CensusSnapshot:
+    return CensusSnapshot.objects.create(
+        captured_at=captured_at or timezone.now(),
+        setor=setor,
+        setor_codigo=setor_codigo,
+        leito="01A",
+        prontuario=prontuario,
+        nome=f"PACIENTE SINTEtico {prontuario}",
+        especialidade="",
+        bed_status=BedStatus.OCCUPIED,
+    )
+
+
+def _synthetic_patient(prontuario: str, *, date_of_birth=None) -> Patient:
+    return Patient.objects.create(
+        patient_source_key=prontuario,
+        name=f"PACIENTE SINTEtico {prontuario}",
+        date_of_birth=date_of_birth,
+    )
+
+
+def _orphan_admission_fixture(prontuario: str, *, now) -> Patient:
+    """Rule-5 scenario: active admission >= 48h, no event in 48h, plus a
+    recent sector entry (movement ledger row)."""
+    patient = _synthetic_patient(prontuario)
+    _census_row(prontuario, captured_at=now)
+    adm = Admission.objects.create(
+        patient=patient,
+        source_admission_key=f"ADM-{prontuario}",
+        admission_date=now - timedelta(hours=96),
+    )
+    Admission.objects.filter(pk=adm.pk).update(
+        created_at=now - timedelta(days=30)
+    )
+    ClinicalEvent.objects.create(
+        admission=adm,
+        patient=patient,
+        event_identity_key=f"evt-{prontuario}",
+        content_hash=f"hash-{prontuario}",
+        happened_at=now - timedelta(hours=72),
+        author_name="DR SINTEtico",
+        profession_type="medica",
+        content_text="Texto clínico sintético de teste.",
+    )
+    PatientMovement.objects.create(
+        patient=patient,
+        movement_date=timezone.localtime(now).date(),
+        sector="SETOR NOVO SINTEtico",
+        first_seen_at=now - timedelta(hours=1),
+        last_seen_at=now - timedelta(hours=1),
+    )
+    return patient
+
+
+@pytest.mark.django_db
+class TestPatientsTabSituationColumn:
+    """MSA-S2: current finding label on the patients failure tab."""
+
+    def test_row_displays_mirror_stale_label_with_accessible_badge(
+        self, admin_client
+    ):
+        now = timezone.now()
+        batch = _finished_batch("failed")
+        pront = "77781001"
+        _orphan_admission_fixture(pront, now=now)
+        _failure(batch, patient_record=pront)
+
+        response = admin_client.get(reverse(METRICS_URL), {"tab": "patients"})
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert pront in content  # failure row remains listed
+        assert LABEL_MIRROR_STALE in content
+        assert 'role="status"' in content
+
+    def test_row_displays_newborn_label_without_new_phi(self, admin_client):
+        now = timezone.now()
+        batch = _finished_batch("failed")
+        pront = "77781002"
+        dob = timezone.localdate() - timedelta(days=2)
+        patient = _synthetic_patient(pront, date_of_birth=dob)
+        _census_row(pront, captured_at=now)
+        _failure(batch, patient_record=pront)
+
+        response = admin_client.get(reverse(METRICS_URL), {"tab": "patients"})
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert LABEL_NEWBORN in content
+        # Data minimization: only the constant label is new — no DOB/name.
+        assert patient.name not in content
+        assert str(dob) not in content
+
+    def test_manual_review_finding_keeps_warning_treatment(
+        self, admin_client
+    ):
+        now = timezone.now()
+        batch = _finished_batch("failed")
+        pront = "77781003"
+        _synthetic_patient(
+            pront, date_of_birth=timezone.localdate() - timedelta(days=10)
+        )
+        _census_row(
+            pront,
+            captured_at=now,
+            setor=OBSTETRIC_3A_NAME,
+            setor_codigo=OBSTETRIC_3A_CODE,
+        )
+        _failure(batch, patient_record=pront)
+
+        response = admin_client.get(reverse(METRICS_URL), {"tab": "patients"})
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert LABEL_COMPANION in content
+        assert "bg-warning-subtle" in content
+        assert MANUAL_REVIEW_MARK in content
+        assert 'role="status"' in content
+
+    def test_patient_outside_current_census_renders_empty_cell(
+        self, admin_client
+    ):
+        batch = _finished_batch("failed")
+        _failure(batch, patient_record="77781999")  # never in the census
+
+        response = admin_client.get(reverse(METRICS_URL), {"tab": "patients"})
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "77781999" in content  # failure row remains listed
+        assert LABEL_MIRROR_STALE not in content
+        assert LABEL_NEWBORN not in content
+        assert MANUAL_REVIEW_MARK not in content
+        # No placeholder: a bare em-dash cell is never rendered.
+        assert "<td>—</td>" not in content
+
+    def test_query_budget_bounded_1_vs_20_patients(self, admin_client):
+        now = timezone.now()
+        batch = _finished_batch("failed")
+        url = reverse(METRICS_URL)
+
+        def _seed_cohort(count: int, *, start: int = 0) -> None:
+            for i in range(start, start + count):
+                pront = f"77782{i:03d}"
+                _synthetic_patient(pront)
+                _census_row(pront, captured_at=now)
+                _failure(batch, patient_record=pront)
+
+        _seed_cohort(1)
+        with CaptureQueriesContext(connection) as ctx_small:
+            assert (
+                admin_client.get(url, {"tab": "patients"}).status_code == 200
+            )
+        queries_small = len(ctx_small.captured_queries)
+
+        _seed_cohort(19, start=1)  # total: 20 failure patients
+        with CaptureQueriesContext(connection) as ctx_big:
+            assert (
+                admin_client.get(url, {"tab": "patients"}).status_code == 200
+            )
+        queries_big = len(ctx_big.captured_queries)
+
+        assert queries_big - queries_small <= 10, (
+            f"query budget exceeded: {queries_small} -> {queries_big}"
+        )
+
+    def test_anonymous_redirected_on_patients_tab(self, client):
+        response = client.get(reverse(METRICS_URL), {"tab": "patients"})
+        assert response.status_code == 302
+        assert "/login/" in response.url
