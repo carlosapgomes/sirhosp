@@ -24,7 +24,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
-from apps.census.models import BedStatus, CensusSnapshot
+from apps.census.models import BedStatus, CensusSnapshot, PatientMovement
 from apps.clinical_docs.models import ClinicalEvent
 from apps.ingestion.models import (
     CensusExecutionBatch,
@@ -49,7 +49,8 @@ R_NEWBORN = "newborn_waiting_registration"
 R_COMPANION = "possible_newborn_companion"
 R_FIRST_EVOLUTION = "recent_admission_awaiting_first_evolution"
 R_RESIDUAL = "suspected_legacy_residual"
-ALL_CODES = {R_RECENT, R_NEWBORN, R_COMPANION, R_FIRST_EVOLUTION, R_RESIDUAL}
+R_MIRROR = "mirror_stale_admission"
+ALL_CODES = {R_RECENT, R_NEWBORN, R_COMPANION, R_FIRST_EVOLUTION, R_RESIDUAL, R_MIRROR}
 
 # Obstetric 3A source-sector identity used by rule 3.
 SECTOR_3A = "3 6 - 3A - OBSTETRÍCIA CLÍNICA - HGRS"
@@ -831,3 +832,203 @@ class TestQueryBudget:
 
         assert _query_count(big_ctx) == _query_count(small_ctx)
         assert _query_count(big_ctx) <= 6
+
+
+# ── MSA-S1: mirror-stale admission split (rule 5 disambiguation) ──────
+
+MIRROR_LABEL = "Suspeita de admissão órfã no espelho"
+MIRROR_SEVERITY = "warning"
+MIRROR_REVIEW = True
+
+
+def make_movement(
+    patient: Patient,
+    *,
+    first_seen_at: datetime,
+    sector: str = SECTOR_OTHER,
+) -> PatientMovement:
+    """Synthesize a sector-entry ledger row (census processing output)."""
+    return PatientMovement.objects.create(
+        patient=patient,
+        movement_date=timezone.localtime(first_seen_at).date(),
+        sector=sector,
+        first_seen_at=first_seen_at,
+        last_seen_at=first_seen_at,
+    )
+
+
+def make_orphan_admission_fixture(
+    pront: str, *, now: datetime
+) -> Patient:
+    """Rule-5 scenario: active admission >= 48h, no event in 48h."""
+    patient = make_patient(pront)
+    make_census_row(pront, captured_at=now)
+    adm = make_active_admission(
+        patient,
+        admission_date=now - timedelta(hours=96),
+        created_at=now - timedelta(days=30),
+    )
+    make_event(adm, happened_at=now - timedelta(hours=72), key=f"evt-{pront}")
+    return patient
+
+
+class TestMirrorStaleAdmissionClosedCode:
+    def test_new_code_is_in_closed_set(self):
+        assert R_MIRROR in ALL_FINDING_CODES
+
+    def test_label_severity_review_contract(self):
+        finding = classify_one(
+            active_admission_date=NOW - timedelta(hours=72),
+            has_active_admission=True,
+            latest_movement_at=NOW - timedelta(hours=1),
+        )
+        assert finding is not None
+        assert finding.code == R_MIRROR
+        assert finding.label == MIRROR_LABEL
+        assert finding.severity == MIRROR_SEVERITY
+        assert finding.requires_manual_review is MIRROR_REVIEW
+
+
+class TestMirrorStaleAdmissionSplit:
+    """Deterministic split of rule 5 by movement recency (pure fn)."""
+
+    def test_recent_movement_yields_mirror_code(self):
+        finding = classify_one(
+            active_admission_date=NOW - timedelta(hours=72),
+            has_active_admission=True,
+            latest_movement_at=NOW - timedelta(hours=1),
+        )
+        assert finding is not None and finding.code == R_MIRROR
+
+    def test_movement_at_window_start_is_mirror(self):
+        finding = classify_one(
+            active_admission_date=NOW - timedelta(hours=72),
+            has_active_admission=True,
+            latest_movement_at=NOW - timedelta(hours=48),
+        )
+        assert finding is not None and finding.code == R_MIRROR
+
+    def test_movement_exactly_now_is_mirror(self):
+        finding = classify_one(
+            active_admission_date=NOW - timedelta(hours=72),
+            has_active_admission=True,
+            latest_movement_at=NOW,
+        )
+        assert finding is not None and finding.code == R_MIRROR
+
+    def test_movement_older_than_window_keeps_residual(self):
+        finding = classify_one(
+            active_admission_date=NOW - timedelta(hours=72),
+            has_active_admission=True,
+            latest_movement_at=NOW - timedelta(days=3),
+        )
+        assert finding is not None and finding.code == R_RESIDUAL
+
+    def test_future_movement_treated_as_absent_keeps_residual(self):
+        finding = classify_one(
+            active_admission_date=NOW - timedelta(hours=72),
+            has_active_admission=True,
+            latest_movement_at=NOW + timedelta(hours=1),
+        )
+        assert finding is not None and finding.code == R_RESIDUAL
+
+    def test_absent_movement_keeps_residual(self):
+        finding = classify_one(
+            active_admission_date=NOW - timedelta(hours=72),
+            has_active_admission=True,
+        )
+        assert finding is not None and finding.code == R_RESIDUAL
+
+
+@pytest.mark.django_db
+class TestMirrorStaleAdmissionBulk:
+    """Bulk service reads the movement ledger; no movement = old result."""
+
+    def test_bulk_recent_movement_yields_mirror_stale(self):
+        now = timezone.now()
+        pront = "9910001"
+        patient = make_orphan_admission_fixture(pront, now=now)
+        make_movement(patient, first_seen_at=now - timedelta(hours=1))
+        inputs = [make_input(pront, patient_id=patient.pk)]
+
+        findings = build_patient_flow_findings(inputs, now=now)
+        assert findings[pront].code == R_MIRROR
+        assert findings[pront].label == MIRROR_LABEL
+        assert findings[pront].severity == MIRROR_SEVERITY
+        assert findings[pront].requires_manual_review is MIRROR_REVIEW
+
+    def test_bulk_old_movement_keeps_residual(self):
+        now = timezone.now()
+        pront = "9910002"
+        patient = make_orphan_admission_fixture(pront, now=now)
+        make_movement(patient, first_seen_at=now - timedelta(days=3))
+        inputs = [make_input(pront, patient_id=patient.pk)]
+
+        findings = build_patient_flow_findings(inputs, now=now)
+        assert findings[pront].code == R_RESIDUAL
+
+    def test_bulk_future_movement_keeps_residual(self):
+        now = timezone.now()
+        pront = "9910003"
+        patient = make_orphan_admission_fixture(pront, now=now)
+        make_movement(patient, first_seen_at=now + timedelta(hours=1))
+        inputs = [make_input(pront, patient_id=patient.pk)]
+
+        findings = build_patient_flow_findings(inputs, now=now)
+        assert findings[pront].code == R_RESIDUAL
+
+    def test_bulk_without_movement_keeps_residual(self):
+        now = timezone.now()
+        pront = "9910004"
+        patient = make_orphan_admission_fixture(pront, now=now)
+        inputs = [make_input(pront, patient_id=patient.pk)]
+
+        findings = build_patient_flow_findings(inputs, now=now)
+        assert findings[pront].code == R_RESIDUAL
+
+
+@pytest.mark.django_db
+class TestMirrorStaleAdmissionBudget:
+    def test_query_budget_with_movements_is_at_most_five(self):
+        now = timezone.now()
+        recent = "9910011"
+        old = "9910012"
+        patient_recent = make_orphan_admission_fixture(recent, now=now)
+        make_movement(
+            patient_recent, first_seen_at=now - timedelta(hours=1)
+        )
+        patient_old = make_orphan_admission_fixture(old, now=now)
+        make_movement(patient_old, first_seen_at=now - timedelta(days=3))
+        inputs = [
+            make_input(recent, patient_id=patient_recent.pk),
+            make_input(old, patient_id=patient_old.pk),
+        ]
+
+        with CaptureQueriesContext(connection) as ctx:
+            findings = build_patient_flow_findings(inputs, now=now)
+
+        # New evidence present: the split is computed from the ledger.
+        assert findings[recent].code == R_MIRROR
+        assert findings[old].code == R_RESIDUAL
+        # Fixed budget: at most five bulk queries regardless of cohort.
+        assert _query_count(ctx) <= 5
+
+
+@pytest.mark.django_db
+class TestMirrorStaleAdmissionCensoSurface:
+    def test_censo_renders_mirror_stale_label_without_surface_changes(
+        self, admin_client
+    ):
+        now = timezone.now()
+        pront = "9910021"
+        patient = make_orphan_admission_fixture(pront, now=now)
+        make_movement(patient, first_seen_at=now - timedelta(hours=1))
+
+        resp = admin_client.get(reverse("services_portal:censo"))
+        content = resp.content.decode()
+        assert resp.status_code == 200
+        # The new closed label flows through the generic badge rendering
+        # (desktop row + mobile card) with no surface modification.
+        assert content.count(MIRROR_LABEL) >= 2
+        # Disambiguation: the old residual label is replaced, not added.
+        assert EXPECTED[R_RESIDUAL][0] not in content

@@ -16,9 +16,9 @@ Design constraints:
 - Strictly separated from the technical axis: runs, batches and
   ``failure_reason`` (timeout etc.) are never read nor rewritten; a
   finding and a technical failure coexist.
-- Bulk by contract: at most four fixed queries per evaluation (patients,
-  admissions, event maxima, stage outcomes) regardless of cohort size —
-  no query in loops, no N+1.
+- Bulk by contract: at most five fixed queries per evaluation (patients,
+  admissions, event maxima, stage outcomes and movement maxima)
+  regardless of cohort size — no query in loops, no N+1.
 - Privacy: the module never logs and never exposes identifiers, names,
   dates of birth, professionals or clinical text; the obstetric 3A sector
   identity is a closed constant, and a sector alone never classifies.
@@ -34,6 +34,7 @@ from typing import Any, Iterable
 from django.db.models import Max
 from django.utils import timezone
 
+from apps.census.models import PatientMovement
 from apps.clinical_docs.models import ClinicalEvent
 from apps.ingestion.extractors.patient_flow_snapshot import (
     OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
@@ -52,6 +53,7 @@ CODE_RECENT_ADMISSION_AWAITING_FIRST_EVOLUTION = (
     "recent_admission_awaiting_first_evolution"
 )
 CODE_SUSPECTED_LEGACY_RESIDUAL = "suspected_legacy_residual"
+CODE_MIRROR_STALE_ADMISSION = "mirror_stale_admission"
 
 ALL_FINDING_CODES = frozenset(
     {
@@ -60,6 +62,7 @@ ALL_FINDING_CODES = frozenset(
         CODE_POSSIBLE_NEWBORN_COMPANION,
         CODE_RECENT_ADMISSION_AWAITING_FIRST_EVOLUTION,
         CODE_SUSPECTED_LEGACY_RESIDUAL,
+        CODE_MIRROR_STALE_ADMISSION,
     }
 )
 
@@ -91,6 +94,11 @@ _FINDING_SPECS: dict[str, tuple[str, str, bool]] = {
     ),
     CODE_SUSPECTED_LEGACY_RESIDUAL: (
         "Suspeita de paciente residual no legado",
+        SEVERITY_WARNING,
+        True,
+    ),
+    CODE_MIRROR_STALE_ADMISSION: (
+        "Suspeita de admissão órfã no espelho",
         SEVERITY_WARNING,
         True,
     ),
@@ -160,6 +168,7 @@ _NEWBORN_MAX_DAYS = 4
 _COMPANION_MIN_DAYS = 5
 _COMPANION_MAX_DAYS = 28
 _EVENT_WINDOW = timedelta(hours=48)
+_MOVEMENT_WINDOW = timedelta(hours=48)
 
 
 @dataclass(frozen=True)
@@ -175,6 +184,17 @@ class PatientFindingInput:
 # ── Pure rule evaluation (D5 priority, one finding per patient) ──────
 
 
+def _is_recent_movement(
+    latest_movement_at: datetime | None, now: datetime
+) -> bool:
+    """Fail-closed movement recency: absent or future timestamps are not
+    recent (invalid evidence is treated as absent)."""
+    return (
+        latest_movement_at is not None
+        and now - _MOVEMENT_WINDOW <= latest_movement_at <= now
+    )
+
+
 def classify_patient_finding(
     *,
     now: datetime,
@@ -186,6 +206,7 @@ def classify_patient_finding(
     has_active_admission: bool = False,
     active_admission_date: datetime | None = None,
     active_admission_last_event_at: datetime | None = None,
+    latest_movement_at: datetime | None = None,
 ) -> PatientFlowFinding | None:
     """Return the single primary finding for one patient, or ``None``.
 
@@ -194,11 +215,16 @@ def classify_patient_finding(
     2. newborn 0–4 days without an active Admission;
     3. newborn 5–28 days without an active Admission in Obstetrícia 3A;
     4. active Admission < 48h without any event;
-    5. active Admission >= 48h with no event in the previous 48h.
+    5. active Admission >= 48h with no event in the previous 48h, split
+       by movement recency: a sector entry within the last 48h means the
+       mirror keeps a stale (orphan) admission
+       (`mirror_stale_admission`); otherwise the legacy residual
+       suspicion stands.
 
-    A missing or future DOB never classifies a newborn; a sector alone
-    never classifies; the residual suspicion never asserts a discharge.
-    ``now`` must be timezone-aware.
+    A missing or future DOB never classifies a newborn; a missing or
+    future movement timestamp is treated as absent (fail-closed); a
+    sector alone never classifies; the residual suspicion never asserts
+    a discharge. ``now`` must be timezone-aware.
     """
     # Rule 1: the outcome holds until a posterior Admission appears.
     if latest_outcome_at is not None and (
@@ -236,6 +262,8 @@ def classify_patient_finding(
                 active_admission_last_event_at is None
                 or active_admission_last_event_at < window_start
             ):
+                if _is_recent_movement(latest_movement_at, now):
+                    return _finding(CODE_MIRROR_STALE_ADMISSION)
                 return _finding(CODE_SUSPECTED_LEGACY_RESIDUAL)
 
     return None
@@ -253,9 +281,10 @@ def build_patient_flow_findings(
 
     Returns a map keyed by ``prontuario`` (registro). Patients absent from
     the input are never classified (leaving the census resolves findings).
-    Uses at most four bulk queries independent of cohort size: patient
-    DOBs, cohort admissions, per-admission event maxima and the latest
-    allowlisted encounter-fallback outcome per registro.
+    Uses at most five bulk queries independent of cohort size: patient
+    DOBs, cohort admissions, per-admission event maxima, the latest
+    allowlisted encounter-fallback outcome per registro and the latest
+    sector entry per patient (``PatientMovement.first_seen_at``).
     """
     now = now or timezone.now()
 
@@ -346,6 +375,16 @@ def build_patient_flow_findings(
         if record and record not in outcome_at:
             outcome_at[record] = stage_row["started_at"]
 
+    # Query 5: latest sector entry per cohort patient (movement ledger).
+    movement_at: dict[int, datetime] = {}
+    if patient_ids:
+        for mov_row in (
+            PatientMovement.objects.filter(patient_id__in=patient_ids)
+            .values("patient_id")
+            .annotate(last=Max("first_seen_at"))
+        ):
+            movement_at[mov_row["patient_id"]] = mov_row["last"]
+
     findings: dict[str, PatientFlowFinding] = {}
     for pront, item in unique.items():
         pid = item.patient_id
@@ -365,6 +404,9 @@ def build_patient_flow_findings(
             ),
             active_admission_last_event_at=(
                 last_event_at.get(active["pk"]) if active else None
+            ),
+            latest_movement_at=(
+                movement_at.get(pid) if pid is not None else None
             ),
         )
         if finding is not None:
