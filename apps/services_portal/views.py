@@ -49,6 +49,10 @@ from apps.ingestion.models import (
     IngestionRun,
     IngestionRunAttempt,
 )
+from apps.ingestion.patient_flow_findings import (
+    PatientFindingInput,
+    build_patient_flow_findings,
+)
 from apps.patients.models import Admission, Patient
 
 
@@ -787,12 +791,20 @@ def _compute_ingestion_stats() -> dict:
     return _build_filtered_queryset(periodo="24h")["stats"]
 
 
-def _build_censo_context(request: HttpRequest) -> dict[str, Any]:
+def _build_censo_context(
+    request: HttpRequest, include_findings: bool = True
+) -> dict[str, Any]:
     """Build the context dict for the censo page.
 
     Centralizes snapshot lookup, filtering, patient/admission resolution,
     specialty resolution, ordering and dropdown options.
     Reusable by the HTML view and the XLSX export endpoint.
+
+    When ``include_findings`` is true, each patient dict also carries
+    ``finding`` — the current patient-flow finding (PFIF-S3) or ``None``
+    — computed in bulk with a fixed query budget. The XLSX export passes
+    ``False`` to skip the classifier cost: the workbook contract has no
+    finding column.
 
     Returns a dict with keys:
         page_title, busca, pacientes, total, captured_at,
@@ -917,6 +929,7 @@ def _build_censo_context(request: HttpRequest) -> dict[str, Any]:
             "prontuario": s.prontuario,
             "nome": s.nome,
             "unidade": s.setor,
+            "unidade_codigo": getattr(s, "setor_codigo", ""),
             "unidade_nome": s.setor,
             "quarto_leito": s.leito,
             "especialidade": esp_sigla,
@@ -926,6 +939,23 @@ def _build_censo_context(request: HttpRequest) -> dict[str, Any]:
             "tempo_numeric": tempo_numeric,
             "patient_id": pid,
         })
+
+    # ── PFIF-S3: current patient-flow finding per patient (bulk) ─────
+    if include_findings and pacientes:
+        finding_map = build_patient_flow_findings(
+            [
+                PatientFindingInput(
+                    prontuario=p["prontuario"],
+                    patient_id=p["patient_id"],
+                    sector=p["unidade"],
+                    sector_code=p["unidade_codigo"],
+                )
+                for p in pacientes
+            ],
+            now=timezone.now(),
+        )
+        for p in pacientes:
+            p["finding"] = finding_map.get(p["prontuario"])
 
     # ── Ordering ─────────────────────────────────────────────────────
     ordering = request.GET.get("ordenar", "").strip()
@@ -1003,7 +1033,8 @@ def censo_export_xlsx(request: HttpRequest) -> HttpResponse:
     """
     from openpyxl.styles import Font
 
-    context = _build_censo_context(request)
+    # No finding column in the workbook contract; skip classifier cost.
+    context = _build_censo_context(request, include_findings=False)
     pacientes = context["pacientes"]
     captured_at = context["captured_at"]
 

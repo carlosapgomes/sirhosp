@@ -105,7 +105,15 @@
             title="Buscar prontu&aacute;rio de {{ p.nome }}">
         {% endif %}
         <td>{{ p.prontuario }}</td>
-        <td class="fw-medium" style="color: var(--sirhosp-sidebar-bg);">{{ p.nome }}</td>
+        <td class="fw-medium" style="color: var(--sirhosp-sidebar-bg);">
+          {{ p.nome }}
+          {% if p.finding %}
+            <br>
+            <span class="badge {% if p.finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+                  role="status"
+                  title="{{ p.finding.label }}{% if p.finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ p.finding.label }}{% if p.finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>
+          {% endif %}
+        </td>
         <td>{{ p.unidade_nome }}</td>
         <td>{{ p.quarto_leito }}</td>
         <td><span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ p.especialidade }}">{{ p.especialidade_nome }}</span></td>
@@ -148,6 +156,11 @@
             <small class="text-muted">{{ p.prontuario }}</small>
             {% if p.especialidade %}
               <span class="badge bg-info-subtle text-info-emphasis fw-normal" title="{{ p.especialidade }}">{{ p.especialidade_nome }}</span>
+            {% endif %}
+            {% if p.finding %}
+              <span class="badge {% if p.finding.requires_manual_review %}bg-warning-subtle text-warning-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %} fw-normal"
+                    role="status"
+                    title="{{ p.finding.label }}{% if p.finding.requires_manual_review %} — requer revisão manual{% endif %}">{{ p.finding.label }}{% if p.finding.requires_manual_review %}<span class="visually-hidden"> — requer revisão manual</span>{% endif %}</span>
             {% endif %}
             <small class="text-muted">{{ p.data_internacao }}</small>
             <small class="text-muted">{{ p.tempo_internacao }}</small>
