@@ -2,7 +2,10 @@
 
 ## Purpose
 
-TBD - created by archiving change recognize-patient-flow-findings. Update Purpose after archive.
+Closed, current and query-bounded patient-flow findings: one primary finding
+per census patient, derived from the ingestion snapshot and internal mirrors,
+strictly separated from technical run outcomes, auto-resolving when the
+patient leaves the census or the underlying evidence updates.
 
 ## Requirements
 
@@ -128,13 +131,32 @@ technical failure and SHALL return closed presentation fields `code`, `label`,
 - **AND** observation-sector context may refine the label without becoming the
   sole evidence
 
-#### Scenario: Older active admission can be suspected residual
+#### Scenario: Older active admission with recent movement is a stale mirror
 
 - **WHEN** an active admission is at least 48 hours old, its patient remains in
-  the current census and it has no event in the previous 48 hours
+  the current census, it has no event in the previous 48 hours and the
+  patient entered a sector within the previous 48 hours
+- **THEN** the patient receives `mirror_stale_admission`
+- **AND** the finding requires manual review to close the orphan admission in
+  the internal mirror
+- **AND** the system does not mutate the admission, the movement ledger or any
+  run
+
+#### Scenario: Older active admission without recent movement can be suspected residual
+
+- **WHEN** an active admission is at least 48 hours old, its patient remains in
+  the current census, it has no event in the previous 48 hours and the patient
+  has no sector entry within the previous 48 hours
 - **THEN** the patient receives `suspected_legacy_residual`
 - **AND** the finding requires manual review
 - **AND** the system does not claim that discharge is confirmed
+
+#### Scenario: Invalid movement evidence fails closed
+
+- **WHEN** the latest sector entry timestamp is in the future relative to the
+  evaluation instant
+- **THEN** the movement is treated as absent and the patient keeps the
+  legacy-residual reading
 
 #### Scenario: Timeout remains technical
 
@@ -146,8 +168,8 @@ technical failure and SHALL return closed presentation fields `code`, `label`,
 ### Requirement: Findings are current, auto-resolving and query-bounded
 
 The system SHALL derive findings from current census, demographics, admissions,
-events and allowlisted stage outcomes without introducing a second mutable
-workflow state.
+events, the patient movement ledger and allowlisted stage outcomes without
+introducing a second mutable workflow state.
 
 #### Scenario: New evidence removes an obsolete finding
 
@@ -156,11 +178,17 @@ workflow state.
 - **THEN** subsequent page evaluation no longer returns the obsolete finding
 - **AND** no manual cleanup row is required
 
+#### Scenario: Mirror staleness resolves itself
+
+- **WHEN** the orphan admission receives a discharge or a new admission is
+  mirrored while the movement evidence ages past 48 hours
+- **THEN** subsequent page evaluation no longer returns `mirror_stale_admission`
+
 #### Scenario: Bulk page classification avoids N plus one queries
 
 - **WHEN** a current census page classifies many patients
-- **THEN** the query count remains within a fixed allowance independent of the
-  patient count
+- **THEN** the query count remains within a fixed allowance of five bulk
+  queries independent of the patient count
 - **AND** templates perform no database query or business classification
 
 ### Requirement: Patient flow findings are visible on authorized pages
