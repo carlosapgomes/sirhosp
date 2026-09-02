@@ -10,6 +10,7 @@ urlpatterns = [
     path("painel/", views.dashboard, name="dashboard"),
     path("censo/", views.censo, name="censo"),
     path("censo/exportar/", views.censo_export_xlsx, name="censo_export_xlsx"),
+    path("atualizacao-censo/", views.census_sync_badge, name="census_sync_badge"),
     path("monitor/", views.monitor_risco, name="monitor_risco"),
     path("metrica-ingestao/", views.ingestion_metrics, name="ingestion_metrics"),
     path("painel/altas/", views.discharge_chart, name="discharge_chart"),

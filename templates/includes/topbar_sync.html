@@ -1,0 +1,12 @@
+{# Self-rearming census badge (TCF-S2): each HTMX poll response replaces
+   this element (hx-swap="outerHTML") carrying the same attributes, so the
+   poll continues without a page reload. Values come from the census_sync_*
+   context processor keys — no presentation logic duplicated here. #}
+<div class="sirhosp-topbar-sync"
+     title="{{ census_sync_title }}"
+     hx-get="{% url 'services_portal:census_sync_badge' %}"
+     hx-trigger="every 60s"
+     hx-swap="outerHTML">
+  <span class="dot {{ census_sync_age_class }}"></span>
+  <span class="sirhosp-topbar-sync-label">Censo: </span>{{ census_sync_label|default:"--:--" }}
+</div>

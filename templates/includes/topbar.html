@@ -10,8 +10,5 @@
     <span class="sirhosp-topbar-brand-sep">&middot;</span>
   </span>
   <h1 class="sirhosp-topbar-title">{{ page_title|default:"Prisma" }}</h1>
-  <div class="sirhosp-topbar-sync" title="{{ census_sync_title }}">
-    <span class="dot {{ census_sync_age_class }}"></span>
-    <span class="sirhosp-topbar-sync-label">Censo: </span>{{ census_sync_label|default:"--:--" }}
-  </div>
+  {% include "includes/topbar_sync.html" %}
 </header>

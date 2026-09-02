@@ -196,8 +196,10 @@ class TestPollingConditional:
         response = client.get(url)
         assert response.status_code == 200
         content = response.content.decode("utf-8")
-        # No HTMX polling for terminal state
-        assert 'hx-trigger="every' not in content
+        # No progress-area polling for terminal state. The topbar census
+        # badge polls every 60s on all shell pages (TCF-S2), so the check
+        # is scoped to the progress area's 3s interval.
+        assert 'hx-trigger="every 3s' not in content
 
     def test_status_page_failed_no_polling(self):
         client = Client()
@@ -208,7 +210,7 @@ class TestPollingConditional:
         response = client.get(url)
         assert response.status_code == 200
         content = response.content.decode("utf-8")
-        assert 'hx-trigger="every' not in content
+        assert 'hx-trigger="every 3s' not in content
 
     def test_status_page_partial_no_polling(self):
         client = Client()
@@ -219,7 +221,7 @@ class TestPollingConditional:
         response = client.get(url)
         assert response.status_code == 200
         content = response.content.decode("utf-8")
-        assert 'hx-trigger="every' not in content
+        assert 'hx-trigger="every 3s' not in content
 
 
 # ---------------------------------------------------------------------------

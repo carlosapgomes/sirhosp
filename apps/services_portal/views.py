@@ -31,6 +31,7 @@ from django.db.models.functions import Cast, Coalesce, ExtractHour
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import render
 from django.utils import timezone
+from django.views.decorators.http import require_GET
 
 from apps.admissions.models import DailyAdmissionCount
 from apps.census.models import (
@@ -59,6 +60,24 @@ from apps.ingestion.patient_flow_findings import (
 )
 from apps.ingestion.pipeline_health import ENCOUNTER_FALLBACK_STAGE
 from apps.patients.models import Admission, Patient
+
+
+@require_GET
+def census_sync_badge(request: HttpRequest) -> HttpResponse:
+    """Serve the self-rearming topbar census badge fragment (TCF-S2).
+
+    Manual auth instead of ``@login_required``: the decorator would 302 to
+    the login page, HTMX would follow the redirect via AJAX and swap the
+    whole login page inside the badge. A plain 401 (empty body) makes HTMX
+    skip the swap (4xx), leaving the badge frozen until the next full
+    navigation — which then leads to the login flow as usual.
+    """
+    if not request.user.is_authenticated:
+        return HttpResponse(status=401)
+    # RequestContext runs the context processors, so the fragment consumes
+    # the census_sync_* keys with the same single aggregate query as the
+    # page render (no presentation logic duplicated).
+    return render(request, "includes/topbar_sync.html")
 
 
 @login_required

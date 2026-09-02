@@ -354,7 +354,10 @@ class TestRunStatusView:
         assert response.status_code == 200
         content = response.content.decode("utf-8")
         assert 'http-equiv="refresh"' not in content
-        assert "hx-trigger" not in content
+        # Topbar badge polls every 60s on shell pages (TCF-S2); scope the
+        # check to the progress area's 3s polling (same as below).
+        assert "hx-trigger" not in content or \
+               "every 3s" not in content
 
     def test_status_shows_patient_record(self):
         """Status page shows the patient record from parameters."""

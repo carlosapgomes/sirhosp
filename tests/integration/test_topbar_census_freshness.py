@@ -19,6 +19,7 @@ from django.contrib.auth.models import User
 from django.db import connection
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
 from django.utils import timezone
 
 from apps.census.models import BedStatus, CensusSnapshot
@@ -145,4 +146,88 @@ class TestTopbarCensusBadge:
             for q in ctx.captured_queries
             if "ingestion_ingestionrun" in q["sql"]
         ]
+        assert run_queries == []
+
+
+# ── TCF-S2: live badge via self-rearming HTMX fragment endpoint ───────
+
+
+class TestCensusSyncBadgeEndpoint:
+    """Contract of the badge fragment endpoint (TCF-S2).
+
+    The endpoint serves the same ``topbar_sync.html`` fragment the page
+    renders, so each poll response re-arms the next poll (self-rearming).
+    Anonymous requests get 401 with no body to swap — never a followed
+    login redirect inside the badge. Budget: exactly one census aggregate
+    query and zero ingestion run queries (context processor reuse).
+    """
+
+    def test_authenticated_poll_returns_self_rearming_fragment(
+        self, auth_client: Client
+    ) -> None:
+        """Authenticated GET returns the HTML fragment carrying the same
+        hx-get/hx-trigger/hx-swap attributes, so HTMX re-arms the poll."""
+        make_snapshot(timezone.localtime().replace(hour=12, minute=34))
+        url = reverse("services_portal:census_sync_badge")
+
+        resp = auth_client.get(url)
+
+        assert resp.status_code == 200
+        assert resp["Content-Type"].startswith("text/html")
+        content = resp.content.decode()
+        assert "Censo: </span>12:34" in content
+        assert f'hx-get="{url}"' in content
+        assert 'hx-trigger="every 60s"' in content
+        assert 'hx-swap="outerHTML"' in content
+
+    def test_anonymous_poll_gets_401_without_login_body(
+        self, client: Client
+    ) -> None:
+        """Anonymous GET gets 401 with no login form to swap into the
+        badge (manual auth: no redirect for HTMX to follow)."""
+        url = reverse("services_portal:census_sync_badge")
+
+        resp = client.get(url)
+
+        assert resp.status_code == 401
+        body = resp.content.decode()
+        assert "csrfmiddlewaretoken" not in body
+        assert "<form" not in body
+
+    def test_shell_page_includes_htmx_fragment(
+        self, auth_client: Client
+    ) -> None:
+        """The shell page renders the badge as the HTMX fragment with the
+        periodic poll attributes (self-rearming markup on the page)."""
+        make_snapshot(timezone.localtime().replace(hour=12, minute=34))
+
+        resp = auth_client.get(SHELL_URL)
+
+        assert resp.status_code == 200
+        content = resp.content.decode()
+        assert 'hx-trigger="every 60s"' in content
+        assert 'hx-swap="outerHTML"' in content
+        url = reverse("services_portal:census_sync_badge")
+        assert f'hx-get="{url}"' in content
+
+    def test_endpoint_query_budget(self, auth_client: Client) -> None:
+        """The endpoint costs exactly one census aggregate query and zero
+        ingestion run queries (presentation reused via context processor)."""
+        make_snapshot(timezone.localtime().replace(hour=12, minute=34))
+        url = reverse("services_portal:census_sync_badge")
+
+        with CaptureQueriesContext(connection) as ctx:
+            auth_client.get(url)
+
+        census_queries = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "census_censussnapshot" in q["sql"]
+        ]
+        run_queries = [
+            q["sql"]
+            for q in ctx.captured_queries
+            if "ingestion_ingestionrun" in q["sql"]
+        ]
+        assert len(census_queries) == 1
         assert run_queries == []
