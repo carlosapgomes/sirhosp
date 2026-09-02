@@ -210,6 +210,23 @@ class TestCensusSyncBadgeEndpoint:
         url = reverse("services_portal:census_sync_badge")
         assert f'hx-get="{url}"' in content
 
+    def test_badge_and_page_render_without_template_comment_syntax(
+        self, auth_client: Client
+    ) -> None:
+        """Neither the shell page nor the badge fragment leaks template
+        comment syntax: multi-line ``{# #}`` is NOT a Django comment and
+        renders as literal text in the header of every page (regression
+        shipped in rc.18, fixed in rc.19)."""
+        fragment = auth_client.get(
+            reverse("services_portal:census_sync_badge")
+        ).content.decode()
+        page = auth_client.get(SHELL_URL).content.decode()
+
+        for content in (page, fragment):
+            assert "{#" not in content
+            assert "{% comment" not in content
+            assert "Self-rearming census badge" not in content
+
     def test_endpoint_query_budget(self, auth_client: Client) -> None:
         """The endpoint costs exactly one census aggregate query and zero
         ingestion run queries (presentation reused via context processor)."""
