@@ -93,12 +93,12 @@ _FINDING_SPECS: dict[str, tuple[str, str, bool]] = {
         False,
     ),
     CODE_SUSPECTED_LEGACY_RESIDUAL: (
-        "Suspeita de paciente residual no legado",
+        "Suspeita de paciente residual",
         SEVERITY_WARNING,
         True,
     ),
     CODE_MIRROR_STALE_ADMISSION: (
-        "Suspeita de admissão órfã no espelho",
+        "Suspeita de internação antiga em aberto ou alta não detectada",
         SEVERITY_WARNING,
         True,
     ),

@@ -69,7 +69,7 @@ EXPECTED = {
         False,
     ),
     R_RESIDUAL: (
-        "Suspeita de paciente residual no legado",
+        "Suspeita de paciente residual",
         "warning",
         True,
     ),
@@ -836,7 +836,7 @@ class TestQueryBudget:
 
 # ── MSA-S1: mirror-stale admission split (rule 5 disambiguation) ──────
 
-MIRROR_LABEL = "Suspeita de admissão órfã no espelho"
+MIRROR_LABEL = "Suspeita de internação antiga em aberto ou alta não detectada"
 MIRROR_SEVERITY = "warning"
 MIRROR_REVIEW = True
 

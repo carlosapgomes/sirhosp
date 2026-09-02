@@ -44,7 +44,7 @@ LABEL_RECENT = "Atendimento recente sem internação"
 LABEL_NEWBORN = "RN aguardando registro"
 LABEL_COMPANION = "Possível RN acompanhante"
 LABEL_FIRST_EVOLUTION = "Internação recente aguardando 1ª evolução"
-LABEL_RESIDUAL = "Suspeita de paciente residual no legado"
+LABEL_RESIDUAL = "Suspeita de paciente residual"
 ALL_LABELS = (
     LABEL_RECENT,
     LABEL_NEWBORN,
