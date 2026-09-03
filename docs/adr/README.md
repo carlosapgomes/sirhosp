@@ -1,12 +1,29 @@
 # Architecture Decision Records
 
-## ADRs ativas
+Registros de decisoes arquiteturais importantes do projeto.
 
-- [ADR-0001 — Adotar monólito modular em Django com PostgreSQL e jobs agendados por systemd/cron](ADR-0001-monolito-django-postgresql-e-jobs-agendados.md)
-- [ADR-0002 — Modelagem canônica de eventos clínicos com reconciliação por chave externa](ADR-0002-modelagem-canonica-eventos-clinicos-e-reconciliacao.md)
-- [ADR-0003 — Catálogo temporal de capacidade e materialização imutável de ocupação](ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel.md)
-- [ADR-0004 — Correção da lotação oficial: CO fora da taxa e partição etária da 3A](ADR-0004-correcao-co-e-particionamento-etario-3a.md)
-- [ADR-0005 — Duas realidades em /beds: capacidade oficial e posições do legado](ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado.md)
-- [ADR-0006 — Ocupação v4 acionável: conflitos tipados, elegibilidade com ressalvas e lista única em /beds](ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica.md)
-- [ADR-0007 — Ocupação v5 por pacientes identificados e apresentação de /beds](ADR-0007-ocupacao-v5-pacientes-identificados.md)
-- [ADR-0008 — Decisão de correção da coorte fail-only de full-sync](ADR-0008-fullsync-failure-characterization-decision.md)
+## ADRs Ativas
+
+| Numero                                                                                            | Titulo                                                                    | Status   | Data       |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------- | ---------- |
+| [ADR-0001](ADR-0001-monolito-django-postgresql-e-jobs-agendados.md)                               | ADR-0001-monolito-django-postgresql-e-jobs-agendados                      | Accepted | 2026-05-24 |
+| [ADR-0002](ADR-0002-modelagem-canonica-eventos-clinicos-e-reconciliacao.md)                       | ADR-0002-modelagem-canonica-eventos-clinicos-e-reconciliacao              | Accepted | 2026-05-24 |
+| [ADR-0003](ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel.md)                      | ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel             | Accepted | 2026-08-17 |
+| [ADR-0004](ADR-0004-correcao-co-e-particionamento-etario-3a.md)                                   | ADR-0004-correcao-co-e-particionamento-etario-3a                          | Accepted | 2026-08-20 |
+| [ADR-0005](ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado.md)                      | ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado             | Accepted | 2026-08-21 |
+| [ADR-0006](ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica.md)                     | ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica            | Accepted | 2026-09-01 |
+| [ADR-0007](ADR-0007-ocupacao-v5-pacientes-identificados.md)                                       | ADR-0007-ocupacao-v5-pacientes-identificados                              | Accepted | 2026-08-25 |
+| [ADR-0008](ADR-0008-fullsync-failure-characterization-decision.md)                                | ADR-0008-fullsync-failure-characterization-decision                       | Accepted | 2026-09-01 |
+| [ADR-0009](ADR-0009-reconciliacao-canonica-de-saidas-e-identidade-longitudinal-de-internacoes.md) | Reconciliação canônica de saídas e identidade longitudinal de internações | Proposed | 2026-09-03 |
+
+## ADRs Deprecated/Superseded
+
+| Numero | Titulo | Status | Data |
+| ------ | ------ | ------ | ---- |
+| -      | -      | -      | -    |
+
+## Como criar uma nova ADR
+
+1. Execute `python3 adr_generator.py --title "Sua decisao"`
+2. Revise contexto, decisao, alternativas e consequencias
+3. Commit da ADR junto do change relacionado
