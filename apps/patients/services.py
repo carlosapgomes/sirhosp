@@ -1,16 +1,192 @@
-"""Patient navigation services (Slice S4)."""
+"""Patient navigation services (Slice S4) and admission identity (RPSA-S1)."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from django.db.models import Count, Q, QuerySet
 
-from apps.patients.models import Admission, Patient
+from apps.patients.models import Admission, AdmissionSourceAlias, Patient
 
 if TYPE_CHECKING:
     from apps.clinical_docs.models import ClinicalEvent
     from apps.ingestion.models import IngestionRun
+
+TZ_ADMISSION_IDENTITY = ZoneInfo("America/Bahia")
+"""Institutional timezone for admission local-date identity matching."""
+
+MATCH_CURRENT_KEY = "current_key"
+MATCH_ALIAS = "alias"
+MATCH_EXACT_START = "exact_start"
+MATCH_UNIQUE_LOCAL_DATE = "unique_local_date"
+
+
+@dataclass(frozen=True)
+class AdmissionIdentityMatch:
+    """Outcome of layered admission identity resolution.
+
+    ``ambiguous`` means the layered resolver found multiple same-day
+    candidates and the caller MUST change nothing (fail closed).
+    """
+
+    admission: Admission | None
+    match_reason: str
+    ambiguous: bool
+    candidate_count: int
+
+
+def _bahia_day_bounds(value: datetime) -> tuple[datetime, datetime]:
+    """UTC-inclusive bounds of the admission's `America/Bahia` local day."""
+    local_day = value.astimezone(TZ_ADMISSION_IDENTITY).date()
+    start = datetime.combine(local_day, time.min, tzinfo=TZ_ADMISSION_IDENTITY)
+    return start, start + timedelta(days=1)
+
+
+def resolve_admission_identity(
+    *,
+    patient: Patient,
+    source_system: str,
+    source_admission_key: str,
+    admission_start: datetime | None,
+    admission_end: datetime | None,
+) -> AdmissionIdentityMatch:
+    """Resolve one canonical admission using layered identity signals.
+
+    Precedence (spec `patient-admission-mirror`, RPSA-S1):
+      1. Current external key ``(source_system, source_admission_key)``.
+      2. Historical alias of one canonical admission.
+      3. Patient plus exact admission start; multiple rows sharing one
+         identical period represent a single duplicated episode and collapse
+         to the oldest row instead of becoming an ambiguity.
+      4. Patient plus a unique `America/Bahia` local admission date.
+
+    Zero or multiple same-day candidates fail closed: the returned match is
+    ambiguous and the caller must not mutate any admission. Only canonical
+    rows (never rows already merged into another) are considered.
+    """
+    admissions = Admission.objects.all()  # default manager: canonical only
+
+    if source_admission_key:
+        by_key = admissions.filter(
+            source_system=source_system,
+            source_admission_key=source_admission_key,
+        ).first()
+        if by_key is not None:
+            return AdmissionIdentityMatch(
+                admission=by_key,
+                match_reason=MATCH_CURRENT_KEY,
+                ambiguous=False,
+                candidate_count=1,
+            )
+
+        # Alias uniqueness (uq_admission_source_alias_key) guarantees at most
+        # one hit; .first() never selects among ambiguous candidates here.
+        alias = (
+            AdmissionSourceAlias.objects.filter(
+                source_system=source_system,
+                alias_key=source_admission_key,
+                admission__merged_into__isnull=True,
+            )
+            .select_related("admission")
+            .first()
+        )
+        if alias is not None:
+            return AdmissionIdentityMatch(
+                admission=alias.admission,
+                match_reason=MATCH_ALIAS,
+                ambiguous=False,
+                candidate_count=1,
+            )
+
+    if admission_start is not None:
+        exact = list(
+            admissions.filter(
+                patient=patient,
+                source_system=source_system,
+                admission_date=admission_start,
+            )
+        )
+        if len(exact) == 1:
+            return AdmissionIdentityMatch(
+                admission=exact[0],
+                match_reason=MATCH_EXACT_START,
+                ambiguous=False,
+                candidate_count=1,
+            )
+        if len(exact) > 1:
+            identical_periods = {
+                (row.admission_date, row.discharge_date) for row in exact
+            }
+            if len(identical_periods) == 1:
+                oldest = min(exact, key=lambda row: row.pk)
+                return AdmissionIdentityMatch(
+                    admission=oldest,
+                    match_reason=MATCH_EXACT_START,
+                    ambiguous=False,
+                    candidate_count=len(exact),
+                )
+            return AdmissionIdentityMatch(
+                admission=None,
+                match_reason=MATCH_EXACT_START,
+                ambiguous=True,
+                candidate_count=len(exact),
+            )
+
+        day_start, day_end = _bahia_day_bounds(admission_start)
+        same_day = list(
+            admissions.filter(
+                patient=patient,
+                source_system=source_system,
+                admission_date__gte=day_start,
+                admission_date__lt=day_end,
+            )
+        )
+        if len(same_day) == 1:
+            return AdmissionIdentityMatch(
+                admission=same_day[0],
+                match_reason=MATCH_UNIQUE_LOCAL_DATE,
+                ambiguous=False,
+                candidate_count=1,
+            )
+        if len(same_day) > 1:
+            return AdmissionIdentityMatch(
+                admission=None,
+                match_reason=MATCH_UNIQUE_LOCAL_DATE,
+                ambiguous=True,
+                candidate_count=len(same_day),
+            )
+
+    return AdmissionIdentityMatch(
+        admission=None,
+        match_reason="",
+        ambiguous=False,
+        candidate_count=0,
+    )
+
+
+def ensure_admission_alias(
+    *,
+    admission: Admission,
+    source_system: str,
+    alias_key: str,
+) -> bool:
+    """Persist an observed external key as alias of the canonical admission.
+
+    Idempotent: an existing alias is left untouched. Returns True only when
+    the alias row was created by this call.
+    """
+    normalized = (alias_key or "").strip()
+    if not normalized:
+        return False
+    _, created = AdmissionSourceAlias.objects.get_or_create(
+        source_system=source_system,
+        alias_key=normalized,
+        defaults={"admission": admission},
+    )
+    return created
 
 
 def search_patients_with_coverage(

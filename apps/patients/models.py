@@ -64,6 +64,24 @@ class Patient(models.Model):
         return self.name
 
 
+class AdmissionQuerySet(models.QuerySet):
+    """Queryset helpers for admission identity semantics."""
+
+    def canonical(self) -> "AdmissionQuerySet":
+        """Exclude admissions merged into another canonical row."""
+        return self.filter(merged_into__isnull=True)
+
+
+class AdmissionManager(models.Manager["Admission"]):
+    """Default manager: canonical admissions only (merged rows hidden)."""
+
+    def get_queryset(self) -> AdmissionQuerySet:
+        return AdmissionQuerySet(self.model, using=self._db).canonical()
+
+    def canonical(self) -> AdmissionQuerySet:
+        return self.get_queryset()
+
+
 class Admission(models.Model):
     """Mirror of hospital admission linked to a Patient.
 
@@ -72,6 +90,13 @@ class Admission(models.Model):
             (e.g. admissionKey).
         source_patient_reference: Patient registration number as seen
             during this admission (for reconciliation).
+        merged_into: Canonical admission when this row was merged as a
+            duplicate; merged rows keep their identity for audit and are
+            excluded from clinical listings via the default manager.
+
+    Managers:
+        objects: Canonical admissions only (``merged_into`` is null).
+        all_objects: Unfiltered maintenance access, including merged rows.
     """
 
     patient = models.ForeignKey(
@@ -92,14 +117,29 @@ class Admission(models.Model):
         max_length=255, blank=True, default="",
     )
 
+    merged_into = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="merged_from",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    objects = AdmissionManager()
+    all_objects = models.Manager()
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
                 fields=["source_system", "source_admission_key"],
                 name="uq_adm_src",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(pk=models.F("merged_into")),
+                name="ck_admission_no_self_merge",
             ),
         ]
         ordering = ["-admission_date"]
@@ -109,6 +149,38 @@ class Admission(models.Model):
             f"Admission {self.source_admission_key} "
             f"({self.patient.name})"
         )
+
+
+class AdmissionSourceAlias(models.Model):
+    """External admission key observed for one canonical Admission.
+
+    The source system can change the admission key inside a single episode;
+    every observed key is preserved here so layered identity resolution can
+    reuse the canonical admission instead of creating a duplicate. The
+    ``(source_system, alias_key)`` uniqueness guarantees one alias resolves
+    to exactly one canonical admission.
+    """
+
+    admission = models.ForeignKey(
+        Admission,
+        on_delete=models.CASCADE,
+        related_name="source_aliases",
+    )
+    source_system = models.CharField(max_length=100, default="tasy")
+    alias_key = models.CharField(max_length=255)
+    first_seen_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source_system", "alias_key"],
+                name="uq_admission_source_alias_key",
+            ),
+        ]
+        ordering = ["-first_seen_at"]
+
+    def __str__(self) -> str:
+        return f"{self.source_system}:{self.alias_key} -> #{self.admission_id}"
 
 
 class PatientIdentifierHistory(models.Model):

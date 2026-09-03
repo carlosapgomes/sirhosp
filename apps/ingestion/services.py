@@ -15,6 +15,7 @@ from apps.clinical_docs.models import ClinicalEvent
 from apps.core.profession_types import to_canonical_profession_type
 from apps.ingestion.models import CensusExecutionBatch, IngestionRun
 from apps.patients.models import Admission, Patient
+from apps.patients.services import ensure_admission_alias, resolve_admission_identity
 
 TZ_INSTITUTIONAL = ZoneInfo("America/Sao_Paulo")
 
@@ -880,7 +881,9 @@ def upsert_admission_snapshot(
           other non-empty value raises ``ValueError``.
 
     Returns:
-        dict with "created" (int) and "updated" (int) counts.
+        dict with "created" (int), "updated" (int) and "ambiguous" (int)
+        counts. Ambiguous items fail closed: no admission is created or
+        changed for them.
     """
     authoritative_source = patient.source_system
 
@@ -904,6 +907,7 @@ def upsert_admission_snapshot(
 
     created = 0
     updated = 0
+    ambiguous = 0
 
     for item in admissions_snapshot:
         admission_key = item.get("admission_key", "")
@@ -913,33 +917,23 @@ def upsert_admission_snapshot(
         ward = item.get("ward", "") or ""
         bed = item.get("bed", "") or ""
 
-        # --- Reconciliation (S1): key first, period fallback ---
-        admission = None
+        # --- Reconciliation (RPSA-S1): layered identity, fail closed ---
+        match = resolve_admission_identity(
+            patient=patient,
+            source_system=authoritative_source,
+            source_admission_key=admission_key,
+            admission_start=admission_date,
+            admission_end=discharge_date,
+        )
 
-        # 1) Match by source admission key (stable key scenario)
-        try:
-            admission = Admission.objects.get(
-                source_system=authoritative_source,
-                source_admission_key=admission_key,
-            )
-        except Admission.DoesNotExist:
-            pass
+        if match.ambiguous:
+            # Multiple same-day candidates: change nothing and skip the
+            # legacy duplicate consolidation so ambiguity never mutates data.
+            ambiguous += 1
+            continue
 
-        # 2) Fallback: match by patient + period (volatile key scenario)
-        if admission is None and admission_date is not None:
-            period_filter: dict[str, Any] = {
-                "patient": patient,
-                "source_system": authoritative_source,
-                "admission_date__date": admission_date.date(),
-            }
-            # Only include discharge_date in the filter when both sides are non-null
-            if discharge_date is not None:
-                period_filter["discharge_date__date"] = discharge_date.date()
-            else:
-                period_filter["discharge_date__isnull"] = True
-            admission = Admission.objects.filter(**period_filter).first()
+        admission = match.admission
 
-        # 3) Create only when no match found
         if admission is None:
             admission = Admission.objects.create(
                 patient=patient,
@@ -981,12 +975,20 @@ def upsert_admission_snapshot(
                 )
                 updated += 1
 
-        # --- Consolidation (S2): merge duplicates for this period ---
+        # Every observed external key is preserved as an alias of the
+        # canonical admission (idempotent for the current key).
+        ensure_admission_alias(
+            admission=admission,
+            source_system=authoritative_source,
+            alias_key=admission_key,
+        )
+
+        # --- Consolidation (S2, legacy): merge duplicates for this period ---
         _consolidate_period_duplicates(
             patient, admission_date, discharge_date, authoritative_source
         )
 
-    return {"created": created, "updated": updated}
+    return {"created": created, "updated": updated, "ambiguous": ambiguous}
 
 
 def persist_admissions_snapshot(
@@ -1024,6 +1026,7 @@ def persist_admissions_snapshot(
         "seen": len(admissions_snapshot),
         "created": 0,
         "updated": 0,
+        "ambiguous": 0,
     }
     if admissions_snapshot:
         upsert_result = upsert_admission_snapshot(
@@ -1033,6 +1036,7 @@ def persist_admissions_snapshot(
         )
         adm_metrics["created"] = upsert_result.get("created", 0)
         adm_metrics["updated"] = upsert_result.get("updated", 0)
+        adm_metrics["ambiguous"] = upsert_result.get("ambiguous", 0)
         backfill_admission_ward_from_census(patient)
     return patient, adm_metrics
 
