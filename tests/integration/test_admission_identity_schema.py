@@ -1,19 +1,33 @@
 """Integration schema checks for layered admission identity (RPSA-S1).
 
 Verifies the migrated database schema (alias table, merge marker, database
-constraints) and compares the Admission reverse-relation inventory evidence
-against the runtime model state.
+constraints) and compares the runtime Admission reverse relations against the
+accessor set recorded in the relation-inventory evidence. The expected
+accessor set is inlined here so the suite is self-contained on a clean
+checkout: the evidence markdown is gitignored documentation and must never be
+loaded by tests.
 """
-
-from pathlib import Path
 
 import pytest
 from django.apps import apps
 from django.db import IntegrityError, connection
 
-INVENTORY_PATH = Path(
-    "openspec/changes/reconcile-patient-exits-and-stale-admissions/"
-    "evidence/admission-relation-inventory.md"
+# Mirrors the "Machine-readable accessor list" fenced block in
+# openspec/changes/reconcile-patient-exits-and-stale-admissions/evidence/
+# admission-relation-inventory.md (kept in sync manually; that file stays
+# documentation only and is never read by this suite).
+EXPECTED_REVERSE_RELATION_ACCESSORS = frozenset(
+    {
+        "events",
+        "summary_state",
+        "summary_versions",
+        "summary_runs",
+        "pipeline_runs",
+        "movements",
+        "evolution_extraction_coverage",
+        "merged_from",
+        "source_aliases",
+    }
 )
 
 
@@ -121,19 +135,4 @@ class TestRelationInventoryMatchesRuntime:
             for relation in admission_model._meta.related_objects
         }
 
-        block_lines: list[str] = []
-        in_block = False
-        for line in INVENTORY_PATH.read_text(encoding="utf-8").splitlines():
-            if line.strip().startswith("```"):
-                if in_block:
-                    break
-                in_block = True
-                continue
-            if in_block and line.strip():
-                block_lines.append(line.strip())
-
-        assert block_lines, (
-            "inventory must contain a fenced block with one reverse-relation "
-            "accessor per line"
-        )
-        assert set(block_lines) == runtime_accessors
+        assert runtime_accessors == EXPECTED_REVERSE_RELATION_ACCESSORS

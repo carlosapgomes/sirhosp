@@ -56,8 +56,9 @@ def resolve_admission_identity(
     """Resolve one canonical admission using layered identity signals.
 
     Precedence (spec `patient-admission-mirror`, RPSA-S1):
-      1. Current external key ``(source_system, source_admission_key)``.
-      2. Historical alias of one canonical admission.
+      1. Current external key ``(source_system, source_admission_key)`` of
+         this patient.
+      2. Historical alias of one canonical admission of this patient.
       3. Patient plus exact admission start; multiple rows sharing one
          identical period represent a single duplicated episode and collapse
          to the oldest row instead of becoming an ambiguity.
@@ -65,12 +66,15 @@ def resolve_admission_identity(
 
     Zero or multiple same-day candidates fail closed: the returned match is
     ambiguous and the caller must not mutate any admission. Only canonical
-    rows (never rows already merged into another) are considered.
+    rows (never rows already merged into another) are considered. The key and
+    alias are patient-scoped matching signals, never clinical identity: a key
+    or alias observed for another patient never matches.
     """
     admissions = Admission.objects.all()  # default manager: canonical only
 
     if source_admission_key:
         by_key = admissions.filter(
+            patient=patient,
             source_system=source_system,
             source_admission_key=source_admission_key,
         ).first()
@@ -88,6 +92,7 @@ def resolve_admission_identity(
             AdmissionSourceAlias.objects.filter(
                 source_system=source_system,
                 alias_key=source_admission_key,
+                admission__patient=patient,
                 admission__merged_into__isnull=True,
             )
             .select_related("admission")
@@ -285,8 +290,10 @@ def merge_patients(
     if keep.pk == merge.pk:
         raise ValueError("Cannot merge a patient into itself.")
 
-    # Re-point admissions
-    admissions_moved = Admission.objects.filter(
+    # Re-point admissions. ``all_objects`` is required: the default manager
+    # hides rows with ``merged_into`` set, and skipping them here would leave
+    # them cascading away with the deleted patient.
+    admissions_moved = Admission.all_objects.filter(
         patient=merge
     ).update(patient=keep)
 

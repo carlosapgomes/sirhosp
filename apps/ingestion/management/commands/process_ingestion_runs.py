@@ -1272,7 +1272,7 @@ class Command(BaseCommand):
 
         Returns:
             Tuple of (patient, adm_metrics) where adm_metrics is
-            dict with keys: seen, created, updated.
+            dict with keys: seen, created, updated, ambiguous.
 
         Side-effects:
             - Creates/updates Patient and Admission records.

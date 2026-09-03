@@ -29,10 +29,10 @@ from apps.ingestion.models import (
 # capture is now an invalid payload (fail-closed), so fixtures that codified
 # the old "empty batch-bound = success" semantics carry a valid capture
 # instead; every original assertion is preserved.
-def _batch_admissions_snapshot() -> list[dict]:
+def _batch_admissions_snapshot(key: str = "ADM_BATCH_001") -> list[dict]:
     return [
         {
-            "admission_key": "ADM_BATCH_001",
+            "admission_key": key,
             "admission_start": "2026-04-01T00:00:00",
             "admission_end": "2026-04-19T00:00:00",
             "ward": "UTI",
@@ -425,7 +425,19 @@ class TestBatchClosure:
             )
 
         mock_ext = MagicMock()
-        mock_ext.get_admission_snapshot.return_value = _batch_admissions_snapshot()
+        # RPSA-S1: admission identity matching is patient-scoped and the
+        # (source_system, source_admission_key) constraint is globally
+        # unique, so each patient's capture carries its own admission key.
+        # Reusing one key across patients now fails the run with
+        # IntegrityError instead of silently mutating the first patient's
+        # admission (pre-fixture-repair behavior).
+        snapshots_by_patient = {
+            "BOTH_P1": _batch_admissions_snapshot("ADM_BATCH_001"),
+            "BOTH_P2": _batch_admissions_snapshot("ADM_BATCH_002"),
+        }
+        mock_ext.get_admission_snapshot.side_effect = (
+            lambda **kwargs: snapshots_by_patient[kwargs["patient_record"]]
+        )
 
         # RPAP-S2 fixture repair: non-empty captures + follow-up isolation so
         # both runs drain the batch after succeeding.

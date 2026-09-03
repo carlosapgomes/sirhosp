@@ -14,7 +14,11 @@ from django.utils import timezone
 from apps.clinical_docs.models import ClinicalEvent
 from apps.core.profession_types import to_canonical_profession_type
 from apps.ingestion.models import CensusExecutionBatch, IngestionRun
-from apps.patients.models import Admission, Patient
+from apps.patients.models import (
+    Admission,
+    AdmissionSourceAlias,
+    Patient,
+)
 from apps.patients.services import ensure_admission_alias, resolve_admission_identity
 
 TZ_INSTITUTIONAL = ZoneInfo("America/Sao_Paulo")
@@ -794,6 +798,9 @@ def _consolidate_period_duplicates(
 
     Side effects:
       - Re-points ClinicalEvent.admission from duplicates to canonical.
+      - Re-points AdmissionSourceAlias rows of duplicates to the canonical
+        admission and records each deleted row's own external key as an alias
+        of the canonical admission, so identity signals survive the delete.
       - Deletes non-canonical duplicate admissions.
     """
     if admission_date is None:
@@ -823,15 +830,33 @@ def _consolidate_period_duplicates(
     canonical = duplicates[0]
     non_canonical = duplicates[1:]
 
-    # Re-point events from non-canonical to canonical
     non_canonical_ids = [a.id for a in non_canonical]
-    if non_canonical_ids:
-        ClinicalEvent.objects.filter(admission_id__in=non_canonical_ids).update(
-            admission_id=canonical.id
-        )
+    if not non_canonical_ids:
+        return
 
-    # Remove duplicate admissions
-    Admission.objects.filter(id__in=non_canonical_ids).delete()
+    with transaction.atomic():
+        # Re-point events from non-canonical to canonical
+        ClinicalEvent.objects.filter(
+            admission_id__in=non_canonical_ids
+        ).update(admission_id=canonical.id)
+
+        # Identity signals must survive the delete below (RPSA-S1): a plain
+        # repoint cannot collide because (source_system, alias_key) is
+        # globally unique, and canonical's own key can never be an alias of a
+        # duplicate (uq_adm_src forbids shared current keys).
+        AdmissionSourceAlias.objects.filter(
+            admission_id__in=non_canonical_ids
+        ).update(admission=canonical)
+        for duplicate in non_canonical:
+            if duplicate.source_admission_key:
+                ensure_admission_alias(
+                    admission=canonical,
+                    source_system=duplicate.source_system,
+                    alias_key=duplicate.source_admission_key,
+                )
+
+        # Remove duplicate admissions
+        Admission.objects.filter(id__in=non_canonical_ids).delete()
 
 
 _SOURCE_SYSTEM_CONFLICT_MESSAGE = (
@@ -1011,11 +1036,15 @@ def persist_admissions_snapshot(
       (``len(admissions_snapshot)``).
     - ``created`` and ``updated`` come from the database upsert outcomes
       returned by :func:`upsert_admission_snapshot`.
+    - ``ambiguous`` counts snapshot items the identity resolver could not
+      disambiguate; those items fail closed (no admission created or
+      changed for them).
 
     A ``Patient`` is always created (even for an empty snapshot) for
     traceability, matching the existing current-worker behavior.
 
-    Returns ``(patient, {"seen": int, "created": int, "updated": int})``.
+    Returns
+    ``(patient, {"seen": int, "created": int, "updated": int, "ambiguous": int})``.
     """
     patient, _ = Patient.objects.get_or_create(
         source_system=source_system,
