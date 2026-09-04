@@ -3,7 +3,7 @@
 import uuid
 
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 
 # ---------------------------------------------------------------------------
 # Canonical exit reconciliation taxonomy (RPSA-S2).
@@ -309,6 +309,85 @@ class ReconciliationEvent(models.Model):
         return (
             f"ReconciliationEvent {self.operation_uuid} "
             f"[{self.status}] {self.source_kind}#{self.source_id}"
+        )
+
+
+class AdmissionMergeOperation(models.Model):
+    """Append-only operation audit of one source-confirmed merge (RPSA-S4).
+
+    One row per merge execution. Payloads carry the structural state
+    required for reversibility — canonical/merged admission primary keys,
+    source-confirmation fingerprint metadata, per-relation movement
+    manifest and before/after field snapshots — and never duplicate
+    patient identity (name, record number) or clinical text. Admission
+    identifiers are stored as plain integers (no FK, no reverse
+    accessors): the audit outlives everything it points to, mirroring the
+    ``ReconciliationEvent.source_id`` precedent.
+
+    Application code never updates or deletes the recorded payload. The
+    single sanctioned state transition is ``rolled_back_at`` (null while
+    the merge stands); a blocked rollback writes nothing at all.
+    """
+
+    operation_uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+    )
+    canonical_admission_id = models.BigIntegerField(
+        help_text="Oldest (winning) Admission primary key.",
+    )
+    merged_admission_id = models.BigIntegerField(
+        help_text="Newer Admission primary key marked ``merged_into``.",
+    )
+    patient_id = models.BigIntegerField(
+        help_text=(
+            "Internal Patient primary key shared by both admissions "
+            "(structural only; never a name or record number)."
+        ),
+    )
+    source_fingerprint = models.CharField(
+        max_length=64,
+        help_text=(
+            "SHA-256 digest of the source-confirmation snapshot that "
+            "authorized the merge (structural content only)."
+        ),
+    )
+    source_episode_count = models.PositiveSmallIntegerField(default=1)
+    confirmed_local_date = models.DateField(
+        help_text="America/Bahia local admission date the source confirmed.",
+    )
+    source_confirmed_at = models.DateTimeField(null=True, blank=True)
+    before_state = models.JSONField(default=dict)
+    relation_manifest = models.JSONField(default=dict)
+    rolled_back_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["canonical_admission_id"],
+                name="ix_adm_merge_op_canon",
+            ),
+            models.Index(
+                fields=["merged_admission_id"],
+                name="ix_adm_merge_op_merged",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(
+                    canonical_admission_id__lt=F("merged_admission_id")
+                ),
+                name="ck_adm_merge_op_oldest_canonical",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"AdmissionMergeOperation {self.operation_uuid} "
+            f"#{self.merged_admission_id} -> #{self.canonical_admission_id}"
         )
 
 
