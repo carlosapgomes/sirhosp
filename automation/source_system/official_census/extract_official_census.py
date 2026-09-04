@@ -11,6 +11,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import sys
 import time
 import zipfile
@@ -78,14 +79,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--username",
         type=str,
-        required=True,
-        help="Nome de usuário do sistema fonte",
+        default=None,
+        help=(
+            "Fallback manual: usuário do sistema fonte, usado somente "
+            "quando SOURCE_SYSTEM_USERNAME não estiver definido no "
+            "ambiente (o ambiente tem precedência)."
+        ),
     )
     parser.add_argument(
         "--password",
         type=str,
-        required=True,
-        help="Senha do sistema fonte",
+        default=None,
+        help=(
+            "Fallback manual: senha do sistema fonte, usada somente "
+            "quando SOURCE_SYSTEM_PASSWORD não estiver definida no "
+            "ambiente (o ambiente tem precedência)."
+        ),
     )
     parser.add_argument(
         "--date",
@@ -94,6 +103,26 @@ def parse_args() -> argparse.Namespace:
         help="Data do censo no formato DD/MM/AAAA (padrão: hoje)",
     )
     return parser.parse_args()
+
+
+def resolve_credentials(args: argparse.Namespace) -> tuple[str, str] | None:
+    """Resolve credenciais do ambiente primeiro; flags são fallback manual.
+
+    RPSA-S7A: ``SOURCE_SYSTEM_USERNAME`` e ``SOURCE_SYSTEM_PASSWORD`` no
+    ambiente têm precedência sobre as flags CLI. Retorna ``None`` quando
+    nenhuma das fontes fornece ambos os valores.
+    """
+    username = os.environ.get("SOURCE_SYSTEM_USERNAME") or args.username or ""
+    password = os.environ.get("SOURCE_SYSTEM_PASSWORD") or args.password or ""
+    if not username or not password:
+        return None
+    return username, password
+
+
+MISSING_CREDENTIALS_MESSAGE = (
+    "Erro de validação: credenciais do sistema fonte não fornecidas. "
+    "Consulte --help para as formas suportadas de fornecimento."
+)
 
 
 def wait_visible(locator: Locator, timeout: int = 10000) -> bool:
@@ -407,6 +436,13 @@ def run(
 
 def main() -> None:
     args = parse_args()
+
+    creds = resolve_credentials(args)
+    if creds is None:
+        print(MISSING_CREDENTIALS_MESSAGE, file=sys.stderr)
+        sys.exit(1)
+    username, password = creds
+
     output_dir = Path(args.output_dir) if args.output_dir else DOWNLOADS_DIR
     date_value = args.date or time.strftime("%d/%m/%Y")
 
@@ -414,8 +450,8 @@ def main() -> None:
 
     run(
         source_url=args.source_url,
-        username=args.username,
-        password=args.password,
+        username=username,
+        password=password,
         headless=args.headless,
         date_value=date_value,
         output_dir=output_dir,

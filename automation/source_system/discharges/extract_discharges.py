@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -60,14 +61,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--username",
         type=str,
-        required=True,
-        help="Nome de usuario do sistema fonte",
+        default=None,
+        help=(
+            "Fallback manual: usuario do sistema fonte, usado somente "
+            "quando SOURCE_SYSTEM_USERNAME não estiver definido no "
+            "ambiente (o ambiente tem precedência)."
+        ),
     )
     parser.add_argument(
         "--password",
         type=str,
-        required=True,
-        help="Senha do sistema fonte",
+        default=None,
+        help=(
+            "Fallback manual: senha do sistema fonte, usada somente "
+            "quando SOURCE_SYSTEM_PASSWORD não estiver definida no "
+            "ambiente (o ambiente tem precedência)."
+        ),
     )
     parser.add_argument(
         "--reference-date",
@@ -82,6 +91,26 @@ def parse_args() -> argparse.Namespace:
         help="Data das altas no formato DD/MM/AAAA (padrao: hoje)",
     )
     return parser.parse_args()
+
+
+def resolve_credentials(args: argparse.Namespace) -> tuple[str, str] | None:
+    """Resolve credenciais do ambiente primeiro; flags são fallback manual.
+
+    RPSA-S7A: ``SOURCE_SYSTEM_USERNAME`` e ``SOURCE_SYSTEM_PASSWORD`` no
+    ambiente têm precedência sobre as flags CLI. Retorna ``None`` quando
+    nenhuma das fontes fornece ambos os valores.
+    """
+    username = os.environ.get("SOURCE_SYSTEM_USERNAME") or args.username or ""
+    password = os.environ.get("SOURCE_SYSTEM_PASSWORD") or args.password or ""
+    if not username or not password:
+        return None
+    return username, password
+
+
+MISSING_CREDENTIALS_MESSAGE = (
+    "Erro de validação: credenciais do sistema fonte não fornecidas. "
+    "Consulte --help para as formas suportadas de fornecimento."
+)
 
 
 def _today_dd_mm_yyyy() -> str:
@@ -288,6 +317,13 @@ def save_debug(page: Page) -> None:
 
 def main() -> None:
     args = parse_args()
+
+    creds = resolve_credentials(args)
+    if creds is None:
+        print(MISSING_CREDENTIALS_MESSAGE, file=sys.stderr)
+        sys.exit(1)
+    username, password = creds
+
     output_dir = Path(args.output_dir) if args.output_dir else DOWNLOADS_DIR
 
     date_value = args.date or _today_dd_mm_yyyy()
@@ -309,8 +345,8 @@ def main() -> None:
             page.goto(args.source_url)
             page.locator(
                 "input[placeholder=\"Nome de usu\u00e1rio\"]"
-            ).fill(args.username)
-            page.locator("input[placeholder=\"Senha\"]").fill(args.password)
+            ).fill(username)
+            page.locator("input[placeholder=\"Senha\"]").fill(password)
             page.locator("input[placeholder=\"Senha\"]").press("Enter")
             aguardar_pagina_estavel(page)
             fechar_dialogos_iniciais(page)

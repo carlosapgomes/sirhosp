@@ -27,6 +27,7 @@ evidence persistence and reconciliation complete on confirmed success.
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from datetime import date as Date
@@ -310,10 +311,6 @@ def _run_discharge_attempt(
             str(tmpdir_path),
             "--source-url",
             creds.url,
-            "--username",
-            creds.username,
-            "--password",
-            creds.password,
             "--date",
             date,
         ]
@@ -321,11 +318,19 @@ def _run_discharge_attempt(
         if headless:
             cmd.append("--headless")
 
+        # RPSA-S7A: credentials travel only in the scoped child
+        # environment, never in argv (the command line is visible via
+        # process inspection). Parent environment is never mutated.
+        child_env = os.environ.copy()
+        child_env["SOURCE_SYSTEM_USERNAME"] = creds.username
+        child_env["SOURCE_SYSTEM_PASSWORD"] = creds.password
+
         try:
             subprocess_result = run_subprocess(
                 cmd,
                 timeout=600,
                 check=False,
+                env=child_env,
             )
         except SubprocessTimeoutError:
             err_msg = safe_error_message(
@@ -578,6 +583,9 @@ def run_discharge_extraction(
 
             if failure is not None:
                 # Unconfirmed zero: structured, credential-safe failure.
+                # RPSA-S7 deferred P2 (landed in RPSA-S7A): propagate the
+                # confirmation timeout to the run exactly like the
+                # first-attempt timeout path.
                 err_msg = safe_error_message(
                     "Zero-row discharge report could not be confirmed by "
                     "an independent second attempt."
@@ -598,6 +606,7 @@ def run_discharge_extraction(
                     run,
                     error_message=err_msg,
                     failure_reason="zero_unconfirmed",
+                    timed_out=failure["timed_out"],
                 )
                 return ExtractionResult(
                     extraction_type="discharge_extraction",
@@ -653,7 +662,14 @@ def run_discharge_extraction(
                 stage_name="discharge_persistence",
                 status="failed",
                 started_at=persist_stage_start,
-                details_json={"error": err_msg},
+                # RPSA-S7 deferred P2 (landed in RPSA-S7A): the
+                # failure-stage metric carries the same attempt metadata
+                # as the succeeded path.
+                details_json={
+                    "error": err_msg,
+                    "attempt_count": attempt_count,
+                    "zero_confirmed": zero_confirmed,
+                },
             )
             mark_run_failed(
                 run,

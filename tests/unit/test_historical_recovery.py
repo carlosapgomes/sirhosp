@@ -62,7 +62,7 @@ def _unconfirmed_zero_result() -> ExtractionResult:
             "Zero-row discharge report could not be confirmed by an "
             "independent second attempt."
         ),
-        metrics={"total_records": 0, "zero_confirmed": False, "attempt_count": 2},
+        metrics={},
         ingestion_run_id=11,
         zero_confirmed=False,
         attempt_count=2,
@@ -270,8 +270,10 @@ class TestZeroMetadataPropagation:
         )
 
         step = result.steps[0]
-        assert step.metrics["zero_confirmed"] is False
-        assert step.metrics["attempt_count"] == 2
+        # The real unconfirmed-zero ExtractionResult carries metrics={}
+        # (durable metadata lives in stage metrics, not on the result);
+        # the orchestrator copies it verbatim.
+        assert step.metrics == {}
         assert step.ingestion_run_id == 11
 
     def test_rows_metadata_passthrough(self):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import tempfile
 from collections import Counter
@@ -160,10 +161,6 @@ def run_death_extraction(
                 str(tmpdir_path),
                 "--source-url",
                 creds.url,
-                "--username",
-                creds.username,
-                "--password",
-                creds.password,
                 "--start-date",
                 start_date,
                 "--end-date",
@@ -172,11 +169,19 @@ def run_death_extraction(
             if headless:
                 cmd.append("--headless")
 
+            # RPSA-S7A: credentials travel only in the scoped child
+            # environment, never in argv (the command line is visible via
+            # process inspection). Parent environment is never mutated.
+            child_env = os.environ.copy()
+            child_env["SOURCE_SYSTEM_USERNAME"] = creds.username
+            child_env["SOURCE_SYSTEM_PASSWORD"] = creds.password
+
             try:
                 subprocess_result = run_subprocess(
                     cmd,
                     timeout=600,
                     check=False,
+                    env=child_env,
                 )
             except SubprocessTimeoutError:
                 err_msg = safe_error_message(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 import re
 import sys
 import tempfile
@@ -1008,21 +1009,25 @@ def run_official_census_extraction(
                 str(tmpdir_path),
                 "--source-url",
                 creds.url,
-                "--username",
-                creds.username,
-                "--password",
-                creds.password,
                 "--date",
                 date,
             ]
             if headless:
                 cmd.append("--headless")
 
+            # RPSA-S7A: credentials travel only in the scoped child
+            # environment, never in argv (the command line is visible via
+            # process inspection). Parent environment is never mutated.
+            child_env = os.environ.copy()
+            child_env["SOURCE_SYSTEM_USERNAME"] = creds.username
+            child_env["SOURCE_SYSTEM_PASSWORD"] = creds.password
+
             try:
                 subprocess_result = run_subprocess(
                     cmd,
                     timeout=600,
                     check=False,
+                    env=child_env,
                 )
             except SubprocessTimeoutError:
                 err_msg = safe_error_message(

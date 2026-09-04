@@ -105,7 +105,10 @@ def _make_subprocess_outputs(outputs: list):
     """
     calls: list[list[str]] = []
 
-    def _side_effect(cmd, timeout=None, check=False):
+    def _side_effect(cmd, timeout=None, check=False, env=None, **kwargs):
+        # RPSA-S7A: the service now also passes env= (scoped child
+        # environment); the fake tolerates it — transport assertions live
+        # in tests/unit/test_historical_extractor_credential_transport.py.
         calls.append(list(cmd))
         spec = outputs[len(calls) - 1] if len(calls) <= len(outputs) else None
         out_dir = Path(cmd[cmd.index("--output-dir") + 1])
@@ -632,3 +635,88 @@ class TestCredentialSafety:
         assert "example.com" not in dumped
         # The structured reason is present and readable.
         assert result.failure_reason == "zero_unconfirmed"
+
+
+# =========================================================================
+# RPSA-S7 deferred P2s (landed in RPSA-S7A)
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestDeferredP2Metadata:
+    """RPSA-S7 deferred P2 observability gaps, closed tests-first.
+
+    - failure-stage ``discharge_persistence`` details_json carries
+      ``attempt_count``/``zero_confirmed`` alongside the error;
+    - a confirmation attempt that times out marks the run
+      ``timed_out=True`` exactly like the first-attempt timeout path,
+      keeping ``confirmation_failure_reason="timeout"`` structured and
+      credential-safe.
+    """
+
+    def test_persistence_failure_stage_carries_attempt_count_and_zero_confirmed(
+        self, mock_credentials, mock_refresh,
+    ):
+        """A failed persistence stage keeps the attempt metadata durable."""
+        from apps.discharges.extraction_service import run_discharge_extraction
+        from apps.ingestion.models import IngestionRun
+
+        with patch(
+            f"{SERVICE_PATH}.run_subprocess",
+            side_effect=_make_subprocess_outputs(
+                [_xls_data_rows(["777001"])]
+            ),
+        ), patch(
+            f"{SERVICE_PATH}._persist_discharge_records",
+            side_effect=RuntimeError("persistence boom"),
+        ):
+            result = run_discharge_extraction(date="01/06/2026")
+
+        assert result.success is False
+        mock_refresh.assert_not_called()
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        stage = run.stage_metrics.get(
+            stage_name="discharge_persistence", status="failed",
+        )
+        assert stage.details_json["error"]
+        assert stage.details_json["attempt_count"] == 1
+        assert stage.details_json["zero_confirmed"] is False
+
+    def test_confirmation_timeout_marks_run_timed_out(
+        self, mock_credentials, mock_refresh,
+    ):
+        """Confirmation timeout propagates ``timed_out=True`` to the run."""
+        from apps.discharges.extraction_service import run_discharge_extraction
+        from apps.ingestion.models import IngestionRun
+
+        with patch(
+            f"{SERVICE_PATH}.run_subprocess",
+            side_effect=_make_subprocess_outputs([None, {"timeout": True}]),
+        ):
+            result = run_discharge_extraction(date="01/06/2026")
+
+        assert result.success is False
+        assert result.failure_reason == "zero_unconfirmed"
+        mock_refresh.assert_not_called()
+
+        run = IngestionRun.objects.get(pk=result.ingestion_run_id)
+        assert run.status == "failed"
+        # Deferred P2: propagate the confirmation timeout to the run
+        # exactly like the first-attempt timeout path.
+        assert run.timed_out is True
+        assert run.failure_reason == "zero_unconfirmed"
+
+        stage = run.stage_metrics.get(
+            stage_name="discharge_extraction", status="failed",
+        )
+        assert stage.details_json["confirmation_failure_reason"] == "timeout"
+        dumped = json.dumps(
+            {
+                "result_error": result.error_message,
+                "stage": stage.details_json,
+                "run_error": run.error_message,
+            }
+        )
+        assert "secret" not in dumped
+        assert "admin" not in dumped
