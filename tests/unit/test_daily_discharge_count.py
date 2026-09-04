@@ -144,5 +144,9 @@ class TestExtractDischargesHook:
         assert "DailyDischargeCount" not in content
         # Reconciliation must be routed through the shared boundary.
         assert "_reconcile_persisted_records" in content
-        # The service must manage persistence (not delegate to another command)
-        assert "call_command" not in content
+        # The service must manage persistence (not delegate to another
+        # command). RPSA-S7: the post-reconciliation aggregate refresh is
+        # the ONLY allowed ``call_command`` use — any second invocation
+        # fails this guard.
+        assert content.count("call_command(") == 1
+        assert 'call_command("refresh_daily_discharge_counts")' in content

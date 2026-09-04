@@ -876,3 +876,181 @@ class TestRetryCommandOutput:
             output = out.getvalue()
             assert "Retry rounds: 1" in output
             assert "(1 attempt(s))" in output
+
+
+# =========================================================================
+# RPSA-S7: zero-confirmation scenarios at the command boundary
+# =========================================================================
+
+
+class TestZeroConfirmationScenarios:
+    """Command-level behaviour for confirmed/unconfirmed zero steps.
+
+    An unconfirmed zero arrives as a failed step with
+    ``failure_reason="zero_unconfirmed"`` (normal retry limits apply and
+    the command exits non-zero while it persists); a confirmed zero is a
+    successful step (never retried, command exits zero). All orchestration
+    is mocked via ``execute_recovery_plan`` following module conventions.
+    """
+
+    def test_unconfirmed_zero_step_exits_nonzero(self):
+        """A final unconfirmed-zero step fails the command (exit non-zero)."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=False,
+                    extraction_type="discharge_extraction",
+                    failure_reason="zero_unconfirmed",
+                    error_message=(
+                        "Zero-row discharge report could not be confirmed "
+                        "by an independent second attempt."
+                    ),
+                    metrics={
+                        "total_records": 0,
+                        "zero_confirmed": False,
+                        "attempt_count": 2,
+                    },
+                ),
+            ],
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            with pytest.raises(SystemExit) as exc_info:
+                call_command("recover_historical_data", "--date", "01/06/2026")
+            assert exc_info.value.code != 0
+
+    def test_unconfirmed_zero_reason_reported_in_output(self):
+        """The structured zero_unconfirmed reason reaches operator output."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=False,
+                    extraction_type="discharge_extraction",
+                    failure_reason="zero_unconfirmed",
+                    error_message="unconfirmed",
+                ),
+            ],
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            out = StringIO()
+            with pytest.raises(SystemExit):
+                call_command(
+                    "recover_historical_data",
+                    "--date", "01/06/2026",
+                    stdout=out,
+                )
+            output = out.getvalue()
+            assert "FAILED (zero_unconfirmed)" in output
+            assert "Failed: 1" in output
+
+    def test_unconfirmed_zero_with_exhausted_retries_reports_retries(self):
+        """Retried-but-still-unconfirmed zero keeps retries and failure."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=False,
+                    extraction_type="discharge_extraction",
+                    failure_reason="zero_unconfirmed",
+                    error_message="unconfirmed",
+                    metrics={"zero_confirmed": False, "attempt_count": 2},
+                ),
+            ],
+            retry_rounds_used=2,
+            retry_attempts=2,
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            out = StringIO()
+            with pytest.raises(SystemExit) as exc_info:
+                call_command(
+                    "recover_historical_data",
+                    "--date", "01/06/2026",
+                    stdout=out,
+                )
+            assert exc_info.value.code != 0
+            output = out.getvalue()
+            assert "Retry rounds: 2" in output
+            assert "FAILED (zero_unconfirmed)" in output
+
+    def test_unconfirmed_zero_recovered_by_retry_exits_zero(self):
+        """A retry that confirms zero turns the command successful."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=True,
+                    extraction_type="discharge_extraction",
+                    metrics={
+                        "total_records": 0,
+                        "zero_confirmed": True,
+                        "attempt_count": 2,
+                    },
+                ),
+            ],
+            retry_rounds_used=1,
+            retry_attempts=1,
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            out = StringIO()
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                stdout=out,
+            )
+            output = out.getvalue()
+            assert "Retry rounds: 1" in output
+            assert "01/06/2026 - discharges" in output and "OK" in output
+            assert "Failed: 0" in output
+
+    def test_confirmed_zero_step_is_ok_and_exits_zero(self):
+        """A confirmed-zero success step is reported OK; command exits zero."""
+        result = RecoveryRunResult(
+            start_date=date(2026, 6, 1),
+            end_date=date(2026, 6, 1),
+            steps=[
+                RecoveryStepResult(
+                    date=date(2026, 6, 1),
+                    date_label="01/06/2026",
+                    extractor="discharges",
+                    success=True,
+                    extraction_type="discharge_extraction",
+                    metrics={
+                        "total_records": 0,
+                        "zero_confirmed": True,
+                        "attempt_count": 2,
+                    },
+                ),
+            ],
+        )
+        with patch(_EXEC_PATH) as mock_exec:
+            mock_exec.return_value = result
+            out = StringIO()
+            call_command(
+                "recover_historical_data",
+                "--date", "01/06/2026",
+                stdout=out,
+            )
+            output = out.getvalue()
+            assert "01/06/2026 - discharges" in output and "OK" in output
+            assert "Failed: 0" in output

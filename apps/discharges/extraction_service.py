@@ -13,6 +13,16 @@ Since RPSA-S2 this module:
   boundary (``apps.patients.reconciliation`` via
   ``apps.discharges.services.reconcile_discharge_record``) using only
   ``saida_em``, never ``alta_em``.
+
+Since RPSA-S7 this module also implements semantic confirmation of empty
+reports: one empty/missing result is not success. The service runs at
+most two independent attempts (each one subprocess invocation plus XLS
+parse in a fresh temporary output directory). Two successful empty
+attempts confirm a semantic zero; a failed confirmation stays failed
+(``zero_unconfirmed``); a non-empty confirmation is processed normally.
+The operational daily aggregate is refreshed via the
+``refresh_daily_discharge_counts`` command exactly once, only after
+evidence persistence and reconciliation complete on confirmed success.
 """
 
 from __future__ import annotations
@@ -24,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from django.core.management import call_command
 from django.db import transaction
 from django.utils import timezone
 
@@ -33,6 +44,7 @@ from apps.ingestion.extractors.subprocess_utils import (
 )
 from apps.ingestion.historical_extraction import (
     ExtractionResult,
+    SourceCredentials,
     create_stage_metric,
     mark_run_failed,
     mark_run_succeeded,
@@ -259,6 +271,135 @@ def _reconcile_persisted_records(
 
 
 # ---------------------------------------------------------------------------
+# Single extraction attempt (RPSA-S7)
+# ---------------------------------------------------------------------------
+
+
+def _run_discharge_attempt(
+    *,
+    script_path: Path,
+    creds: SourceCredentials,
+    date: str,
+    ref_date_iso: str,
+    headless: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Run ONE independent extraction attempt and parse its XLS output.
+
+    One attempt is exactly one subprocess invocation plus output parsing,
+    executed in a fresh temporary output directory so the RPSA-S7
+    confirmation is a genuinely independent observation. This function is
+    called at most twice per service run and contains no retry loop.
+
+    Returns:
+        ``(patients, None)`` when the subprocess completed successfully
+        (``patients`` may be empty — no XLS produced or zero parseable
+        rows); ``([], failure)`` when the attempt failed, where
+        ``failure`` is a structured, credential-safe dict with
+        ``failure_reason``, ``error_message``, ``stage_details`` and
+        ``timed_out`` keys.
+    """
+    safe_date = date.replace("/", "-")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+
+        cmd = [
+            sys.executable,
+            str(script_path),
+            "--output-dir",
+            str(tmpdir_path),
+            "--source-url",
+            creds.url,
+            "--username",
+            creds.username,
+            "--password",
+            creds.password,
+            "--date",
+            date,
+        ]
+        cmd.extend(["--reference-date", ref_date_iso])
+        if headless:
+            cmd.append("--headless")
+
+        try:
+            subprocess_result = run_subprocess(
+                cmd,
+                timeout=600,
+                check=False,
+            )
+        except SubprocessTimeoutError:
+            err_msg = safe_error_message(
+                "Source-system automation timed out."
+            )
+            return [], {
+                "failure_reason": "timeout",
+                "error_message": err_msg,
+                "stage_details": {"error": err_msg},
+                "timed_out": True,
+            }
+        except Exception as exc:
+            err_msg = safe_error_message(str(exc))
+            return [], {
+                "failure_reason": "unexpected_exception",
+                "error_message": err_msg,
+                "stage_details": {"error": err_msg},
+                "timed_out": False,
+            }
+
+        if subprocess_result.returncode != 0:
+            err_msg = safe_error_message(
+                subprocess_result.stderr[:500]
+                if subprocess_result.stderr
+                else "Unknown error"
+            )
+            return [], {
+                "failure_reason": "source_unavailable",
+                "error_message": err_msg,
+                "stage_details": {"returncode": subprocess_result.returncode},
+                "timed_out": False,
+            }
+
+        try:
+            xls_files = sorted(
+                tmpdir_path.glob(f"altas-{safe_date}-*.xlsx"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+
+            if not xls_files:
+                # Empty: the automation succeeded but produced no XLS.
+                return [], None
+
+            import openpyxl  # noqa: PLC0415
+
+            wb = openpyxl.load_workbook(xls_files[0], read_only=True)
+            ws = wb.active
+
+            rows = list(ws.iter_rows(values_only=True))
+            wb.close()
+        except Exception as exc:
+            err_msg = safe_error_message(str(exc))
+            return [], {
+                "failure_reason": "unexpected_exception",
+                "error_message": err_msg,
+                "stage_details": {"error": err_msg},
+                "timed_out": False,
+            }
+
+        # Skip header row (first row)
+        data_rows = rows[1:] if rows else []
+        patients: list[dict[str, Any]] = []
+
+        for row in data_rows:
+            parsed = _parse_xls_row(row)
+            if parsed is not None:
+                patients.append(parsed)
+
+        # Empty also covers an XLS with zero parseable rows.
+        return patients, None
+
+
+# ---------------------------------------------------------------------------
 # Service entry point
 # ---------------------------------------------------------------------------
 
@@ -276,11 +417,23 @@ def run_discharge_extraction(
     1. Resolve and validate the target date.
     2. Resolve source-system credentials.
     3. Create an ``IngestionRun`` for observability.
-    4. Execute the Playwright automation script via subprocess.
-    5. Parse the generated XLS output.
-    6. Persist evidence via :func:`_persist_discharge_records`.
-    7. Reconcile persisted rows via :func:`_reconcile_persisted_records`.
-    8. Record stage metrics (including per-status reconciliation counters).
+    4. Run ONE extraction attempt (subprocess plus parse). A failed first
+       attempt keeps the existing failure semantics and is never
+       confirmed by another invocation.
+    5. When the first attempt is empty (no XLS or zero parseable rows),
+       run exactly ONE independent confirmation attempt in a fresh
+       output directory. Two successful empties confirm a semantic zero;
+       a failed confirmation stays failed (``zero_unconfirmed``); a
+       non-empty confirmation is processed normally.
+    6. Persist evidence via :func:`_persist_discharge_records` and
+       reconcile it via :func:`_reconcile_persisted_records` (RPSA-S2
+       per-status counters) only after the semantic outcome is known.
+    7. Record stage metrics carrying ``attempt_count``/``zero_confirmed``
+       alongside the reconciliation counters.
+    8. On confirmed success (rows or confirmed zero), refresh the
+       operational daily aggregate exactly once via the
+       ``refresh_daily_discharge_counts`` command, AFTER persistence and
+       reconciliation. Failed or unconfirmed extractions never refresh.
     9. Return a structured ``ExtractionResult``.
 
     Args:
@@ -304,7 +457,6 @@ def run_discharge_extraction(
         )
 
     ref_date = parsed_date
-    safe_date = date.replace("/", "-")
     ref_date_iso = ref_date.isoformat()
 
     # --- Resolve credentials ---
@@ -363,254 +515,183 @@ def run_discharge_extraction(
             ingestion_run_id=run.pk,
         )
 
-    # --- Stage: discharge_extraction (subprocess) ---
+    # --- Stage: discharge_extraction (subprocess + parse, RPSA-S7) -----
     ext_stage_start = timezone.now()
 
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmpdir_path = Path(tmpdir)
+        # First attempt. A failed attempt keeps the existing failure
+        # semantics and is never confirmed by a second invocation.
+        patients, failure = _run_discharge_attempt(
+            script_path=script_path,
+            creds=creds,
+            date=date,
+            ref_date_iso=ref_date_iso,
+            headless=headless,
+        )
 
-            cmd = [
-                sys.executable,
-                str(script_path),
-                "--output-dir",
-                str(tmpdir_path),
-                "--source-url",
-                creds.url,
-                "--username",
-                creds.username,
-                "--password",
-                creds.password,
-                "--date",
-                date,
-            ]
-            cmd.extend(["--reference-date", ref_date_iso])
-            if headless:
-                cmd.append("--headless")
+        attempt_count = 1
+        zero_confirmed = False
 
-            try:
-                subprocess_result = run_subprocess(
-                    cmd,
-                    timeout=600,
-                    check=False,
-                )
-            except SubprocessTimeoutError:
-                err_msg = safe_error_message(
-                    "Source-system automation timed out."
-                )
-                create_stage_metric(
-                    run=run,
-                    stage_name="discharge_extraction",
-                    status="failed",
-                    started_at=ext_stage_start,
-                    details_json={"error": err_msg},
-                )
-                mark_run_failed(
-                    run,
-                    error_message=err_msg,
-                    failure_reason="timeout",
-                    timed_out=True,
-                )
-                return ExtractionResult(
-                    extraction_type="discharge_extraction",
-                    target_start=parsed_date,
-                    target_end=parsed_date,
-                    success=False,
-                    failure_reason="timeout",
-                    error_message=err_msg,
-                    ingestion_run_id=run.pk,
-                )
-
-            except Exception as exc:
-                err_msg = safe_error_message(str(exc))
-                create_stage_metric(
-                    run=run,
-                    stage_name="discharge_extraction",
-                    status="failed",
-                    started_at=ext_stage_start,
-                    details_json={"error": err_msg},
-                )
-                mark_run_failed(
-                    run,
-                    error_message=err_msg,
-                    failure_reason="unexpected_exception",
-                )
-                return ExtractionResult(
-                    extraction_type="discharge_extraction",
-                    target_start=parsed_date,
-                    target_end=parsed_date,
-                    success=False,
-                    failure_reason="unexpected_exception",
-                    error_message=err_msg,
-                    ingestion_run_id=run.pk,
-                )
-
-            if subprocess_result.returncode != 0:
-                err_msg = safe_error_message(
-                    subprocess_result.stderr[:500]
-                    if subprocess_result.stderr
-                    else "Unknown error"
-                )
-                create_stage_metric(
-                    run=run,
-                    stage_name="discharge_extraction",
-                    status="failed",
-                    started_at=ext_stage_start,
-                    details_json={"returncode": subprocess_result.returncode},
-                )
-                mark_run_failed(
-                    run,
-                    error_message=err_msg,
-                    failure_reason="source_unavailable",
-                )
-                return ExtractionResult(
-                    extraction_type="discharge_extraction",
-                    target_start=parsed_date,
-                    target_end=parsed_date,
-                    success=False,
-                    failure_reason="source_unavailable",
-                    error_message=err_msg,
-                    ingestion_run_id=run.pk,
-                )
-
+        if failure is not None:
             create_stage_metric(
                 run=run,
                 stage_name="discharge_extraction",
-                status="succeeded",
+                status="failed",
                 started_at=ext_stage_start,
+                details_json={
+                    **failure["stage_details"],
+                    "attempt_count": attempt_count,
+                    "zero_confirmed": zero_confirmed,
+                },
             )
-
-            # --- Stage: discharge_persistence (XLS parse + upsert) ---
-            persist_stage_start = timezone.now()
-
-            xls_files = sorted(
-                tmpdir_path.glob(f"altas-{safe_date}-*.xlsx"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
+            mark_run_failed(
+                run,
+                error_message=failure["error_message"],
+                failure_reason=failure["failure_reason"],
+                timed_out=failure["timed_out"],
             )
-
-            if not xls_files:
-                metrics = {
-                    "total_records": 0,
-                    "created": 0,
-                    "updated": 0,
-                    "errors": 0,
-                }
-                create_stage_metric(
-                    run=run,
-                    stage_name="discharge_persistence",
-                    status="succeeded",
-                    started_at=persist_stage_start,
-                    details_json=metrics,
-                )
-                mark_run_succeeded(run)
-                # RPSA-S2: no operational-aggregate write from evidence
-                # persistence. Zero-confirmation metadata is tracked by a
-                # later slice (RPSA-S7).
-                return ExtractionResult(
-                    extraction_type="discharge_extraction",
-                    target_start=parsed_date,
-                    target_end=parsed_date,
-                    success=True,
-                    metrics=metrics,
-                    ingestion_run_id=run.pk,
-                )
-
-            xls_path = xls_files[0]
-
-            try:
-                import openpyxl  # noqa: PLC0415
-
-                wb = openpyxl.load_workbook(xls_path, read_only=True)
-                ws = wb.active
-
-                rows = list(ws.iter_rows(values_only=True))
-                wb.close()
-
-                if not rows:
-                    metrics = {
-                        "total_records": 0,
-                        "created": 0,
-                        "updated": 0,
-                        "errors": 0,
-                    }
-                    create_stage_metric(
-                        run=run,
-                        stage_name="discharge_persistence",
-                        status="succeeded",
-                        started_at=persist_stage_start,
-                        details_json=metrics,
-                    )
-                    mark_run_succeeded(run)
-                    # RPSA-S2: no operational-aggregate write from
-                    # evidence persistence.
-                    return ExtractionResult(
-                        extraction_type="discharge_extraction",
-                        target_start=parsed_date,
-                        target_end=parsed_date,
-                        success=True,
-                        metrics=metrics,
-                        ingestion_run_id=run.pk,
-                    )
-
-                # Skip header row (first row)
-                data_rows = rows[1:] if rows else []
-                patients: list[dict[str, Any]] = []
-
-                for row in data_rows:
-                    parsed = _parse_xls_row(row)
-                    if parsed is not None:
-                        patients.append(parsed)
-
-                metrics = _persist_discharge_records(
-                    patients, ref_date=ref_date,
-                )
-                # RPSA-S2: route persisted rows through the canonical
-                # reconciliation boundary after evidence persistence.
-                metrics.update(_reconcile_persisted_records(patients))
-
-            except Exception as exc:
-                err_msg = safe_error_message(str(exc))
-                create_stage_metric(
-                    run=run,
-                    stage_name="discharge_persistence",
-                    status="failed",
-                    started_at=persist_stage_start,
-                    details_json={"error": err_msg},
-                )
-                mark_run_failed(
-                    run,
-                    error_message=err_msg,
-                    failure_reason="unexpected_exception",
-                )
-                return ExtractionResult(
-                    extraction_type="discharge_extraction",
-                    target_start=parsed_date,
-                    target_end=parsed_date,
-                    success=False,
-                    failure_reason="unexpected_exception",
-                    error_message=err_msg,
-                    ingestion_run_id=run.pk,
-                )
-
-            create_stage_metric(
-                run=run,
-                stage_name="discharge_persistence",
-                status="succeeded",
-                started_at=persist_stage_start,
-                details_json=metrics,
-            )
-
-            mark_run_succeeded(run)
-
             return ExtractionResult(
                 extraction_type="discharge_extraction",
                 target_start=parsed_date,
                 target_end=parsed_date,
-                success=True,
-                metrics=metrics,
+                success=False,
+                failure_reason=failure["failure_reason"],
+                error_message=failure["error_message"],
                 ingestion_run_id=run.pk,
+                zero_confirmed=zero_confirmed,
+                attempt_count=attempt_count,
             )
+
+        if not patients:
+            # RPSA-S7: one empty/missing report is not success. Prior
+            # evidence stays untouched and nothing is persisted before the
+            # semantic outcome is known. Exactly ONE independent
+            # confirmation attempt follows (no retry loop, no third call).
+            patients, failure = _run_discharge_attempt(
+                script_path=script_path,
+                creds=creds,
+                date=date,
+                ref_date_iso=ref_date_iso,
+                headless=headless,
+            )
+            attempt_count = 2
+
+            if failure is not None:
+                # Unconfirmed zero: structured, credential-safe failure.
+                err_msg = safe_error_message(
+                    "Zero-row discharge report could not be confirmed by "
+                    "an independent second attempt."
+                )
+                create_stage_metric(
+                    run=run,
+                    stage_name="discharge_extraction",
+                    status="failed",
+                    started_at=ext_stage_start,
+                    details_json={
+                        "error": err_msg,
+                        "confirmation_failure_reason": failure["failure_reason"],
+                        "attempt_count": attempt_count,
+                        "zero_confirmed": False,
+                    },
+                )
+                mark_run_failed(
+                    run,
+                    error_message=err_msg,
+                    failure_reason="zero_unconfirmed",
+                )
+                return ExtractionResult(
+                    extraction_type="discharge_extraction",
+                    target_start=parsed_date,
+                    target_end=parsed_date,
+                    success=False,
+                    failure_reason="zero_unconfirmed",
+                    error_message=err_msg,
+                    ingestion_run_id=run.pk,
+                    zero_confirmed=False,
+                    attempt_count=attempt_count,
+                )
+
+            if not patients:
+                # Two independent successful empty attempts: the zero is
+                # semantically confirmed.
+                zero_confirmed = True
+
+        create_stage_metric(
+            run=run,
+            stage_name="discharge_extraction",
+            status="succeeded",
+            started_at=ext_stage_start,
+            details_json={
+                "attempt_count": attempt_count,
+                "zero_confirmed": zero_confirmed,
+            },
+        )
+
+        # --- Stage: discharge_persistence (upsert + reconcile + refresh) --
+        persist_stage_start = timezone.now()
+
+        try:
+            metrics = _persist_discharge_records(
+                patients, ref_date=ref_date,
+            )
+            # RPSA-S2: route persisted rows through the canonical
+            # reconciliation boundary after evidence persistence.
+            metrics.update(_reconcile_persisted_records(patients))
+            metrics["zero_confirmed"] = zero_confirmed
+            metrics["attempt_count"] = attempt_count
+            # RPSA-S7: the aggregate refresh command is the only
+            # extraction-triggered writer of the operational daily
+            # aggregate. It runs exactly once per confirmed success —
+            # rows or confirmed zero — AFTER evidence persistence and
+            # reconciliation complete. Failed or unconfirmed extractions
+            # never reach this point.
+            call_command("refresh_daily_discharge_counts")
+        except Exception as exc:
+            err_msg = safe_error_message(str(exc))
+            create_stage_metric(
+                run=run,
+                stage_name="discharge_persistence",
+                status="failed",
+                started_at=persist_stage_start,
+                details_json={"error": err_msg},
+            )
+            mark_run_failed(
+                run,
+                error_message=err_msg,
+                failure_reason="unexpected_exception",
+            )
+            return ExtractionResult(
+                extraction_type="discharge_extraction",
+                target_start=parsed_date,
+                target_end=parsed_date,
+                success=False,
+                failure_reason="unexpected_exception",
+                error_message=err_msg,
+                ingestion_run_id=run.pk,
+                zero_confirmed=zero_confirmed,
+                attempt_count=attempt_count,
+            )
+
+        create_stage_metric(
+            run=run,
+            stage_name="discharge_persistence",
+            status="succeeded",
+            started_at=persist_stage_start,
+            details_json=metrics,
+        )
+
+        mark_run_succeeded(run)
+
+        return ExtractionResult(
+            extraction_type="discharge_extraction",
+            target_start=parsed_date,
+            target_end=parsed_date,
+            success=True,
+            metrics=metrics,
+            ingestion_run_id=run.pk,
+            zero_confirmed=zero_confirmed,
+            attempt_count=attempt_count,
+        )
 
     except Exception as exc:
         err_msg = safe_error_message(str(exc))

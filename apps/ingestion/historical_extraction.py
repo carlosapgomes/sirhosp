@@ -227,6 +227,16 @@ class ExtractionResult:
             contain credentials or sensitive context.
         ingestion_run_id: Optional primary key of the associated
             ``IngestionRun``, if one was created.
+        zero_confirmed: Whether an empty extraction result was confirmed
+            by a second independent attempt (RPSA-S7). ``False`` for
+            non-empty results, unconfirmed results and all results
+            produced before zero confirmation existed. Lets later
+            health/catch-up code distinguish confirmed zero from missing
+            or unconfirmed coverage.
+        attempt_count: Number of independent source invocations used by
+            the extraction (1 normally; 2 when an empty first attempt was
+            re-checked). Default ``1`` keeps every existing caller
+            behaviour unchanged.
     """
 
     extraction_type: str
@@ -238,3 +248,5 @@ class ExtractionResult:
     failure_reason: str = ""
     error_message: str = ""
     ingestion_run_id: Optional[int] = None
+    zero_confirmed: bool = False
+    attempt_count: int = 1
