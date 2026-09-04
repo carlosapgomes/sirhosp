@@ -229,8 +229,13 @@ class TestPersistDischargeRecordsIdempotency:
         # Still only 1 record
         assert DischargeRecord.objects.count() == 1
 
-    def test_empty_persistence_resets_daily_count(self):
-        """Persistence with empty patient list should reset DailyDischargeCount."""
+    def test_empty_persistence_never_writes_daily_count(self):
+        """Persistence with empty list leaves DailyDischargeCount untouched.
+
+        RPSA-S2 (controller-authorized fixture update): evidence
+        persistence is decoupled from the operational aggregate; the
+        old 'reset to zero' write no longer exists.
+        """
         from apps.discharges.extraction_service import _persist_discharge_records
 
         ref_date = date(2026, 6, 1)
@@ -246,23 +251,21 @@ class TestPersistDischargeRecordsIdempotency:
             },
         ]
 
-        # Pre-populate
+        # Pre-populate evidence only (no aggregate row may appear).
         _persist_discharge_records(batch, ref_date=ref_date)
         assert DischargeRecord.objects.count() == 1
+        assert DailyDischargeCount.objects.count() == 0
 
-        # Call with empty list
+        # Call with empty list: aggregate stays untouched.
         result = _persist_discharge_records([], ref_date=ref_date)
         assert result["total_records"] == 0
-
-        # Verify DDC is reset to 0
-        ddc = DailyDischargeCount.objects.get(date=ref_date)
-        assert ddc.count == 0
+        assert DailyDischargeCount.objects.count() == 0
 
         # DischargeRecord rows remain (no date-based cleanup needed)
         assert DischargeRecord.objects.count() == 1
 
     def test_zero_records_is_valid_success(self):
-        """Calling with empty list on clean state returns success with zero count."""
+        """Empty list on clean state succeeds without aggregate writes."""
         from apps.discharges.extraction_service import _persist_discharge_records
 
         ref_date = date(2026, 6, 1)
@@ -271,11 +274,11 @@ class TestPersistDischargeRecordsIdempotency:
         result = _persist_discharge_records([], ref_date=ref_date)
         assert result["total_records"] == 0
         assert DischargeRecord.objects.count() == 0
-        ddc = DailyDischargeCount.objects.get(date=ref_date)
-        assert ddc.count == 0
+        # RPSA-S2: no DailyDischargeCount row is created.
+        assert DailyDischargeCount.objects.count() == 0
 
     def test_isolated_by_date_same_data_different_date_no_interference(self):
-        """Records for different dates should not interfere with each other."""
+        """Records for different dates do not interfere; aggregate untouched."""
         from apps.discharges.extraction_service import _persist_discharge_records
 
         date_a = date(2026, 6, 1)
@@ -295,20 +298,19 @@ class TestPersistDischargeRecordsIdempotency:
         # Persist for date_a
         _persist_discharge_records(batch, ref_date=date_a)
         assert DischargeRecord.objects.count() == 1
-        assert DailyDischargeCount.objects.filter(date=date_a).count() == 1
+        assert DailyDischargeCount.objects.filter(date=date_a).count() == 0
 
-        # Persist same data for date_b
+        # Persist same data for date_b: same (prontuario, data_internacao)
+        # identity keeps one record; the ref_date parameter never creates
+        # aggregate rows (RPSA-S2 decoupling).
         _persist_discharge_records(batch, ref_date=date_b)
-        assert DischargeRecord.objects.count() == 1  # still 1 (same prontuario+data_int)
-        assert DailyDischargeCount.objects.filter(date=date_b).count() == 1
+        assert DischargeRecord.objects.count() == 1
+        assert DailyDischargeCount.objects.filter(date=date_b).count() == 0
 
-        # Reset date_a to zero
+        # Reset date_a to zero: aggregate rows are simply absent.
         _persist_discharge_records([], ref_date=date_a)
-        ddc_a = DailyDischargeCount.objects.get(date=date_a)
-        assert ddc_a.count == 0
-        # date_b is unaffected
-        ddc_b = DailyDischargeCount.objects.get(date=date_b)
-        assert ddc_b.count == 1
+        assert DailyDischargeCount.objects.count() == 0
+        assert DischargeRecord.objects.count() == 1
 
     def test_atomic_transaction_recovery(self):
         """If an error occurs mid-persistence, no partial state should persist."""
@@ -359,8 +361,8 @@ class TestPersistDischargeRecordsIdempotency:
         assert DischargeRecord.objects.count() == 1, (
             "Transaction should roll back on mid-process failure"
         )
-        # DailyDischargeCount should not have been created for new_batch
-        assert DailyDischargeCount.objects.filter(date=ref_date).count() == 1
+        # No DailyDischargeCount write exists on this path at all (RPSA-S2)
+        assert DailyDischargeCount.objects.count() == 0
 
 
 # =========================================================================
@@ -379,8 +381,6 @@ class TestServiceDischargeExtractionIdempotency:
         from apps.discharges.extraction_service import run_discharge_extraction
         from apps.ingestion.models import IngestionRun
 
-        ref_date = date(2026, 6, 1)
-
         # First extraction
         with _mock_tempdir_and_xls(records_count=3):
             result1 = run_discharge_extraction(date="01/06/2026")
@@ -393,39 +393,35 @@ class TestServiceDischargeExtractionIdempotency:
         assert result2.success is True
         assert result2.metrics["total_records"] == 3
 
-        # Verify no duplication: exactly 3 DischargeRecord rows, not 6
-        records = DischargeRecord.objects.filter(
-            daily_count__date=ref_date,
-        )
+        # Verify no duplication: exactly 3 DischargeRecord rows, not 6.
+        # Evidence is queried by its own identity, not the aggregate link
+        # (RPSA-S2 decoupling).
+        records = DischargeRecord.objects.all()
         assert len(records) == 3, (
             "Repeated extraction should not duplicate DischargeRecord rows"
         )
+        assert all(r.daily_count_id is None for r in records)
 
-        # DailyDischargeCount should have count=3
-        ddc = DailyDischargeCount.objects.get(date=ref_date)
-        assert ddc.count == 3
+        # No aggregate row may be written by extraction (RPSA-S2)
+        assert DailyDischargeCount.objects.count() == 0
 
         # Verify two separate IngestionRuns were created
         assert result1.ingestion_run_id != result2.ingestion_run_id
         runs = IngestionRun.objects.filter(intent="discharge_extraction")
         assert runs.count() >= 2
 
-    def test_service_empty_output_resets_daily_count(
+    def test_service_empty_output_keeps_evidence_and_aggregate_untouched(
         self, mock_credentials, mock_subprocess_success,
     ):
-        """When no XLS output is produced on re-run, DailyDischargeCount should reset to 0."""
+        """No XLS on re-run: evidence remains; aggregate is never reset/written."""
         from apps.discharges.extraction_service import run_discharge_extraction
-
-        ref_date = date(2026, 6, 1)
 
         # First extraction populates 3 records
         with _mock_tempdir_and_xls(records_count=3):
             result1 = run_discharge_extraction(date="01/06/2026")
         assert result1.success is True
-        assert DischargeRecord.objects.filter(
-            daily_count__date=ref_date,
-        ).count() == 3
-        assert DailyDischargeCount.objects.get(date=ref_date).count == 3
+        assert DischargeRecord.objects.count() == 3
+        assert DailyDischargeCount.objects.count() == 0
 
         # Second extraction: no XLS files found → zero records
         real_dir = Path(tempfile_module.mkdtemp())
@@ -443,31 +439,24 @@ class TestServiceDischargeExtractionIdempotency:
         assert result2.success is True
         assert result2.metrics["total_records"] == 0
 
-        # DailyDischargeCount should be reset to 0
-        ddc = DailyDischargeCount.objects.get(date=ref_date)
-        assert ddc.count == 0
-        assert ddc.raw_data == []
+        # Aggregate stays untouched (RPSA-S2: no write, no reset)
+        assert DailyDischargeCount.objects.count() == 0
 
         # DischargeRecord rows from first extraction remain (no date-based cleanup)
-        assert DischargeRecord.objects.filter(
-            daily_count__date=ref_date,
-        ).count() == 3
+        assert DischargeRecord.objects.count() == 3
 
-    def test_service_empty_xls_resets_daily_count(
+    def test_service_empty_xls_keeps_evidence_and_aggregate_untouched(
         self, mock_credentials, mock_subprocess_success,
     ):
-        """When XLS has only header, DailyDischargeCount should reset to 0."""
+        """Header-only XLS on re-run: evidence remains; aggregate untouched."""
         from apps.discharges.extraction_service import run_discharge_extraction
-
-        ref_date = date(2026, 6, 1)
 
         # First extraction populates records
         with _mock_tempdir_and_xls(records_count=3):
             result1 = run_discharge_extraction(date="01/06/2026")
         assert result1.success is True
-        assert DischargeRecord.objects.filter(
-            daily_count__date=ref_date,
-        ).count() == 3
+        assert DischargeRecord.objects.count() == 3
+        assert DailyDischargeCount.objects.count() == 0
 
         # Second extraction: XLS with only header → zero records
         real_dir = Path(tempfile_module.mkdtemp())
@@ -499,14 +488,11 @@ class TestServiceDischargeExtractionIdempotency:
         assert result2.success is True
         assert result2.metrics["total_records"] == 0
 
-        # DailyDischargeCount should be reset to 0
-        ddc = DailyDischargeCount.objects.get(date=ref_date)
-        assert ddc.count == 0
+        # Aggregate stays untouched (RPSA-S2: no write, no reset)
+        assert DailyDischargeCount.objects.count() == 0
 
         # DischargeRecord rows from first extraction remain (no date-based cleanup)
-        assert DischargeRecord.objects.filter(
-            daily_count__date=ref_date,
-        ).count() == 3
+        assert DischargeRecord.objects.count() == 3
 
     def test_service_persistence_failure_does_not_leave_partial_state(
         self, mock_credentials, mock_subprocess_success,
@@ -517,15 +503,11 @@ class TestServiceDischargeExtractionIdempotency:
         """
         from apps.discharges.extraction_service import run_discharge_extraction
 
-        ref_date = date(2026, 6, 1)
-
         # First extraction populates records
         with _mock_tempdir_and_xls(records_count=3):
             result1 = run_discharge_extraction(date="01/06/2026")
         assert result1.success is True
-        assert DischargeRecord.objects.filter(
-            daily_count__date=ref_date,
-        ).count() == 3
+        assert DischargeRecord.objects.count() == 3
 
         # Second extraction: subprocess success but persistence fails
         with _mock_tempdir_and_xls(records_count=5):
@@ -540,9 +522,8 @@ class TestServiceDischargeExtractionIdempotency:
         assert result2.success is False
         assert result2.failure_reason == "unexpected_exception"
 
-        # The original 3 records should still be intact
-        assert DischargeRecord.objects.filter(
-            daily_count__date=ref_date,
-        ).count() == 3, (
+        # The original 3 records should still be intact (queried by their
+        # own identity, not the aggregate link — RPSA-S2 decoupling)
+        assert DischargeRecord.objects.count() == 3, (
             "Persistence failure must not leave a partial or empty state"
         )

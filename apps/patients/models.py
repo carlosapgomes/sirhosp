@@ -1,6 +1,66 @@
 """Patient and Admission domain models (Slice S1)."""
 
+import uuid
+
 from django.db import models
+from django.db.models import Q
+
+# ---------------------------------------------------------------------------
+# Canonical exit reconciliation taxonomy (RPSA-S2).
+# Single source of truth for reconciliation statuses and exit types; the
+# database check constraints below enforce exactly these values.
+# ---------------------------------------------------------------------------
+
+RECONCILIATION_STATUS_PENDING = "pending"
+"""Evidence has not produced a reconciliation outcome yet."""
+RECONCILIATION_STATUS_RECONCILED = "reconciled"
+"""Evidence closed (or corrected) one uniquely matched admission."""
+RECONCILIATION_STATUS_ALREADY_RECONCILED = "already_reconciled"
+"""Evidence repeated against an admission already closed at the same time."""
+RECONCILIATION_STATUS_PATIENT_NOT_FOUND = "patient_not_found"
+"""No mirrored patient resolves for the evidence."""
+RECONCILIATION_STATUS_ADMISSION_NOT_FOUND = "admission_not_found"
+"""Patient resolves but no compatible admission does."""
+RECONCILIATION_STATUS_AMBIGUOUS = "ambiguous"
+"""Multiple candidates remain without contradictory strong identifiers."""
+RECONCILIATION_STATUS_CONFLICT = "conflict"
+"""Contradictory strong identifiers or a temporally unvalidatable match."""
+RECONCILIATION_STATUS_INVALID_EXIT_DATETIME = "invalid_exit_datetime"
+"""Exit is earlier than the matched admission start."""
+
+RECONCILIATION_STATUSES = (
+    RECONCILIATION_STATUS_PENDING,
+    RECONCILIATION_STATUS_RECONCILED,
+    RECONCILIATION_STATUS_ALREADY_RECONCILED,
+    RECONCILIATION_STATUS_PATIENT_NOT_FOUND,
+    RECONCILIATION_STATUS_ADMISSION_NOT_FOUND,
+    RECONCILIATION_STATUS_AMBIGUOUS,
+    RECONCILIATION_STATUS_CONFLICT,
+    RECONCILIATION_STATUS_INVALID_EXIT_DATETIME,
+)
+
+RECONCILIATION_STATUS_CHOICES = [
+    (RECONCILIATION_STATUS_PENDING, "Pending"),
+    (RECONCILIATION_STATUS_RECONCILED, "Reconciled"),
+    (RECONCILIATION_STATUS_ALREADY_RECONCILED, "Already reconciled"),
+    (RECONCILIATION_STATUS_PATIENT_NOT_FOUND, "Patient not found"),
+    (RECONCILIATION_STATUS_ADMISSION_NOT_FOUND, "Admission not found"),
+    (RECONCILIATION_STATUS_AMBIGUOUS, "Ambiguous"),
+    (RECONCILIATION_STATUS_CONFLICT, "Conflict"),
+    (RECONCILIATION_STATUS_INVALID_EXIT_DATETIME, "Invalid exit datetime"),
+]
+
+EXIT_HOSPITAL_DISCHARGE = "hospital_discharge"
+EXIT_DEATH = "death"
+EXIT_UNKNOWN = "unknown"
+
+EXIT_TYPES = (EXIT_HOSPITAL_DISCHARGE, EXIT_DEATH, EXIT_UNKNOWN)
+
+EXIT_TYPE_CHOICES = [
+    (EXIT_HOSPITAL_DISCHARGE, "Hospital discharge"),
+    (EXIT_DEATH, "Death"),
+    (EXIT_UNKNOWN, "Unknown"),
+]
 
 
 class Patient(models.Model):
@@ -181,6 +241,75 @@ class AdmissionSourceAlias(models.Model):
 
     def __str__(self) -> str:
         return f"{self.source_system}:{self.alias_key} -> #{self.admission_id}"
+
+
+class ReconciliationEvent(models.Model):
+    """Append-only audit of one canonical exit-reconciliation attempt.
+
+    One row is created per attempted reconciliation (RPSA-S2). Payloads
+    carry structural state required for traceability and reversibility —
+    source evidence kind/primary key, status, exit type, reason code and
+    prior/new ``discharge_date`` values — and never duplicate patient
+    identity (name, record number) or clinical text. Application code only
+    creates rows: audit is retained indefinitely and must never be updated
+    or deleted through services.
+    """
+
+    operation_uuid = models.UUIDField(
+        default=uuid.uuid4,
+        editable=False,
+        unique=True,
+    )
+    source_kind = models.CharField(
+        max_length=50,
+        help_text="Evidence kind (e.g. discharge_record).",
+    )
+    source_id = models.BigIntegerField(
+        help_text="Primary key of the evidence row (no FK: audit outlives evidence).",
+    )
+    admission = models.ForeignKey(
+        Admission,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reconciliation_events",
+        help_text="Candidate or matched admission, when one resolved.",
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=RECONCILIATION_STATUS_CHOICES,
+    )
+    exit_type = models.CharField(
+        max_length=32,
+        choices=EXIT_TYPE_CHOICES,
+        default=EXIT_UNKNOWN,
+    )
+    reason_code = models.CharField(max_length=64, blank=True, default="")
+    prior_discharge_date = models.DateTimeField(null=True, blank=True)
+    new_discharge_date = models.DateTimeField(null=True, blank=True)
+    details_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["source_kind", "source_id"],
+                name="ix_recon_event_source",
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(status__in=RECONCILIATION_STATUSES),
+                name="ck_reconciliation_event_status",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"ReconciliationEvent {self.operation_uuid} "
+            f"[{self.status}] {self.source_kind}#{self.source_id}"
+        )
 
 
 class PatientIdentifierHistory(models.Model):

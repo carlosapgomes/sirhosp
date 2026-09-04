@@ -127,14 +127,22 @@ class TestExtractDischargesHook:
         assert "DailyDischargeCount" not in content
 
     def test_service_module_contains_persistence_logic(self):
-        """extraction_service.py contains DailyDischargeCount.update_or_create."""
+        """extraction_service.py persists evidence WITHOUT the daily aggregate.
+
+        RPSA-S2 (controller-authorized fixture update): evidence
+        persistence is decoupled from ``DailyDischargeCount`` — the
+        aggregate must never be written from report persistence. The
+        canonical reconciliation boundary must be present instead.
+        """
         from pathlib import Path
         source = (
             Path(__file__).resolve().parents[2]
             / "apps" / "discharges" / "extraction_service.py"
         )
         content = source.read_text()
-        assert "DailyDischargeCount" in content
-        assert "update_or_create" in content
+        # Evidence persistence must not write the operational aggregate.
+        assert "DailyDischargeCount" not in content
+        # Reconciliation must be routed through the shared boundary.
+        assert "_reconcile_persisted_records" in content
         # The service must manage persistence (not delegate to another command)
         assert "call_command" not in content

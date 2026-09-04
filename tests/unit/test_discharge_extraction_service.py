@@ -243,14 +243,12 @@ class TestSuccessfulDischargeExtraction:
         assert "discharge_extraction" in stage_names
         assert "discharge_persistence" in stage_names
 
-        # Verify persisted DailyDischargeCount
-        ddc = DailyDischargeCount.objects.get(date=date(2026, 6, 1))
-        assert ddc.count == 5
-        assert len(ddc.raw_data) == 5
-
-        # Verify persisted DischargeRecord rows
+        # Verify persisted DischargeRecord rows (evidence decoupled from the
+        # aggregate: RPSA-S2 — no DailyDischargeCount row may be written).
+        assert DailyDischargeCount.objects.count() == 0
         records = DischargeRecord.objects.all()
         assert len(records) == 5
+        assert all(r.daily_count_id is None for r in records)
         assert records.filter(prontuario="100000").exists()
         assert records.filter(prontuario="100004").exists()
 
@@ -269,9 +267,8 @@ class TestSuccessfulDischargeExtraction:
         run = IngestionRun.objects.get(pk=result.ingestion_run_id)
         assert run.status == "succeeded"
 
-        ddc = DailyDischargeCount.objects.get(date=date(2026, 6, 1))
-        assert ddc.count == 0
-        assert ddc.raw_data == []
+        # RPSA-S2: zero records never writes the operational aggregate.
+        assert DailyDischargeCount.objects.count() == 0
 
     def test_no_xls_file_means_zero_records(self, mock_credentials, mock_subprocess_success):
         """When no XLS file is found, treat as zero records (success)."""
@@ -291,8 +288,8 @@ class TestSuccessfulDischargeExtraction:
 
         assert result.success is True
         assert result.metrics["total_records"] == 0
-        ddc = DailyDischargeCount.objects.get(date=date(2026, 6, 1))
-        assert ddc.count == 0
+        # RPSA-S2: no aggregate write when no XLS is produced.
+        assert DailyDischargeCount.objects.count() == 0
 
     def test_preserves_existing_records_for_different_date(  # noqa: E501
         self, mock_credentials, mock_subprocess_success,
@@ -320,8 +317,9 @@ class TestSuccessfulDischargeExtraction:
         assert result2.success is True
         assert result2.metrics["total_records"] == 0
 
-        # DailyDischargeCount: 3 from first run (one per alta_em date), 0 new from second (no XLS)
-        assert DailyDischargeCount.objects.count() == 3
+        # Evidence survives across dates; the aggregate stays untouched
+        # (RPSA-S2 decoupling).
+        assert DailyDischargeCount.objects.count() == 0
         assert DischargeRecord.objects.count() == 3  # only from first date
 
 

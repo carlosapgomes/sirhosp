@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import date, datetime
+from typing import TYPE_CHECKING
 
+from django.db import transaction
 from django.utils import timezone
 
-from apps.ingestion.services import queue_demographics_only_run
+from apps.ingestion.services import (
+    queue_admissions_only_run,
+    queue_demographics_only_run,
+)
 from apps.patients.models import Admission, Patient
+
+if TYPE_CHECKING:
+    from apps.discharges.models import DischargeRecord
+
+logger = logging.getLogger(__name__)
 
 
 def process_discharges(
@@ -239,3 +250,150 @@ def _build_recovery_admission_key(
     raw = f"recovery|tasy|{patient_record}|{admission_part}|{discharge_part}"
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
     return f"recovery-{patient_record}-{admission_part}-{discharge_part}-{digest}"
+
+
+# ---------------------------------------------------------------------------
+# Canonical exit reconciliation (RPSA-S2)
+# ---------------------------------------------------------------------------
+
+
+def reconcile_discharge_record(
+    *,
+    record: DischargeRecord,
+    source_system: str = "tasy",
+) -> str:
+    """Offer one persisted ``DischargeRecord`` to canonical reconciliation.
+
+    Uses only the identifiers/precision present in the discharge XLS
+    shape: patient record plus ``America/Bahia`` local admission date
+    (``data_internacao``) plus the effective exit (``saida_em``). The
+    report has no admission key and no exact admission start, so the
+    key/alias/exact-start matching levels are skipped, never synthesized.
+    ``alta_em`` is never used here: a row without ``saida_em`` stays
+    pending evidence and cannot close an admission.
+
+    Evidence linkage/status is written in the same transaction as the
+    admission mutation and the append-only audit. Missing mirror data
+    results in a bounded, deduplicated source-synchronization request —
+    never a synthetic patient or admission. Logs carry aggregate-safe
+    fields only (record primary key and status), never patient identity.
+
+    Returns the final reconciliation status (one of
+    ``apps.patients.models.RECONCILIATION_STATUSES``).
+    """
+    from apps.patients.models import (  # noqa: PLC0415
+        EXIT_HOSPITAL_DISCHARGE,
+        RECONCILIATION_STATUS_ADMISSION_NOT_FOUND,
+        RECONCILIATION_STATUS_ALREADY_RECONCILED,
+        RECONCILIATION_STATUS_PATIENT_NOT_FOUND,
+        RECONCILIATION_STATUS_RECONCILED,
+    )
+    from apps.patients.reconciliation import (  # noqa: PLC0415
+        EVIDENCE_SOURCE_DISCHARGE_RECORD,
+        DischargeExitEvidence,
+        apply_discharge_exit,
+        decide_discharge_match,
+    )
+
+    exit_datetime = record.saida_em
+    if exit_datetime is not None and timezone.is_naive(exit_datetime):
+        exit_datetime = timezone.make_aware(exit_datetime)
+
+    if exit_datetime is None:
+        # Row lacks the effective exit: stays pending evidence. The
+        # medical summary (alta_em) never closes an admission.
+        logger.info(
+            "discharge reconciliation skipped: record_id=%s status=%s",
+            record.pk,
+            record.reconciliation_status,
+        )
+        return record.reconciliation_status
+
+    evidence = DischargeExitEvidence(
+        patient_record=record.prontuario,
+        exit_datetime=exit_datetime,
+        admission_key=None,
+        admission_start=None,
+        admission_local_date=_parse_admission_date(record.data_internacao),
+        source_system=source_system,
+    )
+
+    with transaction.atomic():
+        decision = decide_discharge_match(evidence=evidence)
+        status = apply_discharge_exit(
+            decision=decision,
+            exit_datetime=exit_datetime,
+            exit_type=EXIT_HOSPITAL_DISCHARGE,
+            source_kind=EVIDENCE_SOURCE_DISCHARGE_RECORD,
+            source_id=record.pk,
+        )
+        # Evidence-side linkage/status joins the same atomic block so a
+        # crash can never close an admission while leaving the evidence
+        # row stale.
+        record.admission = (
+            decision.admission
+            if status in (
+                RECONCILIATION_STATUS_RECONCILED,
+                RECONCILIATION_STATUS_ALREADY_RECONCILED,
+            )
+            else None
+        )
+        record.reconciliation_status = status
+        record.reconciled_at = timezone.now()
+        record.save(
+            update_fields=["admission", "reconciliation_status", "reconciled_at"],
+        )
+
+    if status == RECONCILIATION_STATUS_PATIENT_NOT_FOUND:
+        queued = _enqueue_missing_mirror_sync(
+            record.prontuario,
+            include_demographics=True,
+        )
+    elif status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND:
+        queued = _enqueue_missing_mirror_sync(
+            record.prontuario,
+            include_demographics=False,
+        )
+    else:
+        queued = {"admissions_only": 0, "demographics_only": 0}
+
+    logger.info(
+        "discharge reconciliation: record_id=%s status=%s "
+        "admissions_sync_queued=%d demographics_sync_queued=%d",
+        record.pk,
+        status,
+        queued["admissions_only"],
+        queued["demographics_only"],
+    )
+    return status
+
+
+def _enqueue_missing_mirror_sync(
+    patient_record: str,
+    *,
+    include_demographics: bool,
+) -> dict[str, int]:
+    """Enqueue bounded, deduplicated source synchronization requests.
+
+    At most one active (queued/running) run per intent and patient record
+    is kept, so repeated unresolved evidence cannot flood the ingestion
+    queue. No synthetic Patient/Admission is ever created from evidence.
+    """
+    from apps.ingestion.models import IngestionRun  # noqa: PLC0415
+
+    active_intents = set(
+        IngestionRun.objects.filter(
+            status__in=("queued", "running"),
+            intent__in=("admissions_only", "demographics_only"),
+            parameters_json__patient_record=patient_record,
+        ).values_list("intent", flat=True)
+    )
+
+    queued = {"admissions_only": 0, "demographics_only": 0}
+    if "admissions_only" not in active_intents:
+        queue_admissions_only_run(patient_record=patient_record)
+        queued["admissions_only"] = 1
+    if include_demographics and "demographics_only" not in active_intents:
+        queue_demographics_only_run(patient_record=patient_record)
+        queued["demographics_only"] = 1
+    return queued

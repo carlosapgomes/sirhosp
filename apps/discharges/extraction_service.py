@@ -5,8 +5,14 @@ discharge report extraction from the source system. Designed to be invoked
 both by the ``extract_discharges`` management command and by future
 deterministic historical recovery orchestrators.
 
-This module is intentionally separate from ``apps/discharges/services.py``
-to avoid coupling with or modifying the existing discharge reconciliation flow.
+Since RPSA-S2 this module:
+
+- persists ``DischargeRecord`` evidence without writing the operational
+  daily aggregate (decoupled report-batch storage);
+- routes every persisted row through the canonical reconciliation
+  boundary (``apps.patients.reconciliation`` via
+  ``apps.discharges.services.reconcile_discharge_record``) using only
+  ``saida_em``, never ``alta_em``.
 """
 
 from __future__ import annotations
@@ -62,16 +68,6 @@ def _make_aware(dt: datetime | None) -> datetime | None:
     if timezone.is_naive(dt):
         return timezone.make_aware(dt)
     return dt
-
-
-def _patient_for_raw(p: dict) -> dict:
-    """Build a JSON-serializable copy of a patient dict."""
-    d = dict(p)
-    for key in ("alta_em", "saida_em"):
-        val = d.get(key)
-        if isinstance(val, datetime):
-            d[key] = val.isoformat()
-    return d
 
 
 def _parse_xls_row(
@@ -145,24 +141,25 @@ def _persist_discharge_records(
     *,
     ref_date: Date,
 ) -> dict[str, int]:
-    """Upsert ``DischargeRecord`` rows and update ``DailyDischargeCount``.
+    """Upsert ``DischargeRecord`` evidence rows (RPSA-S2).
+
+    Evidence persistence is decoupled from the operational daily
+    aggregate: this path never creates or updates it and never stores
+    patient-bearing ``raw_data``. ``DischargeRecord`` rows are persisted
+    with a null ``daily_count`` and are reconciled afterwards by
+    :func:`_reconcile_persisted_records`.
 
     Args:
         patients: List of parsed patient dicts from XLS rows.
-        ref_date: The reference date for the ``DailyDischargeCount``.
+        ref_date: The reference date of the extraction report (metadata).
 
     Returns:
         A dict with ``total_records``, ``created``, ``updated``, and
         ``errors`` counters.
     """
-    from apps.discharges.models import DailyDischargeCount, DischargeRecord  # noqa: PLC0415
+    from apps.discharges.models import DischargeRecord  # noqa: PLC0415
 
-    # When patients list is empty, record zero-count for ref_date
     if not patients:
-        DailyDischargeCount.objects.update_or_create(
-            date=ref_date,
-            defaults={"count": 0, "raw_data": []},
-        )
         return {
             "total_records": 0,
             "created": 0,
@@ -207,13 +204,8 @@ def _persist_discharge_records(
                 existing.save()
                 updated += 1
         else:
-            count_date = alta_em.date() if alta_em else ref_date
-            daily_count, _ = DailyDischargeCount.objects.get_or_create(
-                date=count_date,
-                defaults={"count": 0, "raw_data": []},
-            )
             DischargeRecord.objects.create(
-                daily_count=daily_count,
+                daily_count=None,
                 alta_em=alta_em,
                 saida_em=saida_em,
                 prontuario=prontuario,
@@ -224,22 +216,46 @@ def _persist_discharge_records(
             )
             created += 1
 
-    # Persist DailyDischargeCount with JSON-serializable raw_data
-    raw_patients = [_patient_for_raw(p) for p in patients if p is not None]
-    DailyDischargeCount.objects.update_or_create(
-        date=ref_date,
-        defaults={
-            "count": len(raw_patients),
-            "raw_data": raw_patients,
-        },
-    )
-
     return {
-        "total_records": len(raw_patients),
+        "total_records": len([p for p in patients if p is not None]),
         "created": created,
         "updated": updated,
         "errors": parse_errors,
     }
+
+
+def _reconcile_persisted_records(
+    patients: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Offer every persisted report row to canonical reconciliation.
+
+    Calls the shared boundary
+    (:func:`apps.discharges.services.reconcile_discharge_record`) instead
+    of duplicating matching rules. Rows lacking ``saida_em`` stay
+    pending. Returns one counter per reconciliation status, keyed as
+    ``reconciliation_<status>``.
+    """
+    from apps.discharges.models import DischargeRecord  # noqa: PLC0415
+    from apps.discharges.services import (  # noqa: PLC0415
+        reconcile_discharge_record,
+    )
+    from apps.patients.models import RECONCILIATION_STATUSES  # noqa: PLC0415
+
+    counters = {f"reconciliation_{s}": 0 for s in RECONCILIATION_STATUSES}
+
+    for p in patients:
+        if p is None:
+            continue
+        record = DischargeRecord.objects.filter(
+            prontuario=p["prontuario"],
+            data_internacao=p["data_internacao"],
+        ).first()
+        if record is None:
+            continue
+        status = reconcile_discharge_record(record=record)
+        counters[f"reconciliation_{status}"] += 1
+
+    return counters
 
 
 # ---------------------------------------------------------------------------
@@ -262,9 +278,10 @@ def run_discharge_extraction(
     3. Create an ``IngestionRun`` for observability.
     4. Execute the Playwright automation script via subprocess.
     5. Parse the generated XLS output.
-    6. Persist records via :func:`_persist_discharge_records`.
-    7. Record stage metrics.
-    8. Return a structured ``ExtractionResult``.
+    6. Persist evidence via :func:`_persist_discharge_records`.
+    7. Reconcile persisted rows via :func:`_reconcile_persisted_records`.
+    8. Record stage metrics (including per-status reconciliation counters).
+    9. Return a structured ``ExtractionResult``.
 
     Args:
         date: Target date in ``DD/MM/AAAA`` format.
@@ -487,12 +504,9 @@ def run_discharge_extraction(
                     details_json=metrics,
                 )
                 mark_run_succeeded(run)
-                # Ensure DailyDischargeCount exists for this date with zero count
-                from apps.discharges.models import DailyDischargeCount as _DDC  # noqa: PLC0415
-                _DDC.objects.update_or_create(
-                    date=ref_date,
-                    defaults={"count": 0, "raw_data": []},
-                )
+                # RPSA-S2: no operational-aggregate write from evidence
+                # persistence. Zero-confirmation metadata is tracked by a
+                # later slice (RPSA-S7).
                 return ExtractionResult(
                     extraction_type="discharge_extraction",
                     target_start=parsed_date,
@@ -528,11 +542,8 @@ def run_discharge_extraction(
                         details_json=metrics,
                     )
                     mark_run_succeeded(run)
-                    from apps.discharges.models import DailyDischargeCount as _DDC  # noqa: PLC0415
-                    _DDC.objects.update_or_create(
-                        date=ref_date,
-                        defaults={"count": 0, "raw_data": []},
-                    )
+                    # RPSA-S2: no operational-aggregate write from
+                    # evidence persistence.
                     return ExtractionResult(
                         extraction_type="discharge_extraction",
                         target_start=parsed_date,
@@ -554,6 +565,9 @@ def run_discharge_extraction(
                 metrics = _persist_discharge_records(
                     patients, ref_date=ref_date,
                 )
+                # RPSA-S2: route persisted rows through the canonical
+                # reconciliation boundary after evidence persistence.
+                metrics.update(_reconcile_persisted_records(patients))
 
             except Exception as exc:
                 err_msg = safe_error_message(str(exc))
