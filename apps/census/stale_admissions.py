@@ -216,9 +216,14 @@ def observe_accepted_census_run(
         }
 
         # 1. Reappearance resolves census-only suspicion without source
-        #    mutation (explicit exit evidence stays untouched).
+        #    mutation (explicit exit evidence stays untouched). Evidence-
+        #    resolved admissions (discharge_date already set) are skipped
+        #    here so the settled step closes their case as ``exit_confirmed``
+        #    (RPSA-S6 fix: reappearance must never relabel those cases).
         for case in open_cases:
             if case.admission.merged_into_id is not None:
+                continue
+            if case.admission.discharge_date is not None:
                 continue
             record = _patient_record(case.admission.patient)
             if record is None or record not in accepted.occupied_keys:
@@ -377,9 +382,13 @@ def evaluate_and_enqueue_stale_admission_cases(
     with transaction.atomic():
         # 1. Cases whose admission already exited elsewhere: the suspicion
         #    was confirmed; close the case without touching the admission.
+        #    Merged rows are excluded (same filter as the open-case query
+        #    below, mirroring the merge KEEP rationale: cases attached to a
+        #    merged admission freeze instead of resolving here — RPSA-S6).
         settled = StaleAdmissionCase.objects.filter(
             resolved_at__isnull=True,
             admission__discharge_date__isnull=False,
+            admission__merged_into__isnull=True,
         )
         for case in settled:
             case.resolved_at = moment

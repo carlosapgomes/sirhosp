@@ -3,17 +3,24 @@
 Slice S2: Dashboard with operational stats (demo data).
 Slice DRD-S1: Dashboard with real DB queries.
 Slice IRMD-S6: Ingestion metric cards on dashboard and metrics page route.
+Slice RPSA-S6: Permission-protected reconciliation review (queue, detail,
+ephemeral streamed CSV). Patient name and record number appear only in the
+authorized rendering/CSV lookup — never in logs or persisted files.
 """
 
 from __future__ import annotations
 
+import csv
+import logging
 from datetime import date, datetime, timedelta
+from datetime import timezone as dt_timezone
 from io import BytesIO
 from itertools import groupby
-from typing import Any
+from typing import Any, Iterator
 
 import openpyxl
 from django.contrib.auth.decorators import login_required
+from django.core.exceptions import PermissionDenied
 from django.core.paginator import EmptyPage, Paginator
 from django.db.models import (
     Count,
@@ -28,8 +35,15 @@ from django.db.models import (
     Value,
 )
 from django.db.models.functions import Cast, Coalesce, ExtractHour
-from django.http import HttpRequest, HttpResponse
-from django.shortcuts import render
+from django.http import (
+    Http404,
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBase,
+    StreamingHttpResponse,
+)
+from django.shortcuts import get_object_or_404, render
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.http import require_GET
 
@@ -42,7 +56,7 @@ from apps.census.models import (
     Specialty,
     Ward,
 )
-from apps.deaths.models import DailyDeathCount
+from apps.deaths.models import DailyDeathCount, DeathRecord
 from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.ingestion.extractors.patient_flow_snapshot import (
     OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
@@ -59,7 +73,21 @@ from apps.ingestion.patient_flow_findings import (
     build_patient_flow_findings,
 )
 from apps.ingestion.pipeline_health import ENCOUNTER_FALLBACK_STAGE
-from apps.patients.models import Admission, Patient
+from apps.patients.models import (
+    RECONCILIATION_STATUS_AMBIGUOUS,
+    RECONCILIATION_STATUS_CONFLICT,
+    RECONCILIATION_STATUS_PENDING,
+    Admission,
+    Patient,
+    ReconciliationEvent,
+    StaleAdmissionCase,
+)
+from apps.patients.reconciliation import (
+    EVIDENCE_SOURCE_DEATH_RECORD,
+    EVIDENCE_SOURCE_DISCHARGE_RECORD,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @require_GET
@@ -2424,3 +2452,474 @@ def sector_indicators(request: HttpRequest) -> HttpResponse:
     return render(
         request, "services_portal/sector_indicators.html", context
     )
+
+
+# ---------------------------------------------------------------------------
+# RPSA-S6: Permission-protected reconciliation review (queue, detail, CSV).
+#
+# Identity rules: patient name and record number are read here only to
+# render the protected pages and build the streamed CSV for users holding
+# ``patients.review_reconciliation_cases``. No logger call and no persisted
+# file may receive them. Export logging carries aggregate outcome metadata
+# only (row count, filter summary, success/failure).
+# ---------------------------------------------------------------------------
+
+RECONCILIATION_REVIEW_PERMISSION = "patients.review_reconciliation_cases"
+"""Dedicated review permission created by RPSA-S5 migration 0005."""
+
+_QUEUE_PAGE_SIZE = 25
+_QUEUE_EVIDENCE_STATUSES = (
+    RECONCILIATION_STATUS_PENDING,
+    RECONCILIATION_STATUS_AMBIGUOUS,
+    RECONCILIATION_STATUS_CONFLICT,
+)
+_QUEUE_STATUS_LABELS = {
+    "open": "Aberto",
+    RECONCILIATION_STATUS_PENDING: "Pendente",
+    RECONCILIATION_STATUS_AMBIGUOUS: "Ambíguo",
+    RECONCILIATION_STATUS_CONFLICT: "Conflito",
+    StaleAdmissionCase.ResolutionReason.REAPPEARED: "Reapareceu no censo",
+    StaleAdmissionCase.ResolutionReason.EXIT_CONFIRMED: "Saída confirmada",
+}
+_QUEUE_TIPO_LABELS = {
+    "case": "Caso de ausência",
+    "discharge": "Evidência de alta",
+    "death": "Evidência de óbito",
+}
+_QUEUE_STATUS_OPTIONS = [
+    ("", "Todos (fila ativa)"),
+    ("open", "Casos abertos"),
+    (RECONCILIATION_STATUS_PENDING, "Evidência pendente"),
+    (RECONCILIATION_STATUS_AMBIGUOUS, "Evidência ambígua"),
+    (RECONCILIATION_STATUS_CONFLICT, "Evidência em conflito"),
+    (
+        StaleAdmissionCase.ResolutionReason.REAPPEARED,
+        "Resolvidos — reapareceu no censo",
+    ),
+    (
+        StaleAdmissionCase.ResolutionReason.EXIT_CONFIRMED,
+        "Resolvidos — saída confirmada",
+    ),
+]
+_QUEUE_TIPO_OPTIONS = [
+    ("", "Todas as origens"),
+    ("case", "Caso de ausência (censo)"),
+    ("discharge", "Evidência de alta"),
+    ("death", "Evidência de óbito"),
+]
+_QUEUE_IDADE_OPTIONS = [
+    ("", "Qualquer idade"),
+    ("7", "Até 7 dias"),
+    ("30", "Até 30 dias"),
+    ("90", "Até 90 dias"),
+]
+_QUEUE_EVIDENCE_KINDS: dict[str, dict[str, Any]] = {
+    "alta": {
+        "model": DischargeRecord,
+        "source_kind": EVIDENCE_SOURCE_DISCHARGE_RECORD,
+        "tipo_label": _QUEUE_TIPO_LABELS["discharge"],
+    },
+    "obito": {
+        "model": DeathRecord,
+        "source_kind": EVIDENCE_SOURCE_DEATH_RECORD,
+        "tipo_label": _QUEUE_TIPO_LABELS["death"],
+    },
+}
+_MIN_SORT_TIME = datetime(1970, 1, 1, tzinfo=dt_timezone.utc)
+_CSV_HEADERS = ["Tipo", "Status", "Prontuario", "Nome", "Referencia", "Detalhe"]
+
+
+class _CsvEcho:
+    """csv.writer sink that returns each serialized row for streaming."""
+
+    def write(self, value: str) -> str:
+        return value
+
+
+def _require_reconciliation_review(request: HttpRequest) -> None:
+    """Deny non-reviewers with 403 and no disclosure of case existence.
+
+    Anonymous requests never reach this check: ``@login_required`` keeps
+    the portal's existing login-redirect behavior. Authenticated users
+    without the dedicated permission get ``PermissionDenied`` (403).
+    """
+    if not request.user.has_perm(RECONCILIATION_REVIEW_PERMISSION):
+        raise PermissionDenied
+
+
+def _queue_filter_values(request: HttpRequest) -> tuple[str, str, str]:
+    return (
+        request.GET.get("status", "").strip(),
+        request.GET.get("tipo", "").strip(),
+        request.GET.get("idade", "").strip(),
+    )
+
+
+def _reconciliation_queue_rows(
+    status: str, tipo: str, idade: str
+) -> list[dict[str, object]]:
+    """One coherent review surface: open cases UNION review evidence.
+
+    - Cases: open by default; resolved cases only when the status filter
+      explicitly asks for ``reappeared``/``exit_confirmed``.
+    - Evidence: ``DischargeRecord``/``DeathRecord`` rows whose
+      reconciliation status is ``pending``/``ambiguous``/``conflict``.
+      ``patient_not_found`` and ``admission_not_found`` rows are NOT queue
+      items (extraction already enqueues bounded sync for them).
+    Filters narrow by status, source type and age (anchor within the last
+    N days). Output is oldest-anchor first (deterministic).
+    """
+    show_cases = tipo in ("", "case")
+    show_discharges = tipo in ("", "discharge")
+    show_deaths = tipo in ("", "death")
+    evidence_statuses: tuple[str, ...] = _QUEUE_EVIDENCE_STATUSES
+    resolved_case_status = ""
+    if status == "open":
+        evidence_statuses = ()
+    elif status in (
+        StaleAdmissionCase.ResolutionReason.REAPPEARED,
+        StaleAdmissionCase.ResolutionReason.EXIT_CONFIRMED,
+    ):
+        resolved_case_status = status
+        evidence_statuses = ()
+    elif status in _QUEUE_EVIDENCE_STATUSES:
+        show_cases = False
+        evidence_statuses = (status,)
+
+    rows: list[dict[str, Any]] = []
+    if show_cases:
+        case_qs = StaleAdmissionCase.objects.select_related("admission__patient")
+        if resolved_case_status:
+            case_qs = case_qs.filter(
+                resolved_at__isnull=False,
+                resolution_reason=resolved_case_status,
+            )
+        else:
+            case_qs = case_qs.filter(resolved_at__isnull=True)
+        for case in case_qs:
+            status_code = case.resolution_reason or "open"
+            rows.append(
+                {
+                    "kind": "case",
+                    "pk": case.pk,
+                    "status_label": _QUEUE_STATUS_LABELS.get(status_code, "Aberto"),
+                    "tipo_label": _QUEUE_TIPO_LABELS["case"],
+                    "anchor_at": case.first_absence_at,
+                    "patient_name": case.admission.patient.name,
+                    "patient_record": case.admission.patient.patient_source_key,
+                    "detail_url": reverse(
+                        "services_portal:reconciliation_case_detail",
+                        args=[case.pk],
+                    ),
+                }
+            )
+    if evidence_statuses:
+        if show_discharges:
+            for record in DischargeRecord.objects.filter(
+                reconciliation_status__in=evidence_statuses
+            ):
+                rows.append(
+                    {
+                        "kind": "discharge",
+                        "pk": record.pk,
+                        "status_label": _QUEUE_STATUS_LABELS.get(
+                            record.reconciliation_status, "Pendente"
+                        ),
+                        "tipo_label": _QUEUE_TIPO_LABELS["discharge"],
+                        "anchor_at": record.saida_em or record.alta_em,
+                        "patient_name": record.nome,
+                        "patient_record": record.prontuario,
+                        "detail_url": reverse(
+                            "services_portal:reconciliation_evidence_detail",
+                            args=["alta", record.pk],
+                        ),
+                    }
+                )
+        if show_deaths:
+            for death_record in DeathRecord.objects.filter(
+                reconciliation_status__in=evidence_statuses
+            ):
+                anchor = death_record.obito_em or datetime.combine(
+                    death_record.date, datetime.min.time(), tzinfo=dt_timezone.utc
+                )
+                rows.append(
+                    {
+                        "kind": "death",
+                        "pk": death_record.pk,
+                        "status_label": _QUEUE_STATUS_LABELS.get(
+                            death_record.reconciliation_status, "Pendente"
+                        ),
+                        "tipo_label": _QUEUE_TIPO_LABELS["death"],
+                        "anchor_at": anchor,
+                        "patient_name": death_record.nome,
+                        "patient_record": death_record.prontuario,
+                        "detail_url": reverse(
+                            "services_portal:reconciliation_evidence_detail",
+                            args=["obito", death_record.pk],
+                        ),
+                    }
+                )
+
+    if idade in {"7", "30", "90"}:
+        cutoff = timezone.now() - timedelta(days=int(idade))
+        rows = [
+            row
+            for row in rows
+            if isinstance(row["anchor_at"], datetime)
+            and row["anchor_at"] >= cutoff
+        ]
+    rows.sort(
+        key=lambda row: (
+            row["anchor_at"] or _MIN_SORT_TIME,
+            str(row["kind"]),
+            int(row["pk"]),
+        )
+    )
+    return rows
+
+
+def _reconciliation_csv_lines(
+    rows: list[dict[str, Any]],
+) -> Iterator[str]:
+    """Stream the queue rows as CSV lines — never a server-side file."""
+    writer = csv.writer(_CsvEcho())
+    yield writer.writerow(_CSV_HEADERS)
+    for row in rows:
+        anchor = row["anchor_at"]
+        anchor_label = (
+            timezone.localtime(anchor).strftime("%d/%m/%Y %H:%M")
+            if isinstance(anchor, datetime)
+            else ""
+        )
+        yield writer.writerow(
+            [
+                row["tipo_label"],
+                row["status_label"],
+                row["patient_record"],
+                row["patient_name"],
+                anchor_label,
+                row["detail_url"],
+            ]
+        )
+
+
+def _format_review_dt(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+    return timezone.localtime(value).strftime("%d/%m/%Y %H:%M")
+
+
+def _merged_state(admission: Admission | None) -> dict[str, object] | None:
+    """Merged/canonical maintenance labels for the linked admission.
+
+    Forward FK access uses the base manager and reverse lookups use
+    ``all_objects``, so merged rows stay visible for authorized
+    maintenance display.
+    """
+    if admission is None:
+        return None
+    merged_into = admission.merged_into
+    merged_from = list(
+        Admission.all_objects.filter(merged_into_id=admission.pk).order_by("pk")
+    )
+    if merged_into is None and not merged_from:
+        return None
+    return {"merged_into": merged_into, "merged_from": merged_from}
+
+
+def _event_view(event: ReconciliationEvent) -> dict[str, str]:
+    """Structural audit display — never clinical text."""
+    return {
+        "when": _format_review_dt(event.created_at),
+        "status_label": event.get_status_display(),
+        "exit_type_label": event.get_exit_type_display(),
+        "reason_code": event.reason_code or "-",
+        "prior": _format_review_dt(event.prior_discharge_date),
+        "new": _format_review_dt(event.new_discharge_date),
+        "source_label": f"{event.source_kind}#{event.source_id}",
+        "operation_uuid": str(event.operation_uuid),
+    }
+
+
+@login_required
+@require_GET
+def reconciliation_queue(request: HttpRequest) -> HttpResponse:
+    """Protected review queue: open cases plus review-set evidence."""
+    _require_reconciliation_review(request)
+    status, tipo, idade = _queue_filter_values(request)
+    rows = _reconciliation_queue_rows(status, tipo, idade)
+    paginator = Paginator(rows, _QUEUE_PAGE_SIZE)
+    try:
+        page_number = int(request.GET.get("page", 1))
+    except (TypeError, ValueError):
+        page_number = 1
+    try:
+        page_obj = paginator.page(page_number)
+    except EmptyPage:
+        page_obj = paginator.page(paginator.num_pages)
+
+    params = request.GET.copy()
+    params.pop("page", None)
+    context = {
+        "page_title": "Revisão de Reconciliação",
+        "page_obj": page_obj,
+        "total": paginator.count,
+        "status_filter": status,
+        "tipo_filter": tipo,
+        "idade_filter": idade,
+        "status_options": _QUEUE_STATUS_OPTIONS,
+        "tipo_options": _QUEUE_TIPO_OPTIONS,
+        "idade_options": _QUEUE_IDADE_OPTIONS,
+        "querystring": params.urlencode(),
+    }
+    return render(request, "services_portal/reconciliation_queue.html", context)
+
+
+@login_required
+@require_GET
+def reconciliation_case_detail(request: HttpRequest, pk: int) -> HttpResponse:
+    """Protected detail of one stale-admission case and its audit trail."""
+    _require_reconciliation_review(request)
+    case = get_object_or_404(
+        StaleAdmissionCase.objects.select_related("admission__patient"), pk=pk
+    )
+    admission = case.admission
+    status_code = case.resolution_reason or "open"
+    context = {
+        "page_title": "Reconciliação — caso de ausência",
+        "kind_label": _QUEUE_TIPO_LABELS["case"],
+        "status_label": _QUEUE_STATUS_LABELS.get(status_code, "Aberto"),
+        "patient_name": admission.patient.name,
+        "patient_record": admission.patient.patient_source_key,
+        "fields": [
+            ("Chave da internação", admission.source_admission_key),
+            ("Sistema de origem", admission.source_system),
+            ("Internação", _format_review_dt(admission.admission_date)),
+            ("Saída registrada", _format_review_dt(admission.discharge_date)),
+            ("Setor / leito", admission.ward or "-"),
+            ("Leito", admission.bed or "-"),
+            ("Primeira ausência", _format_review_dt(case.first_absence_at)),
+            ("Última ausência", _format_review_dt(case.last_absence_at)),
+            ("Run da primeira ausência", case.first_absence_run_id),
+            ("Run da última ausência", case.last_absence_run_id),
+            ("Resolvido em", _format_review_dt(case.resolved_at)),
+            (
+                "Motivo da resolução",
+                case.get_resolution_reason_display() or "-",
+            ),
+            (
+                "Última confirmação solicitada",
+                _format_review_dt(case.last_enqueued_at),
+            ),
+            (
+                "Resultado da confirmação",
+                case.get_last_enqueue_outcome_display() or "-",
+            ),
+        ],
+        "merged_state": _merged_state(admission),
+        "events": [
+            _event_view(event)
+            for event in admission.reconciliation_events.all()
+        ],
+        "back_url": reverse("services_portal:reconciliation_queue"),
+    }
+    return render(request, "services_portal/reconciliation_detail.html", context)
+
+
+@login_required
+@require_GET
+def reconciliation_evidence_detail(
+    request: HttpRequest, kind: str, pk: int
+) -> HttpResponse:
+    """Protected detail of one discharge/death evidence row."""
+    _require_reconciliation_review(request)
+    spec = _QUEUE_EVIDENCE_KINDS.get(kind)
+    if spec is None:
+        raise Http404("Unknown reconciliation evidence kind")
+    record = get_object_or_404(spec["model"], pk=pk)
+    patient_name = str(record.nome)
+    patient_record = str(record.prontuario)
+    if record.admission is not None:
+        patient_name = patient_name or record.admission.patient.name
+        patient_record = patient_record or record.admission.patient.patient_source_key
+    if kind == "alta":
+        fields: list[tuple[str, object]] = [
+            ("Saída efetiva (saida_em)", _format_review_dt(record.saida_em)),
+            ("Registro de alta (alta_em)", _format_review_dt(record.alta_em)),
+            ("Data de internação (fonte)", record.data_internacao or "-"),
+            ("Leito", record.leito or "-"),
+            ("Especialidade", record.especialidade or "-"),
+        ]
+    else:
+        fields = [
+            ("Óbito (data e hora completas)", _format_review_dt(record.obito_em)),
+            ("Data do óbito (fonte)", record.data_obito or "-"),
+            ("Data do registro", record.date.strftime("%d/%m/%Y")),
+        ]
+    fields = [
+        ("Status de reconciliação", record.get_reconciliation_status_display()),
+        ("Reconciliado em", _format_review_dt(record.reconciled_at)),
+        *fields,
+        (
+            "Internação vinculada",
+            record.admission_id if record.admission_id is not None else "-",
+        ),
+    ]
+    context = {
+        "page_title": "Reconciliação — evidência de saída",
+        "kind_label": spec["tipo_label"],
+        "status_label": record.get_reconciliation_status_display(),
+        "patient_name": patient_name,
+        "patient_record": patient_record,
+        "fields": fields,
+        "merged_state": _merged_state(record.admission),
+        "events": [
+            _event_view(event)
+            for event in ReconciliationEvent.objects.filter(
+                source_kind=spec["source_kind"], source_id=record.pk
+            )
+        ],
+        "back_url": reverse("services_portal:reconciliation_queue"),
+    }
+    return render(request, "services_portal/reconciliation_detail.html", context)
+
+
+@login_required
+@require_GET
+def reconciliation_export_csv(request: HttpRequest) -> HttpResponseBase:
+    """Ephemeral streamed CSV of the filtered queue — no server-side file.
+
+    Same permission as the queue. Export logging records actor-independent
+    aggregate outcome metadata only (row count, filter summary); never a
+    patient name, record number or CSV body.
+    """
+    _require_reconciliation_review(request)
+    status, tipo, idade = _queue_filter_values(request)
+    try:
+        rows = _reconciliation_queue_rows(status, tipo, idade)
+    except Exception:
+        logger.error(
+            "reconciliation export failed: rows unknown, status=%s tipo=%s "
+            "idade=%s",
+            status or "*",
+            tipo or "*",
+            idade or "*",
+        )
+        raise
+    logger.info(
+        "reconciliation export ok: rows=%d status=%s tipo=%s idade=%s",
+        len(rows),
+        status or "*",
+        tipo or "*",
+        idade or "*",
+    )
+    stamp = timezone.localtime().strftime("%Y%m%d-%H%M%S")
+    response = StreamingHttpResponse(
+        _reconciliation_csv_lines(rows), content_type="text/csv"
+    )
+    response["Content-Disposition"] = (
+        f'attachment; filename="reconciliacao-{stamp}.csv"'
+    )
+    response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response["Pragma"] = "no-cache"
+    return response

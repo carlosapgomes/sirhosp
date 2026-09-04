@@ -1,10 +1,22 @@
-"""Patient admin configuration (Slice S6) and merge audit (RPSA-S4)."""
+"""Patient admin configuration (Slice S6) and merge audit (RPSA-S4).
+
+RPSA-S6 adds read-only exposure of the append-only reconciliation audit
+(``ReconciliationEvent``) and the conservative stale-admission cases
+(``StaleAdmissionCase``): no add, change or delete actions (design
+decision 10 — audit is retained indefinitely and never mutated).
+"""
 
 from __future__ import annotations
 
 from django.contrib import admin, messages
 
-from apps.patients.models import Admission, AdmissionMergeOperation, Patient
+from apps.patients.models import (
+    Admission,
+    AdmissionMergeOperation,
+    Patient,
+    ReconciliationEvent,
+    StaleAdmissionCase,
+)
 from apps.patients.services import merge_patients
 
 
@@ -60,6 +72,75 @@ class AdmissionMergeOperationAdmin(admin.ModelAdmin):
         "created_at",
     ]
     search_fields = ["operation_uuid"]
+
+    def has_add_permission(self, request) -> bool:
+        return False
+
+    def has_change_permission(self, request, obj=None) -> bool:
+        return False
+
+    def has_delete_permission(self, request, obj=None) -> bool:
+        return False
+
+
+@admin.register(ReconciliationEvent)
+class ReconciliationEventAdmin(admin.ModelAdmin):
+    """Read-only exposure of the append-only reconciliation audit (RPSA-S6).
+
+    Audit rows are retained indefinitely; the admin offers no add,
+    change or delete actions (design decision 10). Payloads carry
+    structural state only — never patient identity or clinical text.
+    """
+
+    list_display = [
+        "operation_uuid",
+        "source_kind",
+        "source_id",
+        "admission",
+        "status",
+        "exit_type",
+        "reason_code",
+        "prior_discharge_date",
+        "new_discharge_date",
+        "created_at",
+    ]
+    list_filter = ["status", "exit_type", "source_kind"]
+    search_fields = ["operation_uuid", "source_id"]
+
+    def has_add_permission(self, request) -> bool:
+        return False
+
+    def has_change_permission(self, request, obj=None) -> bool:
+        return False
+
+    def has_delete_permission(self, request, obj=None) -> bool:
+        return False
+
+
+@admin.register(StaleAdmissionCase)
+class StaleAdmissionCaseAdmin(admin.ModelAdmin):
+    """Read-only exposure of conservative stale-admission cases (RPSA-S6).
+
+    Cases are operational audit state driven by the census observation
+    module; the admin offers no add, change or delete actions. Identity
+    columns (patient name/record) are authorized in the staff-only admin.
+    """
+
+    list_display = [
+        "pk",
+        "admission",
+        "first_absence_at",
+        "last_absence_at",
+        "resolved_at",
+        "resolution_reason",
+        "last_enqueued_at",
+        "last_enqueue_outcome",
+    ]
+    list_filter = ["resolution_reason", "last_enqueue_outcome"]
+    search_fields = [
+        "admission__patient__name",
+        "admission__patient__patient_source_key",
+    ]
 
     def has_add_permission(self, request) -> bool:
         return False

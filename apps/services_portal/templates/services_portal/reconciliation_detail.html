@@ -1,0 +1,96 @@
+{% extends "base_sidebar.html" %}
+
+{% block page_title %}{{ page_title }}{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="{{ back_url }}">Revisão de Reconciliação</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Detalhe</li>
+  </ol>
+</nav>
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">{{ kind_label }}</h2>
+    <p class="text-muted small mb-0">
+      <span class="fw-semibold text-dark">{{ patient_name }}</span>
+      — Prontuário <span class="fw-semibold text-dark">{{ patient_record }}</span>
+    </p>
+  </div>
+  <span class="badge bg-secondary align-self-start">{{ status_label }}</span>
+</div>
+
+{% if merged_state %}
+<div class="alert alert-warning py-2 small mb-3">
+  {% if merged_state.merged_into %}
+  <div>
+    <strong>Mesclada na internação canônica:</strong>
+    #{{ merged_state.merged_into.pk }} — {{ merged_state.merged_into.source_admission_key }}
+  </div>
+  {% endif %}
+  {% if merged_state.merged_from %}
+  <div>
+    <strong>Registros mesclados nesta internação (manutenção):</strong>
+    {% for dup in merged_state.merged_from %}#{{ dup.pk }} {{ dup.source_admission_key }}{% if not forloop.last %}, {% endif %}{% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="row g-3">
+  <div class="col-12 col-lg-5">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-header bg-white small fw-semibold text-muted">Estado estrutural</div>
+      <ul class="list-group list-group-flush small">
+        {% for label, value in fields %}
+        <li class="list-group-item d-flex justify-content-between gap-3">
+          <span class="text-muted">{{ label }}</span>
+          <span class="text-end text-break">{{ value }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+  </div>
+  <div class="col-12 col-lg-7">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-header bg-white small fw-semibold text-muted">
+        Auditoria estrutural (eventos de reconciliação)
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm mb-0 small align-middle">
+          <thead class="table-light">
+            <tr>
+              <th>Quando</th>
+              <th>Status</th>
+              <th>Tipo de saída</th>
+              <th>Razão</th>
+              <th>Saída anterior</th>
+              <th>Nova saída</th>
+              <th>Evidência</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for event in events %}
+            <tr>
+              <td>{{ event.when }}</td>
+              <td>{{ event.status_label }}</td>
+              <td>{{ event.exit_type_label }}</td>
+              <td>{{ event.reason_code }}</td>
+              <td>{{ event.prior }}</td>
+              <td>{{ event.new }}</td>
+              <td class="text-break">{{ event.source_label }}</td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="7" class="text-center text-muted py-3">Sem eventos de auditoria.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

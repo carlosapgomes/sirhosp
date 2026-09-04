@@ -296,6 +296,38 @@ class TestCaseLifecycle:
         assert admission.discharge_date is None
         assert prior_admission.discharge_date == T_BASE - timedelta(days=10)
 
+    def test_evidence_resolved_case_reads_exit_confirmed_on_reappearance(
+        self,
+    ) -> None:
+        """RPSA-S6 fix 1: a case whose admission was already closed by
+        canonical exit evidence must read ``exit_confirmed`` (via the
+        settled step), never ``reappeared`` — reappearance must not
+        relabel evidence-resolved cases."""
+        case, _, _ = _make_two_absence_case(
+            "PRNT-H1", first_absence_at=_at(10), last_absence_at=_at(20)
+        )
+        # The canonical reconciler closed the admission from evidence.
+        case.admission.discharge_date = _at(25)
+        case.admission.save(update_fields=["discharge_date"])
+        reappeared_run = _make_census_run(
+            _at(40), occupied_pronts=["PRNT-H1"]
+        )
+
+        result = observe_accepted_census_run(
+            run_id=reappeared_run.pk, now=_at(41)
+        )
+
+        assert result["cases_resolved_reappeared"] == 0
+        confirmation = result["confirmation"]
+        assert isinstance(confirmation, dict)
+        assert confirmation["resolved_exit_confirmed"] == 1
+        case.refresh_from_db()
+        assert case.resolved_at == _at(41)
+        assert (
+            case.resolution_reason
+            == StaleAdmissionCase.ResolutionReason.EXIT_CONFIRMED
+        )
+
     def test_gap_between_absences_starts_fresh_case_not_false_advance(
         self,
     ) -> None:
@@ -540,6 +572,36 @@ class TestEligibilityAndBoundedEnqueue:
         # Only the pre-existing synthetic confirmation run exists; the
         # pass must not have enqueued anything new.
         assert _admissions_only_records() == ["PRNT-E5"]
+
+    def test_merged_closed_case_is_frozen_by_settled_step(self) -> None:
+        """RPSA-S6 fix 2: a case attached to a merged admission must stay
+        frozen when the merged row is closed — mirroring the open-case
+        query and the merge KEEP rationale (never resolved by the
+        settled/exit-confirmed step)."""
+        patient = _make_patient("PRNT-H2")
+        canonical_admission = _make_open_admission(patient, "ADM_H2_CANON")
+        merged_admission = _make_open_admission(patient, "ADM_H2_DUP")
+        merged_admission.merged_into = canonical_admission
+        merged_admission.discharge_date = _at(25)
+        merged_admission.save(
+            update_fields=["merged_into", "discharge_date"]
+        )
+        first_run = _make_census_run(_at(0), occupied_pronts=[])
+        last_run = _make_census_run(_at(20), occupied_pronts=[])
+        case = StaleAdmissionCase.objects.create(
+            admission=merged_admission,
+            first_absence_run=first_run,
+            first_absence_at=_at(10),
+            last_absence_run=last_run,
+            last_absence_at=_at(20),
+        )
+
+        result = evaluate_and_enqueue_stale_admission_cases(now=_at(40))
+
+        assert result["resolved_exit_confirmed"] == 0
+        case.refresh_from_db()
+        assert case.resolved_at is None
+        assert case.resolution_reason == ""
 
     def test_explicit_exit_evidence_is_independent_of_census_waiting(
         self,

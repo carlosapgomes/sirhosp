@@ -1,4 +1,5 @@
-"""URL routes for services portal: dashboard, census, risk monitor, ingestion metrics."""
+"""URL routes for services portal: dashboard, census, risk monitor, ingestion
+metrics and the permission-protected reconciliation review (RPSA-S6)."""
 
 from django.urls import path
 
@@ -27,4 +28,24 @@ urlpatterns = [
         name="sector_passage_history",
     ),
     path("setores/indicadores/", views.sector_indicators, name="sector_indicators"),
+    path(
+        "reconciliacao/",
+        views.reconciliation_queue,
+        name="reconciliation_queue",
+    ),
+    path(
+        "reconciliacao/exportar/",
+        views.reconciliation_export_csv,
+        name="reconciliation_export_csv",
+    ),
+    path(
+        "reconciliacao/caso/<int:pk>/",
+        views.reconciliation_case_detail,
+        name="reconciliation_case_detail",
+    ),
+    path(
+        "reconciliacao/evidencia/<str:kind>/<int:pk>/",
+        views.reconciliation_evidence_detail,
+        name="reconciliation_evidence_detail",
+    ),
 ]
