@@ -259,20 +259,23 @@ class TestTransactionSafety:
         orig_pk = daily.pk
         orig_count = daily.count
 
-        # Now simulate a failure on the SECOND record creation of a 2-record batch
-        # The first create should succeed, the second should raise.
-        # Since everything is inside transaction.atomic(), the first create,
-        # the delete, and the update_or_create should all be rolled back.
+        # Now simulate a failure on the SECOND record upsert of a 2-record
+        # batch (RPSA-S3: persistence is a stable-key upsert, no
+        # delete/recreate). Since everything is inside
+        # transaction.atomic(), the first upsert, the aggregate update and
+        # any detachment must all be rolled back.
         call_count = [0]
-        real_create = DeathRecord.objects.create
+        real_update_or_create = DeathRecord.objects.update_or_create
 
-        def _failing_create(**kwargs):
+        def _failing_update_or_create(*args, **kwargs):
             call_count[0] += 1
             if call_count[0] == 2:
                 raise RuntimeError("Simulated DB failure mid-way")
-            return real_create(**kwargs)
+            return real_update_or_create(*args, **kwargs)
 
-        with patch.object(DeathRecord.objects, "create", _failing_create):
+        with patch.object(
+            DeathRecord.objects, "update_or_create", _failing_update_or_create
+        ):
             with pytest.raises(RuntimeError):
                 process_deaths(
                     [

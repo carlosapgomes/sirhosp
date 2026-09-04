@@ -280,17 +280,29 @@ docker compose -f compose.yml -f compose.dev.yml exec -T web \
 docker compose -f compose.yml -f compose.dev.yml exec -T web \
   uv run --no-sync python manage.py extract_discharges --headless --date 13/05/2026
 
-# Processar PDF de altas já baixado
-docker compose -f compose.yml -f compose.dev.yml exec -T web \
-  uv run --no-sync python manage.py process_discharge_pdf \
-  downloads/altas-14-05-2026.pdf
-
 # Importar cadastro de leitos (PDF do sistema fonte)
 docker compose -f compose.yml -f compose.dev.yml exec -T web \
   uv run --no-sync python manage.py import_wards_beds_registry \
   --input /tmp/leitos-cadastrados.pdf \
   --filter-name HGRS
 ```
+
+### Fluxo PDF de altas legado (inativo — candidato à remoção)
+
+O fluxo PDF de altas está inativo desde RPSA-S3 (ADR-0009): nenhum
+scheduler o invoca e a cobertura de altas é feita pelo XLS
+(`extract_discharges`), pelo catálogo de internações, pelos óbitos e
+pelos censos. As seguintes peças falham com erro seguro de deprecação
+ANTES de ler qualquer PDF ou alterar qualquer estado (clínico,
+evidência, fila ou agregado):
+
+- comando `process_discharge_pdf`;
+- comando `backfill_daily_discharges`;
+- helper dedicado `automation/source_system/discharges/pdf_utils.py`.
+
+Todos são candidatos a remoção após um ciclo de release sem chamadores
+estáticos ou operacionais (verificação final de chamadores obrigatória
+antes da remoção).
 
 > **Ciclos de censo adaptativos:** a extração e o processamento do censo
 > amplo (`extract_census` + `process_census_snapshot`) são orquestrados de forma

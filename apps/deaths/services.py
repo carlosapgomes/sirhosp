@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import tempfile
+from collections import Counter
 from datetime import date as Date
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
@@ -25,6 +29,22 @@ from apps.ingestion.historical_extraction import (
     safe_error_message,
 )
 from apps.ingestion.models import IngestionRun
+
+if TYPE_CHECKING:
+    from apps.deaths.models import DeathRecord  # noqa: F401
+
+logger = logging.getLogger(__name__)
+
+_TZ_DEATH_EVIDENCE = ZoneInfo("America/Bahia")
+"""Institutional timezone for naive source death datetimes."""
+
+_DEATH_DATETIME_FORMATS: tuple[tuple[str, bool], ...] = (
+    ("%d/%m/%Y %H:%M:%S", True),
+    ("%d/%m/%Y %H:%M", True),
+    ("%d/%m/%Y", False),
+)
+"""Raw ``data_obito`` shapes; the boolean marks whether the source value
+actually carries a time component."""
 
 
 def run_death_extraction(
@@ -350,16 +370,28 @@ def process_deaths(
     *,
     reference_date: Date,
 ) -> dict[str, int]:
-    """Process death records from the CSV extraction.
+    """Process death records from the CSV extraction (RPSA-S3 upsert).
 
-    Persists both the daily aggregate and individual DeathRecord rows.
+    Persists the daily aggregate and offers every row to canonical death
+    reconciliation through a stable-key upsert:
+
+    - each snapshot row is upserted by ``(date, prontuario)``, so
+      repeated extraction preserves the evidence primary key, the
+      Admission link and the reconciliation state (never delete/recreate);
+    - snapshot rows absent from a repeated extraction are retained as
+      evidence but detached from the report-batch aggregate
+      (``daily_count`` set to NULL), so the aggregate always reflects the
+      latest snapshot;
+    - no synthetic Patient/Admission is ever created; unresolved evidence
+      requests bounded, deduplicated source synchronization instead.
 
     Args:
         records: List of dicts with death record data from the CSV.
         reference_date: The date these records refer to.
 
     Returns:
-        A dict with metrics counters.
+        A dict with ``total_records`` plus one ``reconciliation_<status>``
+        counter per reconciliation status observed in this batch.
     """
     from apps.deaths.models import DailyDeathCount, DeathRecord
 
@@ -372,20 +404,23 @@ def process_deaths(
             },
         )
 
-        # Delete old individual records and recreate
-        daily_count.records.all().delete()
+        status_counts: Counter[str] = Counter()
+        snapshot_pks: list[int] = []
 
         for rec in records:
-            prontuario = _find_value(rec, "PRONTUARIO", "prontuario", "Prontuário")
-            nome = _find_value(rec, "NOME", "nome", "Paciente")
-            data_obito = _find_value(
-                rec,
-                "OBITO",
-                "DATA OBITO",
-                "DATA_OBITO",
-                "DATA ÓBITO",
-                "data_obito",
-                "Data Óbito",
+            prontuario = str(_find_value(rec, "PRONTUARIO", "prontuario", "Prontuário") or "")
+            nome = str(_find_value(rec, "NOME", "nome", "Paciente") or "")
+            data_obito = str(
+                _find_value(
+                    rec,
+                    "OBITO",
+                    "DATA OBITO",
+                    "DATA_OBITO",
+                    "DATA ÓBITO",
+                    "data_obito",
+                    "Data Óbito",
+                )
+                or ""
             )
 
             extra = {
@@ -409,18 +444,33 @@ def process_deaths(
                 and v
             }
 
-            DeathRecord.objects.create(
-                daily_count=daily_count,
+            record, _record_created = DeathRecord.objects.update_or_create(
                 date=reference_date,
-                prontuario=str(prontuario or ""),
-                nome=str(nome or ""),
-                data_obito=str(data_obito or ""),
-                raw_extra=extra,
+                prontuario=prontuario,
+                defaults={
+                    "nome": nome,
+                    "data_obito": data_obito,
+                    "raw_extra": extra,
+                    "daily_count": daily_count,
+                },
             )
+            snapshot_pks.append(record.pk)
 
-    return {
-        "total_records": len(records),
-    }
+            status = reconcile_death_record(record=record)
+            status_counts[status] += 1
+
+        # Rows of this date that dropped out of the repeated snapshot are
+        # detached from the report batch but survive as evidence (never
+        # deleted) — their linkage and reconciliation state remain.
+        DeathRecord.objects.filter(
+            date=reference_date,
+            daily_count__isnull=False,
+        ).exclude(pk__in=snapshot_pks).update(daily_count=None)
+
+    metrics: dict[str, int] = {"total_records": len(records)}
+    for status, count in sorted(status_counts.items()):
+        metrics[f"reconciliation_{status}"] = count
+    return metrics
 
 
 def _find_value(record: dict, *keys: str) -> str | None:
@@ -436,3 +486,185 @@ def _find_value(record: dict, *keys: str) -> str | None:
                 return record[rk]
 
     return None
+
+
+def _parse_death_datetime(raw: str) -> datetime | None:
+    """Parse the raw ``data_obito`` string without ever synthesizing an hour.
+
+    Returns an aware ``America/Bahia`` datetime only when the source string
+    carries a complete date AND time. Date-only or unparseable evidence
+    yields ``None`` (reconciliation stays pending) — no hour of day is
+    ever invented for evidence the source did not provide.
+    """
+    text = (raw or "").strip()
+    for fmt, has_time in _DEATH_DATETIME_FORMATS:
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if not has_time:
+            return None
+        return timezone.make_aware(parsed, _TZ_DEATH_EVIDENCE)
+    return None
+
+
+def reconcile_death_record(
+    *,
+    record: DeathRecord,
+    source_system: str = "tasy",
+) -> str:
+    """Offer one persisted ``DeathRecord`` to canonical reconciliation.
+
+    Death evidence carries no admission key, no exact admission start and
+    no local admission date: the only matching layer available is the
+    unique canonical admission whose known period contains a complete
+    death datetime (``match_by_period``). A date-only or unparseable
+    ``data_obito`` never synthesizes an hour: the row stays pending and a
+    deduplicated ``admissions_only`` source synchronization is requested.
+
+    Evidence linkage/status is written in the same transaction as the
+    admission mutation and the append-only audit. Logs carry
+    aggregate-safe fields only (record primary key and status).
+
+    Returns the final reconciliation status (one of
+    ``apps.patients.models.RECONCILIATION_STATUSES``).
+    """
+    from apps.patients.models import (  # noqa: PLC0415
+        EXIT_DEATH,
+        RECONCILIATION_STATUS_ADMISSION_NOT_FOUND,
+        RECONCILIATION_STATUS_ALREADY_RECONCILED,
+        RECONCILIATION_STATUS_AMBIGUOUS,
+        RECONCILIATION_STATUS_PATIENT_NOT_FOUND,
+        RECONCILIATION_STATUS_PENDING,
+        RECONCILIATION_STATUS_RECONCILED,
+    )
+    from apps.patients.reconciliation import (  # noqa: PLC0415
+        EVIDENCE_SOURCE_DEATH_RECORD,
+        DischargeExitEvidence,
+        apply_discharge_exit,
+        decide_discharge_match,
+    )
+
+    exit_datetime = _parse_death_datetime(record.data_obito)
+    record.obito_em = exit_datetime
+
+    if exit_datetime is None:
+        # Date-only (or unparseable) evidence: no source hour exists, so
+        # none is synthesized. The row stays pending; the requested
+        # admissions sync may restore a complete datetime on the source.
+        record.reconciliation_status = RECONCILIATION_STATUS_PENDING
+        record.save(update_fields=["obito_em", "reconciliation_status"])
+        queued = _enqueue_missing_mirror_sync(
+            record.prontuario,
+            include_demographics=False,
+        )
+        logger.info(
+            "death reconciliation pending (date-only evidence): "
+            "record_id=%s status=%s admissions_sync_queued=%d",
+            record.pk,
+            RECONCILIATION_STATUS_PENDING,
+            queued["admissions_only"],
+        )
+        return RECONCILIATION_STATUS_PENDING
+
+    evidence = DischargeExitEvidence(
+        patient_record=record.prontuario,
+        exit_datetime=exit_datetime,
+        admission_key=None,
+        admission_start=None,
+        admission_local_date=None,
+        source_system=source_system,
+        match_by_period=True,
+    )
+
+    with transaction.atomic():
+        decision = decide_discharge_match(evidence=evidence)
+        status = apply_discharge_exit(
+            decision=decision,
+            exit_datetime=exit_datetime,
+            exit_type=EXIT_DEATH,
+            source_kind=EVIDENCE_SOURCE_DEATH_RECORD,
+            source_id=record.pk,
+        )
+        # Evidence-side linkage/status joins the same atomic block so a
+        # crash can never close an admission while leaving the evidence
+        # row stale.
+        record.admission = (
+            decision.admission
+            if status in (
+                RECONCILIATION_STATUS_RECONCILED,
+                RECONCILIATION_STATUS_ALREADY_RECONCILED,
+            )
+            else None
+        )
+        record.reconciliation_status = status
+        record.reconciled_at = timezone.now()
+        record.save(
+            update_fields=[
+                "admission",
+                "reconciliation_status",
+                "reconciled_at",
+                "obito_em",
+            ],
+        )
+
+    if status == RECONCILIATION_STATUS_PATIENT_NOT_FOUND:
+        queued = _enqueue_missing_mirror_sync(
+            record.prontuario,
+            include_demographics=True,
+        )
+    elif status in (
+        RECONCILIATION_STATUS_ADMISSION_NOT_FOUND,
+        RECONCILIATION_STATUS_AMBIGUOUS,
+    ):
+        queued = _enqueue_missing_mirror_sync(
+            record.prontuario,
+            include_demographics=False,
+        )
+    else:
+        queued = {"admissions_only": 0, "demographics_only": 0}
+
+    logger.info(
+        "death reconciliation: record_id=%s status=%s "
+        "admissions_sync_queued=%d demographics_sync_queued=%d",
+        record.pk,
+        status,
+        queued["admissions_only"],
+        queued["demographics_only"],
+    )
+    return status
+
+
+def _enqueue_missing_mirror_sync(
+    patient_record: str,
+    *,
+    include_demographics: bool,
+) -> dict[str, int]:
+    """Enqueue bounded, deduplicated source synchronization requests.
+
+    Mirrors the discharge adapter policy: at most one active
+    (queued/running) run per intent and patient record is kept, so
+    repeated unresolved evidence cannot flood the ingestion queue. No
+    synthetic Patient/Admission is ever created from evidence.
+    """
+    from apps.ingestion.services import (  # noqa: PLC0415
+        queue_admissions_only_run,
+        queue_demographics_only_run,
+    )
+
+    active_intents = set(
+        IngestionRun.objects.filter(
+            status__in=("queued", "running"),
+            intent__in=("admissions_only", "demographics_only"),
+            parameters_json__patient_record=patient_record,
+        ).values_list("intent", flat=True)
+    )
+
+    queued = {"admissions_only": 0, "demographics_only": 0}
+    if "admissions_only" not in active_intents:
+        queue_admissions_only_run(patient_record=patient_record)
+        queued["admissions_only"] = 1
+    if include_demographics and "demographics_only" not in active_intents:
+        queue_demographics_only_run(patient_record=patient_record)
+        queued["demographics_only"] = 1
+    return queued

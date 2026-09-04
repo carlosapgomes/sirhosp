@@ -28,8 +28,10 @@ from datetime import date, datetime, time
 from typing import Optional
 
 from django.db import transaction
+from django.db.models import Q
 
 from apps.patients.models import (
+    EXIT_DEATH,
     EXIT_HOSPITAL_DISCHARGE,
     EXIT_UNKNOWN,
     RECONCILIATION_STATUS_ADMISSION_NOT_FOUND,
@@ -57,6 +59,13 @@ logger = logging.getLogger(__name__)
 
 EVIDENCE_SOURCE_DISCHARGE_RECORD = "discharge_record"
 """Evidence kind recorded in audit payloads for ``DischargeRecord`` rows."""
+
+EVIDENCE_SOURCE_DEATH_RECORD = "death_record"
+"""Evidence kind recorded in audit payloads for ``DeathRecord`` rows."""
+
+MATCH_CONTAINING_PERIOD = "containing_period"
+"""Match reason of the death-evidence period layer (RPSA-S3): the unique
+canonical admission whose known period contains the exit datetime."""
 
 REASON_NULL_ADMISSION_START = "null_admission_start"
 """Key/alias matched but the admission start is null: cannot validate time."""
@@ -89,6 +98,11 @@ class DischargeExitEvidence:
     admission_start: Optional[datetime] = None
     admission_local_date: Optional[date] = None
     source_system: str = "tasy"
+    match_by_period: bool = False
+    """Death-evidence opt-in to the unique-containing-period layer (RPSA-S3).
+
+    Discharge evidence keeps the default (``False``): without an admission
+    key, exact start or local date, no weaker level is ever evaluated."""
 
 
 @dataclass(frozen=True)
@@ -110,10 +124,12 @@ def _decision(
     match_reason: str = "",
     candidate_count: Optional[int] = None,
     reason_code: str = "",
+    exit_type: Optional[str] = None,
 ) -> DischargeMatchDecision:
     if candidate_count is None:
         candidate_count = 1 if admission is not None else 0
-    exit_type = EXIT_HOSPITAL_DISCHARGE if admission is not None else EXIT_UNKNOWN
+    if exit_type is None:
+        exit_type = EXIT_HOSPITAL_DISCHARGE if admission is not None else EXIT_UNKNOWN
     return DischargeMatchDecision(
         status=status,
         admission=admission,
@@ -160,6 +176,16 @@ def decide_discharge_match(
         )
         if isinstance(candidate, DischargeMatchDecision):
             return candidate
+    elif evidence.match_by_period:
+        # Death evidence carries no admission key, no exact start and no
+        # local admission date: the only layer it may use is the unique
+        # canonical admission whose known period contains the complete
+        # death datetime (design decision 3).
+        candidate, match_reason = _resolve_by_unique_containing_period(
+            evidence, patient
+        )
+        if isinstance(candidate, DischargeMatchDecision):
+            return candidate
     else:
         # No key, no exact start, no local date: no fallback to the
         # patient's latest admission is ever performed.
@@ -184,6 +210,7 @@ def decide_discharge_match(
             RECONCILIATION_STATUS_ALREADY_RECONCILED,
             admission=candidate,
             match_reason=match_reason,
+            exit_type=_evidence_exit_type(evidence),
         )
     # Open admission (first close) or an unambiguous authoritative
     # correction of a prior exit value: both are `reconciled`, with the
@@ -192,6 +219,7 @@ def decide_discharge_match(
         RECONCILIATION_STATUS_RECONCILED,
         admission=candidate,
         match_reason=match_reason,
+        exit_type=_evidence_exit_type(evidence),
     )
 
 
@@ -237,6 +265,58 @@ def _resolve_by_identity_layers(
             match.match_reason,
         )
     return match.admission, match.match_reason
+
+
+def _evidence_exit_type(evidence: DischargeExitEvidence) -> Optional[str]:
+    """Death evidence closes as ``death``; discharge evidence keeps the
+    default ``hospital_discharge`` mapping inside :func:`_decision`."""
+    return EXIT_DEATH if evidence.match_by_period else None
+
+
+def _resolve_by_unique_containing_period(
+    evidence: DischargeExitEvidence,
+    patient: Patient,
+) -> tuple[Admission | DischargeMatchDecision, str]:
+    """Unique canonical admission whose known period contains the exit.
+
+    Boundaries are inclusive on both ends (``admission_date <= exit`` and
+    ``discharge_date is null or exit <= discharge_date``), consistent with
+    the RPSA-S2 equality tripwires. An admission with a null start has no
+    known period and can never contain the exit; zero or multiple
+    candidates fail closed — no latest/open fallback is ever taken.
+    """
+    exit_at = evidence.exit_datetime
+    if exit_at is None:
+        # Defensive fail-closed: callers only route complete datetimes here.
+        return (
+            _decision(RECONCILIATION_STATUS_ADMISSION_NOT_FOUND, candidate_count=0),
+            "",
+        )
+    candidates = list(
+        Admission.objects.filter(
+            patient=patient,
+            source_system=evidence.source_system,
+            admission_date__lte=exit_at,
+        )
+        .filter(Q(discharge_date__isnull=True) | Q(discharge_date__gte=exit_at))
+        .order_by("admission_date", "pk")
+    )
+    if not candidates:
+        return (
+            _decision(RECONCILIATION_STATUS_ADMISSION_NOT_FOUND, candidate_count=0),
+            "",
+        )
+    if len(candidates) > 1:
+        return (
+            _decision(
+                RECONCILIATION_STATUS_AMBIGUOUS,
+                match_reason=MATCH_CONTAINING_PERIOD,
+                candidate_count=len(candidates),
+                exit_type=EXIT_DEATH,
+            ),
+            MATCH_CONTAINING_PERIOD,
+        )
+    return candidates[0], MATCH_CONTAINING_PERIOD
 
 
 def _resolve_by_unique_local_date(

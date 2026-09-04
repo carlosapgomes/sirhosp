@@ -18,9 +18,10 @@ from django.db import IntegrityError, connection
 # documentation only and is never read by this suite).
 # RPSA-S2 (controller-authorized fixture update): the discharge evidence
 # FK (``discharge_evidence``) and the reconciliation audit FK
-# (``reconciliation_events``) grow the inventory; design rollout step 4
-# re-derives the inventory once evidence FKs exist, and the clinical vs
-# maintenance call-site classification remains the RPSA-S4 merge gate.
+# (``reconciliation_events``) and death evidence (``death_evidence``,
+# RPSA-S3) grow the inventory; design rollout step 4 re-derives the
+# inventory once evidence FKs exist, and the clinical vs maintenance
+# call-site classification remains the RPSA-S4 merge gate.
 EXPECTED_REVERSE_RELATION_ACCESSORS = frozenset(
     {
         "events",
@@ -33,6 +34,7 @@ EXPECTED_REVERSE_RELATION_ACCESSORS = frozenset(
         "merged_from",
         "source_aliases",
         "discharge_evidence",
+        "death_evidence",
         "reconciliation_events",
     }
 )

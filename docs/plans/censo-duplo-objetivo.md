@@ -56,7 +56,7 @@ Após a limpeza dos 72h, ainda restam 11 pacientes com `discharge_date` preenchi
 ### Censo
 
 | Comando                   | O que faz                                                                                              | Quando roda                              |
-| --------------------------| -------------------------------------------------------------------------------------------------------| -----------------------------------------|
+| ------------------------- | ------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
 | `extract_census`          | Varre o sistema fonte via Playwright e persiste todas as linhas do censo em `CensusSnapshot`           | Orquestrador adaptativo (ver nota acima) |
 | `process_census_snapshot` | Lê o último `CensusSnapshot`, cria/atualiza `Patient` e enfileira runs de admissão (`admissions_only`) | Após `extract_census`                    |
 | `sync_current_inpatients` | Não implementado (reservado)                                                                           | —                                        |
@@ -77,10 +77,10 @@ Após a limpeza dos 72h, ainda restam 11 pacientes com `discharge_date` preenchi
 
 ### Altas
 
-| Comando                 | O que faz                                                      |
-| ----------------------- | -------------------------------------------------------------- |
-| `extract_discharges`    | Baixa PDF diário de altas do sistema fonte.                    |
-| `process_discharge_pdf` | Extrai dados do PDF e atualiza `discharge_date` nas admissões. |
+| Comando                 | O que faz                                                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `extract_discharges`    | Baixa PDF diário de altas do sistema fonte.                                                                         |
+| `process_discharge_pdf` | **Inativo (RPSA-S3):** falha com erro seguro de deprecação antes de ler PDF ou alterar estado. Candidato à remoção. |
 
 ### Sumários
 
@@ -297,7 +297,12 @@ Flags:
 ### `process_discharge_pdf`
 
 ```text
-Extrai pacientes do PDF de altas e atualiza discharge_date.
+Inativo desde RPSA-S3 (ADR-0009): toda invocação falha com erro seguro
+de deprecação antes de ler PDF, imprimir identidade, persistir
+evidência, enfileirar trabalho ou alterar estado clínico/agregado.
+Candidato à remoção (com backfill_daily_discharges e o helper
+automation/source_system/discharges/pdf_utils.py) após um ciclo de
+release sem chamadores estáticos ou operacionais.
 ````
 
 ---
