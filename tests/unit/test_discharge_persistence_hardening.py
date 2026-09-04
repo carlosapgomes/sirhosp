@@ -413,15 +413,24 @@ class TestServiceDischargeExtractionIdempotency:
     def test_service_empty_output_keeps_evidence_and_aggregate_untouched(
         self, mock_credentials, mock_subprocess_success,
     ):
-        """No XLS on re-run: evidence remains; aggregate is never reset/written."""
+        """No XLS on re-run: evidence remains; aggregate is never reset/written.
+
+        A pre-seeded ``DailyDischargeCount`` row for the target date must
+        survive unchanged (same row, same count) across extractions.
+        """
         from apps.discharges.extraction_service import run_discharge_extraction
+
+        # Pre-seed the operational aggregate for the target date.
+        seeded = DailyDischargeCount.objects.create(
+            date=date(2026, 6, 1), count=7,
+        )
 
         # First extraction populates 3 records
         with _mock_tempdir_and_xls(records_count=3):
             result1 = run_discharge_extraction(date="01/06/2026")
         assert result1.success is True
         assert DischargeRecord.objects.count() == 3
-        assert DailyDischargeCount.objects.count() == 0
+        assert DailyDischargeCount.objects.count() == 1
 
         # Second extraction: no XLS files found → zero records
         real_dir = Path(tempfile_module.mkdtemp())
@@ -439,8 +448,12 @@ class TestServiceDischargeExtractionIdempotency:
         assert result2.success is True
         assert result2.metrics["total_records"] == 0
 
-        # Aggregate stays untouched (RPSA-S2: no write, no reset)
-        assert DailyDischargeCount.objects.count() == 0
+        # Pre-seeded aggregate row survives unchanged (RPSA-S2: no write,
+        # no reset).
+        assert DailyDischargeCount.objects.count() == 1
+        seeded.refresh_from_db()
+        assert seeded.count == 7
+        assert seeded.date == date(2026, 6, 1)
 
         # DischargeRecord rows from first extraction remain (no date-based cleanup)
         assert DischargeRecord.objects.count() == 3
@@ -448,15 +461,24 @@ class TestServiceDischargeExtractionIdempotency:
     def test_service_empty_xls_keeps_evidence_and_aggregate_untouched(
         self, mock_credentials, mock_subprocess_success,
     ):
-        """Header-only XLS on re-run: evidence remains; aggregate untouched."""
+        """Header-only XLS on re-run: evidence remains; aggregate untouched.
+
+        A pre-seeded ``DailyDischargeCount`` row for the target date must
+        survive unchanged (same row, same count) across extractions.
+        """
         from apps.discharges.extraction_service import run_discharge_extraction
+
+        # Pre-seed the operational aggregate for the target date.
+        seeded = DailyDischargeCount.objects.create(
+            date=date(2026, 6, 1), count=7,
+        )
 
         # First extraction populates records
         with _mock_tempdir_and_xls(records_count=3):
             result1 = run_discharge_extraction(date="01/06/2026")
         assert result1.success is True
         assert DischargeRecord.objects.count() == 3
-        assert DailyDischargeCount.objects.count() == 0
+        assert DailyDischargeCount.objects.count() == 1
 
         # Second extraction: XLS with only header → zero records
         real_dir = Path(tempfile_module.mkdtemp())
@@ -488,8 +510,12 @@ class TestServiceDischargeExtractionIdempotency:
         assert result2.success is True
         assert result2.metrics["total_records"] == 0
 
-        # Aggregate stays untouched (RPSA-S2: no write, no reset)
-        assert DailyDischargeCount.objects.count() == 0
+        # Pre-seeded aggregate row survives unchanged (RPSA-S2: no write,
+        # no reset).
+        assert DailyDischargeCount.objects.count() == 1
+        seeded.refresh_from_db()
+        assert seeded.count == 7
+        assert seeded.date == date(2026, 6, 1)
 
         # DischargeRecord rows from first extraction remain (no date-based cleanup)
         assert DischargeRecord.objects.count() == 3

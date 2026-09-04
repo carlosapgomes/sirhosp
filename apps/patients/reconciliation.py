@@ -317,10 +317,22 @@ def apply_discharge_exit(
                 locked.save(update_fields=["discharge_date", "updated_at"])
                 new = locked.discharge_date
             admission = locked
-            # A repeated equal application is a no-op: the original
-            # reconciled audit event already covers it (no duplicate
-            # mutation/audit semantics).
-            if final_status != RECONCILIATION_STATUS_ALREADY_RECONCILED:
+            # Append-only audit of every attempted reconciliation:
+            # - a same-evidence repeat (re-extraction of an already
+            #   audited record) stays silent, because its own prior event
+            #   already covers it (no duplicate mutation/audit);
+            # - first-time evidence whose matched admission was closed at
+            #   the same discharge time by another writer still gets
+            #   exactly one structural event (status already_reconciled,
+            #   linkage only: no clinical before/after change).
+            if final_status == RECONCILIATION_STATUS_ALREADY_RECONCILED:
+                has_own_event = ReconciliationEvent.objects.filter(
+                    source_kind=source_kind,
+                    source_id=source_id,
+                ).exists()
+            else:
+                has_own_event = False
+            if not has_own_event:
                 _write_audit(
                     decision=decision,
                     admission=admission,

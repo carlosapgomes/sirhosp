@@ -322,6 +322,35 @@ class TestExtractionReconciliationFlow:
         assert DischargeRecord.objects.count() == 1
         assert ReconciliationEvent.objects.count() == 1
 
+        # Third extraction: same (prontuario, data_internacao) identity,
+        # different valid saida_em — an end-to-end authoritative correction
+        # that must update the admission and leave an audit witness with
+        # the prior value.
+        corrected_records = [
+            {"prontuario": 300004, "data_internacao": "20/05/2026",
+             "alta": "01/06/2026 10:00", "saida": "01/06/2026 13:30"},
+        ]
+        with _mock_tempdir_and_xls(corrected_records):
+            third = run_discharge_extraction(date="01/06/2026")
+
+        assert third.success is True
+        assert third.metrics["reconciliation_reconciled"] == 1
+        admission.refresh_from_db()
+        assert admission.discharge_date == datetime(
+            2026, 6, 1, 13, 30, tzinfo=TZ_LOCAL
+        )
+        assert DischargeRecord.objects.count() == 1
+        assert ReconciliationEvent.objects.count() == 2
+        correction = ReconciliationEvent.objects.order_by("pk").last()
+        assert correction is not None
+        assert correction.status == RECONCILIATION_STATUS_RECONCILED
+        assert correction.prior_discharge_date == datetime(
+            2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL
+        )
+        assert correction.new_discharge_date == datetime(
+            2026, 6, 1, 13, 30, tzinfo=TZ_LOCAL
+        )
+
     def test_ambiguous_same_day_report_leaves_admissions_open(
         self, mock_credentials, mock_subprocess_success,
     ):

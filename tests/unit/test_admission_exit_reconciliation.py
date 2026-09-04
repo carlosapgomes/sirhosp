@@ -200,14 +200,21 @@ class TestDecideDischargeMatch:
         assert decision.status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
         assert decision.admission is None
 
-    def test_unparseable_local_date_does_not_pick_latest_admission(self):
+    def test_exit_equal_to_admission_start_is_reconciled(self):
+        """Equality boundary: exit exactly equal to the admission start is
+        a valid close (strict ``<``), never ``invalid_exit_datetime``."""
         patient = _make_patient("777")
-        _make_admission(patient, "ADM-LATEST", "2026-05-30T09:30:00")
+        boundary = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL)
+        admission = _make_admission(patient, "ADM-1", "2026-06-01T12:00:00")
         decision = decide_discharge_match(
-            evidence=_evidence(admission_local_date=None)
+            evidence=_evidence(
+                admission_local_date=date(2026, 6, 1),
+                exit_datetime=boundary,
+            )
         )
-        assert decision.status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
-        assert decision.admission is None
+        assert decision.status == RECONCILIATION_STATUS_RECONCILED
+        assert decision.admission is not None
+        assert decision.admission.pk == admission.pk
 
     def test_same_day_two_candidates_are_ambiguous(self):
         patient = _make_patient("777")
@@ -354,6 +361,74 @@ class TestApplyDischargeExit:
         assert admission.discharge_date == exit_at
         assert ReconciliationEvent.objects.count() == 1
 
+    def test_first_time_evidence_pre_closed_by_other_writer_gets_one_event(self):
+        """Audit gap fix: evidence whose matched admission was already
+        closed at the same discharge time by a DIFFERENT writer gets
+        linkage plus exactly one structural ``already_reconciled`` event
+        of its own — append-only audit of every attempted reconciliation.
+        """
+        patient = _make_patient("777")
+        exit_at = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL)
+        # Another writer (legacy PDF flow) closed the admission first.
+        admission = _make_admission(
+            patient,
+            "ADM-1",
+            "2026-05-20T08:00:00",
+            end="2026-06-01T12:00:00",
+        )
+
+        status = apply_discharge_exit(
+            decision=self._reconciled_decision(admission),
+            exit_datetime=exit_at,
+            exit_type=EXIT_HOSPITAL_DISCHARGE,
+            source_kind="discharge_record",
+            source_id=42,
+        )
+
+        assert status == RECONCILIATION_STATUS_ALREADY_RECONCILED
+        admission.refresh_from_db()
+        assert admission.discharge_date == exit_at  # no clinical change here
+        assert ReconciliationEvent.objects.count() == 1
+        event = ReconciliationEvent.objects.get()
+        assert event.status == RECONCILIATION_STATUS_ALREADY_RECONCILED
+        assert event.source_kind == "discharge_record"
+        assert event.source_id == 42
+        assert event.prior_discharge_date == exit_at
+        assert event.new_discharge_date is None
+
+    def test_same_evidence_repeat_of_already_reconciled_writes_no_duplicate(self):
+        """Same-evidence idempotency is preserved on the
+        ``already_reconciled`` branch: a re-extraction of a record that
+        already has its own audit event appends no duplicate row.
+        """
+        patient = _make_patient("777")
+        exit_at = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL)
+        admission = _make_admission(
+            patient,
+            "ADM-1",
+            "2026-05-20T08:00:00",
+            end="2026-06-01T12:00:00",
+        )
+
+        first = apply_discharge_exit(
+            decision=self._reconciled_decision(admission),
+            exit_datetime=exit_at,
+            exit_type=EXIT_HOSPITAL_DISCHARGE,
+            source_kind="discharge_record",
+            source_id=42,
+        )
+        second = apply_discharge_exit(
+            decision=self._reconciled_decision(admission),
+            exit_datetime=exit_at,
+            exit_type=EXIT_HOSPITAL_DISCHARGE,
+            source_kind="discharge_record",
+            source_id=42,
+        )
+
+        assert first == RECONCILIATION_STATUS_ALREADY_RECONCILED
+        assert second == RECONCILIATION_STATUS_ALREADY_RECONCILED
+        assert ReconciliationEvent.objects.count() == 1
+
     def test_correction_records_prior_and_new_in_audit(self):
         patient = _make_patient("777")
         prior_exit = datetime(2026, 6, 1, 15, 0, tzinfo=TZ_LOCAL)
@@ -408,6 +483,27 @@ class TestApplyDischargeExit:
         assert event.status == RECONCILIATION_STATUS_INVALID_EXIT_DATETIME
         assert event.prior_discharge_date is None
         assert event.new_discharge_date is None
+
+    def test_locked_equality_boundary_is_reconciled(self):
+        """Under lock, exit exactly equal to the admission start re-derives
+        ``reconciled`` (strict ``<``), never ``invalid_exit_datetime``."""
+        patient = _make_patient("777")
+        boundary = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL)
+        admission = _make_admission(patient, "ADM-1", "2026-06-01T12:00:00")
+
+        status = apply_discharge_exit(
+            decision=self._reconciled_decision(admission),
+            exit_datetime=boundary,
+            exit_type=EXIT_HOSPITAL_DISCHARGE,
+            source_kind="discharge_record",
+            source_id=42,
+        )
+
+        assert status == RECONCILIATION_STATUS_RECONCILED
+        admission.refresh_from_db()
+        assert admission.discharge_date == boundary
+        event = ReconciliationEvent.objects.get()
+        assert event.status == RECONCILIATION_STATUS_RECONCILED
 
 
 # =========================================================================
@@ -465,6 +561,33 @@ class TestReconcileDischargeRecord:
         assert admission.discharge_date == saida
         assert ReconciliationEvent.objects.count() == 1
         assert Admission.objects.count() == 1
+
+    def test_unparseable_local_date_does_not_pick_latest_admission(self):
+        """A real unparseable ``data_internacao`` string (XLS adapter parse
+        layer via :func:`apps.discharges.services._parse_admission_date`,
+        reached through the public path) yields no local-date precision:
+        the row is ``admission_not_found`` and no admission is touched —
+        there is never a latest-admission fallback."""
+        patient = _make_patient("777")
+        admission = _make_admission(patient, "ADM-LATEST", "2026-05-30T09:30:00")
+        record = _make_record(
+            None,
+            data_internacao="31/02/2026",  # February 31st never exists
+            saida=datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL),
+        )
+
+        status = reconcile_discharge_record(record=record)
+
+        assert status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        assert Admission.objects.count() == 1
+        record.refresh_from_db()
+        assert record.admission_id is None
+        assert (
+            record.reconciliation_status
+            == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
+        )
 
     def test_missing_patient_enqueues_bounded_sync_without_synthetic_rows(self):
         record = _make_record(
