@@ -319,16 +319,23 @@ def apply_discharge_exit(
             admission = locked
             # Append-only audit of every attempted reconciliation:
             # - a same-evidence repeat (re-extraction of an already
-            #   audited record) stays silent, because its own prior event
-            #   already covers it (no duplicate mutation/audit);
+            #   audited record) stays silent, because its own prior
+            #   reconcilable event already covers it (no duplicate
+            #   mutation/audit);
             # - first-time evidence whose matched admission was closed at
             #   the same discharge time by another writer still gets
             #   exactly one structural event (status already_reconciled,
             #   linkage only: no clinical before/after change).
             if final_status == RECONCILIATION_STATUS_ALREADY_RECONCILED:
+                # Only a prior reconcilable outcome (reconciled or
+                # already_reconciled) of this very evidence counts as its
+                # own event: an earlier failed attempt (e.g.
+                # patient_not_found) never covers the structural linkage
+                # audited below.
                 has_own_event = ReconciliationEvent.objects.filter(
                     source_kind=source_kind,
                     source_id=source_id,
+                    status__in=_RECONCILABLE_STATUSES,
                 ).exists()
             else:
                 has_own_event = False

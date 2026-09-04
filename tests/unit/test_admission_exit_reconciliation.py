@@ -369,7 +369,9 @@ class TestApplyDischargeExit:
         """
         patient = _make_patient("777")
         exit_at = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL)
-        # Another writer (legacy PDF flow) closed the admission first.
+        # Another writer pre-closed the admission at the same instant —
+        # simulated by seeding discharge_date directly (the legacy PDF
+        # flow itself is not exercised here).
         admission = _make_admission(
             patient,
             "ADM-1",
@@ -561,6 +563,66 @@ class TestReconcileDischargeRecord:
         assert admission.discharge_date == saida
         assert ReconciliationEvent.objects.count() == 1
         assert Admission.objects.count() == 1
+
+    def test_prior_failed_attempt_does_not_block_already_reconciled_audit(self):
+        """A prior non-reconcilable event of the same evidence (e.g.
+        ``patient_not_found`` while the mirror lacked the patient) never
+        covers the structural linkage audit: once the patient is mirrored
+        and the admission turns out pre-closed at the same exit by another
+        writer (simulated by seeded ``discharge_date``), the
+        re-reconciled evidence appends exactly one ``already_reconciled``
+        event — 2 events total (failed attempt + structural one)."""
+        exit_at = datetime(2026, 6, 1, 12, 0, tzinfo=TZ_LOCAL)
+        record = _make_record(
+            None,
+            prontuario="888",
+            data_internacao="20/05/2026",
+            saida=exit_at,
+        )
+
+        first = reconcile_discharge_record(record=record)
+        assert first == RECONCILIATION_STATUS_PATIENT_NOT_FOUND
+        assert ReconciliationEvent.objects.count() == 1
+        assert (
+            ReconciliationEvent.objects.get().status
+            == RECONCILIATION_STATUS_PATIENT_NOT_FOUND
+        )
+
+        # The mirror now holds the patient; the admission was pre-closed
+        # at the same saida_em by another writer (simulated: state seeded
+        # directly, not through the legacy PDF flow).
+        patient = _make_patient("888")
+        admission = _make_admission(
+            patient,
+            "ADM-1",
+            "2026-05-20T08:00:00",
+            end="2026-06-01T12:00:00",
+        )
+
+        second = reconcile_discharge_record(record=record)
+
+        assert second == RECONCILIATION_STATUS_ALREADY_RECONCILED
+        admission.refresh_from_db()
+        assert admission.discharge_date == exit_at  # unchanged
+        assert ReconciliationEvent.objects.count() == 2
+        assert list(
+            ReconciliationEvent.objects.order_by("pk").values_list(
+                "status", flat=True
+            )
+        ) == [
+            RECONCILIATION_STATUS_PATIENT_NOT_FOUND,
+            RECONCILIATION_STATUS_ALREADY_RECONCILED,
+        ]
+        structural = ReconciliationEvent.objects.order_by("pk").last()
+        assert structural.source_id == record.pk
+        assert structural.prior_discharge_date == exit_at
+        assert structural.new_discharge_date is None
+        record.refresh_from_db()
+        assert record.admission_id == admission.pk
+        assert (
+            record.reconciliation_status
+            == RECONCILIATION_STATUS_ALREADY_RECONCILED
+        )
 
     def test_unparseable_local_date_does_not_pick_latest_admission(self):
         """A real unparseable ``data_internacao`` string (XLS adapter parse
