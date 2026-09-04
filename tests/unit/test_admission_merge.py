@@ -18,7 +18,7 @@ from apps.census.models import PatientMovement
 from apps.clinical_docs.models import ClinicalEvent
 from apps.deaths.models import DeathRecord
 from apps.discharges.models import DischargeRecord
-from apps.ingestion.models import EvolutionExtractionCoverage
+from apps.ingestion.models import EvolutionExtractionCoverage, IngestionRun
 from apps.patients.admission_merge import (
     ELIGIBLE,
     RELATION_DISPOSITION_KEEP,
@@ -43,6 +43,7 @@ from apps.patients.models import (
     AdmissionSourceAlias,
     Patient,
     ReconciliationEvent,
+    StaleAdmissionCase,
 )
 from apps.patients.reconciliation import (
     DischargeExitEvidence,
@@ -72,11 +73,27 @@ REPOINTED_ACCESSORS = (
     "death_evidence",
 )
 
-ALL_ACCESSORS = REPOINTED_ACCESSORS + ("merged_from", "reconciliation_events")
+ALL_ACCESSORS = REPOINTED_ACCESSORS + (
+    "merged_from",
+    "reconciliation_events",
+    "stale_cases",
+)
 
 
 def _dt(value: str) -> datetime:
     return datetime.fromisoformat(value).replace(tzinfo=TZ_LOCAL)
+
+
+def _census_run() -> IngestionRun:
+    """Minimal succeeded census run for stale-case FK fixtures."""
+    from django.utils import timezone
+
+    return IngestionRun.objects.create(
+        status="succeeded",
+        intent="census_extraction",
+        queued_at=timezone.now(),
+        processing_started_at=timezone.now(),
+    )
 
 
 def _make_patient(key: str) -> Patient:
@@ -396,7 +413,11 @@ class TestRelationRegistry:
             for accessor, entry in registry.items()
             if entry.disposition == RELATION_DISPOSITION_KEEP
         }
-        assert kept == {"merged_from", "reconciliation_events"}
+        assert kept == {
+            "merged_from",
+            "reconciliation_events",
+            "stale_cases",
+        }
         assert set(REPOINTED_ACCESSORS) <= repointed
 
     def test_unknown_relation_is_a_hard_error(self, db: object) -> None:
@@ -496,11 +517,21 @@ class TestMergeExecution:
         patient, canonical, duplicate = _eligible_pair()
         _attach_relation("reconciliation_events", duplicate, patient)
         _attach_relation("merged_from", duplicate, patient)
+        StaleAdmissionCase.objects.create(
+            admission=duplicate,
+            first_absence_run=_census_run(),
+            first_absence_at=_dt("2026-05-01T10:00:00"),
+            last_absence_run=_census_run(),
+            last_absence_at=_dt("2026-05-01T11:00:00"),
+        )
 
         operation = _merge_pair(canonical, duplicate)
         registry = build_relation_registry()
         assert registry["merged_from"].disposition == RELATION_DISPOSITION_KEEP
         assert registry["reconciliation_events"].disposition == (
+            RELATION_DISPOSITION_KEEP
+        )
+        assert registry["stale_cases"].disposition == (
             RELATION_DISPOSITION_KEEP
         )
         duplicate.refresh_from_db()
@@ -514,6 +545,13 @@ class TestMergeExecution:
             RELATION_DISPOSITION_KEEP
         )
         assert operation.relation_manifest["merged_from"]["attached"] == 1
+        # The stale case stays attached to the row it was raised against
+        # (frozen there by the RPSA-S5 scan/evaluation) and is recorded in
+        # the manifest's kept relations.
+        assert duplicate.stale_cases.count() == 1
+        assert operation.relation_manifest["stale_cases"]["disposition"] == (
+            RELATION_DISPOSITION_KEEP
+        )
 
     def test_summary_state_conflict_stays_attached(self, db: object) -> None:
         patient, canonical, duplicate = _eligible_pair()

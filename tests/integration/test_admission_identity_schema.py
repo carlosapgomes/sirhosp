@@ -22,6 +22,8 @@ from django.db import IntegrityError, connection
 # RPSA-S3) grow the inventory; design rollout step 4 re-derives the
 # inventory once evidence FKs exist, and the clinical vs maintenance
 # call-site classification remains the RPSA-S4 merge gate.
+# RPSA-S5 (controller-authorized fixture update): the per-admission
+# stale-admission case FK (``stale_cases``) joins the same inventory.
 EXPECTED_REVERSE_RELATION_ACCESSORS = frozenset(
     {
         "events",
@@ -36,6 +38,7 @@ EXPECTED_REVERSE_RELATION_ACCESSORS = frozenset(
         "discharge_evidence",
         "death_evidence",
         "reconciliation_events",
+        "stale_cases",
     }
 )
 

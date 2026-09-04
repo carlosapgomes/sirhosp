@@ -215,6 +215,13 @@ _RELATION_DISPOSITIONS: dict[str, tuple[str, str]] = {
         "Append-only audit stays attached to the row it was written "
         "against; visible via ``all_objects``.",
     ),
+    "stale_cases": (
+        RELATION_DISPOSITION_KEEP,
+        "Stale-admission suspicion (RPSA-S5) is operational history raised "
+        "against a specific row: cases attached to a merged row are frozen "
+        "by the stale-admission scan/evaluation, and the canonical episode "
+        "raises its own case from the next census observation.",
+    ),
 }
 
 

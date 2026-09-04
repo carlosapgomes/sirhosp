@@ -32,6 +32,7 @@ from django.db import close_old_connections, connection
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
+from apps.census.stale_admissions import observe_accepted_census_run
 from apps.ingestion.models import CensusExecutionBatch, IngestionRun
 from apps.ingestion.stale_recovery import recover_stale_ingestion_runs
 
@@ -362,6 +363,26 @@ def run_single_cycle(
             )
             logger.error("Snapshot processing failed: %s", exc)
             return result
+
+        # Step 7.5 (RPSA-S5): best-effort stale-admission observation for
+        # the accepted run. Observation failure is logged structurally and
+        # never fails the census cycle; the orchestrator lock is released
+        # by the surrounding finally on every exit path.
+        try:
+            observation = observe_accepted_census_run(run_id=new_run.pk)
+        except Exception as exc:
+            logger.error(
+                "Stale-admission observation failed for census run %s: %s",
+                new_run.pk,
+                type(exc).__name__,
+            )
+            result["absence_observation"] = {
+                "observed": False,
+                "error_type": type(exc).__name__,
+            }
+        else:
+            # Aggregate case counters only; never patient identity.
+            result["absence_observation"] = observation
 
         # Step 8: Success
         result["outcome"] = "success"

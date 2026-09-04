@@ -63,6 +63,8 @@ EXIT_TYPE_CHOICES = [
 ]
 
 
+
+
 class Patient(models.Model):
     """Read-only mirror of patient demographic data from external source.
 
@@ -389,6 +391,127 @@ class AdmissionMergeOperation(models.Model):
             f"AdmissionMergeOperation {self.operation_uuid} "
             f"#{self.merged_admission_id} -> #{self.canonical_admission_id}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Stale-admission case taxonomy (RPSA-S5).
+# One conservative case per open canonical admission; resolution and enqueue
+# outcomes are structural state only and never carry patient identity.
+# ---------------------------------------------------------------------------
+
+class StaleAdmissionCase(models.Model):
+    """Conservative two-census absence suspicion for one open admission.
+
+    Created only from accepted complete census runs (snapshots that pass
+    ``validate_snapshot_completeness`` inside ``process_census_snapshot``).
+    Absence never writes ``Admission.discharge_date``: eligibility only
+    schedules a bounded, deduplicated ``admissions_only`` source
+    confirmation under case-level cooldowns. At most one open case exists
+    per admission; reappearance in an accepted census resolves the case.
+    """
+
+    class ResolutionReason(models.TextChoices):
+        REAPPEARED = "reappeared", "Reappeared in an accepted census"
+        EXIT_CONFIRMED = "exit_confirmed", "Admission exit confirmed by reconciliation"
+
+    class EnqueueOutcome(models.TextChoices):
+        INCONCLUSIVE = "inconclusive", "Inconclusive source confirmation"
+        CONCLUSIVE_NO_EXIT = "conclusive_no_exit", "Source confirmed no exit"
+
+    admission = models.ForeignKey(
+        Admission,
+        on_delete=models.CASCADE,
+        related_name="stale_cases",
+        help_text="Open canonical admission under conservative suspicion.",
+    )
+    first_absence_run = models.ForeignKey(
+        "ingestion.IngestionRun",
+        on_delete=models.PROTECT,
+        related_name="+",
+        help_text="Accepted census run of the first confirmed absence.",
+    )
+    first_absence_at = models.DateTimeField(
+        help_text=(
+            "Capture timestamp of the first absence run; the 30-minute "
+            "eligibility window is measured from here (inclusive)."
+        ),
+    )
+    last_absence_run = models.ForeignKey(
+        "ingestion.IngestionRun",
+        on_delete=models.PROTECT,
+        related_name="+",
+        help_text="Latest accepted census run that omitted the patient.",
+    )
+    last_absence_at = models.DateTimeField(
+        help_text="Capture timestamp of the latest absence run.",
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_reason = models.CharField(
+        max_length=32,
+        choices=ResolutionReason.choices,
+        blank=True,
+        default="",
+        help_text="Set together with resolved_at; empty while the case is open.",
+    )
+    last_enqueued_run = models.ForeignKey(
+        "ingestion.IngestionRun",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="Latest admissions_only confirmation run requested.",
+    )
+    last_enqueued_at = models.DateTimeField(null=True, blank=True)
+    last_enqueue_outcome = models.CharField(
+        max_length=32,
+        choices=EnqueueOutcome.choices,
+        blank=True,
+        default="",
+        help_text=(
+            "Classified at the next evaluation from the run status plus "
+            "admission state; empty while the latest attempt is pending."
+        ),
+    )
+    last_outcome_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Reference instant of the cooldown (run completion).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["first_absence_at", "pk"]
+        permissions = [
+            (
+                "review_reconciliation_cases",
+                "Can review reconciliation cases",
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["admission"],
+                condition=Q(resolved_at__isnull=True),
+                name="uq_stale_case_open_per_admission",
+            ),
+            models.CheckConstraint(
+                condition=Q(last_absence_at__gte=F("first_absence_at")),
+                name="ck_stale_case_absence_order",
+            ),
+            models.CheckConstraint(
+                condition=Q(resolved_at__isnull=True, resolution_reason="")
+                | (
+                    Q(resolved_at__isnull=False)
+                    & ~Q(resolution_reason="")
+                ),
+                name="ck_stale_case_resolution_consistent",
+            ),
+        ]
+        verbose_name = "Stale Admission Case"
+        verbose_name_plural = "Stale Admission Cases"
+
+    def __str__(self) -> str:
+        return f"StaleAdmissionCase #{self.pk} admission={self.admission_id}"
 
 
 class PatientIdentifierHistory(models.Model):
