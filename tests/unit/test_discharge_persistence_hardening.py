@@ -413,10 +413,13 @@ class TestServiceDischargeExtractionIdempotency:
     def test_service_empty_output_keeps_evidence_and_aggregate_untouched(
         self, mock_credentials, mock_subprocess_success,
     ):
-        """No XLS on re-run: evidence remains; aggregate is never reset/written.
+        """No XLS on re-run: evidence remains; aggregate rebuilt to truth.
 
-        A pre-seeded ``DailyDischargeCount`` row for the target date must
-        survive unchanged (same row, same count) across extractions.
+        A pre-seeded ``DailyDischargeCount`` row for the target date is
+        rebuilt by the authorized automatic refresh (RPSA-S7/S8) to the
+        canonical count — an orphan row with no canonical exits is zeroed,
+        never deleted nor fabricated. Evidence persistence itself still
+        never writes the aggregate (S7 source-scan guard).
         """
         from apps.discharges.extraction_service import run_discharge_extraction
 
@@ -448,11 +451,13 @@ class TestServiceDischargeExtractionIdempotency:
         assert result2.success is True
         assert result2.metrics["total_records"] == 0
 
-        # Pre-seeded aggregate row survives unchanged (RPSA-S2: no write,
-        # no reset).
+        # Pre-seeded orphan row rebuilt to canonical truth by the automatic
+        # refresh (RPSA-S8 full-rebuild semantics: zeroed, not deleted, not
+        # fabricated; the direct persistence write count stays zero).
         assert DailyDischargeCount.objects.count() == 1
         seeded.refresh_from_db()
-        assert seeded.count == 7
+        assert seeded.count == 0
+        assert seeded.raw_data == []
         assert seeded.date == date(2026, 6, 1)
 
         # DischargeRecord rows from first extraction remain (no date-based cleanup)
@@ -461,10 +466,13 @@ class TestServiceDischargeExtractionIdempotency:
     def test_service_empty_xls_keeps_evidence_and_aggregate_untouched(
         self, mock_credentials, mock_subprocess_success,
     ):
-        """Header-only XLS on re-run: evidence remains; aggregate untouched.
+        """Header-only XLS on re-run: evidence remains; aggregate rebuilt to truth.
 
-        A pre-seeded ``DailyDischargeCount`` row for the target date must
-        survive unchanged (same row, same count) across extractions.
+        A pre-seeded ``DailyDischargeCount`` row for the target date is
+        rebuilt by the authorized automatic refresh (RPSA-S7/S8) to the
+        canonical count — an orphan row with no canonical exits is zeroed,
+        never deleted nor fabricated. Evidence persistence itself still
+        never writes the aggregate (S7 source-scan guard).
         """
         from apps.discharges.extraction_service import run_discharge_extraction
 
@@ -510,11 +518,13 @@ class TestServiceDischargeExtractionIdempotency:
         assert result2.success is True
         assert result2.metrics["total_records"] == 0
 
-        # Pre-seeded aggregate row survives unchanged (RPSA-S2: no write,
-        # no reset).
+        # Pre-seeded orphan row rebuilt to canonical truth by the automatic
+        # refresh (RPSA-S8 full-rebuild semantics: zeroed, not deleted, not
+        # fabricated; the direct persistence write count stays zero).
         assert DailyDischargeCount.objects.count() == 1
         seeded.refresh_from_db()
-        assert seeded.count == 7
+        assert seeded.count == 0
+        assert seeded.raw_data == []
         assert seeded.date == date(2026, 6, 1)
 
         # DischargeRecord rows from first extraction remain (no date-based cleanup)

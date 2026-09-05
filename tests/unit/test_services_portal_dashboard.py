@@ -1,10 +1,12 @@
 """Slice DRD-S1: Dashboard with real DB queries.
 Slice IRMD-S6: Ingestion metric cards on dashboard.
+Slice RPSA-S8: separate effective-exit and medical-summary cards.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from django.urls import reverse
@@ -13,9 +15,54 @@ from django.utils import timezone
 from apps.admissions.models import DailyAdmissionCount
 from apps.census.models import BedStatus, CensusSnapshot
 from apps.deaths.models import DailyDeathCount
-from apps.discharges.models import DailyDischargeCount
+from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.ingestion.models import IngestionRun
-from apps.patients.models import Patient
+from apps.patients.models import (
+    EXIT_HOSPITAL_DISCHARGE,
+    RECONCILIATION_STATUS_RECONCILED,
+    Admission,
+    Patient,
+    ReconciliationEvent,
+)
+
+BAHIA = ZoneInfo("America/Bahia")
+
+
+def _bahia(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    """Pin a wall-clock datetime to ``America/Bahia`` explicitly."""
+    return datetime(year, month, day, hour, minute, tzinfo=BAHIA)
+
+
+def _seed_exit(key: str, when: datetime) -> None:
+    """Create one canonical effective hospital exit closed at ``when``.
+
+    Synthetic evidence id: the card query reads only the admission link,
+    reconciliation status and exit type of the audit event.
+    """
+    patient = Patient.objects.create(
+        patient_source_key=key, source_system="tasy", name=f"Patient {key}")
+    admission = Admission.objects.create(
+        patient=patient,
+        source_admission_key=f"ADM-{key}",
+        source_system="tasy",
+        discharge_date=when,
+    )
+    ReconciliationEvent.objects.create(
+        source_kind="discharge_record",
+        source_id=admission.pk,
+        admission=admission,
+        status=RECONCILIATION_STATUS_RECONCILED,
+        exit_type=EXIT_HOSPITAL_DISCHARGE,
+    )
+
+
+def _seed_summary(prontuario: str, when: datetime) -> None:
+    """Create one medical discharge summary registered at ``when``."""
+    DischargeRecord.objects.create(
+        prontuario=prontuario,
+        data_internacao=f"INT-{prontuario}",
+        alta_em=when,
+    )
 
 
 @pytest.mark.django_db
@@ -30,7 +77,8 @@ class TestDashboardRealStats:
         ctx = response.context
         assert ctx["stats"]["internados"] == 0
         assert ctx["stats"]["cadastrados"] == 0
-        assert ctx["stats"]["altas_hoje"] == 0
+        assert ctx["stats"]["saidas_hoje"] == 0
+        assert ctx["stats"]["sumarios_hoje"] == 0
         assert ctx["coleta"]["setores"] == 0
         assert ctx["coleta"]["ultima_varredura"] == "Nenhum dado disponível"
 
@@ -74,15 +122,91 @@ class TestDashboardRealStats:
         assert response.status_code == 200
         assert response.context["stats"]["cadastrados"] == 2
 
-    def test_dashboard_shows_discharges_today(self, admin_client):
-        """Dashboard uses DailyDischargeCount as source of truth for today."""
+    def test_dashboard_exit_card_uses_canonical_query_not_stale_aggregate(
+        self, admin_client,
+    ):
+        """RPSA-S8: primary exit card counts today's canonical exits via a
+        direct Admission query — never the (possibly stale) aggregate table."""
         today = timezone.localdate()
-        DailyDischargeCount.objects.create(date=today, count=43)
+        DailyDischargeCount.objects.create(date=today, count=43)  # stale
+        for i in range(2):
+            _seed_exit(
+                f"EX{i}", _bahia(today.year, today.month, today.day, 8 + i, 0)
+            )
 
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
         assert response.status_code == 200
-        assert response.context["stats"]["altas_hoje"] == 43
+        ctx = response.context
+        assert ctx["stats"]["saidas_hoje"] == 2
+        # The retro-latest stats card keeps reading the aggregate.
+        assert ctx["stats"]["altas"] == 43
+        assert ctx["stats"]["altas_date"] == today
+
+    def test_dashboard_exit_card_ignores_last_24h(self, admin_client):
+        """Primary card is the current local date, not the last 24 hours."""
+        today = timezone.localdate()
+        yesterday = today - timedelta(days=1)
+        for i in range(5):
+            _seed_exit(
+                f"T{i}", _bahia(today.year, today.month, today.day, 8 + i, 0)
+            )
+        for i in range(3):
+            _seed_exit(
+                f"Y{i}",
+                _bahia(yesterday.year, yesterday.month, yesterday.day, 20 + i, 0),
+            )
+
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        assert response.context["stats"]["saidas_hoje"] == 5
+
+    def test_dashboard_summary_card_counts_alta_em_today(self, admin_client):
+        """Summary card counts DischargeRecord.alta_em on the local date."""
+        today = timezone.localdate()
+        yesterday = today - timedelta(days=1)
+        for i in range(4):
+            _seed_summary(
+                f"88{i}", _bahia(today.year, today.month, today.day, 9 + i, 30)
+            )
+        _seed_summary(
+            "8899",
+            _bahia(yesterday.year, yesterday.month, yesterday.day, 9, 30),
+        )
+
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        assert response.context["stats"]["sumarios_hoje"] == 4
+
+    def test_dashboard_zero_exits_do_not_zero_summaries(self, admin_client):
+        """Each card's zero is valid and independent."""
+        today = timezone.localdate()
+        for i in range(3):
+            _seed_summary(
+                f"70{i}", _bahia(today.year, today.month, today.day, 9, i)
+            )
+
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        ctx = response.context
+        assert ctx["stats"]["saidas_hoje"] == 0
+        assert ctx["stats"]["sumarios_hoje"] == 3
+
+    def test_dashboard_zero_summaries_do_not_zero_exits(self, admin_client):
+        """Each card's zero is valid and independent."""
+        today = timezone.localdate()
+        for i in range(2):
+            _seed_exit(
+                f"Z{i}", _bahia(today.year, today.month, today.day, 7 + i, 0)
+            )
+
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        ctx = response.context
+        assert ctx["stats"]["saidas_hoje"] == 2
+        assert ctx["stats"]["sumarios_hoje"] == 0
 
     def test_dashboard_shows_sectors_and_timestamp(self, admin_client):
         """Dashboard shows sector count and last capture time."""

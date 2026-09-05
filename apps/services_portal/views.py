@@ -17,12 +17,14 @@ from datetime import timezone as dt_timezone
 from io import BytesIO
 from itertools import groupby
 from typing import Any, Iterator
+from zoneinfo import ZoneInfo
 
 import openpyxl
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import EmptyPage, Paginator
 from django.db.models import (
+    CharField,
     Count,
     F,
     Func,
@@ -34,7 +36,7 @@ from django.db.models import (
     Subquery,
     Value,
 )
-from django.db.models.functions import Cast, Coalesce, ExtractHour
+from django.db.models.functions import Cast, Coalesce, ExtractHour, TruncDate
 from django.http import (
     Http404,
     HttpRequest,
@@ -74,9 +76,11 @@ from apps.ingestion.patient_flow_findings import (
 )
 from apps.ingestion.pipeline_health import ENCOUNTER_FALLBACK_STAGE
 from apps.patients.models import (
+    EXIT_HOSPITAL_DISCHARGE,
     RECONCILIATION_STATUS_AMBIGUOUS,
     RECONCILIATION_STATUS_CONFLICT,
     RECONCILIATION_STATUS_PENDING,
+    RECONCILIATION_STATUS_RECONCILED,
     Admission,
     Patient,
     ReconciliationEvent,
@@ -88,6 +92,55 @@ from apps.patients.reconciliation import (
 )
 
 logger = logging.getLogger(__name__)
+
+# RPSA-S8: discharge/exit indicators are always evaluated on explicit
+# America/Bahia local dates — never an inherited default timezone.
+BAHIA_TZ = ZoneInfo("America/Bahia")
+
+
+def _canonical_hospital_exits() -> QuerySet[Admission]:
+    """Canonical effective hospital exits (RPSA-S8 classification).
+
+    Canonical episodes only (the default manager already excludes rows
+    merged into another canonical admission) with ``discharge_date`` set
+    whose latest reconciled ``ReconciliationEvent`` has exit type
+    ``hospital_discharge`` (the ``saida_em`` provenance). Death exits and
+    admissions without reconciled provenance are not counted.
+    """
+    latest_reconciled_exit_type = ReconciliationEvent.objects.filter(
+        admission=OuterRef("pk"),
+        status=RECONCILIATION_STATUS_RECONCILED,
+    ).order_by("-created_at", "-pk").values("exit_type")[:1]
+    return (
+        Admission.objects.filter(discharge_date__isnull=False)
+        .annotate(
+            latest_exit_type=Subquery(
+                latest_reconciled_exit_type,
+                output_field=CharField(),
+            )
+        )
+        .filter(latest_exit_type=EXIT_HOSPITAL_DISCHARGE)
+    )
+
+
+def _hospital_exits_on(day: date) -> int:
+    """Count canonical hospital exits on one explicit Bahia local date."""
+    return (
+        _canonical_hospital_exits()
+        .annotate(exit_day=TruncDate("discharge_date", tzinfo=BAHIA_TZ))
+        .filter(exit_day=day)
+        .count()
+    )
+
+
+def _medical_summaries_on(day: date) -> int:
+    """Count medical discharge summaries (``alta_em``) on one Bahia date."""
+    return (
+        DischargeRecord.objects.filter(alta_em__isnull=False)
+        .annotate(summary_day=TruncDate("alta_em", tzinfo=BAHIA_TZ))
+        .filter(summary_day=day)
+        .count()
+    )
 
 
 @require_GET
@@ -128,13 +181,9 @@ def dashboard(request: HttpRequest) -> HttpResponse:
         ultima_varredura = "Nenhum dado disponível"
 
     cadastrados = Patient.objects.count()
-    today = timezone.localdate()
-    altas_hoje = (
-        DailyDischargeCount.objects.filter(date=today)
-        .values_list("count", flat=True)
-        .first()
-        or 0
-    )
+    today = timezone.localdate(timezone=BAHIA_TZ)
+    saidas_hoje = _hospital_exits_on(today)
+    sumarios_hoje = _medical_summaries_on(today)
 
     # Daily stats (collected retroactively — latest available date)
     adm_entry = DailyAdmissionCount.objects.order_by("-date").first()
@@ -145,7 +194,8 @@ def dashboard(request: HttpRequest) -> HttpResponse:
     stats = {
         "internados": internados,
         "cadastrados": cadastrados,
-        "altas_hoje": altas_hoje,
+        "saidas_hoje": saidas_hoje,
+        "sumarios_hoje": sumarios_hoje,
         "admissoes": adm_entry.count if adm_entry else 0,
         "admissoes_date": adm_entry.date if adm_entry else today,
         "obitos": death_entry.count if death_entry else 0,
@@ -476,7 +526,7 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
 
     from apps.discharges.models import DailyDischargeCount
 
-    today = timezone.localdate()
+    today = timezone.localdate(timezone=BAHIA_TZ)
 
     entries_recent = list(
         DailyDischargeCount.objects
@@ -487,6 +537,26 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
 
     labels = [e.date.strftime("%d/%m/%Y") for e in entries_recent]
     counts = [e.count for e in entries_recent]
+
+    # RPSA-S8: second daily series — medical summaries derived on request
+    # from ``DischargeRecord.alta_em`` over the SAME window, same explicit
+    # America/Bahia grouping and same today-excluded boundary as the exit
+    # series (whose axis comes from DailyDischargeCount rows).
+    summary_counts: list[int] = []
+    if entries_recent:
+        window_start = entries_recent[0].date
+        summaries_by_day = dict(
+            DischargeRecord.objects
+            .filter(alta_em__isnull=False)
+            .annotate(summary_day=TruncDate("alta_em", tzinfo=BAHIA_TZ))
+            .filter(summary_day__gte=window_start, summary_day__lt=today)
+            .values("summary_day")
+            .annotate(total=Count("id"))
+            .values_list("summary_day", "total")
+        )
+        summary_counts = [
+            summaries_by_day.get(e.date, 0) for e in entries_recent
+        ]
 
     # DWI-S1: weekend flags and weekday abbreviations for per-bar coloring
     _WEEKDAY_ABBR = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
@@ -500,6 +570,9 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
     chart_data = {
         "labels": labels,
         "counts": counts,
+        "summary_counts": summary_counts,
+        "exit_series_label": "Saídas hospitalares (saida_em)",
+        "summary_series_label": "Sumários de alta (alta_em)",
         "sma7": _moving_average(counts, 7),
         "ema7": _exponential_moving_average(counts, 7),
         "sma30": _moving_average(counts, 30),

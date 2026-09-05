@@ -43,6 +43,39 @@
     </div>
   </div>
 
+  <!-- Saídas hospitalares no dia (RPSA-S8: primary effective-exit card,
+       direct canonical query, not the aggregate) -->
+  <div class="col-12 col-md-6 col-lg-3">
+    <a href="{% url 'services_portal:discharge_chart' %}" class="text-decoration-none">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #FEF3C7;">
+          <i class="bi bi-box-arrow-right" style="color: #D97706; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.saidas_hoje }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Saídas hospitalares no dia</div>
+          <div class="small text-muted">hoje · por saida_em</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Sumários de alta registrados (RPSA-S8: separate alta_em indicator) -->
+  <div class="col-12 col-md-6 col-lg-3">
+    <a href="{% url 'services_portal:discharge_chart' %}" class="text-decoration-none">
+      <div class="sirhosp-stat-card d-flex align-items-center gap-3">
+        <div class="sirhosp-stat-icon" style="background: #DCFCE7;">
+          <i class="bi bi-journal-text" style="color: #16A34A; font-size: 1.25rem;"></i>
+        </div>
+        <div>
+          <div class="sirhosp-stat-value" style="color: inherit;">{{ stats.sumarios_hoje }}</div>
+          <div class="sirhosp-stat-label" style="color: inherit;">Sumários de alta registrados</div>
+          <div class="small text-muted">hoje · por alta_em</div>
+        </div>
+      </div>
+    </a>
+  </div>
+
   <!-- Altas no dia -->
   <div class="col-12 col-md-6 col-lg-3">
     <a href="{% url 'services_portal:discharge_list' %}?date={{ stats.altas_date|date:'Y-m-d' }}" class="text-decoration-none">
