@@ -1374,6 +1374,18 @@ manual de batch e qualquer reclassificação manual de histórico. O
 reconhecimento vale somente para execuções novas; evidências antigas
 nunca são reavaliadas em massa.
 
+**Pré-requisito de schema (lição rc.21, 2026-09-05):** o canário só é
+viável quando a imagem nova executa contra o schema atual. Em releases
+cujas migrations são **aditivas e usadas em runtime** (colunas/tabelas
+novas referenciadas pelo código, ex. `merged_into_id` na rc.21), o
+worker canário crasha antes de qualquer processamento. Nessas
+releases escolha: (a) expand-contract — aplicar primeiro as migrations
+aditivas (compatíveis com a imagem antiga, que as ignora) via
+container one-shot da imagem nova, e só então canariar; ou (b) Fase B
+direta (swap completo com migrate na janela), sem canário, registrando
+a decisão. Nunca suba o worker canário sabendo que o schema antigo
+não contém as colunas que o código novo referencia.
+
 #### 6.1.5 Relatório diário de integridade da reconciliação (RPSA-S10)
 
 O comando one-shot `report_admission_reconciliation_integrity` executa a
