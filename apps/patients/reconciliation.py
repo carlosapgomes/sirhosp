@@ -23,6 +23,8 @@ levels are skipped, never synthesized.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Optional
@@ -78,6 +80,41 @@ _RECONCILABLE_STATUSES = (
     RECONCILIATION_STATUS_RECONCILED,
     RECONCILIATION_STATUS_ALREADY_RECONCILED,
 )
+
+
+class ReconciliationRollbackBlocked(Exception):
+    """Post-state diverged from the recorded reconciliation event boundary."""
+
+
+# ---------------------------------------------------------------------------
+# Backfill batch-payload recording hook (RPSA-S9).
+# The scoped payload is ambient state read ONLY when a new audit row or
+# merge operation is created, so backfill items record their batch linkage
+# (``backfill.batch_uuid``/``item_order``) inside the existing append-only
+# payloads without changing any online-service behavior or signature.
+# Existing payloads are never updated.
+# ---------------------------------------------------------------------------
+
+_active_backfill_payload: ContextVar[Optional[dict]] = ContextVar(
+    "sirhosp_active_backfill_payload", default=None
+)
+
+
+def current_backfill_payload() -> Optional[dict]:
+    """Return the active backfill linkage payload, when one is scoped."""
+    return _active_backfill_payload.get()
+
+
+@contextmanager
+def backfill_batch_payload(payload: dict):
+    """Scope the ``{"batch_uuid", "item_order"}`` linkage that gets stamped
+    into newly created audit payloads (reconciliation events and merge
+    operation manifests) for the duration of the block."""
+    token = _active_backfill_payload.set(dict(payload))
+    try:
+        yield
+    finally:
+        _active_backfill_payload.reset(token)
 
 
 @dataclass(frozen=True)
@@ -484,6 +521,15 @@ def _write_audit(
     source_id: int,
 ) -> ReconciliationEvent:
     """Append exactly one audit row; application code never updates it."""
+    details: dict = {
+        "match_reason": decision.match_reason,
+        "candidate_count": decision.candidate_count,
+        "admission_id": admission.pk if admission is not None else None,
+    }
+    active = current_backfill_payload()
+    if active is not None:
+        # RPSA-S9 batch linkage recorded at creation time only (append-only).
+        details["backfill"] = dict(active)
     return ReconciliationEvent.objects.create(
         source_kind=source_kind,
         source_id=source_id,
@@ -493,9 +539,69 @@ def _write_audit(
         reason_code=reason_code or decision.reason_code,
         prior_discharge_date=prior,
         new_discharge_date=new,
-        details_json={
-            "match_reason": decision.match_reason,
-            "candidate_count": decision.candidate_count,
-            "admission_id": admission.pk if admission is not None else None,
-        },
+        details_json=details,
     )
+
+
+def reverse_reconciliation(*, event: ReconciliationEvent) -> ReconciliationEvent:
+    """Reverse one reconciled event as an inverse append-only operation.
+
+    The recorded post-state is validated first (the admission's current
+    ``discharge_date`` must still equal the event's ``new_discharge_date``);
+    any divergence raises :class:`ReconciliationRollbackBlocked` and nothing
+    is written. On success the admission's exit returns to the event's
+    ``prior_discharge_date`` and a NEW ``reconciled`` event is appended with
+    prior/new swapped, ``details_json.rollback_of`` pointing at the original
+    operation UUID and — when scoped by the caller — the batch linkage
+    recorded by the same ambient hook used on apply. The original event is
+    never updated.
+    """
+    with transaction.atomic():
+        locked = ReconciliationEvent.objects.select_for_update().get(pk=event.pk)
+        if locked.details_json.get("rollback_of"):
+            raise ReconciliationRollbackBlocked(
+                "This event is itself a rollback and cannot be reversed again."
+            )
+        if locked.status != RECONCILIATION_STATUS_RECONCILED:
+            raise ReconciliationRollbackBlocked(
+                "Only reconciled events changed clinical state and can be reversed."
+            )
+        if locked.admission_id is None:
+            raise ReconciliationRollbackBlocked(
+                "The event has no linked admission to restore."
+            )
+        admission = Admission.all_objects.select_for_update().get(
+            pk=locked.admission_id
+        )
+        if admission.discharge_date != locked.new_discharge_date:
+            raise ReconciliationRollbackBlocked(
+                "Admission discharge_date no longer matches the event's "
+                "recorded post-state."
+            )
+        restored_prior = admission.discharge_date
+        admission.discharge_date = locked.prior_discharge_date
+        admission.save(update_fields=["discharge_date", "updated_at"])
+        details: dict = {
+            "rollback_of": str(locked.operation_uuid),
+            "admission_id": admission.pk,
+        }
+        active = current_backfill_payload()
+        if active is not None:
+            details["backfill"] = dict(active)
+        inverse = ReconciliationEvent.objects.create(
+            source_kind=locked.source_kind,
+            source_id=locked.source_id,
+            admission=admission,
+            status=RECONCILIATION_STATUS_RECONCILED,
+            exit_type=locked.exit_type,
+            reason_code="rollback",
+            prior_discharge_date=restored_prior,
+            new_discharge_date=locked.prior_discharge_date,
+            details_json=details,
+        )
+    logger.info(
+        "exit reconciliation reversed: event=%s admission_id=%s",
+        locked.operation_uuid,
+        admission.pk,
+    )
+    return inverse

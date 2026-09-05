@@ -196,6 +196,29 @@ class TestCanonicalExitClassification:
 
         assert DailyDischargeCount.objects.count() == 0
 
+    def test_same_patient_two_same_day_exits_count_two(self):
+        """Episode-level counting (RPSA-S8 deferred P2, landed in RPSA-S9).
+
+        Two canonical admissions of the SAME patient exiting on the same
+        local date are two episode exits and must count 2. A regression
+        to distinct-patient semantics would count 1 and fail.
+        """
+        day = date(2026, 3, 15)
+        patient = Patient.objects.create(
+            patient_source_key="EP-P", source_system="tasy", name="Patient EP-P")
+        for index, key in enumerate(("EP-1", "EP-2")):
+            admission = Admission.objects.create(
+                patient=patient,
+                source_admission_key=key,
+                source_system="tasy",
+                discharge_date=_bahia(day.year, day.month, day.day, 10 + index, 0),
+            )
+            _mark_reconciled(admission, EXIT_HOSPITAL_DISCHARGE)
+
+        call_command("refresh_daily_discharge_counts")
+
+        assert DailyDischargeCount.objects.get(date=day).count == 2
+
 
 @pytest.mark.django_db
 class TestBahiaMidnightGrouping:

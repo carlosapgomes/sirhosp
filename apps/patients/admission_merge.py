@@ -32,6 +32,7 @@ from apps.patients.models import (
     AdmissionMergeOperation,
     AdmissionSourceAlias,
 )
+from apps.patients.reconciliation import current_backfill_payload
 from apps.patients.services import ensure_admission_alias
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,12 @@ REVIEW_REQUIRED = "review_required"
 REVIEW_SOURCE_FAILED = "source_failed"
 REVIEW_ZERO_EPISODES = "zero_episodes"
 REVIEW_MULTIPLE_EPISODES = "multiple_episodes"
+
+_BACKFILL_MANIFEST_KEY = "backfill"
+"""Provenance key recorded inside ``relation_manifest`` for backfill items
+(RPSA-S9): ``{"batch_uuid": ..., "item_order": N}``. It is written only on
+newly created operations and is not an Admission relation."""
+
 
 # The patient record number (``source_patient_reference``) is deliberately
 # absent: identity is never merged, snapshotted or restored — every row
@@ -644,6 +651,11 @@ def merge_admissions(
         merged.merged_into = canonical
         merged.save(update_fields=["merged_into", "updated_at"])
 
+        active = current_backfill_payload()
+        if active is not None:
+            # RPSA-S9 batch linkage recorded at creation time only.
+            manifest[_BACKFILL_MANIFEST_KEY] = dict(active)
+
         operation = AdmissionMergeOperation.objects.create(
             canonical_admission_id=canonical.pk,
             merged_admission_id=merged.pk,
@@ -707,6 +719,8 @@ def _validate_rollback_preconditions(
         )
 
     for accessor, entry in manifest.items():
+        if accessor == _BACKFILL_MANIFEST_KEY:
+            continue  # provenance payload, not a relation
         disposition = registry[accessor]
         if disposition.disposition != RELATION_DISPOSITION_REPOINT:
             continue
@@ -815,6 +829,8 @@ def rollback_admission_merge(
 
         # 3. Relations back, in reverse registry order.
         for accessor in sorted(manifest, reverse=True):
+            if accessor == _BACKFILL_MANIFEST_KEY:
+                continue  # provenance payload, not a relation
             disposition = registry[accessor]
             if disposition.disposition != RELATION_DISPOSITION_REPOINT:
                 continue
