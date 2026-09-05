@@ -54,8 +54,9 @@ O workflow:
 2. confirma que releases imutáveis estão habilitadas no repositório;
 3. recusa uma tag exata de imagem que já exista no GHCR;
 4. exige `docs/releases/<release-tag>-upgrade.md`;
-5. cria um draft e anexa `compose.hospital.yml` e o runbook antes da
-   publicação;
+5. cria um draft e anexa `compose.hospital.yml`, o runbook da tag, o script
+   `deploy/exit-reconciliation-scheduler.sh` e os seis units systemd da
+   reconciliação de saídas (3 services + 3 timers) antes da publicação;
 6. constrói e publica o target `prod` do `Dockerfile`;
 7. publica o draft e confirma que o GitHub marcou a release como imutável.
 
@@ -838,59 +839,317 @@ diagnóstico de emergência:
 
 ---
 
-## 4b. Ativar agendamento automático de extração de altas
+## 4b. Agendamento legado de extração de altas (DEPRECATED)
 
-A extração de altas do dia é executada **3 vezes ao dia** (11:00, 19:00, 23:55)
-via systemd timer. O ciclo consulta a página "Altas do Dia" do sistema fonte
-e atualiza o campo `discharge_date` nas internações correspondentes, alimentando
-o indicador "Altas (24h)" do dashboard.
+> **Status: DEPRECADO.** O contrato legado de **3 vezes ao dia**
+> (11:00, 19:00 e 23:55, horário do servidor) executado por
+> `deploy/discharges-scheduler.sh` contra `/opt/sirhosp` (par
+> `compose.yml` + `compose.prod.yml`, via container `web`) foi
+> substituído pela suíte de agendamento da reconciliação de saídas da
+> **seção 5b** (runner one-shot `historical_recovery` do
+> `compose.hospital.yml`, agendado por systemd em `America/Bahia`). O par
+> legado `sirhosp-discharges.{service,timer}` do repositório foi
+> reescrito para o novo contrato horário e `discharges-scheduler.sh`
+> permanece no repositório **apenas como referência histórica**: não
+> instale, não habilite e não agende nada desta seção.
 
-### 4b.1 Instalar o script
+---
+
+## 5b. Reconciliação de saídas — agendamento systemd e runbook (RPSA-S12)
+
+Esta seção descreve a suíte de agendamento **desabilitada por padrão** da
+reconciliação de saídas no servidor hospitalar (`/srv/apps/prisma`, sem clone
+do repositório). A execução usa o runner one-shot `historical_recovery` do
+`compose.hospital.yml` (RPSA-S11) e os comandos `run_exit_reconciliation_runtime`
+(modos `hourly`/`d1`/`catchup`) e `reconcile_stale_admissions`. Toda automação
+da fonte executa pelo perfil `recovery` com `run --rm` — **nunca** pelo serviço
+`web` e **nunca** pelo comando legado `process_discharge_pdf` (o PDF não é
+agendado em hipótese alguma). A ativação exige smoke test e benchmarks
+documentados abaixo; instalar os arquivos nunca habilita nem inicia nada.
+
+### 5b.1 Agendamentos (America/Bahia, offsets fixos sem aleatorização de disparo)
+
+| Timer | Modo do script | Agendamento (`OnCalendar`) | `Persistent` | O que executa |
+| --- | --- | --- | --- | --- |
+| `sirhosp-historical-recovery.timer` | `d1-recovery` | `OnCalendar=*-*-* 05:00:00 America/Bahia` | `true` | D-1 (dia anterior em `America/Bahia`) com os quatro extratores na ordem canônica `discharges, admissions, deaths, official_census` via `run_exit_reconciliation_runtime --mode d1`. |
+| `sirhosp-discharges.timer` | `hourly-discharges` | `OnCalendar=*-*-* *:13:00 America/Bahia` | `true` | Altas do dia corrente via `run_exit_reconciliation_runtime --mode hourly` (13 minutos após cada hora). |
+| `sirhosp-stale-reconciliation.timer` | `stale-sweep` | `OnCalendar=*-*-* *:47:00 America/Bahia` | `true` | Varredura horária limitada de internações órfãs via `reconcile_stale_admissions` (lock advisory próprio, enfileira no máximo 100 confirmações, sem Playwright). |
+
+`America/Bahia` no literal `OnCalendar=` torna os agendamentos independentes do
+fuso do host. Os offsets fixos 05:00 / :13 / :47 (sem aleatorização de disparo) mantêm
+os lançamentos Playwright agendados afastados entre si; a verificação de fila,
+batch aberto e locks é a segunda linha de defesa (RPSA-S11).
+
+### 5b.2 Artefatos, instalação e baseline desabilitado
+
+A mesma release imutável (mesma tag) entrega `compose.hospital.yml`, o runbook
+específico da versão, o script `deploy/exit-reconciliation-scheduler.sh` e os
+seis units de `deploy/systemd/` (3 services + 3 timers). O workflow de release
+anexa todos esses assets antes da publicação; a tag e os assets não podem mais
+ser alterados depois.
+
+Instalação no servidor hospitalar (exemplo sintético com a tag `v1.0.0-rc.N`;
+troque pela tag exata publicada):
 
 ```bash
-# Tornar executável
-chmod +x /opt/sirhosp/deploy/discharges-scheduler.sh
+cd /srv/apps/prisma
 
-# Testar manualmente (opcional, valida conectividade)
-/opt/sirhosp/deploy/discharges-scheduler.sh
-```
+# Baixa o script e os seis units da mesma tag da release imutável
+curl -fL -O \
+  "https://github.com/carlosapgomes/sirhosp/releases/download/v1.0.0-rc.N/exit-reconciliation-scheduler.sh"
+mkdir -p deploy/systemd
+for unit in sirhosp-discharges.service sirhosp-discharges.timer \
+  sirhosp-historical-recovery.service sirhosp-historical-recovery.timer \
+  sirhosp-stale-reconciliation.service sirhosp-stale-reconciliation.timer; do
+  curl -fL -o "deploy/systemd/${unit}" \
+    "https://github.com/carlosapgomes/sirhosp/releases/download/v1.0.0-rc.N/${unit}"
+done
+chmod +x exit-reconciliation-scheduler.sh
+mv exit-reconciliation-scheduler.sh deploy/
 
-### 4b.2 Instalar units do systemd
-
-```bash
-# Copiar units para o systemd
-cp /opt/sirhosp/deploy/systemd/sirhosp-discharges.service /etc/systemd/system/
-cp /opt/sirhosp/deploy/systemd/sirhosp-discharges.timer /etc/systemd/system/
-
-# Recarregar configuração
+# Copia os units para o systemd (NÃO habilita nem inicia nada)
+sudo install -m 0644 deploy/systemd/*.service deploy/systemd/*.timer \
+  /etc/systemd/system/
 systemctl daemon-reload
-
-# Habilitar e iniciar o timer
-systemctl enable --now sirhosp-discharges.timer
-
-# Verificar status
-systemctl status sirhosp-discharges.timer
-systemctl list-timers --no-pager | grep sirhosp
 ```
 
-### 4b.3 Comandos úteis
+**Baseline desabilitado:** os services são `Type=oneshot`, com saída em journal
+e `SyslogIdentifier` próprio, sem `Restart=`; os timers só disparam após
+`systemctl enable`. Não existem arquivos de preset. Confirme que nada foi
+ativado na primeira instalação:
 
 ```bash
-# Ver próximo disparo
-systemctl list-timers sirhosp-discharges.timer
-
-# Disparar manualmente (para teste)
-systemctl start sirhosp-discharges.service
-
-# Ver logs da última execução
-journalctl -u sirhosp-discharges.service -n 50 --no-pager
-
-# Ver logs em tempo real
-journalctl -u sirhosp-discharges.service -f
-
-# Desabilitar agendamento
-systemctl disable --now sirhosp-discharges.timer
+systemctl is-enabled sirhosp-discharges.timer \
+  sirhosp-historical-recovery.timer sirhosp-stale-reconciliation.timer
+systemctl list-timers --all | grep -E 'sirhosp-(discharges|historical-recovery|stale-reconciliation)' || true
 ```
+
+A saída esperada é `disabled` até a ativação explícita da seção 5b.3. Execuções
+manuais de validação usam `systemctl start sirhosp-<nome>.service` (oneshot);
+nenhum destes passos liga o agendamento.
+
+### 5b.3 Ativação: smoke test D-1 manual e enablement
+
+Deploy, validação manual e ativação de timers são **checkpoints separados**.
+Antes de habilitar o timer de D-1, execute um smoke test manual com os quatro
+extratores para a data anterior em `America/Bahia` e confira sucesso e
+contadores agregados de reconciliação:
+
+```bash
+cd /srv/apps/prisma
+docker compose --env-file .env -f compose.hospital.yml --profile recovery run \
+  --rm historical_recovery uv run --no-sync python manage.py \
+  run_exit_reconciliation_runtime --mode d1
+```
+
+Somente depois do smoke test dos quatro extratores, habilite o timer de D-1:
+
+```bash
+sudo systemctl enable --now sirhosp-historical-recovery.timer
+systemctl list-timers sirhosp-historical-recovery.timer
+```
+
+O timer horário de altas só deve ser habilitado depois da aprovação do
+benchmark horário (seção 5b.4):
+
+```bash
+sudo systemctl enable --now sirhosp-discharges.timer
+```
+
+A varredura de segurança (`sirhosp-stale-reconciliation.timer`) é livre de
+Playwright e pode ser habilitada após o smoke test de D-1 e observação da fila
+drenada; mantenha os demais timers desabilitados até os respectivos gates.
+
+### 5b.4 Gates de benchmark independentes e calibração
+
+As aprovações de benchmark **horário** e de **catch-up de sete datas** são
+**independentes** entre si:
+
+- Aprovação do benchmark horário é pré-condição para habilitar
+  `sirhosp-discharges.timer` (extração horária de altas do dia corrente).
+- Aprovação do benchmark de catch-up (até sete datas, quatro extratores) é
+  pré-condição para execução de catch-up multi-data autorizada pelo operador.
+  Enquanto não aprovado, o planejamento automático permanece **somente D-1**;
+  nada agenda catch-up automaticamente e lacunas maiores que sete datas param
+  antes da extração, reportando apenas contagem e limites agregados.
+
+Benchmarks são executados com `benchmark_exit_reconciliation_runtime`
+(fixtures sintéticas; nunca contra produção):
+
+```bash
+cd /srv/apps/prisma
+docker compose --env-file .env -f compose.hospital.yml --profile recovery run \
+  --rm historical_recovery uv run --no-sync python manage.py \
+  benchmark_exit_reconciliation_runtime --mode hourly
+docker compose --env-file .env -f compose.hospital.yml --profile recovery run \
+  --rm historical_recovery uv run --no-sync python manage.py \
+  benchmark_exit_reconciliation_runtime --mode catchup
+```
+
+#### Calibração de limiares de benchmark
+
+Os limiares abaixo são defaults seguros e **documentados como placeholders**
+aguardando calibração com carga real (nota RPSA-S11):
+
+| Threshold | Default horário | Default catch-up |
+| --- | ---: | ---: |
+| `max_latency_seconds` | `30.0` | `300.0` |
+| `max_error_rate` | `0.10` | `0.10` |
+| `max_db_seconds` | `15.0` | `180.0` |
+| `max_queue_depth` | `0` | `0` |
+
+Caveat de calibração da fila: `max_queue_depth` avalia a fila **residual**
+amostrada após o fechamento dos serviços síncronos, e não o pico
+(`peak_active`) rastreado durante a execução — o limiar não detecta impacto
+transitório ativo. Ao calibrar, meça também o pico observado e documente a
+decisão de elevar o limiar com base na medição residual, não no placeholder.
+
+### 5b.5 Contenção: exit 75, locks e limites
+
+Quando a fila de ingestão não está drenada ou existe batch de censo aberto, o
+runtime de modo fonte sai com o código fixo **75** (`EX_TEMPFAIL`) antes de
+lançar Playwright. O **script** `exit-reconciliation-scheduler.sh` retenta
+somente esse código, com bound fixo de **seis invocações no total** (tentativa
+inicial mais no máximo cinco retries) e intervalo fixo de **600 segundos
+(10 minutos)** entre tentativas — o script nunca excede esse limite e os
+valores não são configuráveis. Qualquer outro código de saída diferente de zero
+falha imediatamente. Não existe loop infinito e os units não possuem `Restart=`
+para falhas — a contenção é resolvida no script, dentro do bound, e depois
+disso a falha é definitiva e observável no journal.
+
+Se um runtime equivalente já estiver ativo, o lock advisory falha e a execução
+sai **0** com `result=skip` (sem duplicar trabalho). As guardas:
+
+- fila drenada e sem batch de censo aberto antes de Playwright (modos fonte);
+- locks advisory de sessão distintos: orquestrador de censo
+  (`ADVISORY_LOCK_KEY`), varredura de órfãs (`STALE_ADMISSION_SWEEP_LOCK_KEY`),
+  discharge horária (`HOURLY_LOCK_KEY`) e recuperação histórica D-1/catch-up
+  (`RECOVERY_LOCK_KEY`);
+- offsets fixos dos timers (seção 5b.1) afastam lançamentos Playwright
+  agendados; sobreposição manual residual permanece monitorada.
+
+Inspeção da contenção:
+
+```bash
+journalctl -u sirhosp-historical-recovery.service -n 200 --no-pager
+journalctl -u sirhosp-discharges.service -n 200 --no-pager
+journalctl -u sirhosp-stale-reconciliation.service -n 200 --no-pager
+```
+
+Nas linhas de log, `result=busy ... exit_code=75 attempt=N/6` identifica a
+tentativa corrente dentro do bound de seis invocações totais (linha impressa
+antes de cada nova tentativa, após o intervalo fixo de 600 s) e
+`result=failed exit_code=<código>` marca a falha definitiva.
+
+### 5b.6 Monitoramento (RPSA-S10)
+
+A seção 6.1 documenta `check_ingestion_pipeline_health` com as **quatro opções**
+de reconciliação do RPSA-S10 (`--missing-dates-max`, `--backlog-age-max-hours`,
+`--conflict-max-count`, `--duplicate-max-count`) e seus defaults, além do
+comando diário `report_admission_reconciliation_integrity`. A saída é
+estritamente agregada e read-only (nunca identidade de paciente, texto clínico,
+credenciais ou corpo de CSV). Use o relatório diário de integridade como
+verificação periódica; falhas retornam exit 1 com códigos fixos. Os logs de
+cada execução agendada da seção 5b.1 permanecem agregados (contadores, status,
+datas e reasons seguros).
+
+### 5b.7 Runbook de backfill autorizado (RPSA-S9)
+
+Backfill em produção é uma **operação separada e explicitamente autorizada**;
+nunca parte do deploy ou do agendamento. Plano e apply usam
+`reconcile_admission_history` (dry-run por padrão) e `rollback_admission_reconciliation`.
+Cohorts na ordem determinística: duplicatas confirmadas na fonte, altas com data
+exata, óbitos com data/hora completas; ambiguidades apenas contadas para
+revisão. Saída sempre agregada.
+
+Procedimento autorizado:
+
+1. **Backup:** crie backup local com timestamp do PostgreSQL e registre a
+   referência (`--backup-ref`), nunca um caminho vazio.
+2. **Plano em dry-run:** revise contagens por cohort e limites antes de aplicar.
+   Atenção: `--limit` acima do cap de apply não é rejeitado em dry-run — o
+   preview pode exceder o que o apply aceitaria; mantenha o dry-run dentro do
+   cap.
+3. **Identificação:** `--label` obrigatório, identificando a operação.
+4. **Canário 50:** o primeiro apply de um histórico sem lotes anteriores aceita
+   no máximo 50 itens (`--apply --limit 50`); lotes seguintes sobem até o
+   máximo de **100** por lote.
+5. **Gate do cohort de duplicatas:** a confirmação de fonte deste cohort é
+   **derivada** do par (proxy de frescor `closed.updated_at >= open.updated_at`),
+   não uma confirmação independente da fonte. Antes de aplicar o cohort de
+   duplicatas, exija **sincronização `admissions_only` prévia** que renove o
+   catálogo de internações dos pares afetados e/ou **revisão operador
+   par-a-par** pela ferramenta protegida de revisão.
+6. **Rollback:** para reverter um lote, use `rollback_admission_reconciliation
+   --batch <uuid>` (valida o estado posterior de todos os itens e reverte
+   atomicamente na ordem inversa) ou `--operation <uuid>` para uma operação.
+   Assimetria documentada: o rollback reverte o estado das internações e anexa
+   eventos inversos, mas as linhas de `DischargeRecord`/`DeathRecord` continuam
+   `reconciled`; um item revertido não é replanejado, e um replay posterior da
+   mesma evidência **reconcilia e fecha novamente** a internação.
+7. **Cap pós-rollback:** eventos inversos reutilizam o `batch_uuid` do lote
+   original — um primeiro canário totalmente revertido ainda conta como lote
+   registrado e o cap permanece 100 (conservador por desenho).
+
+Exemplos sintéticos (não executar sem autorização):
+
+```bash
+docker compose --env-file .env -f compose.hospital.yml exec -T web \
+  uv run --no-sync python manage.py reconcile_admission_history \
+  --backup-ref "sirhosp-2026-09-06T030000Z.dump" --label "saneamento-RPSA-S12" \
+  --apply --limit 50
+```
+
+### 5b.8 Desativação e rollback dos timers
+
+Desativar um agendamento não apaga dados nem altera o runtime:
+
+```bash
+sudo systemctl disable --now sirhosp-historical-recovery.timer
+sudo systemctl disable --now sirhosp-discharges.timer
+sudo systemctl disable --now sirhosp-stale-reconciliation.timer
+systemctl list-timers --all | grep sirhosp || true
+```
+
+Rollback completo da suíte (remoção das unidades):
+
+```bash
+sudo systemctl disable --now \
+  sirhosp-historical-recovery.timer sirhosp-discharges.timer \
+  sirhosp-stale-reconciliation.timer 2>/dev/null || true
+sudo rm -f /etc/systemd/system/sirhosp-historical-recovery.{service,timer} \
+  /etc/systemd/system/sirhosp-discharges.{service,timer} \
+  /etc/systemd/system/sirhosp-stale-reconciliation.{service,timer}
+systemctl daemon-reload
+```
+
+### 5b.9 Restrições operacionais (sem cron, sem PDF, legado deprecado)
+
+- **Sem cron:** nenhuma entrada em cron (root ou de container) pode duplicar
+  recuperação D-1, extração horária de altas ou varredura de órfãs; um único
+  agendador canônico (systemd) é dono de cada responsabilidade periódica.
+- **PDF nunca agendado:** `process_discharge_pdf` está inativo e **nunca** é
+  agendado por timer, cron ou runbook.
+- **Legado deprecado:** `discharges-scheduler.sh` e o antigo contrato 3x/dia
+  (seção 4b) estão deprecados e não devem ser instalados; o par
+  `sirhosp-discharges.{service,timer}` reescrito na seção 5b.1 é o dono atual
+  do agendamento de altas.
+- **Sem clone:** a operação usa somente assets da release imutável sob
+  `/srv/apps/prisma`; não há `git pull` nem toolchain no servidor.
+
+### 5b.10 Notas de coordenação (RPSA-S5 e RPSA-S8)
+
+- **Janela varredura × orquestrador (RPSA-S5):** a varredura de :47
+  (`reconcile_stale_admissions`) e a orquestração adaptativa de censo
+  coordenam por locks advisory distintos; o enfileiramento usa dedup
+  caller-side (query-then-insert), portanto permanece uma janela residual
+  alcançável de trabalho ativo duplicado — aceita e consistente com o padrão
+  existente; um guarda a nível de banco é considerada em slice posterior.
+- **Eixo da série de sumários (RPSA-S8):** a segunda série do gráfico
+  (sumários médicos por `alta_em`) é ancorada ao eixo de linhas agregadas e
+  renderiza onde existem linhas de `DailyDischargeCount` — comportamento
+  transicional (o refresh roda após cada extração); indicadores de saída usam
+  `saida_em` em `America/Bahia` e óbitos não entram nas contagens de alta.
 
 ---
 
@@ -904,7 +1163,7 @@ curl http://localhost:8000/health/
 docker compose -f compose.yml -f compose.prod.yml ps
 ```
 
-### 6.1 Health check do pipeline de ingestão (RPAP-S5)
+### 6.1 Health check do pipeline de ingestão (RPAP-S5 e RPSA-S10)
 
 O comando one-shot `check_ingestion_pipeline_health` avalia o pipeline
 censo → internações → demografia → full-sync → evoluções com métricas
@@ -930,6 +1189,10 @@ paciente/internação/evento, parâmetros, texto clínico, URL ou erro bruto.
 | `--max-movement-age-hours` | desligado | Alarme de frescor da última `PatientMovement` (positivo quando ativo). |
 | `--max-admission-age-hours` | desligado | Alarme de frescor da última atualização de `Admission` (positivo quando ativo). |
 | `--max-event-age-hours` | desligado | Alarme de frescor do último `ClinicalEvent` (positivo quando ativo). |
+| `--missing-dates-max` (RPSA-S10) | `7` | Datas de extração de altas ausentes/incompletas aceitas antes do alarme de ação operacional (não negativo). |
+| `--backlog-age-max-hours` (RPSA-S10) | `48` | Idade máxima da evidência de reconciliação `pending`/`ambiguous` mais antiga (positivo). |
+| `--conflict-max-count` (RPSA-S10) | `0` | Evidências de reconciliação `conflict` toleradas (não negativo). |
+| `--duplicate-max-count` (RPSA-S10) | `0` | Pares de internações duplicadas confirmados pela fonte tolerados (não negativo). |
 
 Invariantes batch-bound (qualquer contagem positiva torna unhealthy):
 
@@ -1110,6 +1373,36 @@ docker compose --env-file .env -f compose.hospital.yml up -d --no-deps \
 manual de batch e qualquer reclassificação manual de histórico. O
 reconhecimento vale somente para execuções novas; evidências antigas
 nunca são reavaliadas em massa.
+
+#### 6.1.5 Relatório diário de integridade da reconciliação (RPSA-S10)
+
+O comando one-shot `report_admission_reconciliation_integrity` executa a
+mesma avaliação read-only compartilhada com a configuração padrão e
+renderiza o bloco de reconciliação (RPSA-S10): cobertura durável de
+extração de altas com zero confirmado, lacunas e limites, idade do backlog
+por grupo de status (`pending`/`ambiguous`/`conflict`/casos órfãos abertos),
+evidencias `conflict`, pares duplicados confirmados e a contagem de
+internações canônicas abertas ausentes do último censo. Não enfileira
+trabalho, não chama a fonte e não muta estado clínico; a saída carrega
+somente datas, idades, nomes de grupos, contagens e limites — nunca
+identificadores de paciente/internação/fonte, nomes, prontuários ou texto
+clínico. Exit 0 quando saudável; `CommandError` (exit 1) quando alguma
+violação dos limiares da seção 6.1.1 dispara, com mensagem de códigos
+fixos e contagens.
+
+Execução manual (hospitalar, read-only):
+
+```bash
+cd /srv/apps/prisma
+docker compose --env-file .env -f compose.hospital.yml exec -T web \
+  uv run --no-sync python manage.py report_admission_reconciliation_integrity
+```
+
+A cadência diária do comando é decisão do operador (por exemplo, um timer
+próprio desabilitado por padrão junto aos timers da seção 5b); o comando é
+seguro para execução repetida. O conteúdo dos limiares RPSA-S10 e seus
+defaults vive na tabela 6.1.1 e no módulo `pipeline_health` (comentário
+que referencia esta seção 6.1).
 
 ---
 

@@ -1,25 +1,25 @@
+# SIRHOSP — hourly current-day discharge extraction (America/Bahia, RPSA-S12).
+# This unit owns the discharge schedule: it replaces the deprecated
+# three-times-daily pair that ran the legacy domestic scheduler script.
+# Every run goes through the hospital exit-reconciliation scheduler and the
+# one-shot historical_recovery runner; source automation is never routed
+# through the long-running application service or the deprecated PDF flow.
+# Installed disabled; activation is an explicit operator step after the
+# documented smoke test and benchmarks.
 [Unit]
-Description=SIRHOSP — Extração diária de altas do sistema fonte
+Description=SIRHOSP — Extração horária de altas do dia (America/Bahia, hourly-discharges)
 Documentation=https://github.com/carlosapgomes/sirhosp
 After=network-online.target docker.service
 Wants=network-online.target docker.service
 
 [Service]
 Type=oneshot
-User=root
-WorkingDirectory=/opt/sirhosp
-ExecStart=/opt/sirhosp/deploy/discharges-scheduler.sh
-
-# Timeout generoso: login + download PDF + parse (10 minutos)
-TimeoutStartSec=600
-
-# Logs vão para o journal (acessível via journalctl -u sirhosp-discharges)
+WorkingDirectory=/srv/apps/prisma
+ExecStart=/srv/apps/prisma/deploy/exit-reconciliation-scheduler.sh hourly-discharges
+TimeoutStartSec=1800
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=sirhosp-discharges
-
-# Segurança: impede execução simultânea
-RemainAfterExit=no
 
 [Install]
 WantedBy=multi-user.target

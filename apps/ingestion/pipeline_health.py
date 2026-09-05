@@ -74,8 +74,8 @@ DEFAULT_MAX_ACTIVE_AGE_MINUTES = 120
 DEFAULT_MAX_FULL_SYNC_FAILURE_PERCENT = 20.0
 DEFAULT_MIN_FULL_SYNC_TERMINAL_SAMPLE = 5
 
-# RPSA-S10 reconciliation thresholds with safe defaults (documented in
-# deploy/README.md).
+# RPSA-S10 reconciliation thresholds with safe defaults, documented in
+# deploy/README.md section 6.1 together with the daily integrity command.
 DEFAULT_MISSING_DATES_MAX = 7
 DEFAULT_BACKLOG_AGE_MAX_HOURS = 48
 DEFAULT_CONFLICT_MAX_COUNT = 0

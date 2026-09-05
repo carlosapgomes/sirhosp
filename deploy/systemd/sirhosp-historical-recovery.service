@@ -1,0 +1,25 @@
+# SIRHOSP — D-1 historical recovery (America/Bahia, RPSA-S12).
+# Runs the previous Bahia calendar date with the four extractors in
+# canonical order through the hospital exit-reconciliation scheduler
+# (mode d1-recovery). Playwright-capable one-shot runner only; source
+# automation is never routed through the long-running application service
+# or the deprecated PDF flow, and nothing resolves legacy install paths.
+# Installed disabled; enablement requires the documented all-extractor
+# D-1 smoke test first.
+[Unit]
+Description=SIRHOSP — Recuperação histórica D-1 às 05:00 America/Bahia (d1-recovery)
+Documentation=https://github.com/carlosapgomes/sirhosp
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/apps/prisma
+ExecStart=/srv/apps/prisma/deploy/exit-reconciliation-scheduler.sh d1-recovery
+TimeoutStartSec=7200
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sirhosp-historical-recovery
+
+[Install]
+WantedBy=multi-user.target

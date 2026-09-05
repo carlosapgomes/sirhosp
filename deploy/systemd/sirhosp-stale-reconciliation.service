@@ -1,0 +1,27 @@
+# SIRHOSP — hourly bounded stale-admission safety sweep (America/Bahia,
+# RPSA-S12). Complements post-census absence detection: the sweep evaluates
+# open reconciliation cases plus conflict evidence with the configured
+# cooldowns and enqueues at most 100 deduplicated admissions_only
+# confirmations through the hospital exit-reconciliation scheduler (mode
+# stale-sweep). reconcile_stale_admissions is Playwright-free and holds its
+# own PostgreSQL advisory lock, distinct from the census orchestrator, the
+# hourly discharge and the D-1 recovery locks. Source automation is never
+# routed through the long-running application service or the deprecated PDF
+# flow. Installed disabled.
+[Unit]
+Description=SIRHOSP — Varredura horária de segurança de internações órfãs (America/Bahia, stale-sweep)
+Documentation=https://github.com/carlosapgomes/sirhosp
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/apps/prisma
+ExecStart=/srv/apps/prisma/deploy/exit-reconciliation-scheduler.sh stale-sweep
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sirhosp-stale-reconciliation
+
+[Install]
+WantedBy=multi-user.target

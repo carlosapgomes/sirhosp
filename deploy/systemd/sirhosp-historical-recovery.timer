@@ -1,0 +1,18 @@
+# SIRHOSP — D-1 historical recovery timer (America/Bahia, RPSA-S12).
+# Fires daily at 05:00:00 America/Bahia (host-timezone independent) and
+# requests recovery for the previous Bahia calendar date. Persistent=true
+# catches a missed trigger after downtime; no start randomization keeps
+# the fixed 05:00 offset deterministic relative to the hourly :13/:47
+# timers. Delivered disabled; enabled only after the manual D-1 smoke test
+# passes.
+[Unit]
+Description=SIRHOSP — Timer de recuperação histórica D-1 (05:00 America/Bahia)
+Documentation=https://github.com/carlosapgomes/sirhosp
+
+[Timer]
+OnCalendar=*-*-* 05:00:00 America/Bahia
+Persistent=true
+RemainAfterElapse=no
+
+[Install]
+WantedBy=timers.target

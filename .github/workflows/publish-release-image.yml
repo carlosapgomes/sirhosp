@@ -109,7 +109,7 @@ jobs:
             exit 1
           fi
 
-      - name: Create draft release with standalone Compose
+      - name: Create draft release with standalone Compose and runtime assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -117,7 +117,20 @@ jobs:
         run: |
           set -euo pipefail
           UPGRADE_ASSET="docs/releases/${RELEASE_TAG}-upgrade.md"
+          SCHEDULER_ASSET="deploy/exit-reconciliation-scheduler.sh"
+          SYSTEMD_ASSETS=(
+            deploy/systemd/sirhosp-discharges.service
+            deploy/systemd/sirhosp-discharges.timer
+            deploy/systemd/sirhosp-historical-recovery.service
+            deploy/systemd/sirhosp-historical-recovery.timer
+            deploy/systemd/sirhosp-stale-reconciliation.service
+            deploy/systemd/sirhosp-stale-reconciliation.timer
+          )
           test -f "${UPGRADE_ASSET}"
+          test -f "${SCHEDULER_ASSET}"
+          for asset in "${SYSTEMD_ASSETS[@]}"; do
+            test -f "${asset}"
+          done
           release_args=(
             --verify-tag
             --draft
@@ -128,6 +141,7 @@ jobs:
             release_args+=(--prerelease)
           fi
           gh release create "$RELEASE_TAG" compose.hospital.yml "${UPGRADE_ASSET}" \
+            "${SCHEDULER_ASSET}" "${SYSTEMD_ASSETS[@]}" \
             "${release_args[@]}"
 
       - name: Generate image metadata

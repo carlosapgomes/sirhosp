@@ -1,0 +1,17 @@
+# SIRHOSP — hourly stale-admission safety sweep timer (America/Bahia,
+# RPSA-S12). Fires every hour at minute 47, staggered from the 05:00 D-1
+# recovery and the :13 hourly discharge timer. Persistent=true catches a
+# missed trigger; no start randomization keeps the fixed :47 offset. The
+# sweep-vs-orchestrator coordination relies on distinct advisory locks
+# (see deploy/README.md section 5b). Delivered disabled.
+[Unit]
+Description=SIRHOSP — Timer de varredura de segurança de internações órfãs (America/Bahia)
+Documentation=https://github.com/carlosapgomes/sirhosp
+
+[Timer]
+OnCalendar=*-*-* *:47:00 America/Bahia
+Persistent=true
+RemainAfterElapse=no
+
+[Install]
+WantedBy=timers.target
