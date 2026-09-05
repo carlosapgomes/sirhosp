@@ -218,7 +218,89 @@ def test_hospital_compose_runs_the_complete_current_topology() -> None:
     assert "process_summary_runs" in summary
     assert "--pipeline" in summary
     assert compose.count("<<: *app-service") == 3
-    assert compose.count("<<: *playwright-service") == 2
+    assert compose.count("<<: *playwright-service") == 3
     assert "restart: unless-stopped" in compose
     assert "tmpfs:" in compose
     assert "shm_size:" in compose
+
+
+def _service_names(compose: str) -> list[str]:
+    """Names of every service declared under ``services:``."""
+    body = compose.split("services:\n", maxsplit=1)[1].split(
+        "\nvolumes:\n", maxsplit=1
+    )[0]
+    return re.findall(r"^  ([a-z][a-z0-9_]*):\n", body, re.MULTILINE)
+
+
+def _profile_gated_service_names(compose: str) -> list[str]:
+    """Names of services whose block declares a non-empty ``profiles``."""
+    return [
+        name
+        for name in _service_names(compose)
+        if "profiles:" in _service_block(compose, name)
+    ]
+
+
+def test_hospital_compose_recovery_service_is_profile_gated_and_one_shot() -> None:
+    compose = _compose_text()
+    block = _service_block(compose, "historical_recovery")
+
+    # Profile gate: never resolved by a normal ``up`` without the profile.
+    assert 'profiles: ["recovery"]' in block
+    assert "<<: *playwright-service" in block
+
+    # One-shot runner shape: extends the Playwright anchor (image, init,
+    # credential environment, healthy db and networks come from the anchors)
+    # and overrides the anchor restart policy so it never restarts.
+    assert 'restart: "no"' in block
+    assert "restart: unless-stopped" not in block
+    assert "ports:" not in block
+    assert "container_name:" not in block
+    assert "build:" not in block
+    assert "run_exit_reconciliation_runtime" in block
+    assert "--help" in block
+
+
+def test_hospital_compose_recovery_inherits_playwright_guards() -> None:
+    """The recovery service inherits tmpfs, /dev/shm, init, credential
+    environment, healthy-db dependency and pinned image via the anchors."""
+    compose = _compose_text()
+    playwright_anchor = compose.split(
+        "x-playwright-service: &playwright-service", maxsplit=1
+    )[1].split("services:", maxsplit=1)[0]
+    app_anchor = compose.split(
+        "x-app-service: &app-service", maxsplit=1
+    )[1].split("x-playwright-service:", maxsplit=1)[0]
+
+    assert "shm_size:" in playwright_anchor
+    assert "tmpfs:" in playwright_anchor
+    assert "init: true" in app_anchor
+    assert "service_healthy" in app_anchor
+    assert "image: ghcr.io/carlosapgomes/sirhosp:" in app_anchor
+    assert "SOURCE_SYSTEM_USERNAME" in compose
+    assert "SOURCE_SYSTEM_PASSWORD" in compose
+
+    block = _service_block(compose, "historical_recovery")
+    assert "<<: *playwright-service" in block
+
+
+def test_hospital_compose_normal_up_never_resolves_recovery_service() -> None:
+    """Profile enumeration: without the ``recovery`` profile the default
+    topology is exactly db, web, persistent_worker, census_orchestrator and
+    summary_worker; ``historical_recovery`` is the only profile-gated
+    service and requires the ``recovery`` profile to resolve."""
+    compose = _compose_text()
+    all_names = _service_names(compose)
+    gated = _profile_gated_service_names(compose)
+
+    assert "historical_recovery" in all_names
+    assert gated == ["historical_recovery"]
+    default_topology = [name for name in all_names if name not in gated]
+    assert default_topology == [
+        "db",
+        "web",
+        "persistent_worker",
+        "census_orchestrator",
+        "summary_worker",
+    ]
+    assert "historical_recovery" not in default_topology

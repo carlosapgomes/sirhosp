@@ -168,6 +168,28 @@ services:
       - --sleep-seconds
       - "5"
 
+  historical_recovery:
+    # Runner one-shot para reconciliação de saídas (exit reconciliation).
+    # Uso: docker compose -f compose.hospital.yml --profile recovery run --rm
+    #   historical_recovery uv run --no-sync python manage.py \
+    #   run_exit_reconciliation_runtime --mode d1|hourly|catchup
+    # Herda do anchor x-playwright-service (imagem fixa da release, init,
+    # tmpfs, /dev/shm, ambiente escopado e dependência do db saudável).
+    # NUNCA inicia com `up` normal: exige o perfil `recovery` e roda via
+    # `run --rm` (sem restart / loop).
+    <<: *playwright-service
+    profiles: ["recovery"]
+    command:
+      - uv
+      - run
+      - --no-sync
+      - python
+      - manage.py
+      - run_exit_reconciliation_runtime
+      - --help
+    # One-shot: sobrescreve o restart herdado do anchor (sem daemon/loop).
+    restart: "no"
+
 volumes:
   sirhosp_db_data:
     driver: local
