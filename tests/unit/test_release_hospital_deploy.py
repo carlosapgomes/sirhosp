@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-release-image.yml"
 COMPOSE = ROOT / "compose.hospital.yml"
-NEXT_RELEASE = "v0.1.0-rc.20"
+NEXT_RELEASE = "v0.1.0-rc.21"
 NEXT_RUNBOOK = ROOT / "docs" / "releases" / f"{NEXT_RELEASE}-upgrade.md"
 
 
@@ -152,7 +152,7 @@ def test_hospital_compose_joins_existing_cloudflared_edge_network() -> None:
 
 
 def test_next_release_runbook_declares_exit_reconciliation_contract() -> None:
-    """The RC20 runbook must pin the exit-reconciliation release contract."""
+    """The RC21 runbook must pin the exit-reconciliation release contract."""
     assert NEXT_RUNBOOK.exists(), "runbook for the next release must exist"
     text = NEXT_RUNBOOK.read_text(encoding="utf-8")
 
@@ -181,7 +181,7 @@ def test_next_release_runbook_declares_exit_reconciliation_contract() -> None:
         "drenag",
         "rollback",
         "compose.hospital.yml.rc19",
-        "SIRHOSP_VERSION=v0.1.0-rc.20",
+        "SIRHOSP_VERSION=v0.1.0-rc.21",
         "No migrations to apply",
         "§6.1.4", "é **aplicável**",
     ):
