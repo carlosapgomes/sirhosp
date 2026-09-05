@@ -14,17 +14,20 @@ Covers the vertical slice requirements:
 from __future__ import annotations
 
 import io
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.utils import timezone
 
-from apps.census.models import CensusSnapshot, PatientMovement
+from apps.census.models import BedStatus, CensusSnapshot, PatientMovement
 from apps.clinical_docs.models import ClinicalEvent
+from apps.deaths.models import DeathRecord
+from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.ingestion.models import (
     CensusExecutionBatch,
     FinalRunFailure,
@@ -32,9 +35,20 @@ from apps.ingestion.models import (
     IngestionRunAttempt,
     IngestionRunStageMetric,
 )
-from apps.patients.models import Admission, Patient
+from apps.ingestion.pipeline_health import HealthConfig, evaluate_pipeline_health
+from apps.patients.models import (
+    RECONCILIATION_STATUS_AMBIGUOUS,
+    RECONCILIATION_STATUS_CONFLICT,
+    RECONCILIATION_STATUS_PENDING,
+    RECONCILIATION_STATUS_RECONCILED,
+    Admission,
+    Patient,
+    ReconciliationEvent,
+    StaleAdmissionCase,
+)
 
 COMMAND_NAME = "check_ingestion_pipeline_health"
+DAILY_COMMAND_NAME = "report_admission_reconciliation_integrity"
 
 pytestmark = pytest.mark.django_db
 
@@ -47,6 +61,10 @@ SENTINEL_TEXT = "PRIV-TEXTO-CLINICO-S5"
 SENTINEL_AUTHOR = "PRIV-AUTOR-S5"
 SENTINEL_URL = "https://priv-sentinel-s5.invalid/x"
 SENTINEL_ERROR = f"erro bruto {SENTINEL_URL} {SENTINEL_TEXT}"
+SENTINEL_BED = "PRIV-LEITO-S10"
+
+TZ_LOCAL = ZoneInfo("America/Bahia")
+T_BASE = datetime(2026, 3, 10, 9, 0, 0, tzinfo=TZ_LOCAL)
 
 _COUNTED_MODELS = (
     IngestionRun,
@@ -586,3 +604,735 @@ def _patient_with_domain_rows(
         signature_line="",
     )
     return patient
+
+
+# ---------------------------------------------------------------------------
+# RPSA-S10 fixtures (synthetic, identity-bearing values are sentinels)
+# ---------------------------------------------------------------------------
+
+
+def _hours_ago(hours: int):
+    return timezone.now() - timedelta(hours=hours)
+
+
+def _discharge_evidence(
+    *,
+    status: str,
+    saida_em=None,
+    alta_em=None,
+    prontuario: str = SENTINEL_PATIENT,
+) -> DischargeRecord:
+    return DischargeRecord.objects.create(
+        prontuario=prontuario,
+        data_internacao=(
+            f"PRIV-DI-S10-{DischargeRecord.objects.count() + 1}"
+        ),
+        saida_em=saida_em,
+        alta_em=alta_em,
+        nome=SENTINEL_NAME,
+        reconciliation_status=status,
+    )
+
+
+def _death_evidence(
+    *,
+    status: str,
+    obito_em=None,
+    death_date: date | None = None,
+) -> DeathRecord:
+    return DeathRecord.objects.create(
+        date=death_date or date.today(),
+        prontuario=SENTINEL_PATIENT,
+        nome=SENTINEL_NAME,
+        obito_em=obito_em,
+        reconciliation_status=status,
+    )
+
+
+def _census_run(captured_at) -> IngestionRun:
+    return IngestionRun.objects.create(
+        status="succeeded",
+        intent="census_extraction",
+        queued_at=captured_at,
+        processing_started_at=captured_at,
+        finished_at=captured_at,
+    )
+
+
+def _open_stale_case(*, first_absence_at) -> StaleAdmissionCase:
+    patient = Patient.objects.create(
+        patient_source_key=f"PRONT-S10-{StaleAdmissionCase.objects.count() + 1}",
+        source_system="tasy",
+        name="PACIENTE SINTETICO S10",
+    )
+    admission = Admission.objects.create(
+        patient=patient,
+        source_system="tasy",
+        source_admission_key=f"ADM-S10-{patient.pk}",
+        admission_date=T_BASE - timedelta(days=2),
+    )
+    last_absence_at = first_absence_at + timedelta(minutes=45)
+    return StaleAdmissionCase.objects.create(
+        admission=admission,
+        first_absence_run=_census_run(first_absence_at),
+        first_absence_at=first_absence_at,
+        last_absence_run=_census_run(last_absence_at),
+        last_absence_at=last_absence_at,
+    )
+
+
+def _duplicate_pair(*, closed_fresher: bool = True):
+    """Open + closed canonical admissions on one Bahia local date."""
+    tag = Admission.objects.count() + 1
+    patient = Patient.objects.create(
+        patient_source_key=f"PRONT-S10-DUP-{tag}",
+        source_system="tasy",
+        name="PACIENTE SINTETICO S10",
+    )
+    opened = Admission.objects.create(
+        patient=patient,
+        source_system="tasy",
+        source_admission_key=f"ADM-S10-{tag}-OPEN",
+        admission_date=T_BASE,
+    )
+    closed = Admission.objects.create(
+        patient=patient,
+        source_system="tasy",
+        source_admission_key=f"ADM-S10-{tag}-CLOSED",
+        admission_date=T_BASE + timedelta(hours=1),
+        discharge_date=T_BASE + timedelta(days=3),
+    )
+    if closed_fresher:
+        Admission.objects.filter(pk=closed.pk).update(updated_at=_hours_ago(1))
+        Admission.objects.filter(pk=opened.pk).update(updated_at=_hours_ago(10))
+    else:
+        Admission.objects.filter(pk=closed.pk).update(updated_at=_hours_ago(10))
+        Admission.objects.filter(pk=opened.pk).update(updated_at=_hours_ago(1))
+    return patient, opened, closed
+
+
+def _discharge_run(
+    *,
+    ref_date: str,
+    status: str = "succeeded",
+    total_records: int | None = None,
+    zero_confirmed: bool | None = None,
+    attempt_count: int | None = None,
+    with_persist_stage: bool = True,
+) -> IngestionRun:
+    """A durable discharge-extraction run keyed by its extraction date."""
+    run = IngestionRun.objects.create(
+        status=status,
+        intent="discharge_extraction",
+        queued_at=_hours_ago(2),
+        processing_started_at=_hours_ago(2),
+        finished_at=_hours_ago(1) if status in {"succeeded", "failed"} else None,
+        failure_reason="" if status == "succeeded" else "timeout",
+        parameters_json={"date": "01/06/2026", "ref_date": ref_date},
+    )
+    if with_persist_stage:
+        details: dict[str, Any] = {}
+        if total_records is not None:
+            details["total_records"] = total_records
+        if zero_confirmed is not None:
+            details["zero_confirmed"] = zero_confirmed
+        if attempt_count is not None:
+            details["attempt_count"] = attempt_count
+        IngestionRunStageMetric.objects.create(
+            run=run,
+            stage_name="discharge_persistence",
+            started_at=_hours_ago(2),
+            status="succeeded" if status == "succeeded" else "failed",
+            details_json=details,
+        )
+    return run
+
+
+def _census_run_for_health() -> IngestionRun:
+    return _census_run(_minutes_ago(30))
+
+
+def _evaluate_reconciliation(**overrides):
+    result = evaluate_pipeline_health(
+        HealthConfig(**overrides), now=timezone.now()
+    )
+    return result.reconciliation, result
+
+
+def _group(stats, name: str):
+    return next(group for group in stats.backlog if group.name == name)
+
+
+def _codes(result) -> set[str]:
+    return {violation.code for violation in result.violations}
+
+
+def _reconciliation_model_counts() -> dict[str, int]:
+    models = (
+        IngestionRun,
+        IngestionRunStageMetric,
+        Admission,
+        Patient,
+        StaleAdmissionCase,
+        ReconciliationEvent,
+        DischargeRecord,
+        DeathRecord,
+        DailyDischargeCount,
+        CensusSnapshot,
+    )
+    return {model._meta.label: model.objects.count() for model in models}
+
+
+# ---------------------------------------------------------------------------
+# RPSA-S10: exit-evidence backlog by status group (count + oldest age)
+# ---------------------------------------------------------------------------
+
+
+class TestReconciliationBacklog:
+    def test_backlog_counts_and_oldest_age_per_status_group(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_PENDING, saida_em=_hours_ago(72)
+        )
+        _death_evidence(
+            status=RECONCILIATION_STATUS_PENDING, obito_em=_hours_ago(20)
+        )
+        stats, result = _evaluate_reconciliation()
+
+        assert _group(stats, "pending").count == 2
+        assert _group(stats, "pending").oldest_age_hours in (71, 72, 73)
+        assert _group(stats, "ambiguous").count == 0
+        assert _group(stats, "conflict").count == 0
+        assert _group(stats, "stale_cases").count == 0
+        assert "reconciliation_backlog_age" in _codes(result)
+
+    def test_backlog_age_above_threshold_is_unhealthy_via_command(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_PENDING, saida_em=_hours_ago(72)
+        )
+        out, _err, error = _run_unhealthy()
+        assert "reconciliation_backlog_age=1" in out
+        assert "reconciliation_backlog_age=1" in error
+
+    def test_ambiguous_group_also_respects_age_threshold(self):
+        _death_evidence(
+            status=RECONCILIATION_STATUS_AMBIGUOUS, obito_em=_hours_ago(72)
+        )
+        stats, result = _evaluate_reconciliation()
+        assert _group(stats, "ambiguous").count == 1
+        assert "reconciliation_backlog_age" in _codes(result)
+
+    def test_fresh_backlog_is_within_default_threshold(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_PENDING, saida_em=_hours_ago(2)
+        )
+        stats, result = _evaluate_reconciliation()
+        assert _group(stats, "pending").count == 1
+        assert _group(stats, "pending").oldest_age_hours in (1, 2, 3)
+        assert result.healthy
+
+    def test_reconciled_evidence_is_not_backlog(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_RECONCILED, saida_em=_hours_ago(72)
+        )
+        _death_evidence(
+            status=RECONCILIATION_STATUS_RECONCILED, obito_em=_hours_ago(72)
+        )
+        stats, result = _evaluate_reconciliation()
+        for name in ("pending", "ambiguous", "conflict", "stale_cases"):
+            assert _group(stats, name).count == 0
+        assert result.healthy
+
+    def test_reconciliation_events_are_never_pending_work(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_PENDING, saida_em=_hours_ago(2)
+        )
+        ReconciliationEvent.objects.create(
+            source_kind="discharge_record",
+            source_id=1,
+            status=RECONCILIATION_STATUS_PENDING,
+        )
+        ReconciliationEvent.objects.create(
+            source_kind="death_record",
+            source_id=2,
+            status=RECONCILIATION_STATUS_CONFLICT,
+        )
+        stats, result = _evaluate_reconciliation()
+        assert _group(stats, "pending").count == 1
+        assert _group(stats, "conflict").count == 0
+        assert result.healthy
+
+    def test_conflict_evidence_violates_at_max_zero(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_CONFLICT, saida_em=_hours_ago(1)
+        )
+        _death_evidence(
+            status=RECONCILIATION_STATUS_CONFLICT, obito_em=_hours_ago(1)
+        )
+        stats, result = _evaluate_reconciliation()
+        assert _group(stats, "conflict").count == 2
+        conflict = next(
+            violation
+            for violation in result.violations
+            if violation.code == "reconciliation_conflict_evidence"
+        )
+        assert conflict.count == 2
+
+    def test_conflict_age_has_no_threshold(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_CONFLICT, saida_em=_hours_ago(500)
+        )
+        stats, result = _evaluate_reconciliation()
+        assert _group(stats, "conflict").oldest_age_hours >= 499
+        assert _codes(result) == {"reconciliation_conflict_evidence"}
+
+    def test_open_stale_cases_are_the_fourth_group(self):
+        _open_stale_case(first_absence_at=_hours_ago(5))
+        stats, result = _evaluate_reconciliation()
+        stale = _group(stats, "stale_cases")
+        assert stale.count == 1
+        assert stale.oldest_age_hours in (4, 5, 6)
+        assert result.healthy  # count + age reported without a threshold
+
+    def test_resolved_stale_cases_are_not_backlog(self):
+        case = _open_stale_case(first_absence_at=_hours_ago(5))
+        StaleAdmissionCase.objects.filter(pk=case.pk).update(
+            resolved_at=timezone.now(),
+            resolution_reason=StaleAdmissionCase.ResolutionReason.REAPPEARED,
+        )
+        stats, result = _evaluate_reconciliation()
+        assert _group(stats, "stale_cases").count == 0
+        assert result.healthy
+
+    def test_evidence_without_anchor_is_counted_without_age(self):
+        _discharge_evidence(status=RECONCILIATION_STATUS_PENDING)
+        stats, result = _evaluate_reconciliation()
+        pending = _group(stats, "pending")
+        assert pending.count == 1
+        assert pending.oldest_age_hours is None
+        assert result.healthy  # unknown age cannot breach an age threshold
+
+    def test_backlog_age_threshold_is_overridable(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_PENDING, saida_em=_hours_ago(2)
+        )
+        stats, result = _evaluate_reconciliation(backlog_age_max_hours=1)
+        assert "reconciliation_backlog_age" in _codes(result)
+        assert not result.healthy
+
+
+# ---------------------------------------------------------------------------
+# RPSA-S10: source-confirmed duplicate invariant (RPSA-S9 cohort shape)
+# ---------------------------------------------------------------------------
+
+
+class TestReconciliationDuplicates:
+    def test_source_confirmed_duplicate_pair_violates(self):
+        _duplicate_pair(closed_fresher=True)
+        stats, result = _evaluate_reconciliation()
+        assert stats.duplicate_pairs == 1
+        duplicate = next(
+            violation
+            for violation in result.violations
+            if violation.code == "reconciliation_duplicate_pair"
+        )
+        assert duplicate.count == 1
+
+    def test_duplicate_pair_violation_reaches_command_output(self):
+        _duplicate_pair(closed_fresher=True)
+        out, _err, error = _run_unhealthy()
+        assert "reconciliation_duplicate_pair=1" in out
+        assert "reconciliation_duplicate_pair=1" in error
+
+    def test_stale_closed_row_is_not_a_confirmed_duplicate(self):
+        _duplicate_pair(closed_fresher=False)
+        stats, result = _evaluate_reconciliation()
+        assert stats.duplicate_pairs == 0
+        assert result.healthy
+
+    def test_two_open_rows_are_not_duplicates(self):
+        patient, opened, _closed = _duplicate_pair(closed_fresher=True)
+        Admission.objects.filter(pk=_closed.pk).update(discharge_date=None)
+        del patient
+        stats, result = _evaluate_reconciliation()
+        assert stats.duplicate_pairs == 0
+        assert result.healthy
+
+    def test_different_local_dates_are_not_duplicates(self):
+        _patient, opened, closed = _duplicate_pair(closed_fresher=True)
+        Admission.objects.filter(pk=closed.pk).update(
+            admission_date=T_BASE + timedelta(days=4)
+        )
+        del opened
+        stats, result = _evaluate_reconciliation()
+        assert stats.duplicate_pairs == 0
+        assert result.healthy
+
+    def test_different_patients_are_not_duplicates(self):
+        _patient, opened, closed = _duplicate_pair(closed_fresher=True)
+        other = Patient.objects.create(
+            patient_source_key="PRONT-S10-OTHER",
+            source_system="tasy",
+            name="PACIENTE SINTETICO S10",
+        )
+        Admission.objects.filter(pk=closed.pk).update(patient_id=other.pk)
+        del opened
+        stats, result = _evaluate_reconciliation()
+        assert stats.duplicate_pairs == 0
+        assert result.healthy
+
+    def test_merged_rows_leave_the_invariant(self):
+        _patient, opened, closed = _duplicate_pair(closed_fresher=True)
+        Admission.all_objects.filter(pk=closed.pk).update(
+            merged_into_id=opened.pk
+        )
+        stats, result = _evaluate_reconciliation()
+        assert stats.duplicate_pairs == 0
+        assert result.healthy
+
+    def test_duplicate_max_count_override_disarms_the_alarm(self):
+        _duplicate_pair(closed_fresher=True)
+        stats, result = _evaluate_reconciliation(duplicate_max_count=1)
+        assert stats.duplicate_pairs == 1
+        assert result.healthy
+
+
+# ---------------------------------------------------------------------------
+# RPSA-S10: extraction coverage from durable metadata only
+# ---------------------------------------------------------------------------
+
+
+class TestExtractionCoverage:
+    def test_nonzero_persisted_records_is_complete(self):
+        _discharge_run(ref_date="2026-06-01", total_records=5, attempt_count=1)
+        stats, result = _evaluate_reconciliation()
+        assert stats.coverage.dates_total == 1
+        assert stats.coverage.complete_dates == 1
+        assert stats.coverage.gap_count == 0
+        assert result.healthy
+
+    def test_confirmed_zero_with_two_attempts_is_complete(self):
+        _discharge_run(
+            ref_date="2026-06-01",
+            total_records=0,
+            zero_confirmed=True,
+            attempt_count=2,
+        )
+        stats, result = _evaluate_reconciliation()
+        assert stats.coverage.complete_dates == 1
+        assert stats.coverage.gap_count == 0
+        assert result.healthy
+
+    def test_one_successful_empty_attempt_is_incomplete(self):
+        _discharge_run(ref_date="2026-06-01", total_records=0, attempt_count=1)
+        stats, result = _evaluate_reconciliation()
+        assert stats.coverage.incomplete_dates == 1
+        assert stats.coverage.gap_count == 1
+        assert stats.coverage.gap_first_date == date(2026, 6, 1)
+        assert stats.coverage.gap_last_date == date(2026, 6, 1)
+        assert result.healthy  # gap within the configured boundary
+
+    def test_missing_zero_confirmed_flag_is_incomplete(self):
+        _discharge_run(ref_date="2026-06-01", total_records=0)
+        stats, result = _evaluate_reconciliation()
+        assert stats.coverage.incomplete_dates == 1
+        assert stats.coverage.gap_count == 1
+
+    def test_zero_confirmed_with_single_attempt_is_incomplete(self):
+        _discharge_run(
+            ref_date="2026-06-01",
+            total_records=0,
+            zero_confirmed=True,
+            attempt_count=1,
+        )
+        stats, result = _evaluate_reconciliation()
+        assert stats.coverage.incomplete_dates == 1
+
+    def test_succeeded_run_without_persist_stage_is_incomplete(self):
+        _discharge_run(ref_date="2026-06-01", with_persist_stage=False)
+        stats, _result = _evaluate_reconciliation()
+        assert stats.coverage.incomplete_dates == 1
+
+    def test_failed_run_only_is_missing(self):
+        _discharge_run(
+            ref_date="2026-06-01",
+            status="failed",
+            total_records=0,
+            zero_confirmed=False,
+        )
+        stats, result = _evaluate_reconciliation()
+        assert stats.coverage.missing_dates == 1
+        assert stats.coverage.gap_count == 1
+        assert result.healthy
+
+    def test_gap_bounds_span_earliest_and_latest_dates(self):
+        _discharge_run(ref_date="2026-06-05", total_records=0, attempt_count=1)
+        _discharge_run(ref_date="2026-06-01", total_records=0, attempt_count=1)
+        _discharge_run(ref_date="2026-06-03", total_records=4)
+        stats, _result = _evaluate_reconciliation()
+        assert stats.coverage.gap_first_date == date(2026, 6, 1)
+        assert stats.coverage.gap_last_date == date(2026, 6, 5)
+        assert stats.coverage.gap_count == 2
+        assert stats.coverage.complete_dates == 1
+
+    def test_gap_above_seven_raises_operator_action_violation(self):
+        for day in range(1, 9):  # eight incomplete dates
+            _discharge_run(
+                ref_date=f"2026-06-{day:02d}", total_records=0, attempt_count=1
+            )
+        before = IngestionRun.objects.filter(
+            intent="historical_recovery"
+        ).count()
+        stats, result = _evaluate_reconciliation()
+        gap = next(
+            violation
+            for violation in result.violations
+            if violation.code == "extraction_coverage_gap"
+        )
+        assert gap.count == 8
+        assert stats.coverage.gap_count == 8
+        # Health NEVER starts recovery itself: no runs were enqueued.
+        assert (
+            IngestionRun.objects.filter(intent="historical_recovery").count()
+            == before
+        )
+
+    def test_daily_discharge_count_is_never_coverage_evidence(self):
+        DailyDischargeCount.objects.create(date=date(2026, 6, 1), count=7)
+        stats, result = _evaluate_reconciliation()
+        assert stats.coverage.dates_total == 0
+        assert stats.coverage.gap_count == 0
+        assert result.healthy
+
+    def test_missing_dates_max_is_overridable(self):
+        _discharge_run(ref_date="2026-06-01", total_records=0, attempt_count=1)
+        _discharge_run(ref_date="2026-06-02", total_records=0, attempt_count=1)
+        stats, result = _evaluate_reconciliation(missing_dates_max=1)
+        assert stats.coverage.gap_count == 2
+        gap = next(
+            violation
+            for violation in result.violations
+            if violation.code == "extraction_coverage_gap"
+        )
+        assert gap.count == 2
+
+
+# ---------------------------------------------------------------------------
+# RPSA-S10: open admissions outside the current census (informational)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenOutsideCensus:
+    def _census_snapshot(self, captured_at, prontuario: str) -> None:
+        CensusSnapshot.objects.create(
+            captured_at=captured_at,
+            ingestion_run=_census_run(captured_at),
+            setor="SETOR SINTETICO",
+            setor_codigo="1000",
+            leito=SENTINEL_BED,
+            prontuario=prontuario,
+            nome="PACIENTE SINTETICO S10",
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+    def _admitted_patient(self, prontuario: str) -> Patient:
+        patient = Patient.objects.create(
+            patient_source_key=prontuario,
+            source_system="tasy",
+            name="PACIENTE SINTETICO S10",
+        )
+        Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key=f"ADM-S10-CENSUS-{patient.pk}",
+            admission_date=T_BASE,
+        )
+        return patient
+
+    def test_patient_present_in_latest_census_is_not_counted(self):
+        self._admitted_patient("PRONT-S10-PRESENT")
+        self._census_snapshot(_minutes_ago(30), "PRONT-S10-PRESENT")
+        stats, result = _evaluate_reconciliation()
+        assert stats.open_outside_census == 0
+        assert result.healthy
+
+    def test_patient_absent_from_latest_census_is_counted(self):
+        self._admitted_patient("PRONT-S10-ABSENT")
+        self._census_snapshot(_minutes_ago(30), "PRONT-S10-OTHER")
+        stats, result = _evaluate_reconciliation()
+        assert stats.open_outside_census == 1
+        assert result.healthy  # informational: no threshold, no case created
+
+    def test_only_the_latest_capture_is_compared(self):
+        self._admitted_patient("PRONT-S10-GONE")
+        self._census_snapshot(_minutes_ago(90), "PRONT-S10-GONE")
+        self._census_snapshot(_minutes_ago(30), "PRONT-S10-SOMEONE-ELSE")
+        stats, _result = _evaluate_reconciliation()
+        assert stats.open_outside_census == 1
+
+    def test_closed_and_merged_admissions_are_ignored(self):
+        _patient, opened, closed = _duplicate_pair(closed_fresher=True)
+        self._census_snapshot(_minutes_ago(30), "PRONT-S10-NOBODY")
+        Admission.objects.filter(pk=closed.pk).update(
+            merged_into_id=opened.pk
+        )
+        stats, result = _evaluate_reconciliation()
+        # The open canonical twin stays open but is now the only candidate;
+        # the closed row left the canonical manager with the merge.
+        assert stats.open_outside_census == 1
+        del _patient
+        assert result.healthy
+
+    def test_no_census_snapshot_at_all_is_informational_zero(self):
+        self._admitted_patient("PRONT-S10-NO-CENSUS")
+        stats, result = _evaluate_reconciliation()
+        assert stats.open_outside_census == 0
+        assert result.healthy
+
+
+# ---------------------------------------------------------------------------
+# RPSA-S10: named thresholds, read-only proof and identity-safe rendering
+# ---------------------------------------------------------------------------
+
+
+class TestReconciliationThresholdDefaults:
+    def test_reconciliation_thresholds_have_safe_defaults(self):
+        config = HealthConfig()
+        assert config.missing_dates_max == 7
+        assert config.backlog_age_max_hours == 48
+        assert config.conflict_max_count == 0
+        assert config.duplicate_max_count == 0
+
+    def test_evaluation_is_read_only_with_reconciliation_data(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_PENDING, saida_em=_hours_ago(72)
+        )
+        _duplicate_pair(closed_fresher=True)
+        _discharge_run(ref_date="2026-06-01", total_records=0, attempt_count=1)
+        _open_stale_case(first_absence_at=_hours_ago(3))
+        ReconciliationEvent.objects.create(
+            source_kind="discharge_record", source_id=1, status="conflict"
+        )
+        before = _reconciliation_model_counts()
+        _run_unhealthy()
+        assert _reconciliation_model_counts() == before
+
+
+class TestReconciliationArgumentValidation:
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("--missing-dates-max", "-1"),
+            ("--backlog-age-max-hours", "0"),
+            ("--conflict-max-count", "-1"),
+            ("--duplicate-max-count", "-1"),
+        ],
+    )
+    @mock.patch(
+        "apps.ingestion.management.commands."
+        "check_ingestion_pipeline_health.evaluate_pipeline_health"
+    )
+    def test_invalid_reconciliation_options_fail_before_any_query(
+        self, mock_evaluate: mock.Mock, args: tuple[str, str]
+    ):
+        with pytest.raises(CommandError):
+            call_command(COMMAND_NAME, *args)
+        mock_evaluate.assert_not_called()
+
+    @mock.patch(
+        "apps.ingestion.management.commands."
+        "check_ingestion_pipeline_health.evaluate_pipeline_health"
+    )
+    def test_reconciliation_options_reach_the_config(
+        self, mock_evaluate: mock.Mock
+    ):
+        # Render the real result so the command completes end to end.
+        mock_evaluate.side_effect = lambda config: evaluate_pipeline_health(
+            config
+        )
+        call_command(
+            COMMAND_NAME,
+            "--missing-dates-max", "3",
+            "--backlog-age-max-hours", "12",
+            "--conflict-max-count", "2",
+            "--duplicate-max-count", "4",
+        )
+        config = mock_evaluate.call_args.args[0]
+        assert config.missing_dates_max == 3
+        assert config.backlog_age_max_hours == 12
+        assert config.conflict_max_count == 2
+        assert config.duplicate_max_count == 4
+
+
+class TestReconciliationOutputPrivacy:
+    def test_reconciliation_sentinels_never_reach_the_output(self):
+        _discharge_evidence(
+            status=RECONCILIATION_STATUS_CONFLICT, saida_em=_hours_ago(72)
+        )
+        _death_evidence(status=RECONCILIATION_STATUS_CONFLICT)
+        _duplicate_pair(closed_fresher=True)
+        _open_stale_case(first_absence_at=_hours_ago(72))
+        run = _discharge_run(
+            ref_date="2026-06-01", total_records=0, attempt_count=1
+        )
+        IngestionRunStageMetric.objects.create(
+            run=run,
+            stage_name="discharge_persistence",
+            started_at=_hours_ago(2),
+            status="succeeded",
+            details_json={"sentinel": SENTINEL_TEXT, "total_records": 0},
+        )
+        self._census_occupied_row()
+        out, err, error = _run_unhealthy()
+        combined = out + err + error
+        for sentinel in (
+            SENTINEL_PATIENT,
+            SENTINEL_NAME,
+            SENTINEL_ADMISSION,
+            SENTINEL_BED,
+            SENTINEL_TEXT,
+        ):
+            assert sentinel not in combined, f"sentinel leaked: {sentinel}"
+        assert "group=conflict count=2" in out
+        assert "reconciliation_duplicate_pair=1" in out
+
+    def _census_occupied_row(self) -> None:
+        captured_at = _minutes_ago(30)
+        CensusSnapshot.objects.create(
+            captured_at=captured_at,
+            ingestion_run=_census_run(captured_at),
+            setor="SETOR SINTETICO",
+            setor_codigo="1000",
+            leito=SENTINEL_BED,
+            prontuario=SENTINEL_PATIENT,
+            nome=SENTINEL_NAME,
+            bed_status=BedStatus.OCCUPIED,
+        )
+
+
+class TestReconciliationRender:
+    def test_healthy_output_renders_the_reconciliation_block(self):
+        output = _run_healthy()
+        assert (
+            "reconciliation_backlog: group=pending count=0 "
+            "oldest_age_hours=none" in output
+        )
+        assert (
+            "reconciliation_backlog: group=stale_cases count=0 "
+            "oldest_age_hours=none" in output
+        )
+        assert "reconciliation_duplicates: pairs=0" in output
+        assert "reconciliation_census: open_outside_census=0" in output
+        assert (
+            "extraction_coverage: dates=0 complete=0 incomplete=0 missing=0 "
+            "gap=0 gap_first_date=none gap_last_date=none" in output
+        )
+
+    def test_gap_bounds_render_as_dates_only(self):
+        _discharge_run(ref_date="2026-06-01", total_records=0, attempt_count=1)
+        _discharge_run(ref_date="2026-06-03", total_records=0, attempt_count=1)
+        output = _run_healthy()
+        assert (
+            "extraction_coverage: dates=2 complete=0 incomplete=2 missing=0 "
+            "gap=2 gap_first_date=2026-06-01 gap_last_date=2026-06-03"
+            in output
+        )

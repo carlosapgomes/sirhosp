@@ -14,9 +14,13 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.ingestion.pipeline_health import (
+    DEFAULT_BACKLOG_AGE_MAX_HOURS,
+    DEFAULT_CONFLICT_MAX_COUNT,
+    DEFAULT_DUPLICATE_MAX_COUNT,
     DEFAULT_MAX_ACTIVE_AGE_MINUTES,
     DEFAULT_MAX_FULL_SYNC_FAILURE_PERCENT,
     DEFAULT_MIN_FULL_SYNC_TERMINAL_SAMPLE,
+    DEFAULT_MISSING_DATES_MAX,
     DEFAULT_SETTLING_MINUTES,
     DEFAULT_WINDOW_HOURS,
     HealthConfig,
@@ -91,18 +95,43 @@ class Command(BaseCommand):
             help="Optional maximum age in hours of the latest "
             "ClinicalEvent; omitted disables the alarm (informational).",
         )
+        parser.add_argument(
+            "--missing-dates-max",
+            type=int,
+            default=DEFAULT_MISSING_DATES_MAX,
+            help="Maximum count of missing/incomplete discharge-extraction "
+            "dates before the operator-action alarm (non-negative).",
+        )
+        parser.add_argument(
+            "--backlog-age-max-hours",
+            type=int,
+            default=DEFAULT_BACKLOG_AGE_MAX_HOURS,
+            help="Maximum age in hours of the oldest pending/ambiguous "
+            "reconciliation evidence (positive).",
+        )
+        parser.add_argument(
+            "--conflict-max-count",
+            type=int,
+            default=DEFAULT_CONFLICT_MAX_COUNT,
+            help="Maximum conflict reconciliation evidence rows tolerated "
+            "(non-negative).",
+        )
+        parser.add_argument(
+            "--duplicate-max-count",
+            type=int,
+            default=DEFAULT_DUPLICATE_MAX_COUNT,
+            help="Maximum source-confirmed duplicate admission pairs "
+            "tolerated (non-negative).",
+        )
 
     def handle(self, *args, **options):
         config = self._config_from(options)
         result = evaluate_pipeline_health(config)
         self._render(result)
         if not result.healthy:
-            violations = ",".join(
-                f"{violation.code}={violation.count}"
-                for violation in result.violations
-            )
             raise CommandError(
-                f"ingestion pipeline health: unhealthy violations={violations}"
+                f"ingestion pipeline health: unhealthy "
+                f"violations={format_violations(result)}"
             )
 
     # ------------------------------------------------------------------
@@ -133,6 +162,19 @@ class Command(BaseCommand):
             if value is not None and value <= 0:
                 raise CommandError(f"--{flag.replace('_', '-')} must be positive")
 
+        missing_dates_max = options["missing_dates_max"]
+        backlog_age_max_hours = options["backlog_age_max_hours"]
+        conflict_max_count = options["conflict_max_count"]
+        duplicate_max_count = options["duplicate_max_count"]
+        if missing_dates_max < 0:
+            raise CommandError("--missing-dates-max must be non-negative")
+        if backlog_age_max_hours <= 0:
+            raise CommandError("--backlog-age-max-hours must be positive")
+        if conflict_max_count < 0:
+            raise CommandError("--conflict-max-count must be non-negative")
+        if duplicate_max_count < 0:
+            raise CommandError("--duplicate-max-count must be non-negative")
+
         return HealthConfig(
             window_hours=window_hours,
             settling_minutes=settling_minutes,
@@ -142,6 +184,10 @@ class Command(BaseCommand):
             max_movement_age_hours=options["max_movement_age_hours"],
             max_admission_age_hours=options["max_admission_age_hours"],
             max_event_age_hours=options["max_event_age_hours"],
+            missing_dates_max=missing_dates_max,
+            backlog_age_max_hours=backlog_age_max_hours,
+            conflict_max_count=conflict_max_count,
+            duplicate_max_count=duplicate_max_count,
         )
 
     # ------------------------------------------------------------------
@@ -201,12 +247,54 @@ class Command(BaseCommand):
             f"event_present={_bool_text(freshness.event_present)} "
             f"event_age_minutes={_int_text(freshness.event_age_minutes)}"
         )
+        render_reconciliation_block(self.stdout, result)
         if not result.healthy:
-            violations = ",".join(
-                f"{violation.code}={violation.count}"
-                for violation in result.violations
+            self.stdout.write(
+                f"violations: {format_violations(result)}"
             )
-            self.stdout.write(f"violations: {violations}")
+
+
+def render_reconciliation_block(stdout, result) -> None:
+    """Render the shared reconciliation block (RPSA-S10).
+
+    Used by both health commands so the reconciliation rendering has a
+    single spelling. Strictly aggregate-safe: status-group names, counts,
+    rounded ages, pair/census counts and date bounds only.
+    """
+    for group in result.reconciliation.backlog:
+        stdout.write(
+            f"reconciliation_backlog: group={group.name} count={group.count} "
+            f"oldest_age_hours={_int_text(group.oldest_age_hours)}"
+        )
+    stdout.write(
+        f"reconciliation_duplicates: pairs={result.reconciliation.duplicate_pairs}"
+    )
+    stdout.write(
+        "reconciliation_census: "
+        f"open_outside_census={result.reconciliation.open_outside_census}"
+    )
+    coverage = result.reconciliation.coverage
+    stdout.write(
+        "extraction_coverage: "
+        f"dates={coverage.dates_total} "
+        f"complete={coverage.complete_dates} "
+        f"incomplete={coverage.incomplete_dates} "
+        f"missing={coverage.missing_dates} "
+        f"gap={coverage.gap_count} "
+        f"gap_first_date={_date_text(coverage.gap_first_date)} "
+        f"gap_last_date={_date_text(coverage.gap_last_date)}"
+    )
+
+
+def format_violations(result) -> str:
+    """Fixed ``code=count`` violation summary shared by both commands."""
+    return ",".join(
+        f"{violation.code}={violation.count}" for violation in result.violations
+    )
+
+
+def _date_text(value) -> str:
+    return "none" if value is None else value.isoformat()
 
 
 def _bool_text(value: bool) -> str:
