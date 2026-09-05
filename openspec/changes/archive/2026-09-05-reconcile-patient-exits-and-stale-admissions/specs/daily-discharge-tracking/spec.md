@@ -1,11 +1,4 @@
-# daily-discharge-tracking Specification
-
-## Purpose
-
-Define rastreamento diário de contagem de altas hospitalares, com tabela
-dedicada, management command de atualização e gráfico interativo no portal.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Daily discharge count is stored in a dedicated tracking table
 
@@ -195,66 +188,6 @@ averages on the primary hospital-exit series and visually distinguish weekends.
 - **AND** EMA-7 shows a value starting from day 7 (seeded at index 6)
 - **AND** SMA-30 shows a value starting from day 30
 
-### Requirement: Chart period is customizable via querystring
-
-The system SHALL allow the user to customize the chart period through a
-`?dias=N` querystring parameter, defaulting to 90 days.
-
-#### Scenario: User requests a 30-day period
-
-- **WHEN** an authenticated user accesses `/painel/altas/?dias=30`
-- **AND** `DailyDischargeCount` has at least 30 days of data
-- **THEN** the chart shows only the last 30 days (up to yesterday)
-
-#### Scenario: Invalid period parameter falls back to default
-
-- **WHEN** an authenticated user accesses `/painel/altas/?dias=abc`
-- **THEN** the chart shows the default 90-day period
-
-#### Scenario: Period selector is available on the page
-
-- **WHEN** an authenticated user accesses `/painel/altas/`
-- **THEN** a period selector is rendered with options for 30, 60, 90, 180,
-  and 365 days
-
-### Requirement: Discharge chart page includes weekday average chart
-
-The system SHALL render, below the main chart on `/painel/altas/`, a second
-chart with average discharges per weekday (Monday through Sunday) computed from
-the same selected period.
-
-#### Scenario: Weekday average chart is shown below the main chart
-
-- **WHEN** an authenticated user accesses `/painel/altas/?dias=90`
-- **AND** there are historical daily discharge records
-- **THEN** the page shows a second chart below the main chart
-- **AND** the X axis is ordered Monday to Sunday
-- **AND** each bar value corresponds to the weekday average in that period
-
-#### Scenario: Weekday average respects selected period
-
-- **WHEN** an authenticated user accesses `/painel/altas/?dias=30`
-- **AND** there are daily discharge records older than 30 days
-- **THEN** the weekday averages are computed only from the last 30 displayed
-  days (up to yesterday)
-
-#### Scenario: Weekday average chart handles sparse or empty data
-
-- **WHEN** an authenticated user accesses `/painel/altas/`
-- **AND** the period has no daily discharge records
-- **THEN** the page renders without error
-- **AND** the secondary chart area degrades gracefully without broken scripts
-
-### Requirement: Chart page requires authentication
-
-The system SHALL require authentication to access the discharge chart page,
-consistent with other operational portal pages.
-
-#### Scenario: Anonymous user accesses discharge chart
-
-- **WHEN** an anonymous user accesses `/painel/altas/`
-- **THEN** the user is redirected to login
-
 ### Requirement: Discharge data is displayed in America/Bahia timezone
 
 The system SHALL replace the previous configured-timezone grouping contract for
@@ -291,6 +224,8 @@ discharge events with explicit `America/Bahia` boundaries for `saida_em`,
 - **THEN** that exit is counted in `DailyDischargeCount` for date E
 - **AND** is NOT counted for date D
 
+## ADDED Requirements
+
 ### Requirement: Historical indicator rebuild reports aggregate provenance
 
 The system SHALL rebuild effective-exit history from canonical admissions and
@@ -309,3 +244,8 @@ audit model.
 - **THEN** `DailyDischargeCount` reflects exits by `saida_em`
 - **AND** the medical-summary series remains derivable from `alta_em`
 - **AND** aggregate before/after counts are emitted without patient identity
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: Discharge data is displayed in America/Sao_Paulo timezone`
+- TO: `### Requirement: Discharge data is displayed in America/Bahia timezone`

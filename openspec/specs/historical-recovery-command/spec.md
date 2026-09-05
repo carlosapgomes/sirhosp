@@ -85,15 +85,18 @@ extractors without executing services.
 
 ### Requirement: Historical recovery command aggregates step results
 
-The recovery command SHALL aggregate per-date/per-extractor results into a final
-command outcome and retry failed steps at the end of the batch when retries are
-enabled.
+The recovery command SHALL aggregate per-date/per-extractor results, including
+safe reconciliation counters, into a final command outcome and retry failed or
+semantically unconfirmed steps at the end of the batch when retries are enabled.
 
 #### Scenario: All selected extractions succeed
 
-- **WHEN** all selected extractor service calls return successful results
+- **WHEN** all selected extractor service calls return successful, semantically
+  confirmed results
 - **THEN** the command exits successfully
 - **AND** the final summary reports zero failed steps
+- **AND** discharge and death steps expose aggregate reconciliation statuses
+  without patient identity
 
 #### Scenario: One or more selected extractions fail then retry succeeds
 
@@ -110,6 +113,13 @@ enabled.
   exhausted
 - **THEN** the command exits with a non-zero status after retries complete
 - **AND** the final summary reports the number of final failed steps
+
+#### Scenario: Unconfirmed zero is a failed step
+
+- **WHEN** a discharge extraction returns zero rows without a successful second
+  confirmation
+- **THEN** the step is not counted as succeeded
+- **AND** normal retry limits apply
 
 #### Scenario: Successful steps are not retried
 
@@ -182,3 +192,21 @@ production `historical_recovery` batch runtime.
 - **WHEN** an operator runs the dedicated runtime with `--dry-run`
 - **THEN** the command prints the planned dates and extractors
 - **AND** no extractor service is called
+
+### Requirement: Recovery preserves unresolved evidence for later work
+
+A successful extraction step SHALL retain unresolved reconciliation statuses
+without fabricating patients, admissions, exit times or successful matches.
+
+#### Scenario: Report persists an ambiguous row
+
+- **WHEN** report extraction succeeds but one row has ambiguous admission match
+- **THEN** the step reports the aggregate ambiguity count
+- **AND** preserves the row for authorized review
+- **AND** does not fail unrelated deterministic reconciliations
+
+#### Scenario: Recovery is repeated
+
+- **WHEN** an operator recovers the same date again
+- **THEN** report persistence and already-reconciled exits remain idempotent
+- **AND** pending evidence may be retried under the current matching rules
