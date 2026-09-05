@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change add-versioned-sector-capacity-occupancy-history. Update Purpose after archive.
+Persist one immutable occupancy measurement per accepted census, forming the authoritative historical series for occupancy indicators.
 
 ## Requirements
 

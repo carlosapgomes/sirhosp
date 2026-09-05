@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change add-versioned-sector-capacity-occupancy-history. Update Purpose after archive.
+Render the bed status and capacity view strictly from the latest accepted census measurement, with published capacity references and no stale or projected data.
 
 ## Requirements
 

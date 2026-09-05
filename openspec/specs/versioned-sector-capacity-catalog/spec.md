@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change add-versioned-sector-capacity-occupancy-history. Update Purpose after archive.
+Publish sector capacity as complete, immutable daily catalog versions that downstream views consume by explicit reference.
 
 ## Requirements
 

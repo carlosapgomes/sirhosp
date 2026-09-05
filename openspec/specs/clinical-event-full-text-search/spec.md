@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+Provide full-text search over canonical clinical event content with protected, permission-gated access and aggregate-safe result accounting.
 
 ## Requirements
 

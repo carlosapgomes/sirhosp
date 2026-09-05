@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change repair-persistent-admissions-pipeline. Update Purpose after archive.
+Recover admission mirroring from the latest complete census snapshot when the incremental pipeline loses ground, replaying only what the census proves.
 
 ## Requirements
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change reconcile-patient-exits-and-stale-admissions. Update Purpose after archive.
+Keep one canonical admission per real episode even when the source system reissues or mutates external keys: aliases and source-confirmed merges fold duplicates into a single canonical row with append-only operation audit and sanctioned rollback.
 
 ## Requirements
 

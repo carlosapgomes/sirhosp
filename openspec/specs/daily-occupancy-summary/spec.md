@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change add-versioned-sector-capacity-occupancy-history. Update Purpose after archive.
+Persist exactly one occupancy summary per measured local day, derived from accepted censuses and never overwritten by later partial observations.
 
 ## Requirements
 

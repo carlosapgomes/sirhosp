@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+Persist one canonical, immutable clinical event record per observed clinical fact, versioned and linked to its source evidence without duplicating patient-identifying text.
 
 ## Requirements
 

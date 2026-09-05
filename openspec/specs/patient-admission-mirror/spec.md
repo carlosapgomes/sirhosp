@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+Mirror source-system patients and admissions into canonical records keyed by external identity, tolerating repeated ingestion and metadata updates without duplication.
 
 ## Requirements
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change harden-targeted-evolution-full-sync. Update Purpose after archive.
+Drive targeted medical-evolution extraction by explicit interval coverage so every target window is extracted exactly once, with observable completeness.
 
 ## Requirements
 

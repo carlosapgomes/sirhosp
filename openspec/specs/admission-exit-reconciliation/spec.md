@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change reconcile-patient-exits-and-stale-admissions. Update Purpose after archive.
+Give hospital exit time one authoritative meaning: `saida_em`-derived `discharge_date` closes canonical admissions through append-only reconciliation, deaths close as death exits, and absent or ambiguous evidence never closes an admission by itself.
 
 ## Requirements
 

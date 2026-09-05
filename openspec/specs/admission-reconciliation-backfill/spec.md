@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change reconcile-patient-exits-and-stale-admissions. Update Purpose after archive.
+Provide a deterministic, bounded historical reconciliation backfill: dry-run by default, approved cohorts only, canary-capped apply batches with per-item operation and batch UUIDs, and atomic rollback of whole batches.
 
 ## Requirements
 

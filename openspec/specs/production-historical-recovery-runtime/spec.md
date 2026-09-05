@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change dedicated-historical-recovery-runtime. Update Purpose after archive.
+Define the dedicated batch runtime for historical recovery execution in production, including orchestration, retries and operational bounds.
 
 ## Requirements
 

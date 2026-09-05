@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change 2026-05-03-summary-two-phase-pipeline-traceability. Update Purpose after archive.
+Govern the two-phase internal execution of admission progressive summaries (planning and materialization) with bounded runs and observable state per admission batch.
 
 ## Requirements
 

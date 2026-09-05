@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change repair-persistent-admissions-pipeline. Update Purpose after archive.
+Expose pipeline and exit-reconciliation health through aggregate, identity-safe diagnostics (coverage, backlog, invariants) that are read-only, threshold-driven and alertable without touching clinical state.
 
 ## Requirements
 

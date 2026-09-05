@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change reconcile-patient-exits-and-stale-admissions. Update Purpose after archive.
+Define the production runtime for exit reconciliation: benchmark-gated hourly current-day discharge extraction, the 05:00 America/Bahia D-1 recovery timer with explicit extractors, bounded catch-up, PostgreSQL coordination locks and identity-safe output.
 
 ## Requirements
 

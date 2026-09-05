@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change fundacao-modelo-eventos-e-ingestao-evolucoes. Update Purpose after archive.
+Allow on-demand ingestion of medical evolutions by patient and period through the same bounded pipeline used by scheduled runs.
 
 ## Requirements
 

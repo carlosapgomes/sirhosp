@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD - created by archiving change reconcile-patient-exits-and-stale-admissions. Update Purpose after archive.
+Detect admissions that stay open while absent from consecutive current censuses, creating conservative reconciliation cases with cooldowns and bounded confirmation queues; explicit exit evidence always takes precedence.
 
 ## Requirements
 

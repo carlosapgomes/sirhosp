@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-release-image.yml"
 COMPOSE = ROOT / "compose.hospital.yml"
-NEXT_RELEASE = "v0.1.0-rc.12"
+NEXT_RELEASE = "v0.1.0-rc.20"
 NEXT_RUNBOOK = ROOT / "docs" / "releases" / f"{NEXT_RELEASE}-upgrade.md"
 
 
@@ -151,48 +151,59 @@ def test_hospital_compose_joins_existing_cloudflared_edge_network() -> None:
     assert "      hospital_edge:\n        aliases:\n          - prisma\n" in web
 
 
-def test_next_release_runbook_declares_ui_only_contract() -> None:
-    """The RC12 runbook must pin the UI-only release contract (S1-S3)."""
+def test_next_release_runbook_declares_exit_reconciliation_contract() -> None:
+    """The RC20 runbook must pin the exit-reconciliation release contract."""
     assert NEXT_RUNBOOK.exists(), "runbook for the next release must exist"
     text = NEXT_RUNBOOK.read_text(encoding="utf-8")
 
-    # Scope: UI only (S1-S3), no migrations, no catalog, no activation.
-    for marker in ("somente UI", "sem migration", "sem catálogo"):
-        assert marker in text, f"runbook must mention {marker!r}"
-
-    # Upgrade chain starts at RC11 and migration must be an idempotent no-op.
-    assert "v0.1.0-rc.11" in text
-    assert "No migrations to apply" in text
-
-    # Commit chain and proof of no migrations in the RC interval.
-    for commit in ("6f1644a", "37bf2c0", "afd8359"):
-        assert commit in text, f"runbook must mention commit {commit!r}"
-    assert "apps/*/migrations" in text
-
-    # Operational contract: drain, protected backup with SHA-256, health,
-    # anonymous 302, ten persistent workers, clean logs and trivial rollback
-    # to the preserved RC11 Compose.
+    # Scope: the archived reconcile-patient-exits change, six additive
+    # migrations, and NO activation (timers inert by default).
     for marker in (
-        "backup",
-        "sha256",
-        "drenag",
-        "rollback",
-        "302",
-        "EXPECTED_WORKERS=10",
-        "persistent_worker",
-        "structural_errors",
-        "compose.hospital.yml.rc11",
+        "reconcile-patient-exits-and-stale-admissions",
+        "6 migrations",
+        "Nenhum timer novo fica ativo",
     ):
         assert marker in text, f"runbook must mention {marker!r}"
 
-    # Aggregate verification of the new UI: real situation summary and
-    # capacity headers in the authenticated page, without identifying data.
-    assert "Situação real do hospital" in text
-    assert "Cap." in text
+    # Upgrade chain starts at RC19.
+    assert "v0.1.0-rc.19" in text
 
-    # No catalog, dry-run or activation command may be executed.
-    assert "activate_sector_capacity_catalog" not in text
-    assert "dry-run" not in text
+    # Commit chain anchors of the release interval.
+    for commit in ("a06e7b6", "63b3323", "a06f496"):
+        assert commit in text, f"runbook must mention commit {commit!r}"
+
+    # Operational contract: canary applies (ingestion layer touched),
+    # drain, protected backup with SHA-256, rollback to preserved RC19
+    # Compose, and migrate applying the six migrations then no-op.
+    for marker in (
+        "backup",
+        "SHA-256",
+        "drenag",
+        "rollback",
+        "compose.hospital.yml.rc19",
+        "SIRHOSP_VERSION=v0.1.0-rc.20",
+        "No migrations to apply",
+        "§6.1.4", "é **aplicável**",
+    ):
+        assert marker in text, f"runbook must mention {marker!r}"
+
+    # Read-only validation commands only: dry-run backfill planner and the
+    # aggregate integrity report; no apply, no timer enablement.
+    assert "reconcile_admission_history" in text
+    assert "report_admission_reconciliation_integrity" in text
+    assert "systemctl list-timers" in text
+    assert "--apply" in text  # present only as a forbidden-deploy marker
+    assert "d1-recovery" in text  # post-deploy smoke gate
+
+    # Aggregates rebuild with canonical semantics and credentials leave
+    # argv; the PDF command is retired from scheduling.
+    assert "saida_em" in text
+    assert "raw_data" in text
+    assert "ps -ef" in text
+
+    # Post-deploy activation is a separate operator decision chain.
+    for marker in ("Smoke D-1 manual", "Benchmarks", "canário 50"):
+        assert marker in text, f"runbook must mention {marker!r}"
 
 
 def test_hospital_compose_runs_the_complete_current_topology() -> None:
