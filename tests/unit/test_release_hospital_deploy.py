@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-release-image.yml"
 COMPOSE = ROOT / "compose.hospital.yml"
-NEXT_RELEASE = "v0.1.0-rc.22"
+NEXT_RELEASE = "v0.1.0-rc.23"
 NEXT_RUNBOOK = ROOT / "docs" / "releases" / f"{NEXT_RELEASE}-upgrade.md"
 
 
@@ -152,7 +152,7 @@ def test_hospital_compose_joins_existing_cloudflared_edge_network() -> None:
 
 
 def test_next_release_runbook_declares_orchestrated_d1_contract() -> None:
-    """The RC22 runbook must pin the orchestrated D-1 release contract."""
+    """The RC23 runbook must pin the orchestrated D-1 release contract."""
     assert NEXT_RUNBOOK.exists(), "runbook for the next release must exist"
     text = NEXT_RUNBOOK.read_text(encoding="utf-8")
 
@@ -191,7 +191,7 @@ def test_next_release_runbook_declares_orchestrated_d1_contract() -> None:
     # Simple recreate deploy: version pin, no migrate, health, rollback by
     # redeploy, first-orchestrated-night gate with the aggregate log line.
     for marker in (
-        "SIRHOSP_VERSION=v0.1.0-rc.22",
+        "SIRHOSP_VERSION=v0.1.0-rc.23",
         "sem migrate",
         "manage.py check",
         "Rollback",
