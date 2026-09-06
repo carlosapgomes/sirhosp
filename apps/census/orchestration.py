@@ -24,8 +24,9 @@ from __future__ import annotations
 import logging
 import time as time_module
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from django.core.management import call_command
 from django.db import close_old_connections, connection
@@ -40,6 +41,15 @@ logger = logging.getLogger(__name__)
 
 # Unique PostgreSQL advisory lock key for census orchestrator coordination.
 ADVISORY_LOCK_KEY = 31082024
+
+# America/Bahia literal — never an inherited default timezone (ADR-0010).
+BAHIA_TZ = ZoneInfo("America/Bahia")
+
+# Quiet-window in-process D-1 exit recovery (ADR-0010): at most one
+# previous-day recovery attempt per local Bahia date inside
+# [D1_QUIET_START_HOUR, D1_QUIET_END_HOUR).
+D1_QUIET_START_HOUR = 1
+D1_QUIET_END_HOUR = 5
 
 
 def acquire_orchestrator_lock() -> bool:
@@ -413,6 +423,7 @@ def run_loop(
     enable_stale_recovery: bool = True,
     sleep_fn: Callable[[int | float], None] | None = None,
     should_stop: Callable[[], bool] = lambda: False,
+    now_fn: Callable[[], datetime] | None = None,
 ) -> None:
     """Run the adaptive census orchestrator in continuous loop mode.
 
@@ -421,11 +432,15 @@ def run_loop(
     2. Evaluates eligibility via ``compute_orchestrator_state``.
     3. While blocked (active queue, open batch, cooldown, stale running):
        logs the blocking reason and sleeps for ``sleep_seconds``.
-    4. When eligible, runs a single cycle via ``run_single_cycle``.
-    5. If the cycle fails (extraction_failed, ambiguous_runs,
+    4. When eligible inside the quiet window [01:00, 05:00) America/Bahia
+       with no D-1 attempt yet for the current local date, runs the
+       previous-day exit recovery in-process via ``call_command``
+       (ADR-0010); a failure is logged and never blocks the cycle.
+    5. When eligible, runs a single cycle via ``run_single_cycle``.
+    6. If the cycle fails (extraction_failed, ambiguous_runs,
        processing_failed, or unexpected outcome), sleeps for
        ``failure_backoff_minutes`` before retrying.
-    6. Checks ``should_stop`` at the top of each iteration to support
+    7. Checks ``should_stop`` at the top of each iteration to support
        graceful shutdown via SIGTERM/SIGINT.
 
     Args:
@@ -438,6 +453,10 @@ def run_loop(
             injected in tests to avoid real waiting.
         should_stop: Callable returning True when the loop should exit;
             set by signal handlers in production (default ``lambda: False``).
+        now_fn: Callable returning an aware ``datetime`` used to evaluate
+            the quiet window and the local Bahia date for the in-process
+            D-1 step (default ``timezone.now``); injected in tests to
+            freeze the clock.
     """
     failure_outcomes: set[str] = {
         "extraction_failed",
@@ -457,6 +476,12 @@ def run_loop(
     )
 
     _sleep: Callable[[int | float], None] = sleep_fn or time_module.sleep
+
+    # Quiet-window D-1 exit-recovery state (ADR-0010): an in-memory flag
+    # records the last local Bahia date for which an attempt was made so
+    # there is at most one attempt per date in this process run.
+    _now_fn: Callable[[], datetime] = now_fn or timezone.now
+    last_d1_run_date: date | None = None
 
     while not should_stop():
         # 1. Keep database connections healthy
@@ -498,7 +523,46 @@ def run_loop(
             _sleep(sleep_seconds)
             continue
 
-        # 4. Eligible — run one cycle
+        # 4. Quiet-window D-1 exit recovery (ADR-0010). Being eligible
+        # means the queue is drained and no census batch is open — exactly
+        # the preconditions the D-1 runtime requires. Run it in-process
+        # once per local Bahia date inside the quiet window, before the
+        # next census cycle opens a new batch. A failure is logged and
+        # never blocks the census cycle.
+        local_now = _now_fn().astimezone(BAHIA_TZ)
+        local_date = local_now.date()
+        if (
+            D1_QUIET_START_HOUR <= local_now.hour < D1_QUIET_END_HOUR
+            and local_date != last_d1_run_date
+        ):
+            last_d1_run_date = local_date
+            logger.info(
+                "Quiet-window D-1 recovery start: local date %s "
+                "(America/Bahia), queue drained and batch closed.",
+                local_date,
+            )
+            _d1_started = time_module.monotonic()
+            try:
+                call_command(
+                    "run_exit_reconciliation_runtime", "--mode", "d1"
+                )
+            except (Exception, SystemExit) as exc:
+                # Design D4 (ADR-0010): even an unexpected exit-75
+                # contention race must never abort the orchestrator loop;
+                # log the aggregate-safe exception type and continue.
+                logger.error(
+                    "quiet-window D-1 recovery failed: %s",
+                    type(exc).__name__,
+                )
+            _d1_elapsed = time_module.monotonic() - _d1_started
+            logger.info(
+                "Quiet-window D-1 recovery finished: local date %s, "
+                "duration %.0f seconds.",
+                local_date,
+                _d1_elapsed,
+            )
+
+        # 5. Eligible — run one cycle
         logger.info("System eligible, running single cycle.")
         result = run_single_cycle(
             min_interval_minutes=min_interval_minutes,
@@ -507,7 +571,7 @@ def run_loop(
 
         outcome = result.get("outcome", "")
 
-        # 5. Handle cycle outcomes
+        # 6. Handle cycle outcomes
         if outcome in failure_outcomes:
             error = result.get("error", "")
             message = result.get("message", "")
