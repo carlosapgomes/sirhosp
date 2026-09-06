@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "publish-release-image.yml"
 COMPOSE = ROOT / "compose.hospital.yml"
-NEXT_RELEASE = "v0.1.0-rc.21"
+NEXT_RELEASE = "v0.1.0-rc.22"
 NEXT_RUNBOOK = ROOT / "docs" / "releases" / f"{NEXT_RELEASE}-upgrade.md"
 
 
@@ -151,58 +151,58 @@ def test_hospital_compose_joins_existing_cloudflared_edge_network() -> None:
     assert "      hospital_edge:\n        aliases:\n          - prisma\n" in web
 
 
-def test_next_release_runbook_declares_exit_reconciliation_contract() -> None:
-    """The RC21 runbook must pin the exit-reconciliation release contract."""
+def test_next_release_runbook_declares_orchestrated_d1_contract() -> None:
+    """The RC22 runbook must pin the orchestrated D-1 release contract."""
     assert NEXT_RUNBOOK.exists(), "runbook for the next release must exist"
     text = NEXT_RUNBOOK.read_text(encoding="utf-8")
 
-    # Scope: the archived reconcile-patient-exits change, six additive
-    # migrations, and NO activation (timers inert by default).
+    # Scope: ADR-0010 / orchestrate-d1-exit-recovery, one orchestrator
+    # slice, and NO migrations (schema identical to rc.21).
     for marker in (
-        "reconcile-patient-exits-and-stale-admissions",
-        "6 migrations",
-        "Nenhum timer novo fica ativo",
+        "orchestrate-d1-exit-recovery",
+        "ADR-0010",
+        "876684d",
+        "Nenhuma migration",
     ):
         assert marker in text, f"runbook must mention {marker!r}"
 
-    # Upgrade chain starts at RC19.
-    assert "v0.1.0-rc.19" in text
+    # Upgrade chain starts at RC21.
+    assert "v0.1.0-rc.21" in text
 
-    # Commit chain anchors of the release interval.
-    for commit in ("a06e7b6", "63b3323", "a06f496"):
-        assert commit in text, f"runbook must mention commit {commit!r}"
-
-    # Operational contract: canary applies (ingestion layer touched),
-    # drain, protected backup with SHA-256, rollback to preserved RC19
-    # Compose, and migrate applying the six migrations then no-op.
+    # The systemd 05:00 D-1 timer is disabled; the scheduler stays manual.
     for marker in (
-        "backup",
-        "SHA-256",
-        "drenag",
-        "rollback",
-        "compose.hospital.yml.rc19",
-        "SIRHOSP_VERSION=v0.1.0-rc.21",
-        "No migrations to apply",
-        "§6.1.4", "é **aplicável**",
+        "sirhosp-historical-recovery.timer",
+        "desabilitado",
+        "systemctl is-enabled",
+        "disabled",
     ):
         assert marker in text, f"runbook must mention {marker!r}"
 
-    # Read-only validation commands only: dry-run backfill planner and the
-    # aggregate integrity report; no apply, no timer enablement.
-    assert "reconcile_admission_history" in text
-    assert "report_admission_reconciliation_integrity" in text
-    assert "systemctl list-timers" in text
-    assert "--apply" in text  # present only as a forbidden-deploy marker
-    assert "d1-recovery" in text  # post-deploy smoke gate
+    # Quiet window semantics (ADR-0010): eligible loop, [01:00, 05:00)
+    # America/Bahia, one attempt per local date, failure never blocks.
+    for marker in (
+        "[01:00, 05:00)",
+        "America/Bahia",
+        "fila drenada",
+        "nunca bloqueia",
+    ):
+        assert marker in text, f"runbook must mention {marker!r}"
 
-    # Aggregates rebuild with canonical semantics and credentials leave
-    # argv; the PDF command is retired from scheduling.
-    assert "saida_em" in text
-    assert "raw_data" in text
-    assert "ps -ef" in text
+    # Simple recreate deploy: version pin, no migrate, health, rollback by
+    # redeploy, first-orchestrated-night gate with the aggregate log line.
+    for marker in (
+        "SIRHOSP_VERSION=v0.1.0-rc.22",
+        "sem migrate",
+        "manage.py check",
+        "Rollback",
+        "Quiet-window D-1",
+        "report_admission_reconciliation_integrity",
+    ):
+        assert marker in text, f"runbook must mention {marker!r}"
 
-    # Post-deploy activation is a separate operator decision chain.
-    for marker in ("Smoke D-1 manual", "Benchmarks", "canário 50"):
+    # Invariants: credentials never in argv, aggregate output, no
+    # apply/requeue/backfill/timer in this deploy.
+    for marker in ("ps -ef", "sem `--apply`", "systemctl list-timers"):
         assert marker in text, f"runbook must mention {marker!r}"
 
 
