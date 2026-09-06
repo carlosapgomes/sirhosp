@@ -39,7 +39,13 @@ wait_for_db() {
     local retries=60
     local count=0
 
-    until dc exec -T db pg_isready -U "${POSTGRES_USER:-sirhosp}" -d "${POSTGRES_DB:-sirhosp}" >/dev/null 2>&1; do
+    # Probe with psql itself (same connection path the runner uses), not
+    # pg_isready: during the official postgres entrypoint's first-boot
+    # init/restart gap the temporary server answers readiness probes on
+    # the local socket while the final server may not exist yet, which
+    # made the preclean psql call race against the restart and fail on
+    # slower CI runners (observed twice on 2026-09-06).
+    until dc exec -T db psql -U "${POSTGRES_USER:-sirhosp}" -d postgres -c "SELECT 1" >/dev/null 2>&1; do
         sleep 1
         count=$((count + 1))
         if [ "$count" -ge "$retries" ]; then
