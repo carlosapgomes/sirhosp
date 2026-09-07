@@ -1,7 +1,9 @@
 # ADR-0010: Recuperação D-1 orquestrada pelo ciclo adaptativo de censo
 
-- **Status:** Proposed
-- **Data:** 2026-09-06
+- **Status:** Accepted
+- **Data:** 2026-09-06 (aceita em 2026-09-07, após validação da
+  primeira noite orquestrada em produção: disparo às 01:09:39
+  `America/Bahia`, 4/4 extratores, 31 eventos reconciled para 06/09)
 - **Contexto de decisão:** incidente de contenção do timer D-1 em produção
   (2026-09-06, ver `docs/releases/2026-09-05_v0.1.0-rc.21.md` e o pack de
   ativação em andamento)

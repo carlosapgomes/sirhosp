@@ -97,6 +97,14 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        # Observability (rc.24): the production container runs plain
+        # ``manage.py`` with no Django LOGGING setting, so root logging
+        # defaults to WARNING and the orchestrator's INFO lines (Cycle
+        # blocked, System eligible, Quiet-window D-1 recovery ...) never
+        # reach stdout. Configure INFO explicitly on every invocation,
+        # in every mode (dry-run, once, loop).
+        logging.basicConfig(level=logging.INFO)
+
         dry_run: bool = options["dry_run"]
         loop: bool = options["loop"]
         sleep_seconds: int = options["sleep_seconds"]
