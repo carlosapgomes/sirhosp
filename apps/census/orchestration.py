@@ -436,11 +436,15 @@ def run_loop(
        with no D-1 attempt yet for the current local date, runs the
        previous-day exit recovery in-process via ``call_command``
        (ADR-0010); a failure is logged and never blocks the cycle.
-    5. When eligible, runs a single cycle via ``run_single_cycle``.
-    6. If the cycle fails (extraction_failed, ambiguous_runs,
+    5. When eligible in a new America/Bahia local hour (no hourly attempt
+       yet in this process for that hour), runs the intraday discharge
+       recovery in-process via ``call_command`` (``--mode hourly``); a
+       failure is logged and never blocks the cycle.
+    6. When eligible, runs a single cycle via ``run_single_cycle``.
+    7. If the cycle fails (extraction_failed, ambiguous_runs,
        processing_failed, or unexpected outcome), sleeps for
        ``failure_backoff_minutes`` before retrying.
-    7. Checks ``should_stop`` at the top of each iteration to support
+    8. Checks ``should_stop`` at the top of each iteration to support
        graceful shutdown via SIGTERM/SIGINT.
 
     Args:
@@ -454,9 +458,9 @@ def run_loop(
         should_stop: Callable returning True when the loop should exit;
             set by signal handlers in production (default ``lambda: False``).
         now_fn: Callable returning an aware ``datetime`` used to evaluate
-            the quiet window and the local Bahia date for the in-process
-            D-1 step (default ``timezone.now``); injected in tests to
-            freeze the clock.
+            the quiet window, the local Bahia date/hour for the
+            in-process D-1 and intraday hourly steps (default
+            ``timezone.now``); injected in tests to freeze the clock.
     """
     failure_outcomes: set[str] = {
         "extraction_failed",
@@ -482,6 +486,11 @@ def run_loop(
     # there is at most one attempt per date in this process run.
     _now_fn: Callable[[], datetime] = now_fn or timezone.now
     last_d1_run_date: date | None = None
+
+    # Intraday hourly exit-recovery state: an in-memory flag records the
+    # last local Bahia hour for which an attempt was made so there is at
+    # most one hourly attempt per hour in this process run.
+    last_hourly_run_hour: int | None = None
 
     while not should_stop():
         # 1. Keep database connections healthy
@@ -560,6 +569,43 @@ def run_loop(
                 "duration %.0f seconds.",
                 local_date,
                 _d1_elapsed,
+            )
+
+        # 4.1 Intraday hourly exit recovery. Being eligible means the
+        # queue is drained and no census batch is open — exactly the
+        # preconditions the hourly runtime requires. Run it in-process
+        # once per local Bahia hour, after the D-1 step (when both fire,
+        # D-1 covers the previous day and hourly the current day) and
+        # before the next census cycle opens a new batch. A failure is
+        # logged and never blocks the census cycle. The flag is advanced
+        # BEFORE the attempt so a failure still consumes the hour.
+        if local_now.hour != last_hourly_run_hour:
+            last_hourly_run_hour = local_now.hour
+            logger.info(
+                "Intraday hourly recovery start: local time %s "
+                "(America/Bahia), queue drained and batch closed.",
+                local_now.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            _hourly_started = time_module.monotonic()
+            try:
+                call_command(
+                    "run_exit_reconciliation_runtime", "--mode", "hourly"
+                )
+            except (Exception, SystemExit) as exc:
+                # Same isolation as the D-1 step (ADR-0010): an unexpected
+                # SystemExit contention race must never abort the
+                # orchestrator loop; log the aggregate-safe exception type
+                # and continue.
+                logger.error(
+                    "intraday hourly recovery failed: %s",
+                    type(exc).__name__,
+                )
+            _hourly_elapsed = time_module.monotonic() - _hourly_started
+            logger.info(
+                "Intraday hourly recovery finished: local time %s, "
+                "duration %.0f seconds.",
+                local_now.strftime("%Y-%m-%d %H:%M:%S"),
+                _hourly_elapsed,
             )
 
         # 5. Eligible — run one cycle

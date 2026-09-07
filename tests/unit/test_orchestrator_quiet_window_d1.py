@@ -104,17 +104,33 @@ def _run_loop(
         return cc_mock, cycle_mock
 
 
+def _d1_calls(cc_mock: mock.Mock) -> list[object]:
+    """Return only the call_command invocations for the quiet-window D-1 step.
+
+    The orchestrator also issues intraday hourly recovery invocations through
+    the same patched ``call_command`` (SLICE-OIDR-S1), so D-1 assertions
+    filter the shared mock by mode instead of asserting on its total call
+    count.
+    """
+    return [
+        call
+        for call in cc_mock.call_args_list
+        if call.args == ("run_exit_reconciliation_runtime", "--mode", "d1")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
 def test_eligible_in_quiet_window_runs_d1_before_cycle():
-    """02:30 Bahia eligible: D-1 runs once, before the census cycle."""
+    """02:30 Bahia eligible: D-1 runs once, before hourly and the cycle."""
     order: list[str] = []
 
-    def cc_effect(*args, **kwargs):
-        order.append("d1")
+    def cc_effect(command, *args, **kwargs):
+        assert args[0] == "--mode"
+        order.append(args[1])
 
     def cycle_effect(*args, **kwargs):
         order.append("cycle")
@@ -149,10 +165,10 @@ def test_eligible_in_quiet_window_runs_d1_before_cycle():
             now_fn=lambda: _bahia(2, 30),
         )
 
-    assert order == ["d1", "cycle"]
-    cc_mock.assert_called_once_with(
-        "run_exit_reconciliation_runtime", "--mode", "d1"
-    )
+    assert order == ["d1", "hourly", "cycle"]
+    assert _d1_calls(cc_mock) == [
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1")
+    ]
     cycle_mock.assert_called_once()
 
 
@@ -160,16 +176,16 @@ def test_outside_quiet_window_skips_d1():
     """00:59, 05:00 and 14:00 Bahia: cycle runs, D-1 never invoked."""
     for now in (_bahia(0, 59), _bahia(5, 0), _bahia(14, 0)):
         cc_mock, cycle_mock = _run_loop(now)
-        cc_mock.assert_not_called()
+        assert _d1_calls(cc_mock) == []
         cycle_mock.assert_called_once()
 
 
 def test_at_most_one_attempt_per_local_date():
     """Two eligible iterations on the same local date run D-1 only once."""
     cc_mock, cycle_mock = _run_loop(_bahia(2, 0), iterations=2)
-    cc_mock.assert_called_once_with(
-        "run_exit_reconciliation_runtime", "--mode", "d1"
-    )
+    assert _d1_calls(cc_mock) == [
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1")
+    ]
     assert cycle_mock.call_count == 2
 
 
@@ -179,7 +195,9 @@ def test_d1_failure_logs_and_does_not_block_cycle(caplog):
         raise RuntimeError("boom")
 
     cc_mock, cycle_mock = _run_loop(_bahia(3, 0), call_side_effect=boom)
-    cc_mock.assert_called_once()
+    assert _d1_calls(cc_mock) == [
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1")
+    ]
     cycle_mock.assert_called_once()
     assert any(
         "quiet-window D-1 recovery failed: RuntimeError" in r.message
@@ -194,7 +212,9 @@ def test_d1_system_exit_never_aborts_loop():
         raise SystemExit(75)
 
     cc_mock, cycle_mock = _run_loop(_bahia(3, 0), call_side_effect=exit_75)
-    cc_mock.assert_called_once()
+    assert _d1_calls(cc_mock) == [
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1")
+    ]
     cycle_mock.assert_called_once()
 
 
@@ -220,11 +240,11 @@ def test_quiet_window_boundaries_use_bahia_literal(now, should_run):
     """The window is evaluated in America/Bahia, never the host timezone."""
     cc_mock, cycle_mock = _run_loop(now)
     if should_run:
-        cc_mock.assert_called_once_with(
-            "run_exit_reconciliation_runtime", "--mode", "d1"
-        )
+        assert _d1_calls(cc_mock) == [
+            mock.call("run_exit_reconciliation_runtime", "--mode", "d1")
+        ]
     else:
-        cc_mock.assert_not_called()
+        assert _d1_calls(cc_mock) == []
     cycle_mock.assert_called_once()
 
 
@@ -274,12 +294,10 @@ def test_two_distinct_bahia_dates_run_d1_twice_across_utc_midnight():
         ],
         iterations=2,
     )
-    cc_mock.assert_has_calls(
-        [
-            mock.call("run_exit_reconciliation_runtime", "--mode", "d1"),
-            mock.call("run_exit_reconciliation_runtime", "--mode", "d1"),
-        ]
-    )
+    assert _d1_calls(cc_mock) == [
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1"),
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1"),
+    ]
     assert cycle_mock.call_count == 2
 
 
@@ -297,9 +315,9 @@ def test_same_bahia_date_late_window_does_not_third_call():
         ],
         iterations=2,
     )
-    cc_mock.assert_called_once_with(
-        "run_exit_reconciliation_runtime", "--mode", "d1"
-    )
+    assert _d1_calls(cc_mock) == [
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1")
+    ]
     assert cycle_mock.call_count == 2
 
 
@@ -332,13 +350,10 @@ def test_rollover_flag_tracks_bahia_local_date_across_utc_midnight(caplog):
         ],
         iterations=3,
     )
-    cc_mock.assert_has_calls(
-        [
-            mock.call("run_exit_reconciliation_runtime", "--mode", "d1"),
-            mock.call("run_exit_reconciliation_runtime", "--mode", "d1"),
-        ]
-    )
-    assert cc_mock.call_count == 2
+    assert _d1_calls(cc_mock) == [
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1"),
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1"),
+    ]
     assert cycle_mock.call_count == 3
     start_dates = sorted(
         {
@@ -365,9 +380,9 @@ def test_failure_still_consumes_the_single_daily_attempt():
         iterations=2,
         call_side_effect=boom,
     )
-    cc_mock.assert_called_once_with(
-        "run_exit_reconciliation_runtime", "--mode", "d1"
-    )
+    assert _d1_calls(cc_mock) == [
+        mock.call("run_exit_reconciliation_runtime", "--mode", "d1")
+    ]
     assert cycle_mock.call_count == 2
 
 
@@ -388,7 +403,7 @@ def test_success_emits_aggregate_start_and_finish_logs(caplog):
     assert "2026-09-06" in start
     assert finish is not None
     assert "2026-09-06" in finish
-    cc_mock.assert_called_once()
+    assert len(_d1_calls(cc_mock)) == 1
     cycle_mock.assert_called_once()
 
 
@@ -407,5 +422,5 @@ def test_failure_path_logs_start_finish_and_exception_type(caplog):
         "quiet-window D-1 recovery failed: RuntimeError" in m for m in messages
     )
     assert any("Quiet-window D-1 recovery finished" in m for m in messages)
-    cc_mock.assert_called_once()
+    assert len(_d1_calls(cc_mock)) == 1
     cycle_mock.assert_called_once()

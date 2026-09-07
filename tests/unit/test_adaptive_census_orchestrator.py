@@ -12,8 +12,9 @@ Covers:
 from __future__ import annotations
 
 import io
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import pytest
 from django.core.management import CommandError, call_command
@@ -21,6 +22,14 @@ from django.utils import timezone
 
 from apps.census.orchestration import OrchestratorDecision, compute_orchestrator_state
 from apps.ingestion.models import CensusExecutionBatch, IngestionRun
+
+# Fixed America/Bahia afternoon instant used to freeze the injected clock in
+# eligible ``run_loop`` tests (SLICE-OIDR-S1): outside the D-1 quiet window
+# and stable within one local hour, so the intraday hourly step fires at most
+# once and never reaches the real runtime inside the unit suite.
+_FIXED_BAHIA_AFTERNOON = datetime(
+    2026, 9, 6, 14, 0, tzinfo=ZoneInfo("America/Bahia")
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1305,11 +1314,13 @@ class TestRunLoopExecutesCycle:
                 },
             ) as mock_cycle,
             mock.MagicMock() as mock_sleep,
+            mock.patch("apps.census.orchestration.call_command"),
         ):
             run_loop(
                 sleep_seconds=10,
                 sleep_fn=mock_sleep,
                 should_stop=controlled_stop,
+                now_fn=lambda: _FIXED_BAHIA_AFTERNOON,
             )
 
         mock_cycle.assert_called_once()
@@ -1361,11 +1372,13 @@ class TestRunLoopExecutesCycle:
                 },
             ) as mock_cycle,
             mock.MagicMock() as mock_sleep,
+            mock.patch("apps.census.orchestration.call_command"),
         ):
             run_loop(
                 sleep_seconds=10,
                 sleep_fn=mock_sleep,
                 should_stop=controlled_stop,
+                now_fn=lambda: _FIXED_BAHIA_AFTERNOON,
             )
 
         mock_cycle.assert_called_once()
@@ -1417,12 +1430,14 @@ class TestRunLoopFailureBackoff:
                 },
             ) as mock_cycle,
             mock.MagicMock() as mock_sleep,
+            mock.patch("apps.census.orchestration.call_command"),
         ):
             run_loop(
                 sleep_seconds=10,
                 failure_backoff_minutes=5,
                 sleep_fn=mock_sleep,
                 should_stop=controlled_stop,
+                now_fn=lambda: _FIXED_BAHIA_AFTERNOON,
             )
 
         mock_cycle.assert_called_once()
@@ -1471,11 +1486,13 @@ class TestRunLoopFailureBackoff:
                 },
             ) as mock_cycle,
             mock.MagicMock() as mock_sleep,
+            mock.patch("apps.census.orchestration.call_command"),
         ):
             run_loop(
                 sleep_seconds=10,
                 sleep_fn=mock_sleep,
                 should_stop=controlled_stop,
+                now_fn=lambda: _FIXED_BAHIA_AFTERNOON,
             )
 
         mock_cycle.assert_called_once()
@@ -1523,12 +1540,14 @@ class TestRunLoopFailureBackoff:
                 },
             ) as mock_cycle,
             mock.MagicMock() as mock_sleep,
+            mock.patch("apps.census.orchestration.call_command"),
         ):
             run_loop(
                 sleep_seconds=10,
                 failure_backoff_minutes=10,
                 sleep_fn=mock_sleep,
                 should_stop=controlled_stop,
+                now_fn=lambda: _FIXED_BAHIA_AFTERNOON,
             )
 
         mock_cycle.assert_called_once()
@@ -1588,12 +1607,14 @@ class TestRunLoopFailureBackoff:
                     stale_running_minutes=180: next(cycle_results),
             ) as mock_cycle,
             mock.MagicMock() as mock_sleep,
+            mock.patch("apps.census.orchestration.call_command"),
         ):
             run_loop(
                 sleep_seconds=10,
                 failure_backoff_minutes=5,
                 sleep_fn=mock_sleep,
                 should_stop=controlled_stop,
+                now_fn=lambda: _FIXED_BAHIA_AFTERNOON,
             )
 
         # run_single_cycle called twice (first fails, second succeeds)
@@ -1660,11 +1681,13 @@ class TestRunLoopSignalHandling:
                 },
             ) as mock_cycle,
             mock.MagicMock() as mock_sleep,
+            mock.patch("apps.census.orchestration.call_command"),
         ):
             run_loop(
                 sleep_seconds=10,
                 sleep_fn=mock_sleep,
                 should_stop=controlled_stop,
+                now_fn=lambda: _FIXED_BAHIA_AFTERNOON,
             )
 
         # Cycle was executed (completed iteration) before stop check
@@ -2011,12 +2034,14 @@ class TestRunLoopStaleRecoveryEnabled:
                 },
             ) as mock_cycle,
             mock.MagicMock() as mock_sleep,
+            mock.patch("apps.census.orchestration.call_command"),
         ):
             run_loop(
                 sleep_seconds=10,
                 sleep_fn=mock_sleep,
                 should_stop=controlled_stop,
                 enable_stale_recovery=True,
+                now_fn=lambda: _FIXED_BAHIA_AFTERNOON,
             )
 
         mock_recovery.assert_called_once()
