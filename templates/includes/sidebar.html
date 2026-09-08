@@ -68,6 +68,11 @@
       <i class="bi bi-person-circle"></i>
       {{ user.username }}
     </div>
+    <a href="{% url 'accounts:profile' %}"
+       class="d-flex align-items-center gap-2 text-white-50 small text-decoration-none mb-2">
+      <i class="bi bi-person-badge"></i>
+      <span>Perfil</span>
+    </a>
     <form method="post" action="{% url 'logout' %}" class="d-grid">
       {% csrf_token %}
       <button type="submit" class="btn btn-sm btn-outline-light">

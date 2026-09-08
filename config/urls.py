@@ -17,4 +17,5 @@ urlpatterns = [
     path("", include("apps.services_portal.urls")),
     path("", include("apps.census.urls")),
     path("", include("apps.summaries.urls")),
+    path("", include("apps.accounts.urls")),
 ]

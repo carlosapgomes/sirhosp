@@ -1,0 +1,110 @@
+{% extends "base_sidebar.html" %}
+
+{% block page_title %}Meu Perfil{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
+  <div>
+    <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Meu Perfil</h2>
+    <p class="text-muted small mb-0">Identidade e troca de senha do usuário logado</p>
+  </div>
+</div>
+
+{% if messages %}
+  {% for message in messages %}
+    <div class="alert alert-success d-flex align-items-center gap-2 py-2 small" role="alert">
+      <i class="bi bi-check-circle me-1"></i>
+      {{ message }}
+    </div>
+  {% endfor %}
+{% endif %}
+
+<div class="row g-4">
+  <!-- Identity (read-only) -->
+  <div class="col-12 col-lg-5">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body">
+        <h3 class="h6 fw-semibold mb-3" style="color: var(--sirhosp-sidebar-bg);">
+          <i class="bi bi-person-badge me-2 text-primary"></i> Identidade
+        </h3>
+        <dl class="row small mb-0">
+          <dt class="col-4 fw-semibold text-muted">Usuário</dt>
+          <dd class="col-8">{{ user.username }}</dd>
+          <dt class="col-4 fw-semibold text-muted">Nome completo</dt>
+          <dd class="col-8">{{ user.get_full_name|default:"—" }}</dd>
+          <dt class="col-4 fw-semibold text-muted">E-mail</dt>
+          <dd class="col-8">{{ user.email|default:"—" }}</dd>
+          <dt class="col-4 fw-semibold text-muted">Último login</dt>
+          <dd class="col-8">{{ user.last_login|date:"d/m/Y H:i"|default:"—" }}</dd>
+          <dt class="col-4 fw-semibold text-muted">Papel</dt>
+          <dd class="col-8">{{ role }}</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <!-- Password change -->
+  <div class="col-12 col-lg-7">
+    <div class="card border-0 shadow-sm">
+      <div class="card-body">
+        <h3 class="h6 fw-semibold mb-3" style="color: var(--sirhosp-sidebar-bg);">
+          <i class="bi bi-shield-lock me-2 text-primary"></i> Trocar senha
+        </h3>
+
+        {% if form.errors %}
+          <div class="alert alert-danger d-flex align-items-center gap-2 py-2 small" role="alert">
+            <i class="bi bi-exclamation-circle"></i>
+            <span>Corrija os erros abaixo para concluir a troca.</span>
+          </div>
+        {% endif %}
+
+        <form method="post" novalidate>
+          {% csrf_token %}
+
+          <div class="mb-3 text-start">
+            <label for="id_old_password" class="form-label small fw-semibold text-muted">Senha atual</label>
+            <div class="input-group">
+              <span class="input-group-text"><i class="bi bi-lock"></i></span>
+              <input type="password" class="form-control" name="old_password" id="id_old_password"
+                     autocomplete="current-password" required>
+            </div>
+            {% for error in form.old_password.errors %}
+              <div class="text-danger small mt-1"><i class="bi bi-exclamation-circle me-1"></i>{{ error }}</div>
+            {% endfor %}
+          </div>
+
+          <div class="mb-3 text-start">
+            <label for="id_new_password1" class="form-label small fw-semibold text-muted">Nova senha</label>
+            <div class="input-group">
+              <span class="input-group-text"><i class="bi bi-key"></i></span>
+              <input type="password" class="form-control" name="new_password1" id="id_new_password1"
+                     autocomplete="new-password" required>
+            </div>
+            {% for error in form.new_password1.errors %}
+              <div class="text-danger small mt-1"><i class="bi bi-exclamation-circle me-1"></i>{{ error }}</div>
+            {% endfor %}
+          </div>
+
+          <div class="mb-4 text-start">
+            <label for="id_new_password2" class="form-label small fw-semibold text-muted">Confirmação da nova senha</label>
+            <div class="input-group">
+              <span class="input-group-text"><i class="bi bi-key"></i></span>
+              <input type="password" class="form-control" name="new_password2" id="id_new_password2"
+                     autocomplete="new-password" required>
+            </div>
+            {% for error in form.new_password2.errors %}
+              <div class="text-danger small mt-1"><i class="bi bi-exclamation-circle me-1"></i>{{ error }}</div>
+            {% endfor %}
+          </div>
+
+          <div class="d-grid gap-2">
+            <button type="submit" class="btn btn-primary">
+              <i class="bi bi-check-lg me-1"></i> Salvar nova senha
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
