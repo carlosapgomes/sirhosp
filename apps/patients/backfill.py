@@ -13,10 +13,12 @@ mutate exclusively through the online services:
 - mirror exits: ``DischargeRecord`` still pending that is not eligible for
   the exact cohort, whose patient resolves uniquely and has EXACTLY one
   closed canonical admission whose period mirrors the exit
-  (``admission_date <= alta_em <= discharge_date``). Planning only in
-  this module: the provenance-event apply/rollback lands with the
-  mirror-exit slice (SLICE-BME-S2), so a planned ``mirror_exits`` item
-  that reaches apply is rejected by an explicit guard;
+  (``admission_date <= alta_em <= discharge_date``). Apply emits the
+  provenance event directly (``reason_code="mirror_exit"``) and closes
+  the evidence WITHOUT touching the admission; rollback (batch and
+  single operation) restores the evidence to ``pending`` inside the same
+  transaction after ``reverse_reconciliation`` appends the inverse event
+  (design D5 — the admission stays counted in the canonical series);
 - complete deaths: evidence with a complete datetime and exactly one
   compatible admission, replayed via
   :func:`apps.deaths.services.reconcile_death_record`.
@@ -25,9 +27,12 @@ Everything else (temporal-only matches, absent evidence, ambiguity) is
 counted for manual review only and never applied. The plan carries no
 patient identity; apply/rollback record batch linkage append-only in the
 existing audit payloads (``backfill.batch_uuid``/``item_order``) through
-the ambient hook in :mod:`apps.patients.reconciliation`. This module
-performs no direct ORM writes; every mutation happens inside an online
-service. Summary/refresh pipelines are never started here.
+the ambient hook in :mod:`apps.patients.reconciliation`. Mutations run
+through the online services, with one deliberate exception: a mirror-exit
+item cannot go through ``apply_discharge_exit`` (which would mutate the
+admission), so its provenance event and evidence close are written here,
+append-only, inside the same bounded transaction. Summary/refresh
+pipelines are never started here.
 """
 
 from __future__ import annotations
@@ -54,7 +59,9 @@ from apps.patients.admission_merge import (
     rollback_admission_merge,
 )
 from apps.patients.models import (
+    EXIT_HOSPITAL_DISCHARGE,
     RECONCILIATION_STATUS_ALREADY_RECONCILED,
+    RECONCILIATION_STATUS_PENDING,
     RECONCILIATION_STATUS_RECONCILED,
     Admission,
     AdmissionMergeOperation,
@@ -62,8 +69,10 @@ from apps.patients.models import (
     ReconciliationEvent,
 )
 from apps.patients.reconciliation import (
+    EVIDENCE_SOURCE_DISCHARGE_RECORD,
     DischargeExitEvidence,
     backfill_batch_payload,
+    current_backfill_payload,
     decide_discharge_match,
     reverse_reconciliation,
 )
@@ -82,6 +91,9 @@ COHORT_ORDER = (
 
 KIND_RECONCILIATION_EVENT = "reconciliation_event"
 KIND_MERGE_OPERATION = "merge_operation"
+
+REASON_MIRROR_EXIT = "mirror_exit"
+"""Audit reason_code of mirror-exit provenance events (design D2)."""
 
 FIRST_APPLY_CAP = 50
 """First authorized canary: at most 50 items when no backfill batch exists."""
@@ -183,8 +195,8 @@ class DischargeItem:
 class MirrorExitItem:
     """One pending discharge row mirrored by a unique closed anchor.
 
-    Planned in this module; the provenance-event apply/rollback is
-    implemented by the mirror-exit slice (SLICE-BME-S2).
+    Apply emits the provenance event and closes the evidence without
+    touching the admission; the backfill rollback restores the evidence.
     """
 
     record_id: int
@@ -418,8 +430,12 @@ def _mirror_exit_candidates(
     """
     review: dict[str, int] = defaultdict(int)
     items: list[MirrorExitItem] = []
-    candidates = DischargeRecord.objects.exclude(
-        reconciliation_status__in=_RECONCILED_STATUSES
+    # Only genuinely pending evidence is eligible (design D1): review-status
+    # rows (conflict/ambiguous/admission_not_found/...) must never be
+    # silently converted into reconciled provenance events by the mirror
+    # cohort — exactly pending, not merely "not reconciled".
+    candidates = DischargeRecord.objects.filter(
+        reconciliation_status=RECONCILIATION_STATUS_PENDING
     ).order_by("pk")
     for record in candidates:
         if record.pk in exact_claimed_ids:
@@ -516,6 +532,82 @@ def build_backfill_plan(*, limit: Optional[int] = None) -> BackfillPlan:
 # ---------------------------------------------------------------------------
 
 
+def _mirror_exit_anchor(record: DischargeRecord) -> Optional[Admission]:
+    """Re-resolve the unique closed anchor whose period mirrors the exit.
+
+    Mirrors the planner window (``admission_date <= alta_em <=
+    discharge_date``); zero or multiple closed candidates never apply.
+    """
+    alta = record.alta_em
+    if alta is not None and timezone.is_naive(alta):
+        alta = timezone.make_aware(alta)
+    if alta is None:
+        return None
+    patient = Patient.objects.filter(
+        source_system="tasy",
+        patient_source_key=record.prontuario,
+    ).first()
+    if patient is None:
+        return None
+    closed = list(
+        Admission.objects.filter(
+            patient=patient,
+            admission_date__lte=alta,
+            discharge_date__isnull=False,
+            discharge_date__gte=alta,
+        ).order_by("admission_date", "pk")
+    )
+    if len(closed) == 1:
+        return closed[0]
+    return None
+
+
+def _apply_mirror_exit_item(*, record_id: int) -> None:
+    """Emit the mirror provenance event and close the discharge evidence.
+
+    The anchor admission already carries the mirrored ``discharge_date``
+    from the source, so nothing on the Admission is mutated: the event is
+    append-only provenance with ``reason_code="mirror_exit"`` and
+    prior/new equal to the mirrored exit, and the evidence row joins the
+    same bounded transaction. Any divergence at apply time (evidence no
+    longer pending, or the unique closed anchor no longer resolving)
+    raises so the whole batch rolls back with zero writes.
+    """
+    record = DischargeRecord.objects.get(pk=record_id)
+    if record.reconciliation_status in _RECONCILED_STATUSES:
+        raise BackfillItemFailed(
+            f"mirror-exit evidence {record_id} resolved "
+            f"'{record.reconciliation_status}' at apply time."
+        )
+    anchor = _mirror_exit_anchor(record)
+    if anchor is None or anchor.discharge_date is None:
+        raise BackfillItemFailed(
+            f"mirror-exit evidence {record_id} no longer resolves to a "
+            "unique closed anchor at apply time."
+        )
+    details: dict = {"admission_id": anchor.pk}
+    active = current_backfill_payload()
+    if active is not None:
+        details["backfill"] = dict(active)
+    ReconciliationEvent.objects.create(
+        source_kind=EVIDENCE_SOURCE_DISCHARGE_RECORD,
+        source_id=record.pk,
+        admission=anchor,
+        status=RECONCILIATION_STATUS_RECONCILED,
+        exit_type=EXIT_HOSPITAL_DISCHARGE,
+        reason_code=REASON_MIRROR_EXIT,
+        prior_discharge_date=anchor.discharge_date,
+        new_discharge_date=anchor.discharge_date,
+        details_json=details,
+    )
+    record.admission = anchor
+    record.reconciliation_status = RECONCILIATION_STATUS_RECONCILED
+    record.reconciled_at = timezone.now()
+    record.save(
+        update_fields=["admission", "reconciliation_status", "reconciled_at"]
+    )
+
+
 def _execute_item(item: PlanItem) -> None:
     payload = item.payload
     if isinstance(payload, DuplicateItem):
@@ -535,15 +627,7 @@ def _execute_item(item: PlanItem) -> None:
                 "at apply time."
             )
     elif isinstance(payload, MirrorExitItem):
-        # Provenance-event apply/rollback ships with the mirror-exit slice
-        # (SLICE-BME-S2). Until then a planned mirror item must never fall
-        # through to the death branch: fail loudly with an explicit reason.
-        raise BackfillItemFailed(
-            f"mirror-exit evidence {payload.record_id} reached apply, but "
-            "the mirror_exits payload is not supported yet "
-            "(planned apply/rollback is SLICE-BME-S2); the batch rolled "
-            "back with zero writes."
-        )
+        _apply_mirror_exit_item(record_id=payload.record_id)
     else:
         status = reconcile_death_record(
             record=DeathRecord.objects.get(pk=payload.record_id)
@@ -669,6 +753,34 @@ def _validate_batch_post_states(items: list[BatchItem]) -> None:
         )
 
 
+def _restore_mirror_exit_evidence(*, event: ReconciliationEvent) -> None:
+    """Restore the mirror evidence inside the rollback transaction (D5).
+
+    Called right after ``reverse_reconciliation`` appended the inverse
+    event. Only mirror-exit provenance events restore their evidence
+    (discriminated by ``reason_code="mirror_exit"``); the discharge row
+    is resolved by ``source_kind``/``source_id`` and returned to its
+    pre-apply shape (``pending``, ``reconciled_at`` cleared, admission
+    link dropped) in the SAME transaction as the inverse event.
+    """
+    if event.reason_code != REASON_MIRROR_EXIT:
+        return
+    if event.source_kind != EVIDENCE_SOURCE_DISCHARGE_RECORD:
+        return
+    record = DischargeRecord.objects.filter(pk=event.source_id).first()
+    if record is None:
+        raise BackfillRollbackConflict(
+            f"Mirror-exit evidence {event.source_id} no longer exists; "
+            "rollback aborted with zero writes."
+        )
+    record.admission = None
+    record.reconciliation_status = RECONCILIATION_STATUS_PENDING
+    record.reconciled_at = None
+    record.save(
+        update_fields=["admission", "reconciliation_status", "reconciled_at"]
+    )
+
+
 def rollback_backfill_batch(*, batch_uuid: uuid.UUID) -> BatchRollbackResult:
     """Reverse a whole backfill batch atomically in reverse item order.
 
@@ -706,6 +818,7 @@ def rollback_backfill_batch(*, batch_uuid: uuid.UUID) -> BatchRollbackResult:
                             "aborted with zero writes."
                         )
                     reverse_reconciliation(event=item.event)
+                    _restore_mirror_exit_evidence(event=item.event)
             reversed_counts[item.kind] += 1
     return BatchRollbackResult(
         batch_uuid=batch_uuid,
@@ -721,7 +834,10 @@ def rollback_single_operation(
 
     The operation namespace (reconciliation events and merge operations)
     is disjoint from the batch namespace (backfill payload linkage), so a
-    selector can never be mistaken for a batch.
+    selector can never be mistaken for a batch. A reconciliation-event
+    rollback runs its inverse event and the mirror-evidence restore inside
+    ONE transaction (P1-1): a failure after the inverse event aborts with
+    zero writes instead of leaving a stuck half-rollback.
     """
     event = ReconciliationEvent.objects.filter(operation_uuid=operation_uuid).first()
     merge_operation = AdmissionMergeOperation.objects.filter(
@@ -733,7 +849,13 @@ def rollback_single_operation(
             "event and a merge operation."
         )
     if event is not None:
-        reverse_reconciliation(event=event)
+        # ONE transaction for the inverse event AND the evidence restore:
+        # reverse_reconciliation opens its own atomic block, so a failure in
+        # the restore must not leave a committed inverse event behind (a
+        # half-rollback the re-run would then block as rollback_of).
+        with transaction.atomic():
+            reverse_reconciliation(event=event)
+            _restore_mirror_exit_evidence(event=event)
         return OperationRollbackResult(kind=KIND_RECONCILIATION_EVENT)
     if merge_operation is not None:
         rollback_admission_merge(operation=merge_operation)
