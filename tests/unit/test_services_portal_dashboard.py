@@ -5,7 +5,7 @@ Slice RPSA-S8: separate effective-exit and medical-summary cards.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -19,6 +19,9 @@ from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.ingestion.models import IngestionRun
 from apps.patients.models import (
     EXIT_HOSPITAL_DISCHARGE,
+    RECONCILIATION_STATUS_AMBIGUOUS,
+    RECONCILIATION_STATUS_CONFLICT,
+    RECONCILIATION_STATUS_PENDING,
     RECONCILIATION_STATUS_RECONCILED,
     Admission,
     Patient,
@@ -367,14 +370,59 @@ class TestDashboardIngestionMetrics:
 
 @pytest.mark.django_db
 class TestDischargeChartView:
-    """Tests for /painel/altas/ discharge chart page."""
+    """Tests for /painel/altas/ discharge chart page.
 
-    def _create_counts(self, days: int, start_count: int = 5):
-        """Helper: create DailyDischargeCount entries for last N days."""
+    SCPED-S1: the single management series counts ``DischargeRecord.saida_em``
+    over a consecutive calendar axis ending yesterday; days without captured
+    exits stay on the axis as zero and feed the averages.  Tests seed
+    synthetic discharge evidence only — the chart no longer reads
+    ``DailyDischargeCount`` rows.
+    """
+
+    def _seed_discharge(
+        self,
+        when: datetime,
+        especialidade: str = "",
+        status: str = RECONCILIATION_STATUS_PENDING,
+    ) -> None:
+        """Create one synthetic discharge record exiting at ``when`` (Bahia).
+
+        Prontuario and data_internacao stay short synthetic identifiers so
+        the unique contract (prontuario, data_internacao) never collides and
+        the column width is respected.
+        """
+        self._seed_seq = getattr(self, "_seed_seq", 0) + 1
+        prontuario = f"SCPED{self._seed_seq}"
+        DischargeRecord.objects.create(
+            prontuario=prontuario,
+            data_internacao=f"INT-{prontuario}",
+            saida_em=when,
+            especialidade=especialidade,
+            reconciliation_status=status,
+        )
+
+    def _seed_exit_counts(self, days: int, start_count: int = 1) -> None:
+        """Seed ``days`` consecutive days (offsets ``days..1``) with exits.
+
+        The oldest day gets ``start_count`` exits and each following day one
+        more, so the chronological chart series equals ``[start_count..]``.
+        """
         today = timezone.localdate()
         for i in range(days):
             day = today - timedelta(days=days - i)
-            DailyDischargeCount.objects.create(date=day, count=start_count + i)
+            for _n in range(start_count + i):
+                self._seed_discharge(
+                    _bahia(day.year, day.month, day.day, 10, 0),
+                )
+
+    @staticmethod
+    def _axis_labels(days: int) -> list[str]:
+        """Expected ``%d/%m/%Y`` labels for the last ``days`` calendar days."""
+        today = timezone.localdate()
+        return [
+            (today - timedelta(days=days - i)).strftime("%d/%m/%Y")
+            for i in range(days)
+        ]
 
     def test_chart_requires_authentication(self, client):
         """Anonymous users are redirected to login."""
@@ -388,180 +436,233 @@ class TestDischargeChartView:
         response = admin_client.get(url)
         assert response.status_code == 200
 
-    def test_chart_default_90_days(self, admin_client):
-        """Chart shows data for last 90 days by default."""
-        self._create_counts(120)  # more than 90
+    def test_chart_default_90_calendar_days_through_yesterday(self, admin_client):
+        """Default axis has exactly 90 consecutive days ending yesterday."""
+        self._seed_exit_counts(120)
         url = reverse("services_portal:discharge_chart")
         response = admin_client.get(url)
         assert response.status_code == 200
         chart_data = response.context["chart_data"]
-        assert len(chart_data["labels"]) <= 90
+        assert chart_data["labels"] == self._axis_labels(90)
+        assert len(chart_data["counts"]) == 90
+        assert chart_data["has_data"] is True
         today_str = timezone.localdate().strftime("%d/%m/%Y")
         assert today_str not in chart_data["labels"]
 
-    def test_chart_respects_dias_parameter(self, admin_client):
-        """?dias=30 shows only last 30 days."""
-        self._create_counts(60)
+    def test_chart_respects_dias_parameter_exact_window(self, admin_client):
+        """?dias=30 shows exactly the 30 consecutive days ending yesterday."""
+        self._seed_exit_counts(60)
         url = reverse("services_portal:discharge_chart") + "?dias=30"
         response = admin_client.get(url)
         assert response.status_code == 200
         chart_data = response.context["chart_data"]
-        assert len(chart_data["labels"]) <= 30
+        assert chart_data["labels"] == self._axis_labels(30)
 
     def test_chart_invalid_dias_falls_back_to_90(self, admin_client):
-        """Invalid ?dias=abc falls back to default 90."""
-        self._create_counts(100)
+        """Invalid ?dias=abc falls back to the default 90-day axis."""
+        self._seed_exit_counts(100)
         url = reverse("services_portal:discharge_chart") + "?dias=abc"
         response = admin_client.get(url)
         assert response.status_code == 200
         chart_data = response.context["chart_data"]
-        assert len(chart_data["labels"]) <= 90
+        assert chart_data["labels"] == self._axis_labels(90)
 
-    def test_chart_context_has_all_ma_keys(self, admin_client):
-        """Context contains labels, counts, sma7, ema7, sma30."""
-        self._create_counts(35)
+    def test_day_without_exit_stays_on_axis_with_zero(self, admin_client):
+        """R3: a calendar day without ``saida_em`` stays as zero on the axis."""
+        today = timezone.localdate()
+        for offset in range(30, 0, -1):  # oldest -> yesterday
+            if offset != 10:  # leave one axis day without exits
+                day = today - timedelta(days=offset)
+                self._seed_discharge(
+                    _bahia(day.year, day.month, day.day, 12, 0),
+                )
         url = reverse("services_portal:discharge_chart") + "?dias=30"
         response = admin_client.get(url)
         chart_data = response.context["chart_data"]
-        assert "labels" in chart_data
-        assert "counts" in chart_data
-        assert "sma7" in chart_data
-        assert "ema7" in chart_data
-        assert "sma30" in chart_data
+        assert len(chart_data["labels"]) == 30
+        assert chart_data["counts"] == [
+            0 if offset == 10 else 1 for offset in range(30, 0, -1)
+        ]
+        # Averages consume the same calendar-complete series.
+        assert len(chart_data["sma7"]) == 30
+        assert len(chart_data["ema7"]) == 30
+        assert len(chart_data["sma30"]) == 30
+
+    def test_single_series_counts_only_captured_exits(self, admin_client):
+        """R1: summaries and stale aggregates never enter the exit series."""
+        today = timezone.localdate()
+        yesterday = today - timedelta(days=1)
+        two_days = today - timedelta(days=2)
+        three_days = today - timedelta(days=3)
+        # Captured exit yesterday.
+        self._seed_discharge(
+            _bahia(yesterday.year, yesterday.month, yesterday.day, 18, 0),
+        )
+        # Medical summary (alta_em only) on the same day must not count.
+        DischargeRecord.objects.create(
+            prontuario="S1",
+            data_internacao="INT-S1",
+            alta_em=_bahia(yesterday.year, yesterday.month, yesterday.day, 14, 0),
+        )
+        # Stale canonical aggregate that the chart no longer reads.
+        DailyDischargeCount.objects.create(date=yesterday, count=42)
+        # Exit outside the requested two-day window must not count.
+        self._seed_discharge(
+            _bahia(three_days.year, three_days.month, three_days.day, 9, 0),
+        )
+
+        url = reverse("services_portal:discharge_chart") + "?dias=2"
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        assert chart_data["labels"] == [
+            two_days.strftime("%d/%m/%Y"),
+            yesterday.strftime("%d/%m/%Y"),
+        ]
+        assert chart_data["counts"] == [0, 1]
+        assert chart_data["has_data"] is True
+        assert "summary_counts" not in chart_data
+        assert "summary_series_label" not in chart_data
+
+    def test_pending_reconciliation_exits_are_counted(self, admin_client):
+        """R2: every saida_em counts regardless of reconciliation_status."""
+        today = timezone.localdate()
+        yesterday = today - timedelta(days=1)
+        statuses = [
+            RECONCILIATION_STATUS_PENDING,
+            RECONCILIATION_STATUS_AMBIGUOUS,
+            RECONCILIATION_STATUS_CONFLICT,
+            RECONCILIATION_STATUS_RECONCILED,
+        ]
+        for i, status in enumerate(statuses):
+            self._seed_discharge(
+                _bahia(yesterday.year, yesterday.month, yesterday.day, 10 + i, 0),
+                status=status,
+            )
+
+        url = reverse("services_portal:discharge_chart") + "?dias=7"
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        idx = chart_data["labels"].index(yesterday.strftime("%d/%m/%Y"))
+        assert chart_data["counts"][idx] == 4
+        assert chart_data["has_data"] is True
+
+    def test_chart_context_has_all_ma_keys(self, admin_client):
+        """Context contains labels, counts, sma7, ema7, sma30."""
+        self._seed_exit_counts(35)
+        url = reverse("services_portal:discharge_chart") + "?dias=35"
+        response = admin_client.get(url)
+        chart_data = response.context["chart_data"]
+        for key in ("labels", "counts", "sma7", "ema7", "sma30"):
+            assert key in chart_data
         n = len(chart_data["labels"])
-        assert len(chart_data["counts"]) == n
-        assert len(chart_data["sma7"]) == n
-        assert len(chart_data["ema7"]) == n
-        assert len(chart_data["sma30"]) == n
+        assert n == 35
+        for key in ("counts", "sma7", "ema7", "sma30"):
+            assert len(chart_data[key]) == n
+        assert chart_data["counts"] == list(range(1, 36))
 
     def test_sma7_is_none_for_first_six_days(self, admin_client):
         """SMA-7 is None for indices 0-5, value from index 6."""
-        self._create_counts(15)
+        self._seed_exit_counts(15)
         url = reverse("services_portal:discharge_chart") + "?dias=15"
         response = admin_client.get(url)
         sma7 = response.context["chart_data"]["sma7"]
-        assert sma7[0] is None
-        assert sma7[5] is None
-        assert sma7[6] is not None
+        assert sma7[:6] == [None] * 6
+        assert sma7[6] == 4.0  # mean(1..7)
 
     def test_ema7_is_none_for_first_six_days(self, admin_client):
         """EMA-7 is None for indices 0-5 (seeded at index 6 with SMA)."""
-        self._create_counts(15)
+        self._seed_exit_counts(15)
         url = reverse("services_portal:discharge_chart") + "?dias=15"
         response = admin_client.get(url)
         ema7 = response.context["chart_data"]["ema7"]
-        assert ema7[0] is None
-        assert ema7[5] is None
+        assert ema7[:6] == [None] * 6
         assert ema7[6] is not None
+        assert isinstance(ema7[6], float)
 
     def test_ema7_matches_sma7_at_seed_position(self, admin_client):
-        """At position 6 (index 6), EMA-7 seed equals SMA-7 of first 7 values."""
-        self._create_counts(15)
+        """At index 6 the EMA-7 seed equals the SMA-7 of the first 7 values."""
+        self._seed_exit_counts(15)
         url = reverse("services_portal:discharge_chart") + "?dias=15"
         response = admin_client.get(url)
         sma7 = response.context["chart_data"]["sma7"]
         ema7 = response.context["chart_data"]["ema7"]
         assert sma7[6] == ema7[6]  # seed position
-        # EMA is defined for all positions >= 6 (no additional None gaps)
         for i in range(7, 15):
             assert ema7[i] is not None
             assert isinstance(ema7[i], float)
 
     def test_ema7_reacts_faster_than_sma7_to_changes(self, admin_client):
         """EMA-7 gives more weight to recent values than SMA-7."""
-        # Create constant counts for 10 days then a spike
         today = timezone.localdate()
-        for i in range(15):
+        for i in range(15):  # constant 5, then a spike in the last 3 days
             day = today - timedelta(days=15 - i)
-            count = 5 if i < 12 else 20  # spike at day 12 (index 11)
-            DailyDischargeCount.objects.create(date=day, count=count)
+            count = 5 if i < 12 else 20
+            for _n in range(count):
+                self._seed_discharge(
+                    _bahia(day.year, day.month, day.day, 10, 0),
+                )
 
         url = reverse("services_portal:discharge_chart") + "?dias=15"
         response = admin_client.get(url)
         sma7 = response.context["chart_data"]["sma7"]
         ema7 = response.context["chart_data"]["ema7"]
-        # After spike, EMA should be higher than SMA
         assert ema7[13] is not None
         assert sma7[13] is not None
         assert ema7[13] > sma7[13]
 
     def test_sma30_is_none_for_first_29_days(self, admin_client):
         """SMA-30 is None for indices 0-28, value from index 29."""
-        self._create_counts(35)
+        self._seed_exit_counts(35)
         url = reverse("services_portal:discharge_chart") + "?dias=35"
         response = admin_client.get(url)
         sma30 = response.context["chart_data"]["sma30"]
-        assert sma30[0] is None
-        assert sma30[28] is None
-        assert sma30[29] is not None
+        assert sma30[:29] == [None] * 29
+        assert sma30[29] == 15.5  # mean(1..30)
 
-    def test_chart_handles_empty_data(self, admin_client):
-        """Page renders without error when no DailyDischargeCount exists."""
+    def test_empty_dataset_keeps_full_zero_axis(self, admin_client):
+        """No exits still renders the consecutive calendar axis with zeros."""
         url = reverse("services_portal:discharge_chart")
         response = admin_client.get(url)
         assert response.status_code == 200
         chart_data = response.context["chart_data"]
-        assert chart_data["labels"] == []
-        assert chart_data["counts"] == []
+        assert chart_data["labels"] == self._axis_labels(90)
+        assert chart_data["counts"] == [0] * 90
+        assert chart_data["has_data"] is False
 
-    # ── DWI-S1: Weekend highlight tests ──────────────────────────────
-
-    def test_chart_context_has_weekend_flags(self, admin_client):
-        """Context contains weekend_flags aligned with labels and counts."""
-        self._create_counts(10)
-        url = reverse("services_portal:discharge_chart") + "?dias=7"
+    def test_chart_context_has_weekend_flags_aligned_with_axis(self, admin_client):
+        """Weekend flags align with the calendar axis, including zero days."""
+        self._seed_exit_counts(10)
+        url = reverse("services_portal:discharge_chart") + "?dias=14"
         response = admin_client.get(url)
         chart_data = response.context["chart_data"]
         assert "weekend_flags" in chart_data
         n = len(chart_data["labels"])
         assert len(chart_data["weekend_flags"]) == n
         assert len(chart_data["weekend_flags"]) == len(chart_data["counts"])
-        # All values should be booleans
         assert all(isinstance(f, bool) for f in chart_data["weekend_flags"])
-
-    def test_weekend_flags_correct_for_known_dates(self, admin_client):
-        """Weekend flags are True for Saturday/Sunday, False for Mon-Fri."""
-        today = timezone.localdate()
-        # Create entries for 8 days before today (oldest first after reverse):
-        # today=Sunday => sat,sun,mon,tue,wed,thu,fri,sat
-        for i in range(8, 0, -1):
-            day = today - timedelta(days=i)
-            DailyDischargeCount.objects.create(date=day, count=5)
-
-        url = reverse("services_portal:discharge_chart") + "?dias=8"
-        response = admin_client.get(url)
-        labels = response.context["chart_data"]["labels"]
-        flags = response.context["chart_data"]["weekend_flags"]
-
-        for label, flag in zip(labels, flags, strict=True):
+        for label, flag in zip(
+            chart_data["labels"], chart_data["weekend_flags"], strict=True
+        ):
             d = datetime.strptime(label, "%d/%m/%Y").date()
-            is_weekend = d.weekday() >= 5  # 5=Saturday, 6=Sunday
-            assert flag == is_weekend, (
+            assert flag == (d.weekday() >= 5), (
                 f"{label} weekday={d.weekday()} flag={flag}"
             )
 
     def test_page_html_uses_weekend_flags_for_coloring(self, admin_client):
         """HTML/JS uses weekend_flags for per-bar coloring."""
-        self._create_counts(10)
+        self._seed_exit_counts(10)
         url = reverse("services_portal:discharge_chart") + "?dias=7"
         response = admin_client.get(url)
         content = response.content.decode()
-        # JSON data emitted by json_script includes weekend_flags
         assert '"weekend_flags"' in content
-        # JS code must reference rawData.weekend_flags for per-bar colors
-        assert "weekend_flags" in content
-        # Updated legend references weekend colors
         assert any(
             term in content
-            for term in ["Sábado", "Domingo", "sábado", "domingo",
-                         "fim de semana", "dia útil"]
+            for term in ["Sábado", "Domingo", "sábado", "domingo", "dia útil"]
         )
-
-    # ── DWI-S2: Weekday average chart tests ─────────────────────────
 
     def test_chart_context_has_weekday_avg(self, admin_client):
         """Context contains weekday_avg with labels, values, counts."""
-        self._create_counts(10)
+        self._seed_exit_counts(10)
         url = reverse("services_portal:discharge_chart") + "?dias=7"
         response = admin_client.get(url)
         assert "weekday_avg" in response.context
@@ -572,7 +673,7 @@ class TestDischargeChartView:
 
     def test_weekday_avg_labels_are_fixed_order(self, admin_client):
         """Weekday avg labels are in fixed Seg..Dom order regardless of data."""
-        self._create_counts(10)
+        self._seed_exit_counts(10)
         url = reverse("services_portal:discharge_chart") + "?dias=7"
         response = admin_client.get(url)
         wa = response.context["weekday_avg"]
@@ -582,7 +683,7 @@ class TestDischargeChartView:
 
     def test_weekday_avg_values_and_counts_are_length_7(self, admin_client):
         """Weekday avg values and counts are length 7."""
-        self._create_counts(10)
+        self._seed_exit_counts(10)
         url = reverse("services_portal:discharge_chart") + "?dias=7"
         response = admin_client.get(url)
         wa = response.context["weekday_avg"]
@@ -591,120 +692,73 @@ class TestDischargeChartView:
         assert all(isinstance(v, float) for v in wa["values"])
         assert all(v >= 0 for v in wa["values"])
 
-    def test_weekday_avg_correct_for_deterministic_fixture(self, admin_client):
-        """Weekday averages are correctly computed for known data.
-
-        Uses fixed 2024-01-01 (Mon) through 2024-01-14 dates with
-        known counts. Test runs with ?dias=365 so all entries are
-        included.
-        """
-        # 2024-01-01 is Monday
-        mon1 = date(2024, 1, 1)  # Mon
-        mon2 = date(2024, 1, 8)  # Mon
-        tue1 = date(2024, 1, 2)  # Tue
-        tue2 = date(2024, 1, 9)  # Tue
-        wed1 = date(2024, 1, 3)  # Wed
-        thu1 = date(2024, 1, 4)  # Thu
-        fri1 = date(2024, 1, 5)  # Fri
-        sat1 = date(2024, 1, 6)  # Sat
-        # No Sunday entry (test zero/empty bucket)
-
-        DailyDischargeCount.objects.create(date=mon1, count=10)
-        DailyDischargeCount.objects.create(date=mon2, count=20)  # avg=15
-        DailyDischargeCount.objects.create(date=tue1, count=5)
-        DailyDischargeCount.objects.create(date=tue2, count=15)  # avg=10
-        DailyDischargeCount.objects.create(date=wed1, count=8)   # avg=8
-        DailyDischargeCount.objects.create(date=thu1, count=12)  # avg=12
-        DailyDischargeCount.objects.create(date=fri1, count=2)   # avg=2
-        DailyDischargeCount.objects.create(date=sat1, count=4)   # avg=4
-
-        url = reverse("services_portal:discharge_chart") + "?dias=365"
+    def test_weekday_avg_two_full_weeks(self, admin_client):
+        """Two full weeks with 5 exits/day give 5.0 for every weekday."""
+        today = timezone.localdate()
+        for _offset in range(14, 0, -1):  # each weekday occurs exactly twice
+            day = today - timedelta(days=_offset)
+            for _n in range(5):
+                self._seed_discharge(
+                    _bahia(day.year, day.month, day.day, 10, 0),
+                )
+        url = reverse("services_portal:discharge_chart") + "?dias=14"
         response = admin_client.get(url)
         wa = response.context["weekday_avg"]
+        assert wa["values"] == [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        assert wa["counts"] == [2, 2, 2, 2, 2, 2, 2]
+        assert wa["has_data"] is True
 
-        # Seg  Ter  Qua  Qui  Sex  Sáb  Dom
-        assert wa["values"][0] == 15.0
-        assert wa["values"][1] == 10.0
-        assert wa["values"][2] == 8.0
-        assert wa["values"][3] == 12.0
-        assert wa["values"][4] == 2.0
-        assert wa["values"][5] == 4.0
-        assert wa["values"][6] == 0.0  # no Sunday data
-
-        assert wa["counts"] == [2, 2, 1, 1, 1, 1, 0]
-
-    def test_page_html_has_weekday_average_chart_canvas(self, admin_client):
-        """HTML contains canvas#weekdayAverageChart for the second chart."""
-        self._create_counts(10)
-        url = reverse("services_portal:discharge_chart") + "?dias=7"
+    def test_weekday_avg_zero_exit_days_participate(self, admin_client):
+        """R4: weekend zero-exit days still count as occurrences (weekday avg)."""
+        today = timezone.localdate()
+        for _offset in range(14, 0, -1):
+            day = today - timedelta(days=_offset)
+            if day.weekday() < 5:  # only business days receive exits
+                for _n in range(5):
+                    self._seed_discharge(
+                        _bahia(day.year, day.month, day.day, 10, 0),
+                    )
+        url = reverse("services_portal:discharge_chart") + "?dias=14"
         response = admin_client.get(url)
-        content = response.content.decode()
-        assert "weekdayAverageChart" in content
+        wa = response.context["weekday_avg"]
+        # Each weekday still occurs twice in the calendar axis.
+        assert wa["counts"] == [2, 2, 2, 2, 2, 2, 2]
+        assert wa["values"][5] == 0.0  # Sáb: no exits, average stays zero
+        assert wa["values"][6] == 0.0  # Dom
+        assert wa["values"][:5] == [5.0, 5.0, 5.0, 5.0, 5.0]
+        assert wa["has_data"] is True
 
     def test_weekday_avg_zero_when_no_data(self, admin_client):
-        """Weekday avg all zero when there are no discharge entries."""
+        """Weekday avg is all zero when no exit was captured in the period."""
         url = reverse("services_portal:discharge_chart")
         response = admin_client.get(url)
         assert "weekday_avg" in response.context
         wa = response.context["weekday_avg"]
         assert wa["values"] == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        assert wa["counts"] == [0, 0, 0, 0, 0, 0, 0]
+        assert sum(wa["counts"]) == 90  # the full calendar axis is observed
         assert wa["has_data"] is False
 
-    # ── DWI-S3: Hardening de estados vazios / esparsos ─────────────
-
-    def test_empty_data_hides_weekday_chart_card(self, admin_client):
-        """When no DailyDischargeCount exists, weekday chart card is hidden."""
-        url = reverse("services_portal:discharge_chart")
-        response = admin_client.get(url)
-        content = response.content.decode()
-        assert response.status_code == 200
-        # The second canvas should NOT be present when has_data=False
-        assert '<canvas id="weekdayAverageChart"' not in content
-        # But the json_script with weekday-avg-data still exists
-        assert "weekday-avg-data" in content
-
     def test_short_period_missing_weekdays_no_break(self, admin_client):
-        """Short period (5 days Mon-Fri) without weekend entries still renders."""
-        # Create only Monday-Friday entries (no weekend)
-        mon = date(2024, 2, 5)  # Monday
-        for i in range(5):
-            day = mon + timedelta(days=i)
-            DailyDischargeCount.objects.create(date=day, count=3 + i)
-
+        """A short period without every weekday still renders cleanly."""
+        self._seed_exit_counts(5)
         url = reverse("services_portal:discharge_chart") + "?dias=5"
         response = admin_client.get(url)
         assert response.status_code == 200
         content = response.content.decode()
-
-        # Weekday chart canvas IS present (has_data=True: Mon-Fri have counts)
+        wa = response.context["weekday_avg"]
+        assert len(wa["values"]) == 7
+        assert sum(wa["counts"]) == 5
+        assert wa["has_data"] is True
         assert "weekdayAverageChart" in content
 
-        # Weekend buckets (Sáb=5, Dom=6) should have zero avg and zero counts
-        wa = response.context["weekday_avg"]
-        assert wa["values"][5] == 0.0  # Sáb
-        assert wa["values"][6] == 0.0  # Dom
-        assert wa["counts"][5] == 0
-        assert wa["counts"][6] == 0
-        assert wa["has_data"] is True  # at least one weekday has data
-
-    def test_weekday_avg_counts_coherent_with_period(self, admin_client):
-        """Weekday avg counts reflect the actual number of observations in period."""
-        # 2024-03-04 is Monday
-        mon = date(2024, 3, 4)
-        # Create 14 days: 2 full weeks Mon-Sun
-        for i in range(14):
-            day = mon + timedelta(days=i)
-            DailyDischargeCount.objects.create(date=day, count=5)
-
-        url = reverse("services_portal:discharge_chart") + "?dias=14"
+    def test_empty_data_hides_weekday_chart_card(self, admin_client):
+        """With no exits, the weekday chart card is hidden."""
+        url = reverse("services_portal:discharge_chart")
         response = admin_client.get(url)
-        wa = response.context["weekday_avg"]
-        # Each weekday appears exactly twice in 14 days
-        assert wa["counts"] == [2, 2, 2, 2, 2, 2, 2]
-        # Each avg should be 5.0 (all entries have count=5)
-        assert all(v == 5.0 for v in wa["values"])
-
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert '<canvas id="weekdayAverageChart"' not in content
+        assert "weekday-avg-data" in content
 
 @pytest.mark.django_db
 class TestAdmissionDeathChartViews:

@@ -97,6 +97,10 @@ logger = logging.getLogger(__name__)
 # America/Bahia local dates — never an inherited default timezone.
 BAHIA_TZ = ZoneInfo("America/Bahia")
 
+# SCPED-S1: the primary chart shows one management series — effective
+# patient exits captured by DischargeRecord.saida_em.
+EXIT_SERIES_LABEL = "Saídas efetivas (saida_em)"
+
 
 def _canonical_hospital_exits() -> QuerySet[Admission]:
     """Canonical effective hospital exits (RPSA-S8 classification).
@@ -507,72 +511,48 @@ def official_census_list(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def discharge_chart(request: HttpRequest) -> HttpResponse:
-    """Discharge chart page with daily bars and moving averages.
+    """Discharge chart page with one daily exit series and moving averages.
 
     Query parameter:
-        ?dias=N  — number of days to display (default: 90)
+        ?dias=N  — number of consecutive calendar days (default: 90).
 
-    The chart always shows data through YESTERDAY (today is excluded
-    because it is still in progress).
+    SCPED-S1: the single management series counts ``DischargeRecord.saida_em``
+    on explicit ``America/Bahia`` local dates, regardless of reconciliation
+    status. The axis is the full requested calendar window ending yesterday;
+    days without captured exits stay on the axis as zero and participate in
+    the moving/weekday averages. Medical summaries (``alta_em``) no longer
+    appear on this primary chart.
     """
-    # Parse ?dias parameter
-    dias_str = request.GET.get("dias", "90").strip()
-    try:
-        dias = int(dias_str)
-        if dias < 1:
-            dias = 90
-    except (ValueError, TypeError):
-        dias = 90
-
-    from apps.discharges.models import DailyDischargeCount
+    dias = _parse_dias_param(request)
 
     today = timezone.localdate(timezone=BAHIA_TZ)
+    window_start = today - timedelta(days=dias)
+    axis_dates = [
+        window_start + timedelta(days=i)
+        for i in range(dias)
+    ]
 
-    entries_recent = list(
-        DailyDischargeCount.objects
-        .filter(date__lt=today)
-        .order_by("-date")[:dias]
+    exits_by_day = dict(
+        DischargeRecord.objects
+        .filter(saida_em__isnull=False)
+        .annotate(exit_day=TruncDate("saida_em", tzinfo=BAHIA_TZ))
+        .filter(exit_day__gte=window_start, exit_day__lt=today)
+        .values("exit_day")
+        .annotate(total=Count("id"))
+        .values_list("exit_day", "total")
     )
-    entries_recent.reverse()  # chronological order
+    counts = [exits_by_day.get(day, 0) for day in axis_dates]
 
-    labels = [e.date.strftime("%d/%m/%Y") for e in entries_recent]
-    counts = [e.count for e in entries_recent]
-
-    # RPSA-S8: second daily series — medical summaries derived on request
-    # from ``DischargeRecord.alta_em`` over the SAME window, same explicit
-    # America/Bahia grouping and same today-excluded boundary as the exit
-    # series (whose axis comes from DailyDischargeCount rows).
-    summary_counts: list[int] = []
-    if entries_recent:
-        window_start = entries_recent[0].date
-        summaries_by_day = dict(
-            DischargeRecord.objects
-            .filter(alta_em__isnull=False)
-            .annotate(summary_day=TruncDate("alta_em", tzinfo=BAHIA_TZ))
-            .filter(summary_day__gte=window_start, summary_day__lt=today)
-            .values("summary_day")
-            .annotate(total=Count("id"))
-            .values_list("summary_day", "total")
-        )
-        summary_counts = [
-            summaries_by_day.get(e.date, 0) for e in entries_recent
-        ]
-
-    # DWI-S1: weekend flags and weekday abbreviations for per-bar coloring
+    # DWI-S1: weekend flags and weekday abbreviations for per-bar coloring.
     _WEEKDAY_ABBR = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
-    weekend_flags = []
-    weekday_short = []
-    for e in entries_recent:
-        wd = e.date.weekday()  # 0=Mon … 6=Sun
-        weekend_flags.append(wd >= 5)
-        weekday_short.append(_WEEKDAY_ABBR[wd])
+    weekend_flags = [day.weekday() >= 5 for day in axis_dates]
+    weekday_short = [_WEEKDAY_ABBR[day.weekday()] for day in axis_dates]
 
     chart_data = {
-        "labels": labels,
+        "labels": [day.strftime("%d/%m/%Y") for day in axis_dates],
         "counts": counts,
-        "summary_counts": summary_counts,
-        "exit_series_label": "Saídas hospitalares (saida_em)",
-        "summary_series_label": "Sumários de alta (alta_em)",
+        "exit_series_label": EXIT_SERIES_LABEL,
+        "has_data": any(c > 0 for c in counts),
         "sma7": _moving_average(counts, 7),
         "ema7": _exponential_moving_average(counts, 7),
         "sma30": _moving_average(counts, 30),
@@ -580,20 +560,27 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
         "weekday_short": weekday_short,
     }
 
-    weekday_avg = _weekday_average(entries_recent)
+    weekday_avg = _weekday_average_for_axis(axis_dates, counts)
 
     # ── Distribuicao horaria por especialidade ─────────────────────
-    # Parse separate date range for hourly data
+    # Parse separate date range for hourly data. R5: the analysis uses the
+    # effective-exit time (``saida_em``) with explicit America/Bahia days.
     raw_hour_start = request.GET.get("h_start", "")
     raw_hour_end = request.GET.get("h_end", "")
 
     try:
-        h_start = datetime.strptime(raw_hour_start, "%Y-%m-%d").date() if raw_hour_start else None
+        h_start = (
+            datetime.strptime(raw_hour_start, "%Y-%m-%d").date()
+            if raw_hour_start else None
+        )
     except (ValueError, TypeError):
         h_start = None
 
     try:
-        h_end = datetime.strptime(raw_hour_end, "%Y-%m-%d").date() if raw_hour_end else None
+        h_end = (
+            datetime.strptime(raw_hour_end, "%Y-%m-%d").date()
+            if raw_hour_end else None
+        )
     except (ValueError, TypeError):
         h_end = None
 
@@ -608,12 +595,12 @@ def discharge_chart(request: HttpRequest) -> HttpResponse:
 
     hourly_qs = (
         DischargeRecord.objects
-        .filter(
-            alta_em__isnull=False,
-            alta_em__date__gte=h_start,
-            alta_em__date__lte=h_end,
+        .filter(saida_em__isnull=False)
+        .annotate(
+            exit_day=TruncDate("saida_em", tzinfo=BAHIA_TZ),
+            hora=ExtractHour("saida_em", tzinfo=BAHIA_TZ),
         )
-        .annotate(hora=ExtractHour("alta_em"))
+        .filter(exit_day__gte=h_start, exit_day__lte=h_end)
         .values("hora", "especialidade")
         .annotate(total=Count("id"))
         .order_by("hora", "especialidade")
@@ -832,6 +819,36 @@ def _weekday_average(entries: list) -> dict:
         "values": values,
         "counts": n_days,
         "has_data": any(n > 0 for n in n_days),
+    }
+
+
+def _weekday_average_for_axis(dates: list[date], counts: list[int]) -> dict:
+    """Weekday averages over a full calendar axis, zero days included.
+
+    SCPED-S1: every axis date contributes one observation to its weekday
+    bucket; dates without captured exits contribute zero to the average.
+    Only the discharge chart uses this, because its axis is always the full
+    requested calendar window rather than database rows.
+    """
+    weekday_labels = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
+    sums = [0] * 7
+    n_days: list[int] = [0] * 7
+
+    for day, count in zip(dates, counts, strict=True):
+        wd = day.weekday()  # 0=Mon … 6=Sun
+        sums[wd] += count
+        n_days[wd] += 1
+
+    values = [
+        round(sums[i] / n_days[i], 1) if n_days[i] > 0 else 0.0
+        for i in range(7)
+    ]
+
+    return {
+        "labels": weekday_labels,
+        "values": values,
+        "counts": n_days,
+        "has_data": any(c > 0 for c in counts),
     }
 
 
