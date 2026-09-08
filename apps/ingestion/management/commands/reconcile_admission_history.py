@@ -17,9 +17,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.patients.backfill import (
-    COHORT_DEATHS,
-    COHORT_DISCHARGES,
-    COHORT_DUPLICATES,
+    COHORT_ORDER,
     BackfillPlan,
     apply_backfill_plan,
     build_backfill_plan,
@@ -31,7 +29,8 @@ class Command(BaseCommand):
     help = (
         "Plan (default dry-run) and, with explicit authorization flags, "
         "apply bounded historical reconciliation cohorts: source-confirmed "
-        "duplicates, exact hospital discharges and complete deaths. "
+        "duplicates, exact hospital discharges, mirror-confirmed exits and "
+        "complete deaths. "
         "Ambiguities are counted for manual review only."
     )
 
@@ -107,7 +106,7 @@ class Command(BaseCommand):
         self.stdout.write(
             f"applied batch_uuid={result.batch_uuid} items={result.items}"
         )
-        for cohort in (COHORT_DUPLICATES, COHORT_DISCHARGES, COHORT_DEATHS):
+        for cohort in COHORT_ORDER:
             self.stdout.write(
                 f"applied cohort={cohort} count={result.applied[cohort]}"
             )
@@ -118,7 +117,12 @@ class Command(BaseCommand):
         self.stdout.write(
             f"backfill plan: mode={mode} cap={plan.cap} limit={limit_label}"
         )
-        for cohort_plan in (plan.duplicates, plan.discharges, plan.deaths):
+        for cohort_plan in (
+            plan.duplicates,
+            plan.discharges,
+            plan.mirror_exits,
+            plan.deaths,
+        ):
             self.stdout.write(
                 f"cohort={cohort_plan.cohort} eligible={cohort_plan.total} "
                 f"bounded={len(cohort_plan.items)}"

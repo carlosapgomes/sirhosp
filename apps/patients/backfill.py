@@ -10,6 +10,13 @@ mutate exclusively through the online services:
   and exactly one canonical same-patient same-local-admission-date
   admission, replayed via
   :func:`apps.discharges.services.reconcile_discharge_record`;
+- mirror exits: ``DischargeRecord`` still pending that is not eligible for
+  the exact cohort, whose patient resolves uniquely and has EXACTLY one
+  closed canonical admission whose period mirrors the exit
+  (``admission_date <= alta_em <= discharge_date``). Planning only in
+  this module: the provenance-event apply/rollback lands with the
+  mirror-exit slice (SLICE-BME-S2), so a planned ``mirror_exits`` item
+  that reaches apply is rejected by an explicit guard;
 - complete deaths: evidence with a complete datetime and exactly one
   compatible admission, replayed via
   :func:`apps.deaths.services.reconcile_death_record`.
@@ -51,6 +58,7 @@ from apps.patients.models import (
     RECONCILIATION_STATUS_RECONCILED,
     Admission,
     AdmissionMergeOperation,
+    Patient,
     ReconciliationEvent,
 )
 from apps.patients.reconciliation import (
@@ -63,8 +71,14 @@ from apps.patients.services import TZ_ADMISSION_IDENTITY
 
 COHORT_DUPLICATES = "duplicates"
 COHORT_DISCHARGES = "discharges"
+COHORT_MIRROR_EXITS = "mirror_exits"
 COHORT_DEATHS = "deaths"
-COHORT_ORDER = (COHORT_DUPLICATES, COHORT_DISCHARGES, COHORT_DEATHS)
+COHORT_ORDER = (
+    COHORT_DUPLICATES,
+    COHORT_DISCHARGES,
+    COHORT_MIRROR_EXITS,
+    COHORT_DEATHS,
+)
 
 KIND_RECONCILIATION_EVENT = "reconciliation_event"
 KIND_MERGE_OPERATION = "merge_operation"
@@ -80,6 +94,8 @@ REVIEW_PAIR_SHAPE = "pair_shape"
 REVIEW_STALE_CONFIRMATION = "stale_confirmation"
 REVIEW_DATE_ONLY = "date_only"
 REVIEW_MISSING_SAIDA_EM = "missing_saida_em"
+REVIEW_MIRROR_AMBIGUOUS = "mirror_ambiguous"
+REVIEW_MIRROR_PATIENT_NOT_FOUND = "mirror_patient_not_found"
 
 _RECONCILED_STATUSES = (
     RECONCILIATION_STATUS_RECONCILED,
@@ -164,13 +180,24 @@ class DischargeItem:
 
 
 @dataclass(frozen=True)
+class MirrorExitItem:
+    """One pending discharge row mirrored by a unique closed anchor.
+
+    Planned in this module; the provenance-event apply/rollback is
+    implemented by the mirror-exit slice (SLICE-BME-S2).
+    """
+
+    record_id: int
+
+
+@dataclass(frozen=True)
 class DeathItem:
     """One death evidence row to replay via the online service."""
 
     record_id: int
 
 
-PlanPayload = Union[DuplicateItem, DischargeItem, DeathItem]
+PlanPayload = Union[DuplicateItem, DischargeItem, MirrorExitItem, DeathItem]
 
 
 @dataclass(frozen=True)
@@ -203,6 +230,7 @@ class BackfillPlan:
     limit: Optional[int]
     duplicates: CohortPlan
     discharges: CohortPlan
+    mirror_exits: CohortPlan
     deaths: CohortPlan
     manual_review: dict[str, int]
     items: tuple[PlanItem, ...]
@@ -368,27 +396,96 @@ def _death_candidates() -> tuple[list[DeathItem], dict[str, int]]:
     return items, dict(review)
 
 
+def _mirror_exit_candidates(
+    *,
+    exact_claimed_ids: set[int],
+) -> tuple[list[MirrorExitItem], dict[str, int]]:
+    """Mirror exits: pending rows corroborated by one closed anchor period.
+
+    A pending ``DischargeRecord`` with a valid ``alta_em`` becomes a
+    mirror item when its patient resolves uniquely and EXACTLY one
+    closed canonical admission (default manager: ``merged_into`` null)
+    satisfies ``admission_date <= alta_em <= discharge_date``. Rows the
+    exact cohort already plans (``decide_discharge_match`` decided
+    ``reconciled``) are never re-claimed here — the same ``record_id``
+    can never be an item of both ``discharges`` and ``mirror_exits`` in
+    one plan. Null ``alta_em`` rows never become mirror candidates and
+    keep the existing discharge review accounting (rows without the
+    effective exit stay under ``discharges:missing_saida_em``); rows
+    whose patient does not resolve uniquely, or with more than one
+    closed candidate in the window, are manual review with explicit
+    mirror reasons.
+    """
+    review: dict[str, int] = defaultdict(int)
+    items: list[MirrorExitItem] = []
+    candidates = DischargeRecord.objects.exclude(
+        reconciliation_status__in=_RECONCILED_STATUSES
+    ).order_by("pk")
+    for record in candidates:
+        if record.pk in exact_claimed_ids:
+            continue
+        alta = record.alta_em
+        if alta is not None and timezone.is_naive(alta):
+            alta = timezone.make_aware(alta)
+        if alta is None:
+            continue
+        patient = Patient.objects.filter(
+            source_system="tasy",
+            patient_source_key=record.prontuario,
+        ).first()
+        if patient is None:
+            review[
+                f"{COHORT_DISCHARGES}:{REVIEW_MIRROR_PATIENT_NOT_FOUND}"
+            ] += 1
+            continue
+        closed = list(
+            Admission.objects.filter(
+                patient=patient,
+                admission_date__lte=alta,
+                discharge_date__isnull=False,
+                discharge_date__gte=alta,
+            ).order_by("admission_date", "pk")
+        )
+        if len(closed) > 1:
+            review[f"{COHORT_DISCHARGES}:{REVIEW_MIRROR_AMBIGUOUS}"] += 1
+            continue
+        if len(closed) == 1:
+            items.append(MirrorExitItem(record_id=record.pk))
+    items.sort(key=lambda item: item.record_id)
+    return items, dict(review)
+
+
 def build_backfill_plan(*, limit: Optional[int] = None) -> BackfillPlan:
     """Build the pure deterministic plan (no ORM writes).
 
     Cohorts execute in the mandated order — duplicates, exact hospital
-    discharges, complete deaths — each in stable primary-key order; the
-    limit applies to the merged plan before any write. Dry-run bounds the
-    preview by the current canary cap when no explicit limit is given.
+    discharges, mirror exits, complete deaths — each in stable primary-key
+    order; the limit applies to the merged plan before any write. Dry-run
+    bounds the preview by the current canary cap when no explicit limit
+    is given.
     """
     cap = current_apply_cap()
     bound = limit if limit is not None else cap
     duplicate_items, duplicate_review = _duplicate_candidates()
     discharge_items, discharge_review = _discharge_candidates()
+    mirror_items, mirror_review = _mirror_exit_candidates(
+        exact_claimed_ids={item.record_id for item in discharge_items},
+    )
     death_items, death_review = _death_candidates()
     manual_review: dict[str, int] = {}
-    for partial in (duplicate_review, discharge_review, death_review):
+    for partial in (
+        duplicate_review,
+        discharge_review,
+        mirror_review,
+        death_review,
+    ):
         for reason, count in partial.items():
             manual_review[reason] = count
 
     ordered: list[tuple[str, PlanPayload]] = []
     ordered += [(COHORT_DUPLICATES, item) for item in duplicate_items]
     ordered += [(COHORT_DISCHARGES, item) for item in discharge_items]
+    ordered += [(COHORT_MIRROR_EXITS, item) for item in mirror_items]
     ordered += [(COHORT_DEATHS, item) for item in death_items]
     items = tuple(
         PlanItem(order=order, cohort=cohort, payload=payload)
@@ -407,6 +504,7 @@ def build_backfill_plan(*, limit: Optional[int] = None) -> BackfillPlan:
         limit=limit,
         duplicates=cohort_plan(COHORT_DUPLICATES, len(duplicate_items)),
         discharges=cohort_plan(COHORT_DISCHARGES, len(discharge_items)),
+        mirror_exits=cohort_plan(COHORT_MIRROR_EXITS, len(mirror_items)),
         deaths=cohort_plan(COHORT_DEATHS, len(death_items)),
         manual_review=manual_review,
         items=items,
@@ -436,6 +534,16 @@ def _execute_item(item: PlanItem) -> None:
                 f"discharge evidence {payload.record_id} resolved '{status}' "
                 "at apply time."
             )
+    elif isinstance(payload, MirrorExitItem):
+        # Provenance-event apply/rollback ships with the mirror-exit slice
+        # (SLICE-BME-S2). Until then a planned mirror item must never fall
+        # through to the death branch: fail loudly with an explicit reason.
+        raise BackfillItemFailed(
+            f"mirror-exit evidence {payload.record_id} reached apply, but "
+            "the mirror_exits payload is not supported yet "
+            "(planned apply/rollback is SLICE-BME-S2); the batch rolled "
+            "back with zero writes."
+        )
     else:
         status = reconcile_death_record(
             record=DeathRecord.objects.get(pk=payload.record_id)
