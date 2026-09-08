@@ -41,5 +41,11 @@ class ProfileView(LoginRequiredMixin, FormView):
     def form_valid(self, form):
         form.save()
         update_session_auth_hash(self.request, self.request.user)
+        # A successful change releases the forced first-login change (D2/S2):
+        # the flag is only ever cleared here, never by provisioning/reset.
+        profile = getattr(self.request.user, "profile", None)
+        if profile is not None and profile.must_change_password:
+            profile.must_change_password = False
+            profile.save(update_fields=["must_change_password"])
         messages.success(self.request, "Senha alterada com sucesso.")
         return super().form_valid(form)

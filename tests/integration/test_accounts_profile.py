@@ -13,6 +13,8 @@ from django.contrib.auth.models import User
 from django.test import Client
 from django.utils import timezone
 
+from apps.accounts.models import UserProfile
+
 NEW_PASSWORD = "NovaSenhaSegura#42"
 
 
@@ -188,6 +190,50 @@ class TestWeakNewPassword:
         registered_user.refresh_from_db()
         assert registered_user.check_password(user_password)
         assert not registered_user.check_password("abc123")
+
+
+class TestForcedPasswordChange:
+    def test_password_change_clears_flag_and_releases_portal(
+        self,
+        client: Client,
+        db: None,
+        user_password: str,
+    ) -> None:
+        """A successful change clears must_change_password and releases the
+        portal for a flagged user (R4)."""
+        flagged = User.objects.create_user(
+            username="operador",
+            password=user_password,
+            first_name="Maria",
+            last_name="Silva",
+        )
+        UserProfile.objects.create(user=flagged, must_change_password=True)
+        assert client.login(username="operador", password=user_password)
+
+        # Flag active: the portal is blocked by the middleware.
+        resp = client.get("/painel/")
+        assert resp.status_code == 302
+        assert resp["Location"] == "/perfil/"
+
+        # Successful change on /perfil/ clears the flag.
+        resp = client.post(
+            "/perfil/",
+            {
+                "old_password": user_password,
+                "new_password1": NEW_PASSWORD,
+                "new_password2": NEW_PASSWORD,
+            },
+        )
+        assert resp.status_code == 302
+        assert resp["Location"] == "/perfil/"
+
+        profile = flagged.profile
+        profile.refresh_from_db()
+        assert profile.must_change_password is False
+
+        # Portal released: /painel/ answers normally now.
+        resp = client.get("/painel/")
+        assert resp.status_code == 200
 
 
 # ── R6: success message and sidebar link ─────────────────────────
