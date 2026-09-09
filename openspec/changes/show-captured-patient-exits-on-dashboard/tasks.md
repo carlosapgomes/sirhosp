@@ -18,13 +18,13 @@
 
 ## 3. SLICE-SCPED-S2 — Card e listagem coerentes com saída capturada
 
-- [ ] 3.1 RED: adicionar testes sintéticos para o card diário e a listagem por
+- [x] 3.1 RED: adicionar testes sintéticos para o card diário e a listagem por
   data incluírem `saida_em` independentemente da reconciliação e não dependerem
   de `DailyDischargeCount.records/raw_data`; executar o foco em container e
   registrar a falha esperada
-- [ ] 3.2 GREEN: ajustar dashboard e listagem com o menor blast radius e verificar
+- [x] 3.2 GREEN: ajustar dashboard e listagem com o menor blast radius e verificar
   os testes focados mais as regressões locais de dashboard/listagem
-- [ ] 3.3 Gerar `/tmp/sirhosp-slice-SCPED-S2-report.md` e validar todo Markdown
+- [x] 3.3 Gerar `/tmp/sirhosp-slice-SCPED-S2-report.md` e validar todo Markdown
   alterado com `./scripts/markdown-lint.sh`
 
 ## 4. SLICE-SCPED-S3 — Qualidade de reconciliação fora do gráfico principal

@@ -1,5 +1,4 @@
 {% extends "base_sidebar.html" %}
-{% load dict_extras %}
 
 {% block page_title %}{{ page_title }}{% endblock %}
 
@@ -25,17 +24,25 @@
   <table class="table table-sm table-hover">
     <thead class="table-light">
       <tr>
-        {% for col in columns %}
-        <th>{{ col }}</th>
-        {% endfor %}
+        <th>Prontuário</th>
+        <th>Nome</th>
+        <th>Data de internação</th>
+        <th>Saída (saida_em)</th>
+        <th>Leito</th>
+        <th>Especialidade</th>
+        <th>Reconciliação</th>
       </tr>
     </thead>
     <tbody>
       {% for r in records %}
       <tr>
-        {% for col in columns %}
-        <td>{{ r|dict_key:col|default:"—" }}</td>
-        {% endfor %}
+        <td>{{ r.prontuario|default:"—" }}</td>
+        <td>{{ r.nome|default:"—" }}</td>
+        <td>{{ r.data_internacao|default:"—" }}</td>
+        <td>{{ r.saida_em_display|default:"—" }}</td>
+        <td>{{ r.leito|default:"—" }}</td>
+        <td>{{ r.especialidade|default:"—" }}</td>
+        <td><span class="badge bg-secondary">{{ r.reconciliation_display|default:"—" }}</span></td>
       </tr>
       {% endfor %}
     </tbody>

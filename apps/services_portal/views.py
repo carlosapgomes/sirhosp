@@ -24,7 +24,6 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import EmptyPage, Paginator
 from django.db.models import (
-    CharField,
     Count,
     F,
     Func,
@@ -59,7 +58,7 @@ from apps.census.models import (
     Ward,
 )
 from apps.deaths.models import DailyDeathCount, DeathRecord
-from apps.discharges.models import DailyDischargeCount, DischargeRecord
+from apps.discharges.models import DischargeRecord
 from apps.ingestion.extractors.patient_flow_snapshot import (
     OUTCOME_RECENT_ENCOUNTER_WITHOUT_ADMISSION,
 )
@@ -76,9 +75,11 @@ from apps.ingestion.patient_flow_findings import (
 )
 from apps.ingestion.pipeline_health import ENCOUNTER_FALLBACK_STAGE
 from apps.patients.models import (
-    EXIT_HOSPITAL_DISCHARGE,
+    RECONCILIATION_STATUS_ALREADY_RECONCILED,
     RECONCILIATION_STATUS_AMBIGUOUS,
     RECONCILIATION_STATUS_CONFLICT,
+    RECONCILIATION_STATUS_INVALID_EXIT_DATETIME,
+    RECONCILIATION_STATUS_PATIENT_NOT_FOUND,
     RECONCILIATION_STATUS_PENDING,
     RECONCILIATION_STATUS_RECONCILED,
     Admission,
@@ -101,48 +102,30 @@ BAHIA_TZ = ZoneInfo("America/Bahia")
 # patient exits captured by DischargeRecord.saida_em.
 EXIT_SERIES_LABEL = "Saídas efetivas (saida_em)"
 
+# SCPED-S2: the per-date exit list labels each row's reconciliation
+# outcome with the same vocabulary the protected review queue uses.
+_DISCHARGE_STATUS_LABELS: dict[str, str] = {
+    RECONCILIATION_STATUS_PENDING: "Pendente",
+    RECONCILIATION_STATUS_RECONCILED: "Reconciliada",
+    RECONCILIATION_STATUS_ALREADY_RECONCILED: "Já reconciliada",
+    RECONCILIATION_STATUS_PATIENT_NOT_FOUND: "Paciente não localizado",
+    RECONCILIATION_STATUS_AMBIGUOUS: "Ambíguo",
+    RECONCILIATION_STATUS_CONFLICT: "Conflito",
+    RECONCILIATION_STATUS_INVALID_EXIT_DATETIME: "Data de saída inválida",
+}
 
-def _canonical_hospital_exits() -> QuerySet[Admission]:
-    """Canonical effective hospital exits (RPSA-S8 classification).
 
-    Canonical episodes only (the default manager already excludes rows
-    merged into another canonical admission) with ``discharge_date`` set
-    whose latest reconciled ``ReconciliationEvent`` has exit type
-    ``hospital_discharge`` (the ``saida_em`` provenance). Death exits and
-    admissions without reconciled provenance are not counted.
+def _captured_exits_on(day: date) -> int:
+    """Count source-captured effective exits (``saida_em``) on one Bahia date.
+
+    SCPED-S2: the management card reads discharge evidence directly,
+    regardless of reconciliation status — never the canonical aggregate
+    and never ``alta_em`` without an effective exit.
     """
-    latest_reconciled_exit_type = ReconciliationEvent.objects.filter(
-        admission=OuterRef("pk"),
-        status=RECONCILIATION_STATUS_RECONCILED,
-    ).order_by("-created_at", "-pk").values("exit_type")[:1]
     return (
-        Admission.objects.filter(discharge_date__isnull=False)
-        .annotate(
-            latest_exit_type=Subquery(
-                latest_reconciled_exit_type,
-                output_field=CharField(),
-            )
-        )
-        .filter(latest_exit_type=EXIT_HOSPITAL_DISCHARGE)
-    )
-
-
-def _hospital_exits_on(day: date) -> int:
-    """Count canonical hospital exits on one explicit Bahia local date."""
-    return (
-        _canonical_hospital_exits()
-        .annotate(exit_day=TruncDate("discharge_date", tzinfo=BAHIA_TZ))
+        DischargeRecord.objects.filter(saida_em__isnull=False)
+        .annotate(exit_day=TruncDate("saida_em", tzinfo=BAHIA_TZ))
         .filter(exit_day=day)
-        .count()
-    )
-
-
-def _medical_summaries_on(day: date) -> int:
-    """Count medical discharge summaries (``alta_em``) on one Bahia date."""
-    return (
-        DischargeRecord.objects.filter(alta_em__isnull=False)
-        .annotate(summary_day=TruncDate("alta_em", tzinfo=BAHIA_TZ))
-        .filter(summary_day=day)
         .count()
     )
 
@@ -170,7 +153,10 @@ def dashboard(request: HttpRequest) -> HttpResponse:
     """Main dashboard with operational indicators from real DB queries.
 
     Displays current inpatient census from latest CensusSnapshot,
-    total registered patients, today's discharges, and data collection status.
+    total registered patients, today's captured exits, and data collection
+    status. SCPED-S2: the exit card counts ``DischargeRecord.saida_em`` on
+    today's Bahia date regardless of reconciliation — medical summaries
+    and canonical comparisons live on the protected quality surface.
     """
     latest = CensusSnapshot.objects.aggregate(latest=Max("captured_at"))["latest"]
 
@@ -186,26 +172,21 @@ def dashboard(request: HttpRequest) -> HttpResponse:
 
     cadastrados = Patient.objects.count()
     today = timezone.localdate(timezone=BAHIA_TZ)
-    saidas_hoje = _hospital_exits_on(today)
-    sumarios_hoje = _medical_summaries_on(today)
+    saidas_hoje = _captured_exits_on(today)
 
     # Daily stats (collected retroactively — latest available date)
     adm_entry = DailyAdmissionCount.objects.order_by("-date").first()
     death_entry = DailyDeathCount.objects.order_by("-date").first()
-    discharge_entry = DailyDischargeCount.objects.order_by("-date").first()
     ofcensus_entry = OfficialCensusRecord.objects.order_by("-date").first()
 
     stats = {
         "internados": internados,
         "cadastrados": cadastrados,
         "saidas_hoje": saidas_hoje,
-        "sumarios_hoje": sumarios_hoje,
         "admissoes": adm_entry.count if adm_entry else 0,
         "admissoes_date": adm_entry.date if adm_entry else today,
         "obitos": death_entry.count if death_entry else 0,
         "obitos_date": death_entry.date if death_entry else today,
-        "altas": discharge_entry.count if discharge_entry else 0,
-        "altas_date": discharge_entry.date if discharge_entry else today,
         "censo_oficial": (
             OfficialCensusRecord.objects.filter(
                 date=ofcensus_entry.date
@@ -231,28 +212,63 @@ def dashboard(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def discharge_list(request: HttpRequest) -> HttpResponse:
+    """Per-date list of captured patient exits for one Bahia local date.
+
+    SCPED-S2: rows come from ``DischargeRecord.saida_em`` on the selected
+    ``America/Bahia`` date (default: today) regardless of reconciliation
+    status, so the list count matches the management chart for the same
+    date. The legacy ``DailyDischargeCount`` count/records/raw_data link is
+    intentionally gone.
+    """
     date_str = request.GET.get("date", "").strip()
+    selected_date = None
     if date_str:
         try:
             selected_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
             selected_date = None
-    else:
-        selected_date = None
+    if selected_date is None:
+        selected_date = timezone.localdate(timezone=BAHIA_TZ)
 
-    if selected_date:
-        entry = DailyDischargeCount.objects.filter(date=selected_date).first()
-    else:
-        entry = DailyDischargeCount.objects.order_by("-date").first()
-        selected_date = entry.date if entry else timezone.localdate()
+    # Explicit America/Bahia day boundaries; Bahia has no DST so the
+    # wall-clock slice is unambiguous. Rows become plain dicts so the
+    # template never receives the legacy daily_count/records/raw_data
+    # relationship (R5).
+    day_start = datetime(
+        selected_date.year, selected_date.month, selected_date.day,
+        tzinfo=BAHIA_TZ,
+    )
+    day_end = day_start + timedelta(days=1)
+    rows_qs = (
+        DischargeRecord.objects.filter(
+            saida_em__isnull=False,
+            saida_em__gte=day_start,
+            saida_em__lt=day_end,
+        ).order_by("saida_em", "pk")
+    )
+    records: list[dict[str, str]] = [
+        {
+            "prontuario": r.prontuario,
+            "nome": r.nome,
+            "data_internacao": r.data_internacao,
+            # Local Bahia wall-clock exit instant, formatted for the table.
+            "saida_em_display": timezone.localtime(
+                r.saida_em, timezone=BAHIA_TZ
+            ).strftime("%d/%m/%Y %H:%M"),
+            "leito": r.leito,
+            "especialidade": r.especialidade,
+            "reconciliation_display": _DISCHARGE_STATUS_LABELS.get(
+                r.reconciliation_status, r.reconciliation_status
+            ),
+        }
+        for r in rows_qs
+    ]
 
-    records, columns = _discharge_records_for_template(entry)
     return render(request, "services_portal/discharge_list.html", {
         "page_title": "Altas",
         "date": selected_date,
-        "count": entry.count if entry else 0,
+        "count": len(records),
         "records": records,
-        "columns": columns,
     })
 
 
@@ -2147,28 +2163,6 @@ def _death_records_for_template(entry) -> tuple[list[dict], list[str]]:
                     "prontuario": r.prontuario,
                     "nome": r.nome,
                     "data_obito": r.data_obito,
-                }
-                d.update(r.raw_extra)
-                recs.append(d)
-            return recs, list(recs[0].keys())
-    records = entry.raw_data if entry else []
-    columns = list(records[0].keys()) if records else []
-    return records, columns
-
-
-def _discharge_records_for_template(entry) -> tuple[list[dict], list[str]]:
-    """Build template-friendly records from DischargeRecord or raw_data."""
-    if entry and hasattr(entry, "records"):
-        record_objs = list(entry.records.all())
-        if record_objs:
-            recs = []
-            for r in record_objs:
-                d = {
-                    "prontuario": r.prontuario,
-                    "nome": r.nome,
-                    "data_internacao": r.data_internacao,
-                    "leito": r.leito,
-                    "especialidade": r.especialidade,
                 }
                 d.update(r.raw_extra)
                 recs.append(d)

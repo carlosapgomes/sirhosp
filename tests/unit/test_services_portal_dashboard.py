@@ -1,11 +1,12 @@
 """Slice DRD-S1: Dashboard with real DB queries.
 Slice IRMD-S6: Ingestion metric cards on dashboard.
 Slice RPSA-S8: separate effective-exit and medical-summary cards.
+Slice SCPED-S2: captured-exit day card and per-date evidence list.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -18,14 +19,11 @@ from apps.deaths.models import DailyDeathCount
 from apps.discharges.models import DailyDischargeCount, DischargeRecord
 from apps.ingestion.models import IngestionRun
 from apps.patients.models import (
-    EXIT_HOSPITAL_DISCHARGE,
     RECONCILIATION_STATUS_AMBIGUOUS,
     RECONCILIATION_STATUS_CONFLICT,
     RECONCILIATION_STATUS_PENDING,
     RECONCILIATION_STATUS_RECONCILED,
-    Admission,
     Patient,
-    ReconciliationEvent,
 )
 
 BAHIA = ZoneInfo("America/Bahia")
@@ -36,26 +34,22 @@ def _bahia(year: int, month: int, day: int, hour: int, minute: int = 0) -> datet
     return datetime(year, month, day, hour, minute, tzinfo=BAHIA)
 
 
-def _seed_exit(key: str, when: datetime) -> None:
-    """Create one canonical effective hospital exit closed at ``when``.
+def _seed_captured_exit(
+    prontuario: str,
+    when: datetime,
+    status: str = RECONCILIATION_STATUS_PENDING,
+) -> DischargeRecord:
+    """Create one discharge evidence whose effective exit is ``when``.
 
-    Synthetic evidence id: the card query reads only the admission link,
-    reconciliation status and exit type of the audit event.
+    SCPED-S2: the dashboard day card and the per-date list count
+    ``DischargeRecord.saida_em`` directly — never admission
+    reconciliation or the legacy daily aggregate.
     """
-    patient = Patient.objects.create(
-        patient_source_key=key, source_system="tasy", name=f"Patient {key}")
-    admission = Admission.objects.create(
-        patient=patient,
-        source_admission_key=f"ADM-{key}",
-        source_system="tasy",
-        discharge_date=when,
-    )
-    ReconciliationEvent.objects.create(
-        source_kind="discharge_record",
-        source_id=admission.pk,
-        admission=admission,
-        status=RECONCILIATION_STATUS_RECONCILED,
-        exit_type=EXIT_HOSPITAL_DISCHARGE,
+    return DischargeRecord.objects.create(
+        prontuario=prontuario,
+        data_internacao=f"INT-{prontuario}",
+        saida_em=when,
+        reconciliation_status=status,
     )
 
 
@@ -81,7 +75,11 @@ class TestDashboardRealStats:
         assert ctx["stats"]["internados"] == 0
         assert ctx["stats"]["cadastrados"] == 0
         assert ctx["stats"]["saidas_hoje"] == 0
-        assert ctx["stats"]["sumarios_hoje"] == 0
+        # SCPED-S2: summary and canonical-aggregate keys no longer feed
+        # any dashboard card (they moved to the protected quality surface).
+        assert "sumarios_hoje" not in ctx["stats"]
+        assert "altas" not in ctx["stats"]
+        assert "altas_date" not in ctx["stats"]
         assert ctx["coleta"]["setores"] == 0
         assert ctx["coleta"]["ultima_varredura"] == "Nenhum dado disponível"
 
@@ -125,37 +123,23 @@ class TestDashboardRealStats:
         assert response.status_code == 200
         assert response.context["stats"]["cadastrados"] == 2
 
-    def test_dashboard_exit_card_uses_canonical_query_not_stale_aggregate(
+    def test_dashboard_exit_card_counts_today_by_saida_em(
         self, admin_client,
     ):
-        """RPSA-S8: primary exit card counts today's canonical exits via a
-        direct Admission query — never the (possibly stale) aggregate table."""
-        today = timezone.localdate()
-        DailyDischargeCount.objects.create(date=today, count=43)  # stale
-        for i in range(2):
-            _seed_exit(
-                f"EX{i}", _bahia(today.year, today.month, today.day, 8 + i, 0)
-            )
+        """R1: the day card counts saida_em on the current local date.
 
-        url = reverse("services_portal:dashboard")
-        response = admin_client.get(url)
-        assert response.status_code == 200
-        ctx = response.context
-        assert ctx["stats"]["saidas_hoje"] == 2
-        # The retro-latest stats card keeps reading the aggregate.
-        assert ctx["stats"]["altas"] == 43
-        assert ctx["stats"]["altas_date"] == today
-
-    def test_dashboard_exit_card_ignores_last_24h(self, admin_client):
-        """Primary card is the current local date, not the last 24 hours."""
+        Five captured exits today and three yesterday show exactly five on
+        the card — no last-24h window and no stale canonical aggregate.
+        """
         today = timezone.localdate()
         yesterday = today - timedelta(days=1)
+        DailyDischargeCount.objects.create(date=today, count=43)  # stale
         for i in range(5):
-            _seed_exit(
+            _seed_captured_exit(
                 f"T{i}", _bahia(today.year, today.month, today.day, 8 + i, 0)
             )
         for i in range(3):
-            _seed_exit(
+            _seed_captured_exit(
                 f"Y{i}",
                 _bahia(yesterday.year, yesterday.month, yesterday.day, 20 + i, 0),
             )
@@ -163,53 +147,83 @@ class TestDashboardRealStats:
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
         assert response.status_code == 200
-        assert response.context["stats"]["saidas_hoje"] == 5
+        ctx = response.context
+        assert ctx["stats"]["saidas_hoje"] == 5
+        # The legacy aggregate feeds no discharge card anymore.
+        assert "altas" not in ctx["stats"]
+        assert "altas_date" not in ctx["stats"]
 
-    def test_dashboard_summary_card_counts_alta_em_today(self, admin_client):
-        """Summary card counts DischargeRecord.alta_em on the local date."""
+    def test_dashboard_exit_card_includes_unreconciled_evidence(
+        self, admin_client,
+    ):
+        """R1: pending/ambiguous/conflict saida_em rows still count today."""
+        today = timezone.localdate()
+        statuses = [
+            RECONCILIATION_STATUS_PENDING,
+            RECONCILIATION_STATUS_AMBIGUOUS,
+            RECONCILIATION_STATUS_CONFLICT,
+            RECONCILIATION_STATUS_RECONCILED,
+        ]
+        for i, status in enumerate(statuses):
+            _seed_captured_exit(
+                f"ST{i}",
+                _bahia(today.year, today.month, today.day, 9 + i, 0),
+                status=status,
+            )
+
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        assert response.context["stats"]["saidas_hoje"] == 4
+
+    def test_dashboard_exit_card_zero_when_no_exit_was_captured_today(
+        self, admin_client,
+    ):
+        """R2: alta_em-only rows never enter the exit card; empty today → 0."""
         today = timezone.localdate()
         yesterday = today - timedelta(days=1)
-        for i in range(4):
-            _seed_summary(
-                f"88{i}", _bahia(today.year, today.month, today.day, 9 + i, 30)
-            )
         _seed_summary(
-            "8899",
-            _bahia(yesterday.year, yesterday.month, yesterday.day, 9, 30),
+            "SUM1", _bahia(today.year, today.month, today.day, 9, 0)
+        )
+        _seed_summary(
+            "SUM2", _bahia(today.year, today.month, today.day, 10, 0)
+        )
+        _seed_captured_exit(
+            "Y1",
+            _bahia(yesterday.year, yesterday.month, yesterday.day, 20, 0),
         )
 
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
         assert response.status_code == 200
-        assert response.context["stats"]["sumarios_hoje"] == 4
+        assert response.context["stats"]["saidas_hoje"] == 0
 
-    def test_dashboard_zero_exits_do_not_zero_summaries(self, admin_client):
-        """Each card's zero is valid and independent."""
+    def test_dashboard_shows_no_second_primary_discharge_card(
+        self, admin_client,
+    ):
+        """R3: summaries and canonical comparisons stay off the dashboard."""
         today = timezone.localdate()
-        for i in range(3):
-            _seed_summary(
-                f"70{i}", _bahia(today.year, today.month, today.day, 9, i)
-            )
+        _seed_captured_exit(
+            "E1", _bahia(today.year, today.month, today.day, 9, 0)
+        )
+        _seed_summary(
+            "SUM1", _bahia(today.year, today.month, today.day, 9, 30)
+        )
+        DailyDischargeCount.objects.create(date=today, count=43)  # stale
 
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
+        assert response.status_code == 200
+        content = response.content.decode()
         ctx = response.context
-        assert ctx["stats"]["saidas_hoje"] == 0
-        assert ctx["stats"]["sumarios_hoje"] == 3
-
-    def test_dashboard_zero_summaries_do_not_zero_exits(self, admin_client):
-        """Each card's zero is valid and independent."""
-        today = timezone.localdate()
-        for i in range(2):
-            _seed_exit(
-                f"Z{i}", _bahia(today.year, today.month, today.day, 7 + i, 0)
-            )
-
-        url = reverse("services_portal:dashboard")
-        response = admin_client.get(url)
-        ctx = response.context
-        assert ctx["stats"]["saidas_hoje"] == 2
-        assert ctx["stats"]["sumarios_hoje"] == 0
+        assert ctx["stats"]["saidas_hoje"] == 1
+        assert "sumarios_hoje" not in ctx["stats"]
+        assert "Sumários de alta registrados" not in content
+        chart_url = reverse("services_portal:discharge_chart")
+        # Exactly one primary discharge card navigates to the exit chart.
+        assert content.count(f'href="{chart_url}"') == 1
+        list_href = f'href="{reverse("services_portal:discharge_list")}"'
+        assert list_href not in content
 
     def test_dashboard_shows_sectors_and_timestamp(self, admin_client):
         """Dashboard shows sector count and last capture time."""
@@ -277,15 +291,133 @@ class TestDashboardRealStats:
         assert response.status_code == 200
         assert 'census:bed_status' in content or '/beds/' in content
 
-    def test_dashboard_discharge_card_links_to_chart(self, admin_client):
-        """The discharge stat card is clickable and links to /altas/."""
+    def test_dashboard_discharge_area_links_only_to_captured_exit_chart(
+        self, admin_client,
+    ):
+        """The single exit card is clickable and links to /painel/altas/."""
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
         content = response.content.decode()
         assert response.status_code == 200
-        chart_url = reverse("services_portal:discharge_list")
-        assert chart_url in content
+        chart_url = reverse("services_portal:discharge_chart")
+        assert f'href="{chart_url}"' in content
         assert '<a href="' in content
+
+
+@pytest.mark.django_db
+class TestDischargeListView:
+    """SCPED-S2: /altas/ per-date list follows the captured-exit metric.
+
+    R4/R5: the list queries ``DischargeRecord.saida_em`` on the explicit
+    ``America/Bahia`` local date and never reads ``DailyDischargeCount``
+    (neither its count, its ``records`` link nor its ``raw_data``).
+    """
+
+    @staticmethod
+    def _seed_exit_on(
+        day: date,
+        prontuario: str,
+        hour: int = 10,
+        status: str = RECONCILIATION_STATUS_PENDING,
+    ) -> DischargeRecord:
+        return _seed_captured_exit(
+            prontuario,
+            _bahia(day.year, day.month, day.day, hour, 0),
+            status=status,
+        )
+
+    def test_list_requires_authentication(self, client):
+        """Anonymous users are redirected to login (R6 preserved)."""
+        url = reverse("services_portal:discharge_list")
+        response = client.get(url)
+        assert response.status_code == 302
+
+    def test_list_defaults_to_current_bahia_date(self, admin_client):
+        """Without ?date= the list opens the current local date."""
+        url = reverse("services_portal:discharge_list")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        assert response.context["date"] == timezone.localdate()
+
+    def test_list_invalid_date_falls_back_to_current_date(self, admin_client):
+        """A malformed ?date= falls back to the current local date."""
+        url = reverse("services_portal:discharge_list") + "?date=abc"
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        assert response.context["date"] == timezone.localdate()
+
+    def test_list_counts_captured_exits_on_selected_date_only(
+        self, admin_client,
+    ):
+        """R4: rows and count come from saida_em on the selected date."""
+        d = timezone.localdate() - timedelta(days=1)
+        expected: list[str] = []
+        statuses = [
+            RECONCILIATION_STATUS_PENDING,
+            RECONCILIATION_STATUS_AMBIGUOUS,
+            RECONCILIATION_STATUS_CONFLICT,
+            RECONCILIATION_STATUS_RECONCILED,
+        ]
+        for i, status in enumerate(statuses):
+            key = f"D{i}"
+            self._seed_exit_on(d, key, hour=8 + i, status=status)
+            expected.append(key)
+        # A captured exit on the previous day stays out.
+        self._seed_exit_on(d - timedelta(days=1), "PREV", hour=9)
+        # A captured exit on the following day stays out.
+        self._seed_exit_on(d + timedelta(days=1), "NEXT", hour=9)
+        # A medical summary on D without saida_em stays out.
+        _seed_summary("SUM1", _bahia(d.year, d.month, d.day, 9, 30))
+
+        url = reverse("services_portal:discharge_list") + (
+            f"?date={d.isoformat()}"
+        )
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        ctx = response.context
+        assert ctx["date"] == d
+        assert ctx["count"] == 4
+        prontuarios = [r["prontuario"] for r in ctx["records"]]
+        assert sorted(prontuarios) == sorted(expected)
+
+    def test_list_ignores_legacy_daily_count_records_and_raw_data(
+        self, admin_client,
+    ):
+        """R5: no dependency on DailyDischargeCount count/records/raw_data."""
+        d = timezone.localdate() - timedelta(days=1)
+        legacy = DailyDischargeCount.objects.create(
+            date=d,
+            count=99,
+            raw_data=[{"prontuario": "FAKE1", "nome": "Fake row"}],
+        )
+        # Legacy-linked evidence whose exit happened on another date.
+        DischargeRecord.objects.create(
+            prontuario="LEG1",
+            data_internacao="INT-LEG1",
+            daily_count=legacy,
+            saida_em=_bahia(
+                (d - timedelta(days=1)).year,
+                (d - timedelta(days=1)).month,
+                (d - timedelta(days=1)).day,
+                9,
+                0,
+            ),
+        )
+        for key in ("EVID1", "EVID2", "EVID3"):
+            self._seed_exit_on(d, key, hour=10)
+
+        url = reverse("services_portal:discharge_list") + (
+            f"?date={d.isoformat()}"
+        )
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        ctx = response.context
+        assert ctx["count"] == 3
+        prontuarios = [r["prontuario"] for r in ctx["records"]]
+        assert sorted(prontuarios) == ["EVID1", "EVID2", "EVID3"]
+        content = response.content.decode()
+        assert "FAKE1" not in content
+        assert "LEG1" not in content
 
 
 @pytest.mark.django_db

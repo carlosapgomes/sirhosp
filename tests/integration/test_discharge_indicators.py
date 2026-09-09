@@ -14,6 +14,12 @@ SCPED-S1: proves through the real HTTP views that:
 - the hourly and specialty analysis uses the hour of ``saida_em``;
 - the empty period renders the empty state.
 
+SCPED-S2: proves that the dashboard discharge area keeps one primary
+captured-exit card (``saida_em`` today, summaries off the dashboard) and
+that the per-date discharge list counts ``DischargeRecord.saida_em`` on the
+selected Bahia date — matching the chart bar and ignoring
+``DailyDischargeCount`` count/records/raw_data.
+
 All fixtures are synthetic.
 """
 
@@ -102,21 +108,63 @@ def _seed_captured_exit(
 
 
 @pytest.mark.django_db
-class TestDashboardCardsNavigation:
-    """Both discharge cards link to the discharge chart page."""
+class TestDashboardDischargeArea:
+    """Dashboard discharge area emphasizes a single captured-exit card.
 
-    def test_both_cards_render_and_link_to_chart(self, admin_client):
+    SCPED-S2: the primary exit card counts ``DischargeRecord.saida_em`` on
+    today's Bahia date and the medical-summary card is gone from the main
+    dashboard (it belongs to the protected quality surface).
+    """
+
+    def test_dashboard_shows_single_captured_exit_card(self, admin_client):
         url = reverse("services_portal:dashboard")
         response = admin_client.get(url)
         assert response.status_code == 200
         content = response.content.decode()
 
         assert "Saídas hospitalares no dia" in content
-        assert "Sumários de alta registrados" in content
+        assert "Sumários de alta registrados" not in content
 
         chart_url = reverse("services_portal:discharge_chart")
         assert chart_url == "/painel/altas/"
-        assert content.count(chart_url) >= 2
+        # One primary discharge card navigates to the exit chart.
+        assert content.count(f'href="{chart_url}"') == 1
+
+    def test_dashboard_exit_card_counts_captured_exits_today(
+        self, admin_client,
+    ):
+        """Five saida_em exits today win over yesterday's and summaries."""
+        today = timezone.localdate()
+        yesterday = today - timedelta(days=1)
+        statuses = [
+            RECONCILIATION_STATUS_PENDING,
+            RECONCILIATION_STATUS_AMBIGUOUS,
+            RECONCILIATION_STATUS_CONFLICT,
+            RECONCILIATION_STATUS_RECONCILED,
+            RECONCILIATION_STATUS_PENDING,
+        ]
+        for i, status in enumerate(statuses):
+            _seed_captured_exit(
+                f"D{i}",
+                _bahia(today.year, today.month, today.day, 8 + i, 0),
+                status=status,
+            )
+        for i in range(3):
+            _seed_captured_exit(
+                f"Y{i}",
+                _bahia(yesterday.year, yesterday.month, yesterday.day, 20 + i, 0),
+            )
+        _seed_summary(
+            "SUM1", _bahia(today.year, today.month, today.day, 9, 30)
+        )
+
+        url = reverse("services_portal:dashboard")
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        assert response.context["stats"]["saidas_hoje"] == 5
+
+        content = response.content.decode()
+        assert "Sumários de alta registrados" not in content
 
 
 @pytest.mark.django_db
@@ -408,3 +456,84 @@ class TestChartEmptyState:
 
         content = response.content.decode()
         assert EMPTY_STATE_MESSAGE in content
+
+
+@pytest.mark.django_db
+class TestDischargeListMatchesChart:
+    """The per-date discharge list shares the chart's captured-exit contract.
+
+    SCPED-S2 (R4/R5): the list queries ``DischargeRecord.saida_em`` on the
+    selected Bahia date, its total equals the chart bar for that date, and
+    it ignores ``DailyDischargeCount`` (count, records and raw_data).
+    """
+
+    @staticmethod
+    def _open_list(admin_client, day: date):
+        url = reverse("services_portal:discharge_list") + (
+            f"?date={day.isoformat()}"
+        )
+        response = admin_client.get(url)
+        assert response.status_code == 200
+        return response
+
+    def test_list_requires_authentication(self, client):
+        """Anonymous users are redirected to login (R6 preserved)."""
+        url = reverse("services_portal:discharge_list")
+        response = client.get(url)
+        assert response.status_code == 302
+
+    def test_date_list_total_equals_chart_and_includes_pending(
+        self, admin_client,
+    ):
+        """R4: pending/ambiguous/conflict exits appear and total == chart."""
+        d = timezone.localdate() - timedelta(days=1)
+        keys: list[str] = []
+        statuses = [
+            RECONCILIATION_STATUS_PENDING,
+            RECONCILIATION_STATUS_AMBIGUOUS,
+            RECONCILIATION_STATUS_CONFLICT,
+            RECONCILIATION_STATUS_RECONCILED,
+        ]
+        for i, status in enumerate(statuses):
+            key = f"LST{i}"
+            _seed_captured_exit(
+                key,
+                _bahia(d.year, d.month, d.day, 9 + i, 0),
+                status=status,
+            )
+            keys.append(key)
+        # A captured exit on the previous day stays out of date D.
+        prev = d - timedelta(days=1)
+        _seed_captured_exit(
+            "PREV", _bahia(prev.year, prev.month, prev.day, 9, 0)
+        )
+        # A medical summary on D without saida_em stays out.
+        _seed_summary("SUM1", _bahia(d.year, d.month, d.day, 9, 30))
+        # Legacy aggregate noise must not leak into the list.
+        DailyDischargeCount.objects.create(
+            date=d,
+            count=99,
+            raw_data=[{"prontuario": "FAKE1", "nome": "Fake row"}],
+        )
+
+        list_response = self._open_list(admin_client, d)
+        ctx = list_response.context
+        assert ctx["date"] == d
+        assert ctx["count"] == 4
+        assert sorted(r["prontuario"] for r in ctx["records"]) == sorted(keys)
+
+        # The chart bar for D uses the same saida_em contract.
+        chart_response = admin_client.get(
+            reverse("services_portal:discharge_chart")
+        )
+        chart = chart_response.context["chart_data"]
+        label = d.strftime("%d/%m/%Y")
+        assert label in chart["labels"]
+        assert chart["counts"][chart["labels"].index(label)] == 4
+
+        html = list_response.content.decode()
+        assert "FAKE1" not in html
+        assert "Pendente" in html
+        assert "Ambíguo" in html
+        assert "Conflito" in html
+        assert "Reconciliada" in html
