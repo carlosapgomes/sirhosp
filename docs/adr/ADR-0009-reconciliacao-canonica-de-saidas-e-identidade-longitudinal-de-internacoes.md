@@ -82,12 +82,8 @@ internação composta pelas seguintes regras:
     executado somente em operação posterior expressamente autorizada. Cada item
     recebe um UUID de operação e cada apply um UUID de lote; rollback de lote é
     atômico e validado integralmente antes de qualquer mutação.
-13. `DailyDischargeCount` é derivado exclusivamente da saída efetiva canônica e
-    tem o refresh de agregado como único escritor; a persistência de evidência
-    de alta não escreve contagem nem `raw_data` com registros de pacientes.
-14. Indicadores de saída usam `saida_em` em `America/Bahia`; indicadores de
-    sumário permanecem separados e usam `alta_em`. Óbitos não são contados como
-    altas hospitalares.
+13. `DailyDischargeCount` é derivado exclusivamente da saída efetiva canônica — a métrica canônica de domínio do reconciliador e do fluxo hospitalar — e tem o refresh de agregado como único escritor; a persistência de evidência de alta não escreve contagem nem `raw_data` com registros de pacientes. Ler esse agregado ou a evidência fonte por telas de gestão não altera o reconciliador.
+14. A métrica gerencial de saídas apresentada aos gestores conta a evidência fonte capturada (`DischargeRecord.saida_em`) por dia local `America/Bahia`, independentemente do status de reconciliação. Ela é uma apresentação de evidência, não substitui nem condiciona a métrica canônica de domínio do item 13. Indicadores de sumário permanecem separados e usam `alta_em`; óbitos não são contados como altas hospitalares. Comparações entre as três séries — saídas capturadas por `saida_em`, saídas canônicas reconciliadas e sumários por `alta_em` — ficam restritas à superfície protegida de revisão da reconciliação, em agregados diários sem identidade de paciente, e nunca alteram regras, eventos, status ou internações.
 15. Identidade de paciente pode aparecer apenas em telas e CSV efêmero
     protegidos por permissão específica. Logs e métricas permanecem agregados.
 

@@ -24,6 +24,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.core.paginator import EmptyPage, Paginator
 from django.db.models import (
+    CharField,
     Count,
     F,
     Func,
@@ -75,6 +76,7 @@ from apps.ingestion.patient_flow_findings import (
 )
 from apps.ingestion.pipeline_health import ENCOUNTER_FALLBACK_STAGE
 from apps.patients.models import (
+    EXIT_HOSPITAL_DISCHARGE,
     RECONCILIATION_STATUS_ALREADY_RECONCILED,
     RECONCILIATION_STATUS_AMBIGUOUS,
     RECONCILIATION_STATUS_CONFLICT,
@@ -720,13 +722,14 @@ def _exponential_moving_average(
 def _parse_dias_param(request: HttpRequest) -> int:
     """Parse ?dias=N from request, defaulting to 90.
 
-    Returns an integer between 1 and 365; invalid/non-numeric values
-    fall back to 90.
+    Returns an integer between 1 and 365 (inclusive). Non-numeric,
+    zero/negative and above-365 values fall back to 90; the 365-day cap
+    keeps the calendar axis, lists and aggregate payload bounded.
     """
     dias_str = request.GET.get("dias", "90").strip()
     try:
         dias = int(dias_str)
-        if dias < 1:
+        if dias < 1 or dias > 365:
             dias = 90
     except (ValueError, TypeError):
         dias = 90
@@ -2631,6 +2634,128 @@ def _require_reconciliation_review(request: HttpRequest) -> None:
         raise PermissionDenied
 
 
+# ---------------------------------------------------------------------------
+# SCPED-S3: aggregate-only quality comparison on the protected review page.
+#
+# Identity rules: the comparison payload is built exclusively from daily
+# counts — labels and integer totals. No logger call, payload field or
+# template fragment below may carry a patient name, record number,
+# admission key or clinical text. The view is read-only (R5): it never
+# updates a rule, status, reconciliation event or admission.
+# ---------------------------------------------------------------------------
+
+_QUALITY_PERIOD_OPTIONS = (30, 60, 90, 180, 365)
+_QUALITY_SERIES_LABELS = {
+    "captured": "Saídas capturadas (saida_em)",
+    "reconciled": "Saídas canônicas reconciliadas",
+    "summary": "Sumários médicos (alta_em)",
+}
+
+
+def _captured_exit_day_counts(
+    window_start: date, window_end_exclusive: date
+) -> dict[date, int]:
+    """Counts of evidence rows with ``saida_em`` per America/Bahia day.
+
+    SCPED-S1/S3: captured exits count regardless of reconciliation
+    status, mirroring the primary management chart series.
+    """
+    rows = (
+        DischargeRecord.objects.filter(saida_em__isnull=False)
+        .annotate(exit_day=TruncDate("saida_em", tzinfo=BAHIA_TZ))
+        .filter(exit_day__gte=window_start, exit_day__lt=window_end_exclusive)
+        .values("exit_day")
+        .annotate(total=Count("id"))
+        .values_list("exit_day", "total")
+    )
+    return dict(rows)
+
+
+def _reconciled_exit_day_counts(
+    window_start: date, window_end_exclusive: date
+) -> dict[date, int]:
+    """Canonical reconciled hospital exits per America/Bahia day.
+
+    Same domain semantics as the ``DailyDischargeCount`` refresh
+    (ADR-0009/RPSA-S8): canonical admissions with ``discharge_date`` set
+    whose latest reconciled ``ReconciliationEvent`` carries the
+    ``hospital_discharge`` exit type. Death exits and merged duplicates
+    are excluded. The read is aggregate-only and never mutates state.
+    """
+    latest_reconciled_exit_type = ReconciliationEvent.objects.filter(
+        admission=OuterRef("pk"),
+        status=RECONCILIATION_STATUS_RECONCILED,
+    ).order_by("-created_at", "-pk").values("exit_type")[:1]
+    rows = (
+        Admission.objects.filter(discharge_date__isnull=False)
+        .annotate(
+            latest_exit_type=Subquery(
+                latest_reconciled_exit_type,
+                output_field=CharField(),
+            )
+        )
+        .filter(latest_exit_type=EXIT_HOSPITAL_DISCHARGE)
+        .annotate(exit_day=TruncDate("discharge_date", tzinfo=BAHIA_TZ))
+        .filter(exit_day__gte=window_start, exit_day__lt=window_end_exclusive)
+        .values("exit_day")
+        .annotate(total=Count("pk"))
+        .values_list("exit_day", "total")
+    )
+    return dict(rows)
+
+
+def _summary_day_counts(
+    window_start: date, window_end_exclusive: date
+) -> dict[date, int]:
+    """Counts of medical summaries (``alta_em``) per America/Bahia day."""
+    rows = (
+        DischargeRecord.objects.filter(alta_em__isnull=False)
+        .annotate(summary_day=TruncDate("alta_em", tzinfo=BAHIA_TZ))
+        .filter(summary_day__gte=window_start, summary_day__lt=window_end_exclusive)
+        .values("summary_day")
+        .annotate(total=Count("id"))
+        .values_list("summary_day", "total")
+    )
+    return dict(rows)
+
+
+def _quality_comparison_payload(request: HttpRequest) -> dict[str, Any]:
+    """Aggregate-only three-series payload over an explicit window.
+
+    Axis: ``?dias=N`` (default 90, 1..365) consecutive ``America/Bahia``
+    calendar days ending yesterday, zero-filled. The payload never
+    contains patient identity (R4) and is produced by read-only queries
+    (R5).
+    """
+    dias = _parse_dias_param(request)
+    today = timezone.localdate(timezone=BAHIA_TZ)
+    window_start = today - timedelta(days=dias)
+    axis_dates = [window_start + timedelta(days=i) for i in range(dias)]
+
+    captured = _captured_exit_day_counts(window_start, today)
+    reconciled = _reconciled_exit_day_counts(window_start, today)
+    summaries = _summary_day_counts(window_start, today)
+
+    counts = {
+        "captured_counts": [captured.get(day, 0) for day in axis_dates],
+        "reconciled_counts": [reconciled.get(day, 0) for day in axis_dates],
+        "summary_counts": [summaries.get(day, 0) for day in axis_dates],
+    }
+    has_data = any(
+        value > 0
+        for series in counts.values()
+        for value in series
+    )
+    return {
+        "labels": [day.strftime("%d/%m/%Y") for day in axis_dates],
+        **counts,
+        "has_data": has_data,
+        "dias": dias,
+        "period_start": window_start.isoformat(),
+        "period_end": axis_dates[-1].isoformat(),
+    }
+
+
 def _queue_filter_values(request: HttpRequest) -> tuple[str, str, str]:
     return (
         request.GET.get("status", "").strip(),
@@ -2855,6 +2980,10 @@ def reconciliation_queue(request: HttpRequest) -> HttpResponse:
         "tipo_options": _QUEUE_TIPO_OPTIONS,
         "idade_options": _QUEUE_IDADE_OPTIONS,
         "querystring": params.urlencode(),
+        # SCPED-S3: aggregate-only quality comparison (same permission).
+        "quality_comparison": _quality_comparison_payload(request),
+        "quality_period_options": _QUALITY_PERIOD_OPTIONS,
+        "quality_series_labels": _QUALITY_SERIES_LABELS,
     }
     return render(request, "services_portal/reconciliation_queue.html", context)
 

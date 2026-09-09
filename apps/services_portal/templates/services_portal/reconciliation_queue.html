@@ -22,6 +22,55 @@
   </a>
 </div>
 
+<!-- SCPED-S3: aggregate-only quality comparison (no patient identity). -->
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-header bg-white border-0 d-flex flex-wrap justify-content-between align-items-center gap-2">
+    <div>
+      <h5 class="card-title mb-1">Comparativo de qualidade da reconciliação</h5>
+      <p class="text-muted small mb-0">
+        Saídas capturadas (saida_em), saídas canônicas reconciliadas e sumários
+        médicos (alta_em) por dia em America/Bahia — somente agregados, sem
+        identidade de paciente.
+      </p>
+    </div>
+    <div class="d-flex gap-2 flex-wrap">
+      <span class="text-muted small align-self-center me-1">Período:</span>
+      {% for option in quality_period_options %}
+      <a href="?dias={{ option }}"
+         class="btn btn-sm {% if option == quality_comparison.dias %}btn-primary{% else %}btn-outline-primary{% endif %}">
+        {{ option }} dias
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="card-body">
+    {% if quality_comparison.has_data %}
+    <div style="position: relative; height: 320px;">
+      <canvas id="qualityComparisonChart"></canvas>
+    </div>
+    {% else %}
+    <div class="text-center py-4 text-muted">
+      <i class="bi bi-clipboard-check" style="font-size: 2rem;"></i>
+      <p class="mt-2 small mb-0">Nenhum dado agregado no período.</p>
+    </div>
+    {% endif %}
+  </div>
+  <div class="card-footer bg-white small text-muted d-flex gap-4 flex-wrap">
+    <span class="d-flex align-items-center gap-2">
+      <span style="display:inline-block;width:12px;height:12px;background:#0D6EFD;border-radius:2px;"></span>
+      {{ quality_series_labels.captured }}
+    </span>
+    <span class="d-flex align-items-center gap-2">
+      <span style="display:inline-block;width:12px;height:12px;background:#16A34A;border-radius:2px;"></span>
+      {{ quality_series_labels.reconciled }}
+    </span>
+    <span class="d-flex align-items-center gap-2">
+      <span style="display:inline-block;width:12px;height:12px;background:#F59E0B;border-radius:2px;"></span>
+      {{ quality_series_labels.summary }}
+    </span>
+  </div>
+</div>
+
 <!-- Filtros -->
 <form method="get" class="card border-0 shadow-sm mb-3">
   <div class="card-body">
@@ -54,6 +103,7 @@
         <button type="submit" class="btn btn-primary btn-sm">Filtrar</button>
       </div>
     </div>
+    {% if quality_comparison.dias %}<input type="hidden" name="dias" value="{{ quality_comparison.dias }}">{% endif %}
   </div>
 </form>
 
@@ -121,4 +171,45 @@
   </ul>
 </nav>
 {% endif %}
+{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+{{ quality_comparison|json_script:"quality-comparison-data" }}
+<script>
+  'use strict';
+
+  (function () {
+    var el = document.getElementById('quality-comparison-data');
+    if (!el) return;
+    var data;
+    try {
+      data = JSON.parse(el.textContent);
+    } catch (e) {
+      console.warn('Prisma: quality comparison JSON parse error', e);
+      return;
+    }
+    var canvas = document.getElementById('qualityComparisonChart');
+    if (!canvas || typeof Chart === 'undefined' || !data.labels || !data.labels.length) return;
+    new Chart(canvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: data.labels,
+        datasets: [
+          { label: 'Saídas capturadas (saida_em)', data: data.captured_counts, backgroundColor: '#0D6EFD', borderWidth: 0 },
+          { label: 'Saídas canônicas reconciliadas', data: data.reconciled_counts, backgroundColor: '#16A34A', borderWidth: 0 },
+          { label: 'Sumários médicos (alta_em)', data: data.summary_counts, backgroundColor: '#F59E0B', borderWidth: 0 },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } },
+      },
+    });
+  })();
+</script>
 {% endblock %}

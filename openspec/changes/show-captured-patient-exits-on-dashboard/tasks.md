@@ -29,13 +29,13 @@
 
 ## 4. SLICE-SCPED-S3 — Qualidade de reconciliação fora do gráfico principal
 
-- [ ] 4.1 RED: adicionar testes de integração para comparação agregada de saídas
+- [x] 4.1 RED: adicionar testes de integração para comparação agregada de saídas
   capturadas, saídas reconciliadas e sumários na superfície protegida, incluindo
   negação sem permissão e ausência de identidade no payload
-- [ ] 4.2 GREEN: implementar o comparativo agregado na superfície existente de
+- [x] 4.2 GREEN: implementar o comparativo agregado na superfície existente de
   reconciliação sem alterar regras ou dados clínicos e verificar testes focados
   de permissão e apresentação
-- [ ] 4.3 Atualizar a ADR-0009 para distinguir indicador gerencial de evidência e
+- [x] 4.3 Atualizar a ADR-0009 para distinguir indicador gerencial de evidência e
   agregado canônico de domínio; gerar
   `/tmp/sirhosp-slice-SCPED-S3-report.md` e executar
   `./scripts/markdown-lint.sh`
