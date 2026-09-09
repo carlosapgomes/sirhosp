@@ -42,12 +42,12 @@
 
 ## 5. Gate final e handoff
 
-- [ ] 5.1 Executar `./scripts/test-in-container.sh check`, testes unitários e de
+- [x] 5.1 Executar `./scripts/test-in-container.sh check`, testes unitários e de
   integração relevantes, `lint` e `typecheck`, registrando resultados
-- [ ] 5.2 Executar `./scripts/test-in-container.sh quality-gate`,
+- [x] 5.2 Executar `./scripts/test-in-container.sh quality-gate`,
   `./scripts/markdown-lint.sh` e
   `openspec validate show-captured-patient-exits-on-dashboard --strict`
-- [ ] 5.3 Revisar diff e artefatos para confirmar ausência de migrations, dados
+- [x] 5.3 Revisar diff e artefatos para confirmar ausência de migrations, dados
   reais, credenciais, mudanças no backfill ou alteração semântica de
   `DailyDischargeCount`; preparar release code-only e parar antes de qualquer
   operação em produção
