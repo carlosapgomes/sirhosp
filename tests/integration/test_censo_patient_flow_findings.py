@@ -11,6 +11,7 @@ patient data. A timezone-aware synthetic ``now`` is injected everywhere.
 
 from __future__ import annotations
 
+import re
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -198,6 +199,17 @@ def seed_cohort(prefix: str, size: int) -> None:
 
 def _query_count(ctx: CaptureQueriesContext) -> int:
     return (ctx.final_queries or 0) - (ctx.initial_queries or 0)
+
+
+def _markup_without_filter_form(content: str) -> str:
+    """Return the page markup with the censo filter form removed.
+
+    CRF-S1 R3 renders the closed residual label inside the "Situação"
+    select option, so the finding-badge contract must be asserted on the
+    patient list surface (desktop table + mobile cards) instead of the
+    whole page; a badge rendered with any finding label still fails.
+    """
+    return re.sub(r"<form\b.*?</form>", "", content, flags=re.S)
 
 
 def patient_id_of(pront: str) -> int | None:
@@ -663,9 +675,10 @@ class TestCensoFindingBadges:
         resp = admin_client.get(reverse("services_portal:censo"))
         content = resp.content.decode()
         assert resp.status_code == 200
+        list_markup = _markup_without_filter_form(content)
         for label, _, _ in EXPECTED.values():
-            assert label not in content
-        assert "data-finding-placeholder" not in content
+            assert label not in list_markup
+        assert "data-finding-placeholder" not in list_markup
 
     def test_mixed_cohort_only_flagged_patients_have_badges(
         self, admin_client
@@ -1031,4 +1044,213 @@ class TestMirrorStaleAdmissionCensoSurface:
         # (desktop row + mobile card) with no surface modification.
         assert content.count(MIRROR_LABEL) >= 2
         # Disambiguation: the old residual label is replaced, not added.
-        assert EXPECTED[R_RESIDUAL][0] not in content
+        assert EXPECTED[R_RESIDUAL][0] not in _markup_without_filter_form(content)
+        # Its only page occurrence is the residual filter option (CRF-S1).
+        assert content.count(EXPECTED[R_RESIDUAL][0]) == 1
+
+
+# ── CRF-S1: residual-finding filter on /censo/ + WYSIWYG export ───────
+
+RESIDUAL_OPTION = "residual"
+CENSO_EMPTY_STATE = "Nenhum paciente internado no momento."
+XLSX_HEADERS = [
+    "Registro",
+    "Nome",
+    "Setor / Unidade",
+    "Leito",
+    "Especialidade",
+    "Data Internação",
+    "Tempo Internação",
+    "Capturado em",
+]
+
+
+def make_residual_patient(pront: str, *, now: datetime) -> Patient:
+    """Residual candidate: active admission >= 48h, stale event, no movement."""
+    patient = make_patient(pront)
+    make_census_row(pront, captured_at=now)
+    adm = make_active_admission(
+        patient,
+        admission_date=now - timedelta(hours=96),
+        created_at=now - timedelta(days=30),
+    )
+    make_event(adm, happened_at=now - timedelta(hours=72), key=f"evt-{pront}")
+    return patient
+
+
+def make_mirror_stale_patient(pront: str, *, now: datetime) -> Patient:
+    """Same admission shape plus a sector entry inside 48h (rule-5 split)."""
+    patient = make_residual_patient(pront, now=now)
+    make_movement(patient, first_seen_at=now - timedelta(hours=1))
+    return patient
+
+
+def make_recent_admission_member(pront: str, *, now: datetime) -> Patient:
+    """Healthy member: active admission < 48h awaiting the first evolution."""
+    patient = make_patient(pront)
+    make_census_row(pront, captured_at=now)
+    make_active_admission(
+        patient,
+        admission_date=now - timedelta(hours=10),
+        created_at=now - timedelta(hours=10),
+    )
+    return patient
+
+
+def _finding_select_markup(content: str) -> str:
+    """Return the rendered ``finding`` select, or ``""`` when absent."""
+    match = re.search(r'<select[^>]*name="finding".*?</select>', content, re.S)
+    return match.group(0) if match else ""
+
+
+def _xlsx_registros(content: bytes) -> list[str]:
+    """Return the ``Registro`` cell of every patient row in the workbook."""
+    ws = openpyxl.load_workbook(BytesIO(content)).active
+    return [row[0] for row in ws.iter_rows(min_row=2, values_only=True)]
+
+
+def _xlsx_header_row(content: bytes) -> list[str]:
+    ws = openpyxl.load_workbook(BytesIO(content)).active
+    return [cell.value for cell in ws[1]]
+
+
+@pytest.mark.django_db
+class TestCensoFindingFilter:
+    """CRF-S1: ``?finding=residual`` narrows the list, total and export."""
+
+    def test_residual_filter_returns_only_residual_patients(self, admin_client):
+        now = timezone.now()
+        residual, mirror, healthy = "CRF1001", "CRF1002", "CRF1003"
+        make_residual_patient(residual, now=now)
+        make_mirror_stale_patient(mirror, now=now)
+        make_recent_admission_member(healthy, now=now)
+
+        resp = admin_client.get(reverse("services_portal:censo") + f"?finding={RESIDUAL_OPTION}")
+        content = resp.content.decode()
+
+        assert resp.status_code == 200
+        # Desktop row + mobile card carry the residual badge.
+        assert content.count(EXPECTED[R_RESIDUAL][0]) >= 2
+        assert residual in content
+        # Any other finding (manual review or not) stays out of the list.
+        assert mirror not in content
+        assert healthy not in content
+        assert "1 paciente encontrado" in content
+
+    def test_residual_filter_defaults_and_unknown_values(self, admin_client):
+        now = timezone.now()
+        residual, mirror = "CRF1011", "CRF1012"
+        make_residual_patient(residual, now=now)
+        make_mirror_stale_patient(mirror, now=now)
+        url = reverse("services_portal:censo")
+
+        absent = admin_client.get(url)
+        absent_content = absent.content.decode()
+        assert absent.status_code == 200
+        assert residual in absent_content and mirror in absent_content
+        absent_select = _finding_select_markup(absent_content)
+        assert '<option value="" selected>' in absent_select
+        assert absent_select.count("selected") == 1
+        assert absent_select.count('value="') == 2
+
+        unknown = admin_client.get(url + "?finding=bogus")
+        unknown_content = unknown.content.decode()
+        assert unknown.status_code == 200
+        assert residual in unknown_content and mirror in unknown_content
+        unknown_select = _finding_select_markup(unknown_content)
+        assert '<option value="" selected>' in unknown_select
+        assert unknown_select.count("selected") == 1
+
+        active = admin_client.get(url + f"?finding={RESIDUAL_OPTION}")
+        active_select = _finding_select_markup(active.content.decode())
+        assert f'<option value="{RESIDUAL_OPTION}" selected>' in active_select
+        assert active_select.count("selected") == 1
+
+        padded = admin_client.get(url + "?finding=%20residual%20")
+        padded_content = padded.content.decode()
+        assert padded.status_code == 200
+        assert residual in padded_content
+        assert mirror not in padded_content
+
+    def test_residual_filter_query_count_unchanged(self, admin_client):
+        now = timezone.now()
+        make_residual_patient("CRF1021", now=now)
+        make_mirror_stale_patient("CRF1022", now=now)
+        make_recent_admission_member("CRF1023", now=now)
+        url = reverse("services_portal:censo")
+
+        with CaptureQueriesContext(connection) as plain_ctx:
+            resp = admin_client.get(url)
+        assert resp.status_code == 200
+        with CaptureQueriesContext(connection) as filtered_ctx:
+            resp = admin_client.get(url + f"?finding={RESIDUAL_OPTION}")
+        assert resp.status_code == 200
+
+        # In-memory recorte after the bulk classifier: no per-patient query.
+        assert _query_count(filtered_ctx) == _query_count(plain_ctx)
+
+    def test_export_applies_residual_filter(self, admin_client):
+        now = timezone.now()
+        residual, mirror, healthy = "CRF1031", "CRF1032", "CRF1033"
+        make_residual_patient(residual, now=now)
+        make_mirror_stale_patient(mirror, now=now)
+        make_recent_admission_member(healthy, now=now)
+
+        export = admin_client.get(
+            reverse("services_portal:censo_export_xlsx") + f"?finding={RESIDUAL_OPTION}"
+        )
+        assert export.status_code == 200
+        assert _xlsx_header_row(export.content) == XLSX_HEADERS
+        # The workbook mirrors the filtered page: residual patients only.
+        assert _xlsx_registros(export.content) == [residual]
+        page = admin_client.get(reverse("services_portal:censo") + f"?finding={RESIDUAL_OPTION}")
+        assert f"PACIENTE SINTEtico {residual}" in page.content.decode()
+        # No finding label leaks into the workbook.
+        ws = openpyxl.load_workbook(BytesIO(export.content)).active
+        for row in ws.iter_rows(values_only=True):
+            for value in row:
+                for label, _, _ in EXPECTED.values():
+                    assert value != label
+
+    def test_export_without_finding_filter_unchanged(self, admin_client):
+        now = timezone.now()
+        residual, mirror, healthy = "CRF1041", "CRF1042", "CRF1043"
+        make_residual_patient(residual, now=now)
+        make_mirror_stale_patient(mirror, now=now)
+        make_recent_admission_member(healthy, now=now)
+
+        export_url = reverse("services_portal:censo_export_xlsx")
+        export = admin_client.get(export_url)
+        assert export.status_code == 200
+        assert _xlsx_header_row(export.content) == XLSX_HEADERS
+        assert sorted(_xlsx_registros(export.content)) == sorted([residual, mirror, healthy])
+
+        # Unfiltered export keeps today's cost: no classifier run.
+        with CaptureQueriesContext(connection) as export_ctx:
+            admin_client.get(export_url)
+        with CaptureQueriesContext(connection) as page_ctx:
+            admin_client.get(reverse("services_portal:censo"))
+        assert _query_count(export_ctx) < _query_count(page_ctx)
+
+    def test_residual_filter_without_matches_renders_empty_state_and_valid_export(
+        self, admin_client
+    ):
+        now = timezone.now()
+        mirror, healthy = "CRF1051", "CRF1052"
+        make_mirror_stale_patient(mirror, now=now)
+        make_recent_admission_member(healthy, now=now)
+
+        resp = admin_client.get(reverse("services_portal:censo") + f"?finding={RESIDUAL_OPTION}")
+        content = resp.content.decode()
+        assert resp.status_code == 200
+        # Pre-existing generic empty state (shared with q/unidade/especialidade).
+        assert CENSO_EMPTY_STATE in content
+        assert mirror not in content
+        assert healthy not in content
+
+        export = admin_client.get(
+            reverse("services_portal:censo_export_xlsx") + f"?finding={RESIDUAL_OPTION}"
+        )
+        assert export.status_code == 200
+        assert _xlsx_header_row(export.content) == XLSX_HEADERS
+        assert _xlsx_registros(export.content) == []

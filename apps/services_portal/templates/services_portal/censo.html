@@ -33,7 +33,7 @@
 <form method="get" class="card border-0 shadow-sm mb-3">
   <div class="card-body">
     <div class="row g-2 align-items-end">
-      <div class="col-12 col-md-3">
+      <div class="col-12 col-md-2">
         <label for="q" class="form-label small fw-semibold text-muted">Nome ou Registro</label>
         <div class="input-group">
           <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
@@ -41,7 +41,7 @@
                  placeholder="Buscar paciente..." value="{{ busca }}">
         </div>
       </div>
-      <div class="col-12 col-md-3">
+      <div class="col-12 col-md-2">
         <label for="unidade" class="form-label small fw-semibold text-muted">Setor / Unidade</label>
         <select class="form-select" id="unidade" name="unidade">
           <option value="">Todos os setores</option>
@@ -57,6 +57,13 @@
           {% for opt in especialidade_options %}
             <option value="{{ opt.value }}" {% if especialidade_filter == opt.value %}selected{% endif %}>{{ opt.label }}</option>
           {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label for="finding" class="form-label small fw-semibold text-muted">Situação</label>
+        <select class="form-select" id="finding" name="finding">
+          <option value=""{% if finding_filter != 'residual' %} selected{% endif %}>Todos os pacientes</option>
+          <option value="residual"{% if finding_filter == 'residual' %} selected{% endif %}>Suspeita de paciente residual</option>
         </select>
       </div>
       <div class="col-6 col-md-2">

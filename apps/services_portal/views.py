@@ -71,6 +71,7 @@ from apps.ingestion.models import (
     IngestionRunStageMetric,
 )
 from apps.ingestion.patient_flow_findings import (
+    CODE_SUSPECTED_LEGACY_RESIDUAL,
     PatientFindingInput,
     build_patient_flow_findings,
 )
@@ -967,11 +968,21 @@ def _build_censo_context(
     ``False`` to skip the classifier cost: the workbook contract has no
     finding column.
 
+    ``finding=residual`` (CRF-S1) restricts the list to patients whose
+    current finding is exactly ``suspected_legacy_residual``; an empty or
+    unrecognized value keeps the full list. The recorte is applied in
+    Python between the finding attach and the ordering, so it costs no
+    extra query and the export stays WYSIWYG (D3): findings are computed
+    whenever ``include_findings`` is true or the residual filter is
+    active.
+
     Returns a dict with keys:
         page_title, busca, pacientes, total, captured_at,
         unidade_options, unidade_filter, especialidade_options,
-        especialidade_filter, ordering.
+        especialidade_filter, finding_filter, ordering.
     """
+    finding_filter = request.GET.get("finding", "").strip()
+
     latest = CensusSnapshot.objects.aggregate(latest=Max("captured_at"))["latest"]
 
     if latest is None:
@@ -985,6 +996,7 @@ def _build_censo_context(
             "unidade_filter": "",
             "especialidade_options": [],
             "especialidade_filter": "",
+            "finding_filter": finding_filter,
             "ordering": "",
         }
 
@@ -1102,7 +1114,8 @@ def _build_censo_context(
         })
 
     # ── PFIF-S3: current patient-flow finding per patient (bulk) ─────
-    if include_findings and pacientes:
+    # The residual filter needs the finding even on the export path.
+    if (include_findings or finding_filter == "residual") and pacientes:
         finding_map = build_patient_flow_findings(
             [
                 PatientFindingInput(
@@ -1117,6 +1130,14 @@ def _build_censo_context(
         )
         for p in pacientes:
             p["finding"] = finding_map.get(p["prontuario"])
+
+    # ── CRF-S1: residual finding recorte (in memory, pre-ordering) ───
+    if finding_filter == "residual":
+        pacientes = [
+            p
+            for p in pacientes
+            if p.get("finding") and p["finding"].code == CODE_SUSPECTED_LEGACY_RESIDUAL
+        ]
 
     # ── Ordering ─────────────────────────────────────────────────────
     ordering = request.GET.get("ordenar", "").strip()
@@ -1166,6 +1187,7 @@ def _build_censo_context(
         "unidade_filter": unidade_filter,
         "especialidade_options": especialidade_options,
         "especialidade_filter": especialidade_filter,
+        "finding_filter": finding_filter,
         "ordering": ordering,
     }
 
@@ -1190,11 +1212,12 @@ def censo_export_xlsx(request: HttpRequest) -> HttpResponse:
     specialty resolution with the HTML view. Returns a workbook in
     memory with no temporary files written to disk.
 
-    Query parameters: q, unidade, especialidade, ordenar.
+    Query parameters: q, unidade, especialidade, finding, ordenar.
     """
     from openpyxl.styles import Font
 
-    # No finding column in the workbook contract; skip classifier cost.
+    # No finding column in the workbook contract; skip classifier cost
+    # unless the residual filter needs the recorte (WYSIWYG, D3).
     context = _build_censo_context(request, include_findings=False)
     pacientes = context["pacientes"]
     captured_at = context["captured_at"]
