@@ -1,0 +1,146 @@
+## ADDED Requirements
+
+### Requirement: Censo residual-finding filter
+
+The authenticated `/censo/` page SHALL offer a control that restricts the
+patient list to patients whose current patient-flow finding is
+`suspected_legacy_residual`, combining with the existing filters and
+ordering without changing classifier semantics.
+
+#### Scenario: Filter restricts the list to residual patients
+
+- **WHEN** an authenticated user activates the residual-finding filter
+- **THEN** only patients whose current finding is `suspected_legacy_residual`
+  appear in the desktop table and mobile cards
+- **AND** the displayed patient total reflects the filtered list
+
+#### Scenario: Filter excludes other manual-review findings
+
+- **WHEN** the residual-finding filter is active and a listed patient's
+  current finding is `mirror_stale_admission` or any other finding
+- **THEN** that patient does not appear in the filtered result
+
+#### Scenario: Filter combines with existing filters and ordering
+
+- **WHEN** the residual-finding filter is combined with free-text search,
+  sector, specialty or ordering
+- **THEN** all selected criteria apply consistently
+
+#### Scenario: Filter defaults to the full list
+
+- **WHEN** the control is not used
+- **THEN** the page lists every current occupied-bed patient as before
+
+#### Scenario: Unrecognized filter value does not filter
+
+- **WHEN** the control carries an unrecognized value
+- **THEN** the page lists every current occupied-bed patient as before
+- **AND** the control renders its default option
+
+#### Scenario: Filter control keeps its selected state
+
+- **WHEN** the residual option is selected and the filter form is submitted
+- **THEN** the control remains on the residual option
+
+#### Scenario: Filtering keeps classification queries bounded
+
+- **WHEN** the residual-finding filter is active
+- **THEN** the page query count stays within the existing fixed allowance
+- **AND** filtering adds no per-patient query
+
+## MODIFIED Requirements
+
+### Requirement: Censo XLSX export
+
+The system SHALL allow authenticated users to download an XLSX file containing
+the current `/censo/` result set.
+
+#### Scenario: Export downloads XLSX file
+
+- **WHEN** an authenticated user requests the censo export endpoint
+- **THEN** the response downloads an `.xlsx` file with the official XLSX content
+  type
+- **AND** the workbook can be opened by standard Excel-compatible readers
+
+#### Scenario: Export respects current filters
+
+- **WHEN** an authenticated user exports the censo with query parameters for
+  search, sector, specialty, ordering or the residual-finding filter
+- **THEN** the workbook contains the same patients that the filtered `/censo/`
+  page would show for those query parameters
+
+#### Scenario: Export applies the residual-finding filter
+
+- **WHEN** an authenticated user exports the censo with the residual-finding
+  filter active
+- **THEN** the workbook contains only patients whose current finding is
+  `suspected_legacy_residual`
+- **AND** the workbook keeps the existing column contract without adding
+  finding labels
+
+#### Scenario: Export includes expected columns
+
+- **WHEN** an authenticated user downloads the XLSX export
+- **THEN** the workbook includes at least `Registro`, `Nome`, `Setor / Unidade`,
+  `Leito`, `Especialidade`, `Data Internação`, `Tempo Internação` and
+  `Capturado em` columns
+
+#### Scenario: Export uses full specialty names
+
+- **WHEN** an exported patient row has a specialty with a matching `Specialty`
+  catalog entry
+- **THEN** the `Especialidade` cell contains the full specialty name
+
+#### Scenario: Anonymous export request is rejected
+
+- **WHEN** an anonymous user requests the censo export endpoint
+- **THEN** the system redirects the user to login instead of returning patient
+  data
+
+#### Scenario: Empty census export remains valid
+
+- **WHEN** an authenticated user exports the censo and there is no latest census
+  snapshot or no matching patient after filters
+- **THEN** the system returns a valid XLSX workbook with headers and no patient
+  rows
+
+### Requirement: Current census HTML displays patient flow findings
+
+The authenticated `/censo/` HTML page SHALL display current patient-flow
+findings from the shared bulk classifier while preserving the list and export
+contracts.
+
+#### Scenario: Desktop row displays finding badge
+
+- **WHEN** a listed patient has a current finding
+- **THEN** the desktop row displays its user-facing label
+- **AND** review-required findings use a distinct accessible warning treatment
+
+#### Scenario: Mobile card displays same finding
+
+- **WHEN** the responsive mobile representation renders the same patient
+- **THEN** it displays the same finding code/label and review semantics
+
+#### Scenario: Patient has no finding
+
+- **WHEN** the classifier returns no current finding for a patient
+- **THEN** the existing row/card layout remains without a placeholder error
+
+#### Scenario: Filters ordering and links are preserved
+
+- **WHEN** findings are displayed
+- **THEN** free-text, unit, specialty, ordering and patient-detail navigation
+  behave as before
+
+#### Scenario: XLSX contract remains unchanged
+
+- **WHEN** an authenticated user exports the current census without the
+  residual-finding filter
+- **THEN** the existing workbook columns and patient set remain unchanged
+- **AND** the system never adds finding labels to the XLSX
+
+#### Scenario: Classification queries are bounded
+
+- **WHEN** `/censo/` lists different numbers of patients
+- **THEN** finding classification uses bulk queries with a fixed allowance
+- **AND** no query is performed from the template loop
