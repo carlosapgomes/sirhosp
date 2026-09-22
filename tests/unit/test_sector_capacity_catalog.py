@@ -68,6 +68,14 @@ V5_CATALOG = (
     / "sector_capacity_catalog_v5.json"
 )
 
+V6_CATALOG = (
+    Path(__file__).resolve().parents[2]
+    / "apps"
+    / "census"
+    / "data"
+    / "sector_capacity_catalog_v6.json"
+)
+
 # C1: nomes exatos esperados no sistema fonte (CensusSnapshot.setor).
 EXPECTED_SOURCE_NAMES = {
     "751": "0 - SALA DE PROCEDIMENTO ADULTO HGRS",
@@ -235,6 +243,10 @@ def _v4_document() -> dict:
 
 def _v5_document() -> dict:
     return json.loads(V5_CATALOG.read_text(encoding="utf-8"))
+
+
+def _v6_document() -> dict:
+    return json.loads(V6_CATALOG.read_text(encoding="utf-8"))
 
 
 def _alias_document() -> dict:
@@ -2341,3 +2353,176 @@ class TestV5FutureActivation:
         assert CapacityCatalogVersion.objects.count() == 0
         assert CapacityGroupDefinition.objects.count() == 0
         assert CapacitySectorMembership.objects.count() == 0
+
+
+class TestV6CatalogDocument:
+    """RCD-S1 R1-R4: catálogo v6 com rename exclusivo do grupo Cardio."""
+
+    def test_v6_document_declares_schema_and_algorithm_context(self):
+        document = _v6_document()
+        assert document["schema_version"] == "3.0"
+        assert document["occupancy_algorithm_version"] == "occupancy-v5"
+
+    def test_v6_changes_only_source_reference_context(self):
+        v5 = _v5_document()
+        v6 = _v6_document()
+        assert set(v6) == set(v5)
+        assert v6["schema_version"] == v5["schema_version"] == "3.0"
+        assert (
+            v6["occupancy_algorithm_version"] == v5["occupancy_algorithm_version"] == "occupancy-v5"
+        )
+        assert v6["source_reference"] != v5["source_reference"]
+        assert len(v6["source_reference"]) <= 255
+        lowered = v6["source_reference"].lower()
+        for marker in ("prontuário", "nome de paciente", "sha-256 de paciente"):
+            assert marker not in lowered
+
+    def test_v6_renames_only_cardio_display_name(self):
+        v5 = _v5_document()
+        v6 = _v6_document()
+        v5_cardio = next(group for group in v5["groups"] if group["stable_key"] == "ENF-2B-CARD")
+        assert v5_cardio["display_name"] == "Cardioclinica / Enfermaria 2B Cardio"
+        expected_groups = v5["groups"]
+        cardio = next(group for group in expected_groups if group["stable_key"] == "ENF-2B-CARD")
+        cardio["display_name"] = "Enfermaria 2B Cardio"
+        assert expected_groups == v6["groups"]
+
+    def test_v6_document_totals_and_alias_coverage_match_v5(self):
+        v5 = validate_catalog_document(_v5_document())
+        v6 = validate_catalog_document(_v6_document())
+        expected = (43, 48, 47, 39, 4, 666, 666, 48)
+        for catalog in (v5, v6):
+            assert (
+                catalog.group_count,
+                catalog.membership_count,
+                catalog.code_count,
+                catalog.standard_group_count,
+                catalog.unrated_group_count,
+                catalog.known_capacity,
+                catalog.calculable_capacity,
+                catalog.aliased_membership_count,
+            ) == expected
+        assert (
+            v6.group_count,
+            v6.membership_count,
+            v6.code_count,
+            v6.standard_group_count,
+            v6.unrated_group_count,
+            v6.known_capacity,
+            v6.calculable_capacity,
+            v6.aliased_membership_count,
+        ) == (
+            v5.group_count,
+            v5.membership_count,
+            v5.code_count,
+            v5.standard_group_count,
+            v5.unrated_group_count,
+            v5.known_capacity,
+            v5.calculable_capacity,
+            v5.aliased_membership_count,
+        )
+
+    def test_v6_curated_cardio_aliases_unchanged(self):
+        aliases = {
+            membership["source_code"]: membership["source_display_name"]
+            for group in _v6_document()["groups"]
+            for membership in group["source_codes"]
+        }
+        assert aliases["719"] == "Cardioclínica"
+        assert aliases["2156"] == "Enfermaria 2B Cardio"
+
+    def test_v6_hash_is_own_and_distinct_from_v5(self):
+        sha6 = hashlib.sha256(V6_CATALOG.read_bytes()).hexdigest()
+        sha5 = hashlib.sha256(V5_CATALOG.read_bytes()).hexdigest()
+        assert len(sha6) == 64
+        assert sha6 != sha5
+
+
+class TestV6DryRun:
+    """RCD-S1 R6: dry-run v6 com zero escrita e cobertura de aliases."""
+
+    @pytest.mark.django_db
+    def test_dry_run_reports_v6_totals_and_full_alias_coverage(self, capsys):
+        before = (
+            CapacityCatalogVersion.objects.count(),
+            CapacityGroupDefinition.objects.count(),
+            CapacitySectorMembership.objects.count(),
+        )
+        assert before == (0, 0, 0)
+
+        result = activate_sector_capacity_catalog(V6_CATALOG, _future_date(30), dry_run=True)
+        assert result.algorithm_version == "occupancy-v5"
+        assert result.created is False
+        assert result.group_count == 43
+        assert result.member_count == 48
+        assert result.code_count == 47
+        assert result.standard_group_count == 39
+        assert result.unrated_group_count == 4
+        assert result.known_capacity == 666
+        assert result.calculable_capacity == 666
+        assert result.aliased_membership_count == 48
+        assert result.aliased_membership_count == result.member_count
+        assert result.document_sha256 == hashlib.sha256(V6_CATALOG.read_bytes()).hexdigest()
+
+        call_command(
+            "activate_sector_capacity_catalog",
+            "--input",
+            str(V6_CATALOG),
+            "--effective-from",
+            _future_date(30),
+            "--dry-run",
+        )
+        out = capsys.readouterr().out
+        assert "validado (dry-run)" in out
+        assert "algoritmo de ocupação: occupancy-v5" in out
+        assert "grupos oficiais: 43" in out
+        assert "associações: 48" in out
+        assert "códigos-fonte distintos: 47" in out
+        assert "grupos com capacidade: 39" in out
+        assert "grupos standard: 39" in out
+        assert "grupos unrated: 4" in out
+        assert "capacidade conhecida: 666" in out
+        assert "capacidade calculável: 666" in out
+
+        after = (
+            CapacityCatalogVersion.objects.count(),
+            CapacityGroupDefinition.objects.count(),
+            CapacitySectorMembership.objects.count(),
+        )
+        assert after == before == (0, 0, 0)
+
+
+class TestV6FutureActivation:
+    """RCD-S1 R5: ativação futura atômica e idempotente do v6."""
+
+    @pytest.mark.django_db
+    def test_future_activation_persists_v6_atomically(self):
+        effective = _future_date(30)
+        result = activate_sector_capacity_catalog(V6_CATALOG, effective)
+        assert result.created is True
+        assert result.algorithm_version == "occupancy-v5"
+        version = CapacityCatalogVersion.objects.get()
+        assert version.effective_from.isoformat() == effective
+        assert version.schema_version == "3.0"
+        assert version.algorithm_version == "occupancy-v5"
+        assert version.groups.count() == 43
+        assert version.memberships.count() == 48
+
+        rows = {membership.source_code: membership for membership in version.memberships.all()}
+        assert rows["719"].source_display_name == "Cardioclínica"
+        assert rows["2156"].source_display_name == "Enfermaria 2B Cardio"
+        assert version.groups.get(stable_key="ENF-2B-CARD").display_name == ("Enfermaria 2B Cardio")
+
+    @pytest.mark.django_db
+    def test_v6_activation_is_idempotent_for_same_document_and_date(self):
+        effective = _future_date(30)
+        first = activate_sector_capacity_catalog(V6_CATALOG, effective)
+        second = activate_sector_capacity_catalog(V6_CATALOG, effective)
+        assert first.created is True
+        assert second.created is False
+        assert first.document_sha256 == second.document_sha256
+        assert second.algorithm_version == "occupancy-v5"
+        assert second.aliased_membership_count == 48
+        assert CapacityCatalogVersion.objects.count() == 1
+        assert CapacityGroupDefinition.objects.count() == 43
+        assert CapacitySectorMembership.objects.count() == 48
