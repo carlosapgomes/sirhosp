@@ -2378,6 +2378,70 @@ class TestBedStatusV4ActionablePresentation:
         assert "Cardioclínica" in content
         assert "Enfermaria 2B Cardio" in content
 
+    def test_cardio_renamed_group_sorts_with_enfermaria_2b_peers(self, admin_client):
+        today = timezone.localdate()
+        self._v4_catalog(
+            today,
+            [
+                {
+                    "stable_key": "ENF-2A-HEMA",
+                    "display_name": "Enfermaria 2A Oncohemato",
+                    "capacity": 10,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (("9001", "2A Source", "Enfermaria 2A Oncohemato", "all"),),
+                },
+                {
+                    "stable_key": "ENF-2B-CARD",
+                    "display_name": "Enfermaria 2B Cardio",
+                    "capacity": 15,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (
+                        ("719", "0 N - CARDIOCLINICA", "Cardioclínica", "all"),
+                        (
+                            "2156",
+                            "2 7 - 2B - CARDIO - HGRS",
+                            "Enfermaria 2B Cardio",
+                            "all",
+                        ),
+                    ),
+                },
+                {
+                    "stable_key": "ENF-2B-NEURO",
+                    "display_name": "Enfermaria 2B Neuroclínica",
+                    "capacity": 12,
+                    "policy": CalculationPolicy.STANDARD,
+                    "members": (("9002", "2B Neuro Source", "Enfermaria 2B Neuroclínica", "all"),),
+                },
+            ],
+        )
+        run = self._run()
+        for index, (code, marker) in enumerate(
+            [("9001", "SYN-2A"), ("719", "SYN-719"), ("2156", "SYN-2156"), ("9002", "SYN-2B")]
+        ):
+            self._snapshot(
+                run,
+                captured_at=self._at(today),
+                code=code,
+                sector=f"Sector {code}",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=marker,
+                age_band="not_applicable",
+            )
+        self._materialize(run.pk)
+        response = self._render(admin_client)
+        content = response.content.decode()
+        units = response.context["units"]
+        assert [unit.title for unit in units] == [
+            "Enfermaria 2A Oncohemato",
+            "Enfermaria 2B Cardio",
+            "Enfermaria 2B Neuroclínica",
+        ]
+        cardio = next(unit for unit in units if unit.title == "Enfermaria 2B Cardio")
+        assert cardio.title == "Enfermaria 2B Cardio"
+        assert "Cardioclinica /" not in content
+        assert content.count("Capacidade: 15") == 1
+
     def test_3a_two_groups_one_source_physical_once(self, admin_client):
         today = timezone.localdate()
         self._v4_catalog(today, self._partitioned_3a())
