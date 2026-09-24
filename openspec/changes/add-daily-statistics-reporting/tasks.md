@@ -11,9 +11,9 @@
 
 ## 3. SLICE-DSRS-S2 — Fotografia final materializada
 
-- [ ] 3.1 RED: adicionar testes sintéticos para schema, revisão corrente única, idempotência, catálogo/medição exatos, setores oficiais e pacientes do censo de fechamento; executar os testes focados em container e registrar a falha esperada
-- [ ] 3.2 GREEN: adicionar modelos, migration e materialização atômica mínima da fotografia final, sem eventos clínicos nem backfill; repetir testes focados e regressões locais
-- [ ] 3.3 Gerar `/tmp/sirhosp-slice-DSRS-S2-report.md` e validar migration, check, lint, typecheck e Markdown alterado
+- [x] 3.1 RED: adicionar testes sintéticos para schema, revisão corrente única, idempotência, catálogo/medição exatos, setores oficiais e pacientes do censo de fechamento; executar os testes focados em container e registrar a falha esperada
+- [x] 3.2 GREEN: adicionar modelos, migration e materialização atômica mínima da fotografia final, sem eventos clínicos nem backfill; repetir testes focados e regressões locais
+- [x] 3.3 Gerar `/tmp/sirhosp-slice-DSRS-S2-report.md` e validar migration, check, lint, typecheck e Markdown alterado
 
 ## 4. SLICE-DSRS-S3 — Entradas e transferências detectadas
 

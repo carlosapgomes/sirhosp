@@ -44,6 +44,14 @@ ALGORITHM_VERSION_V2 = "occupancy-v2"
 ALGORITHM_VERSION_V3 = "occupancy-v3"
 ALGORITHM_VERSION_V4 = "occupancy-v4"
 ALGORITHM_VERSION_V5 = "occupancy-v5"
+# Occupancy contracts whose official grouping follows the catalog source code
+# and, for their age-partitioned codes, the age band of each row.
+_CATALOG_CODE_ALGORITHM_VERSIONS = (
+    ALGORITHM_VERSION,
+    ALGORITHM_VERSION_V2,
+    ALGORITHM_VERSION_V3,
+    ALGORITHM_VERSION_V4,
+)
 _CENSUS_INTENT = "census_extraction"
 _PERCENT_QUANTUM = Decimal("0.01")
 _STATUS_KEYS = tuple(BedStatus.values)
@@ -1743,6 +1751,60 @@ def _operational_status(name: str) -> str | None:
     return None
 
 
+def _identified_patient_identity(
+    bed: CensusSnapshot,
+) -> tuple[str, str] | None:
+    """Normalized ``(record, name)`` of one identified patient row.
+
+    Shared identity contract of every occupancy algorithm: the row must be an
+    occupied bed carrying a digits-only record and a non-empty name that is
+    not an operational marker (e.g. ``RESERVA INTERNA``). ``None`` means the
+    row is not an identified patient, whatever algorithm measured the census.
+    """
+    if bed.bed_status != BedStatus.OCCUPIED:
+        return None
+    name = _normalize_patient_name(bed.nome)
+    record = _normalize_record(bed.prontuario)
+    if _operational_status(name) is not None:
+        return None
+    if not (_is_valid_record(record) and name):
+        return None
+    return record, name
+
+
+def _catalog_group_index(
+    catalog: CapacityCatalogVersion,
+) -> tuple[
+    dict[str, CapacityGroupDefinition],
+    dict[tuple[str, str], CapacityGroupDefinition],
+    set[str],
+]:
+    """Official source-code index of one immutable catalog version.
+
+    Returns the last-wins code lookup (identical coverage semantics to
+    v2/v3/v4), the age-partitioned band lookup and the set of source codes
+    partitioned by age band. The v5 materialization, the v5 presentation and
+    the identified-row assignment of every occupancy contract share this one
+    index so the official partition of a source code (e.g. 654) is resolved in
+    exactly one place.
+    """
+    group_by_code: dict[str, CapacityGroupDefinition] = {}
+    band_groups: dict[tuple[str, str], CapacityGroupDefinition] = {}
+    partitioned_codes: set[str] = set()
+    for group in catalog.groups.all():
+        for membership in group.memberships.all():
+            # ``group_by_code`` mirrors the legacy last-wins code lookup so
+            # coverage semantics stay identical to v2/v3/v4.
+            group_by_code[membership.source_code] = group
+            if membership.age_selector == CapacityMembershipSelector.ALL:
+                continue
+            band_groups[
+                (membership.source_code, membership.age_selector)
+            ] = group
+            partitioned_codes.add(membership.source_code)
+    return group_by_code, band_groups, partitioned_codes
+
+
 def _resolve_v5_3a_group(
     lines: list[_V5Line],
     band_groups: dict[tuple[str, str], CapacityGroupDefinition],
@@ -1836,20 +1898,9 @@ def _calculate_v5(
     A record present in more than one official unit counts once in each.
     """
     definitions = list(catalog.groups.all())
-    group_by_code: dict[str, CapacityGroupDefinition] = {}
-    band_groups: dict[tuple[str, str], CapacityGroupDefinition] = {}
-    partitioned_codes: set[str] = set()
-    for group in definitions:
-        for membership in group.memberships.all():
-            # ``group_by_code`` mirrors the legacy last-wins code lookup so
-            # coverage semantics stay identical to v2/v3/v4.
-            group_by_code[membership.source_code] = group
-            if membership.age_selector == CapacityMembershipSelector.ALL:
-                continue
-            band_groups[
-                (membership.source_code, membership.age_selector)
-            ] = group
-            partitioned_codes.add(membership.source_code)
+    group_by_code, band_groups, partitioned_codes = _catalog_group_index(
+        catalog
+    )
 
     observed_identities = {
         ("code", row.code) if row.code else ("name", row.name) for row in rows
@@ -3999,18 +4050,9 @@ def _v5_units(
     group_rows = {
         group.stable_key: group for group in measurement.groups.all()
     }
-    group_by_code: dict[str, CapacityGroupDefinition] = {}
-    band_groups: dict[tuple[str, str], CapacityGroupDefinition] = {}
-    partitioned_codes: set[str] = set()
-    for group in definitions:
-        for membership in group.memberships.all():
-            group_by_code[membership.source_code] = group
-            if membership.age_selector == CapacityMembershipSelector.ALL:
-                continue
-            band_groups[
-                (membership.source_code, membership.age_selector)
-            ] = group
-            partitioned_codes.add(membership.source_code)
+    group_by_code, band_groups, partitioned_codes = _catalog_group_index(
+        measurement.catalog
+    )
 
     membership_by_code: dict[str, CapacitySectorMembership] = {}
     for group in definitions:
@@ -4274,6 +4316,199 @@ def _v5_unmapped_units(
             )
         )
     return units
+
+
+def assign_official_group_keys(
+    *,
+    measurement: OccupancyMeasurement,
+    snapshots: Iterable[CensusSnapshot],
+) -> dict[int, str | None]:
+    """Map identified census rows to their official historical grouping.
+
+    Each occupancy contract keeps its own canonical attribution of an
+    identified occupied row to a persisted official group; this primitive only
+    dispatches to it instead of restating any formula:
+
+    - ``occupancy-v5`` resolves an age-partitioned source code (e.g. 654 in the
+      v5/v6 catalogs) per record with :func:`_resolve_v5_3a_group`, keeping its
+      reliable-band and ``RN`` fallbacks;
+    - ``occupancy-v1``-``occupancy-v4`` count rows through the official catalog
+      code and, for the age-partitioned codes of v2/v3/v4, through the row's
+      own age band, so a row of a partitioned code without a reliable band
+      belongs to no official group instead of receiving a v5 fallback.
+
+    A row is an identified patient under the shared identity contract (occupied
+    bed, digits-only record, non-marker non-empty name). Identified rows whose
+    source code has no official catalog grouping are attributed to the unmapped
+    group already persisted by the same measurement, so no synthetic key is
+    ever recomputed here.
+
+    Args:
+        measurement: Exact immutable measurement of the closing census run.
+        snapshots: Rows of the census photograph of that same run.
+
+    Returns:
+        ``{CensusSnapshot.pk: official group stable_key or None}`` for every
+        identified occupied row; rows that are not identified patients and
+        rows of another bed status have no entry. ``None`` keeps a safely
+        unidentified grouping explicit instead of inventing a sector.
+
+    Raises:
+        OccupancyMaterializationError: When the measurement declares an
+            occupancy algorithm whose official grouping has no canonical
+            implementation here.
+    """
+    if measurement.algorithm_version == ALGORITHM_VERSION_V5:
+        return _assign_v5_identified_group_keys(
+            measurement=measurement, snapshots=snapshots
+        )
+    if measurement.algorithm_version in _CATALOG_CODE_ALGORITHM_VERSIONS:
+        return _assign_catalog_code_group_keys(
+            measurement=measurement, snapshots=snapshots
+        )
+    supported = ", ".join(
+        (*_CATALOG_CODE_ALGORITHM_VERSIONS, ALGORITHM_VERSION_V5)
+    )
+    raise OccupancyMaterializationError(
+        "The official grouping of identified census rows is defined for "
+        f"{supported}; measurement {measurement.pk} declares "
+        f"{measurement.algorithm_version!r}."
+    )
+
+
+def _assign_v5_identified_group_keys(
+    *,
+    measurement: OccupancyMeasurement,
+    snapshots: Iterable[CensusSnapshot],
+) -> dict[int, str | None]:
+    """Attribute identified rows under the record-level v5 partition."""
+    group_by_code, band_groups, partitioned_codes = _catalog_group_index(
+        measurement.catalog
+    )
+    unmapped_by_code, unmapped_by_name = _persisted_unmapped_group_keys(
+        measurement
+    )
+
+    assignment: dict[int, str | None] = {}
+    partitioned_lines: dict[str, list[_V5Line]] = defaultdict(list)
+    partitioned_rows: dict[str, list[int]] = defaultdict(list)
+    for bed in snapshots:
+        identity = _identified_patient_identity(bed)
+        if identity is None:
+            continue
+        record, name = identity
+        code = (bed.setor_codigo or "").strip()
+        sector_name = _normalize_identity(bed.setor)
+        if code in partitioned_codes:
+            partitioned_lines[record].append(
+                _V5Line(
+                    code=code,
+                    name=name,
+                    bed=_normalize_identity(bed.leito),
+                    age_band=bed.age_band,
+                )
+            )
+            partitioned_rows[record].append(bed.pk)
+            continue
+        assignment[bed.pk] = _catalog_row_group_key(
+            code=code,
+            sector_name=sector_name,
+            group_by_code=group_by_code,
+            unmapped_by_code=unmapped_by_code,
+            unmapped_by_name=unmapped_by_name,
+        )
+
+    for record, rows in partitioned_rows.items():
+        group = _resolve_v5_3a_group(
+            partitioned_lines[record], band_groups, Counter[str]()
+        )
+        for pk in rows:
+            assignment[pk] = group.stable_key
+    return assignment
+
+
+def _assign_catalog_code_group_keys(
+    *,
+    measurement: OccupancyMeasurement,
+    snapshots: Iterable[CensusSnapshot],
+) -> dict[int, str | None]:
+    """Attribute identified rows under the v1-v4 code/age-band grouping.
+
+    v1-v4 persist one official group per catalog definition (and one synthetic
+    group per unmapped unit) computed from the raw source code and, for the
+    age-partitioned codes of v2/v3/v4, from the row's own age band. Each
+    identified row therefore follows exactly that resolution; a row of a
+    partitioned code without a reliable band was counted in no group by the
+    measurement and consequently resolves to ``None``.
+    """
+    group_by_code, band_groups, partitioned_codes = _catalog_group_index(
+        measurement.catalog
+    )
+    unmapped_by_code, unmapped_by_name = _persisted_unmapped_group_keys(
+        measurement
+    )
+
+    assignment: dict[int, str | None] = {}
+    for bed in snapshots:
+        if _identified_patient_identity(bed) is None:
+            continue
+        code = (bed.setor_codigo or "").strip()
+        if code in partitioned_codes:
+            band_group = band_groups.get((code, bed.age_band))
+            assignment[bed.pk] = (
+                None if band_group is None else band_group.stable_key
+            )
+            continue
+        assignment[bed.pk] = _catalog_row_group_key(
+            code=code,
+            sector_name=_normalize_identity(bed.setor),
+            group_by_code=group_by_code,
+            unmapped_by_code=unmapped_by_code,
+            unmapped_by_name=unmapped_by_name,
+        )
+    return assignment
+
+
+def _catalog_row_group_key(
+    *,
+    code: str,
+    sector_name: str,
+    group_by_code: dict[str, CapacityGroupDefinition],
+    unmapped_by_code: dict[str, str],
+    unmapped_by_name: dict[str, str],
+) -> str | None:
+    """Official stable key of one non-partitioned identified census row."""
+    group = group_by_code.get(code) if code else None
+    if group is not None:
+        return group.stable_key
+    if code:
+        return unmapped_by_code.get(code)
+    return unmapped_by_name.get(sector_name)
+
+
+def _persisted_unmapped_group_keys(
+    measurement: OccupancyMeasurement,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Persisted unmapped group keys of one measurement, by code and name.
+
+    The occupancy materialization of every algorithm already decided which
+    observed source code or source name had no official catalog grouping and
+    persisted one synthetic group per unmapped unit; reading those components
+    keeps that decision authoritative for the identified-row assignment.
+    """
+    unmapped_by_code: dict[str, str] = {}
+    unmapped_by_name: dict[str, str] = {}
+    for group in measurement.groups.all():
+        if group.calculation_status != OccupancyCalculationStatus.UNMAPPED:
+            continue
+        for component in group.components_json:
+            observed_code = str(component.get("observed_code") or "").strip()
+            observed_name = str(component.get("observed_name") or "").strip()
+            if observed_code:
+                unmapped_by_code[observed_code] = group.stable_key
+            elif observed_name:
+                unmapped_by_name[observed_name] = group.stable_key
+    return unmapped_by_code, unmapped_by_name
 
 
 def build_units_presentation(
