@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     "apps.search",
     "apps.services_portal",
     "apps.census",
+    "apps.statistics_reports.apps.StatisticsReportsConfig",
     "apps.discharges.DischargesConfig",
     "apps.deaths.DeathsConfig",
     "apps.admissions.AdmissionsConfig",

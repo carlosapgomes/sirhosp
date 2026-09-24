@@ -5,9 +5,9 @@
 
 ## 2. SLICE-DSRS-S1 — Seleção do dia estatístico
 
-- [ ] 2.1 RED: adicionar testes sintéticos para censo aceito, abertura, fechamento, âncora, limites `America/Bahia`, distinção do lote clínico e dias incompletos; executar os testes focados em container e registrar a falha esperada
-- [ ] 2.2 GREEN: criar o módulo de relatórios e o serviço mínimo de seleção determinística sem persistir relatórios; repetir os testes focados e executar check, lint e typecheck proporcionais
-- [ ] 2.3 Gerar `/tmp/sirhosp-slice-DSRS-S1-report.md` com checklist, arquivos, antes/depois, comandos, riscos e próximo passo; validar todo Markdown alterado com `./scripts/markdown-lint.sh`
+- [x] 2.1 RED: adicionar testes sintéticos para censo aceito, abertura, fechamento, âncora, limites `America/Bahia`, distinção do lote clínico e dias incompletos; executar os testes focados em container e registrar a falha esperada
+- [x] 2.2 GREEN: criar o módulo de relatórios e o serviço mínimo de seleção determinística sem persistir relatórios; repetir os testes focados e executar check, lint e typecheck proporcionais
+- [x] 2.3 Gerar `/tmp/sirhosp-slice-DSRS-S1-report.md` com checklist, arquivos, antes/depois, comandos, riscos e próximo passo; validar todo Markdown alterado com `./scripts/markdown-lint.sh`
 
 ## 3. SLICE-DSRS-S2 — Fotografia final materializada
 
