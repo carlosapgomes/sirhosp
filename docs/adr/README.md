@@ -16,6 +16,7 @@ Registros de decisoes arquiteturais importantes do projeto.
 | [ADR-0008](ADR-0008-fullsync-failure-characterization-decision.md)                                | ADR-0008-fullsync-failure-characterization-decision                       | Accepted | 2026-09-01 |
 | [ADR-0009](ADR-0009-reconciliacao-canonica-de-saidas-e-identidade-longitudinal-de-internacoes.md) | Reconciliação canônica de saídas e identidade longitudinal de internações | Proposed | 2026-09-03 |
 | [ADR-0010](ADR-0010-recuperacao-d1-orquestrada-pelo-ciclo-adaptativo.md)                          | Recuperação D-1 orquestrada pelo ciclo adaptativo de censo                | Proposed | 2026-09-06 |
+| [ADR-0011](ADR-0011-projecao-diaria-materializada-e-versionada-para-relatorios-estatisticos.md)   | Projeção diária materializada e versionada para relatórios estatísticos   | Accepted | 2026-09-24 |
 
 ## ADRs Deprecated/Superseded
 
