@@ -15,6 +15,12 @@ Materializar atomicamente uma revisão diária contendo cabeçalho, agrupamentos
 oficiais, métricas persistidas e pacientes do censo de fechamento, com
 idempotência e uma única revisão corrente.
 
+Decisão humana registrada durante a execução: expor em
+`apps/census/occupancy.py` uma primitiva pública mínima que reutilize a
+atribuição oficial existente de cada linha censitária ao agrupamento histórico,
+inclusive a partição v5/v6 do código 654. Não duplicar essa regra no módulo de
+relatórios.
+
 ## Requisitos verificáveis
 
 - **R1:** schema preserva data Bahia, revisão, status, runs âncora/abertura/
@@ -34,6 +40,7 @@ idempotência e uma única revisão corrente.
 
 ```yaml
 expected_files:
+  - apps/census/occupancy.py
   - apps/statistics_reports/models.py
   - apps/statistics_reports/migrations/0001_initial.py
   - apps/statistics_reports/materialization.py
@@ -48,15 +55,18 @@ out_of_scope:
   - correções manuais e backfill histórico
 ```
 
-Limite: cinco arquivos contando o `__init__.py` incidental. Pare se for
-necessário modificar `CensusSnapshot`, medições de ocupação ou fontes clínicas.
+Limite: seis arquivos contando o `__init__.py` incidental. A alteração em
+`apps/census/occupancy.py` deve apenas expor/reutilizar a atribuição oficial já
+existente e permanecer coberta pelo teste de integração deste slice. Pare se
+for necessário modificar `CensusSnapshot`, medições de ocupação ou fontes
+clínicas.
 
 ## Matriz requisito -> arquivo -> teste/check
 
 | Requisito | Arquivo(s) esperado(s) | Teste/check |
 | --- | --- | --- |
 | R1, R5 | `models.py`, migration | constraints e publicação transacional |
-| R2–R3 | `materialization.py` | medição exata e roster do fechamento |
+| R2–R3 | `occupancy.py`, `materialization.py` | atribuição oficial, medição exata e roster do fechamento |
 | R4 | ambos | rebuild idempotente sem duplicação |
 | R6 | `materialization.py` | data pré-ativação recusada |
 
