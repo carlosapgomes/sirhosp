@@ -36,7 +36,13 @@ Decisões humanas registradas durante a execução:
   transferências, mas permite óbito, alta ou saída não classificada sem setor
   quando nenhuma posição anterior unívoca existir;
 - está autorizada a edição mínima do teste S3 que assumia um único evento por
-  prontuário, selecionando o evento pelo `kind` após a introdução das saídas.
+  prontuário, selecionando o evento pelo `kind` após a introdução das saídas;
+- após duas revisões, foi autorizada excepcionalmente uma terceira rodada S4,
+  limitada a persistir em `DailyStatisticsEvent` a procedência clínica anulável
+  (`source kind` e PK da evidência), copiá-la durante a materialização, atualizar
+  a migration `0003`, os testes de regressão e o relatório do slice. O hash não
+  substitui essa procedência consultável e nenhum FK ou payload clínico adicional
+  deve ser introduzido.
 
 ## Requisitos verificáveis
 
