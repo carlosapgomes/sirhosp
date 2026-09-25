@@ -15,15 +15,28 @@ Classificar desaparecimentos observados como óbito, alta, transferência ou
 distintas; inferir setor somente com procedência; e publicar nova revisão
 atômica quando evidência tardia mudar o resultado.
 
-Decisão humana registrada durante a execução: a transferência com destino não
-identificado é ancorada na saída. Quando um prontuário presente desaparece do
-censo seguinte e reaparece depois na cadeia, uma reaparição com agrupamento
-resolvido continua representada pelo único fato de S3; uma reaparição sem
-grupo resolvido confirma `internal_transfer` com origem no setor deixado e
-destino nulo. `alta_em` sem `saida_em` e `PatientMovement` não confirmam
-transferência. A constraint de endpoints deve continuar exigindo endpoint para
-entradas/transferências, mas permitir óbito, alta ou saída não classificada sem
-setor quando nenhuma posição anterior unívoca existir.
+Decisões humanas registradas durante a execução:
+
+- a transferência com destino não identificado é ancorada na saída. Quando um
+  prontuário presente desaparece do censo seguinte e reaparece depois na
+  cadeia, uma reaparição com agrupamento resolvido continua representada pelo
+  único fato de S3; uma reaparição sem grupo resolvido confirma
+  `internal_transfer` com origem no setor deixado e destino nulo;
+- a precedência óbito > `saida_em` > transferência > saída não classificada é
+  global ao episódio, inclusive com reaparição posterior. A reaparição só
+  determina transferência quando não existir óbito ou alta efetiva compatível;
+- óbito exato e `saida_em` casam no intervalo
+  `(detected_not_before, detected_at]`; óbito date-only casa pelas datas locais
+  Bahia cobertas pelo intervalo, mantendo apenas `occurred_on`. Evidências
+  múltiplas usam o momento clínico mais antigo e PK como desempate, e a
+  evidência escolhida participa do fingerprint;
+- `alta_em` sem `saida_em` e `PatientMovement` não confirmam transferência. O
+  setor é inferido apenas da última posição censitária anterior unívoca;
+- a constraint de endpoints continua exigindo endpoint para entradas e
+  transferências, mas permite óbito, alta ou saída não classificada sem setor
+  quando nenhuma posição anterior unívoca existir;
+- está autorizada a edição mínima do teste S3 que assumia um único evento por
+  prontuário, selecionando o evento pelo `kind` após a introdução das saídas.
 
 ## Requisitos verificáveis
 
@@ -53,6 +66,7 @@ expected_files:
   - apps/statistics_reports/materialization.py
   - apps/statistics_reports/models.py
   - tests/integration/test_daily_statistics_exits.py
+  - tests/integration/test_daily_statistics_entries.py
 allowed_incidental_files:
   - apps/statistics_reports/migrations/0003_event_revision_constraints.py
 out_of_scope:
@@ -62,8 +76,9 @@ out_of_scope:
   - alterações em admissions, discharges, deaths ou patients
 ```
 
-Limite: cinco arquivos com migration incidental. Pare se a precedência exigir
-mutar fonte clínica ou se identidade cruzada permanecer ambígua.
+Limite: seis arquivos com migration incidental e a edição mínima autorizada do
+teste S3. Pare se a precedência exigir mutar fonte clínica ou se identidade
+cruzada permanecer ambígua.
 
 ## Matriz requisito -> arquivo -> teste/check
 
