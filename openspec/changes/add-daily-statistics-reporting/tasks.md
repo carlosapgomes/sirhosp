@@ -23,9 +23,9 @@
 
 ## 5. SLICE-DSRS-S4 — Saídas, precedência e revisões automáticas
 
-- [ ] 5.1 RED: adicionar testes para óbito exato ou sem hora, `saida_em`, transferência, `Transferência interna — destino não identificado`, `Saída do setor — destino não identificado`, setor inferido/desconhecido, precedência sem dupla contagem e revisão por evidência tardia; registrar RED em container
-- [ ] 5.2 GREEN: implementar classificação de saídas e publicação transacional de revisões automáticas sem alterar fontes clínicas nem oferecer correção manual; repetir testes focados e regressões locais
-- [ ] 5.3 Gerar `/tmp/sirhosp-slice-DSRS-S4-report.md` e executar check, lint, typecheck e Markdown alterado
+- [x] 5.1 RED: adicionar testes para óbito exato ou sem hora, `saida_em`, transferência, `Transferência interna — destino não identificado`, `Saída do setor — destino não identificado`, setor inferido/desconhecido, precedência sem dupla contagem e revisão por evidência tardia; registrar RED em container
+- [x] 5.2 GREEN: implementar classificação de saídas e publicação transacional de revisões automáticas sem alterar fontes clínicas nem oferecer correção manual; repetir testes focados e regressões locais
+- [x] 5.3 Gerar `/tmp/sirhosp-slice-DSRS-S4-report.md` e executar check, lint, typecheck e Markdown alterado
 
 ## 6. SLICE-DSRS-S5 — Fechamento diário operacional
 

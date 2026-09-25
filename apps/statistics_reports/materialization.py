@@ -1,4 +1,4 @@
-"""Atomic materialization of the daily statistics revision (DSRS-S2, DSRS-S3).
+"""Atomic materialization of the daily statistics revision (DSRS-S2..S4).
 
 One call materializes, for one ``America/Bahia`` local date, the reproducible
 revision consumed by the page and the workbook of later slices:
@@ -10,9 +10,12 @@ revision consumed by the page and the workbook of later slices:
 - patients are the nominal rows of the closing census photograph, attributed
   to the official grouping by the shared occupancy assignment primitive;
 - detected entries and internal transfers are derived from the consecutive
-  accepted census photographs (DSRS-S3) and persisted as one row per logical
-  fact, with the versioned origin classification, the detection interval and
-  the explicit quality of ambiguous identity or grouping;
+  accepted census photographs (DSRS-S3), and classified exits are derived from
+  the same sequence together with the persisted death and effective discharge
+  evidence (DSRS-S4); each logical fact is persisted once, with the versioned
+  origin classification, the clinical instant or date a source provided, the
+  attribution quality of its sector, the detection interval and the explicit
+  quality of ambiguous identity or grouping;
 - a deterministic SHA-256 source fingerprint makes a repeated build a no-op
   and publishes a superseding revision only when the sources changed.
 
@@ -20,7 +23,10 @@ Publication is atomic: the candidate revision is completed inside one
 transaction and only then becomes the single ready revision of its date. A
 failed build leaves the previous ready revision untouched and persists nothing.
 Dates before the declared activation boundary are refused, so no historical
-backfill can be triggered from here.
+backfill can be triggered from here. Automatic revisions reuse the same
+selected closing photograph: late clinical evidence changes the derived events,
+never the census close it was read from, and no clinical source record is
+ever written here.
 """
 
 from __future__ import annotations
@@ -37,8 +43,8 @@ from apps.census.models import CensusSnapshot, OccupancyMeasurement
 from apps.census.occupancy import assign_official_group_keys
 from apps.ingestion.models import IngestionRun
 from apps.statistics_reports.events import (
-    EntryDerivation,
-    derive_entry_events,
+    EventDerivation,
+    derive_report_events,
 )
 from apps.statistics_reports.models import (
     DailyStatisticsEvent,
@@ -140,7 +146,7 @@ def materialize_daily_statistics(
             measurement=closing.measurement,
             snapshots=photograph,
         )
-        derivation = derive_entry_events(
+        derivation = derive_report_events(
             window=window,
             origin_policy=origin_policy,
         )
@@ -214,7 +220,7 @@ def _next_revision(local_date: date) -> int:
 def _quality_codes(
     *,
     window: DailyStatisticsWindow,
-    derivation: EntryDerivation,
+    derivation: EventDerivation,
 ) -> tuple[str, ...]:
     """Structured quality codes of the revision, without duplicates."""
     return tuple(
@@ -227,16 +233,16 @@ def _source_fingerprint(
     window: DailyStatisticsWindow,
     photograph: Sequence[CensusSnapshot],
     assignment: Mapping[int, str | None],
-    derivation: EntryDerivation,
+    derivation: EventDerivation,
     quality_codes: Sequence[str],
 ) -> str:
     """Deterministic SHA-256 of every source value this revision copies.
 
     The payload covers the selected runs, the exact measurement and catalog
     context, the copied official sector metrics, the nominal closing rows with
-    their resolved grouping and the whole compared census chain with its
-    derived events and origin policy version, so an unchanged source set is
-    recognized as the same revision.
+their resolved grouping and the whole compared census chain with its derived
+events, their clinical values and the chosen evidence rows, so an unchanged
+source set is recognized as the same revision.
     """
     assert window.closing is not None
     measurement = window.closing.measurement
@@ -396,15 +402,18 @@ def _create_patients(
 def _create_events(
     *,
     report: DailyStatisticsReport,
-    derivation: EntryDerivation,
+    derivation: EventDerivation,
     sectors: Mapping[str, DailyStatisticsSector],
 ) -> None:
-    """Persist one durable row per detected entry or internal transfer.
+    """Persist one durable row per detected entry, transfer or classified exit.
 
     A transition only observed between two census photographs carries no
     clinical instant: ``occurred_at`` and ``occurred_on`` stay null and the
     detection interval keeps the uncertainty, so no hour and no clinical date
-    are synthesized.
+    are synthesized. Only evidence-classified exits store the clinical value the
+    source provided and the inspectable provenance of the chosen evidence row
+    (``source_kind``/``source_pk``); every other event keeps both provenance
+    fields null. Every event records how its sector was determined.
     """
     rows: list[DailyStatisticsEvent] = []
     for event in derivation.events:
@@ -432,8 +441,11 @@ def _create_events(
                 record=event.record,
                 name=event.name,
                 bed=event.bed,
-                occurred_at=None,
-                occurred_on=None,
+                occurred_at=event.occurred_at,
+                occurred_on=event.occurred_on,
+                source_kind=event.source_kind,
+                source_pk=event.source_pk,
+                sector_attribution=event.sector_attribution,
                 detected_not_before=event.detected_not_before,
                 detected_at=event.detected_at,
                 fingerprint=event.fingerprint,

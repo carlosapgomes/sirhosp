@@ -1,4 +1,4 @@
-"""Materialized daily statistics projection (DSRS-S2, DSRS-S3).
+"""Materialized daily statistics projection (DSRS-S2, DSRS-S3, DSRS-S4).
 
 The projection is owned by the reporting module: source facts stay in the
 census, ingestion and clinical apps, while this app persists only the
@@ -8,9 +8,10 @@ catalog context, a deterministic source fingerprint and the quality metadata of
 the selected window. Sectors copy the metrics already persisted by that exact
 measurement and patients are the nominal rows of the closing census
 photograph; nothing here recalculates official capacity, occupancy, balance or
-excess. Detected entries and internal transfers are one durable event row per
-logical fact, with the event's own origin classification, detection interval
-and deterministic fingerprint.
+excess. Detected entries, internal transfers and classified exits are one
+durable event row per logical fact, with the event's own origin classification,
+clinical instant or date when a source provides one, detection interval,
+attributed sector quality and deterministic fingerprint.
 """
 
 from __future__ import annotations
@@ -263,15 +264,53 @@ class DailyStatisticsEventKind(models.TextChoices):
     """Stable normalized kind of one detected report event.
 
     A confirmed internal transfer is one single kind: both legs live in the
-    same event row instead of being duplicated as independent facts.
+    same event row instead of being duplicated as independent facts. Exits keep
+    the deterministic precedence death, effective hospital discharge, internal
+    transfer, unclassified departure, so one episode is counted once.
     """
 
     HOSPITAL_ADMISSION = "hospital_admission", "Internação hospitalar"
     INTERNAL_TRANSFER = "internal_transfer", "Transferência interna"
+    DEATH = "death", "Óbito"
+    HOSPITAL_DISCHARGE = "hospital_discharge", "Alta hospitalar"
     UNCLASSIFIED_ENTRY = (
         "unclassified_entry",
         "Entrada no setor — origem não identificada",
     )
+    UNCLASSIFIED_DEPARTURE = (
+        "unclassified_departure",
+        "Saída do setor — destino não identificado",
+    )
+
+
+EXIT_EVENT_KINDS: tuple[str, ...] = (
+    DailyStatisticsEventKind.DEATH,
+    DailyStatisticsEventKind.HOSPITAL_DISCHARGE,
+    DailyStatisticsEventKind.UNCLASSIFIED_DEPARTURE,
+)
+"""Event kinds that report a patient leaving, without a destination sector.
+
+They may stay without any endpoint when no unambiguous earlier census position
+existed; every other kind still requires one endpoint.
+"""
+
+
+class DailyStatisticsSectorAttribution(models.TextChoices):
+    """How the sector one detected event stores was determined.
+
+    ``observed`` means the stored sector comes from the detecting census
+    photograph. ``inferred_last_census`` means the event itself carries no
+    sector (a clinical exit evidence or a disappearance) and the sector comes
+    only from the last unambiguous census position. ``unknown`` keeps an exit
+    without any trustworthy prior position explicit instead of inventing it.
+    """
+
+    OBSERVED = "observed", "Observado na fotografia de detecção"
+    INFERRED_LAST_CENSUS = (
+        "inferred_last_census",
+        "Inferido da última posição censitária",
+    )
+    UNKNOWN = "unknown", "Não determinado"
 
 
 class DailyStatisticsEvent(models.Model):
@@ -280,10 +319,16 @@ class DailyStatisticsEvent(models.Model):
     A sector change is stored once, carrying origin and destination, and is
     read as the origin's exit and as the destination's entry. The origin
     classification records the policy version and the normalized source value
-    that produced it, so an entry never becomes an admission silently.
-    Clinical time stays distinct from detection: a transition only observed
-    between two census photographs keeps its detection interval and stores no
-    synthesized instant.
+    that produced it, so an entry never becomes an admission silently. An exit
+    is classified once, by the global precedence of its episode, and carries
+    the clinical instant or date of the evidence that explained it. Clinical
+    time stays distinct from detection: a transition only observed between two
+    census photographs keeps its detection interval and stores no synthesized
+    instant, and the attributed sector records how it was determined. An exit
+    explained by persisted clinical evidence also keeps the inspectable
+    provenance of the chosen row (source kind and primary key, without a foreign
+    key), while a fact the census photographs alone proved keeps both null and
+    never claims evidence it did not use.
     """
 
     report = models.ForeignKey(
@@ -375,11 +420,41 @@ class DailyStatisticsEvent(models.Model):
             "never synthesizes a clinical date"
         ),
     )
+    source_kind = models.CharField(
+        max_length=30,
+        null=True,
+        blank=True,
+        help_text=(
+            "Stable source kind of the clinical exit evidence that explained "
+            "this event (e.g. death_record); null when only the census "
+            "photographs proved it, so no evidence is ever claimed"
+        ),
+    )
+    source_pk = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Primary key of that clinical evidence row, kept as an "
+            "inspectable provenance reference without a foreign key; null "
+            "when no clinical evidence explained this event"
+        ),
+    )
     detected_not_before = models.DateTimeField(
         help_text="Instant of the accepted census photograph before the change",
     )
     detected_at = models.DateTimeField(
         help_text="Instant of the accepted census photograph detecting the change",
+    )
+    sector_attribution = models.CharField(
+        max_length=30,
+        choices=DailyStatisticsSectorAttribution.choices,
+        default=DailyStatisticsSectorAttribution.OBSERVED,
+        help_text=(
+            "How the sector this event stores was determined: observed in the "
+            "detecting photograph, inferred from the last unambiguous census "
+            "position when the event itself carries no sector, or not "
+            "determined"
+        ),
     )
     fingerprint = models.CharField(
         max_length=64,
@@ -397,7 +472,8 @@ class DailyStatisticsEvent(models.Model):
                 name="uq_daily_statistics_event_report_fingerprint",
             ),
             models.CheckConstraint(
-                condition=models.Q(origin_sector__isnull=False)
+                condition=models.Q(kind__in=EXIT_EVENT_KINDS)
+                | models.Q(origin_sector__isnull=False)
                 | models.Q(destination_sector__isnull=False),
                 name="ck_daily_statistics_event_has_endpoint",
             ),

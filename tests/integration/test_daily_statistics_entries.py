@@ -500,6 +500,21 @@ def _single_event(report: DailyStatisticsReport, record: str) -> DailyStatistics
     return events[0]
 
 
+def _event_of_kind(
+    report: DailyStatisticsReport,
+    record: str,
+    kind: str,
+) -> DailyStatisticsEvent:
+    """The one event of ``record`` carrying ``kind``.
+
+    A record can hold an entry and an exit of the same day once departures are
+    derived, so a test that only needs one of them selects it by kind.
+    """
+    events = list(report.events.filter(record=record, kind=kind))
+    assert len(events) == 1, f"expected one {kind} event for {record}: {events}"
+    return events[0]
+
+
 def _assert_no_sector_event(report: DailyStatisticsReport, record: str) -> None:
     """No sector event may exist for ``record``."""
     assert not report.events.filter(record=record).exists()
@@ -1580,9 +1595,10 @@ class TestEventLedgerIdentity:
             ],
             closing=[],
         )
-        event = _single_event(
+        event = _event_of_kind(
             _materialize(policy=_policy(external=(EXTERNAL_ORIGIN,))),
             PATIENT_RECORD,
+            DailyStatisticsEventKind.HOSPITAL_ADMISSION,
         )
 
         with pytest.raises(IntegrityError):
