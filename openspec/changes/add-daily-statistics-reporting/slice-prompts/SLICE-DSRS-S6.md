@@ -16,10 +16,10 @@ exclusivamente a revisão materializada.
 
 Decisão humana registrada durante a execução: criar agora as permissões
 `view_daily_statistics` e `export_daily_statistics` em `Meta.permissions`, com
-migration própria. Eventos com origem e destino nulos não podem desaparecer nem
-ser atribuídos arbitrariamente: a página os mostra uma única vez em uma seção
-de relatório `Setor não identificado`, que S7 espelhará em worksheet
-condicional.
+migration própria. Eventos com origem e destino nulos e pacientes do fechamento
+sem setor atribuível não podem desaparecer nem ser atribuídos arbitrariamente:
+a página os mostra uma única vez em uma seção de relatório
+`Setor não identificado`, que S7 espelhará em worksheet condicional.
 
 ## Requisitos verificáveis
 
@@ -32,8 +32,9 @@ condicional.
   saldo ou excedente sem recalcular métricas.
 - **R5:** accordion do setor contém entradas, saídas, eventos com origem ou
   destino não identificado e pacientes; cada lista mantém badge zero e estado
-  vazio quando aplicável. Eventos com ambos os endpoints nulos aparecem uma
-  única vez na seção de relatório `Setor não identificado`.
+  vazio quando aplicável. Eventos com ambos os endpoints nulos e pacientes do
+  fechamento sem setor aparecem uma única vez na seção de relatório
+  `Setor não identificado`.
 - **R6:** controles de collapse preservam rótulos e estados acessíveis.
 - **R7:** pacientes/eventos usam ordenação natural compartilhada.
 - **R8:** item `Estatísticas` aparece somente com permissão, entre `Leitos` e

@@ -217,11 +217,11 @@ The canonical route is `/statistics/`; Django's slash behavior may redirect
 `/statistics`. The default date is yesterday when ready, otherwise the latest
 ready date, never today. The HTML follows the Bootstrap collapse and
 accessibility patterns already used by `/beds/`. Events whose origin and
-destination are both unknown cannot be assigned to an official sector and are
-therefore shown once in a report-level `Setor não identificado` section rather
-than being silently omitted or arbitrarily attributed. XLSX mirrors that
-section with a conditional worksheet of the same name only when such events
-exist.
+destination are both unknown, and closing patients without an attributable
+sector, cannot be assigned to an official grouping. They are therefore shown
+once in a report-level `Setor não identificado` section rather than being
+silently omitted or arbitrarily attributed. XLSX mirrors that section with a
+conditional worksheet of the same name whenever either kind of row exists.
 
 Natural bed sorting tokenizes textual and numeric segments, puts missing beds
 last and then uses normalized name and record as tie-breakers. The helper is
@@ -244,9 +244,10 @@ Manual adjustment permission and UI are explicitly deferred.
 
 Use the existing `openpyxl` dependency. Each official presentation unit gets
 one sheet. When the selected revision contains events with neither origin nor
-destination sector, one additional conditional `Setor não identificado` sheet
-preserves those events without pretending it is an official grouping. Sheet
-names are sanitized to Excel's character and 31-character limits,
+destination sector or closing patients without an attributable sector, one
+additional conditional `Setor não identificado` sheet preserves those rows
+without pretending it is an official grouping. Sheet names are sanitized to
+Excel's character and 31-character limits,
 de-duplicated deterministically and accompanied by the full unit name inside
 the sheet.
 

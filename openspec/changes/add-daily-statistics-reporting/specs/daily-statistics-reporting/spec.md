@@ -366,12 +366,13 @@ origem ou destino não identificado e pacientes do fechamento.
 - **THEN** seu título e badge zero continuam visíveis
 - **AND** a interface apresenta estado vazio explícito
 
-#### Scenario: Evento não possui setor atribuível
+#### Scenario: Linha nominal não possui setor atribuível
 
-- **WHEN** um evento materializado não possui setor de origem nem de destino
-- **THEN** a página o exibe uma única vez na seção de relatório
+- **WHEN** um evento materializado não possui setor de origem nem de destino ou
+  um paciente do fechamento não possui setor atribuível
+- **THEN** a página exibe a linha uma única vez na seção de relatório
   `Setor não identificado`
-- **AND** não o omite nem o atribui arbitrariamente a um agrupamento oficial
+- **AND** não a omite nem a atribui arbitrariamente a um agrupamento oficial
 
 ### Requirement: Pacientes são ordenados naturalmente por leito
 
@@ -402,12 +403,13 @@ ordenação apresentadas na página.
 - **THEN** o workbook contém uma folha por agrupamento oficial exibido
 - **AND** cada folha identifica o nome completo do setor
 
-#### Scenario: Workbook possui eventos sem setor atribuível
+#### Scenario: Workbook possui linhas sem setor atribuível
 
 - **WHEN** a revisão selecionada contém evento sem origem nem destino setorial
+  ou paciente do fechamento sem setor atribuível
 - **THEN** o workbook contém também a folha condicional
   `Setor não identificado`
-- **AND** essa folha preserva o evento sem representá-lo como agrupamento
+- **AND** essa folha preserva essas linhas sem representá-las como agrupamento
   oficial
 
 #### Scenario: Folha contém todas as tabelas
