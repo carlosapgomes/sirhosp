@@ -1,4 +1,4 @@
-"""Materialized daily statistics projection (DSRS-S2, DSRS-S3, DSRS-S4).
+"""Materialized daily statistics projection (DSRS-S2, DSRS-S3, DSRS-S4, DSRS-S7).
 
 The projection is owned by the reporting module: source facts stay in the
 census, ingestion and clinical apps, while this app persists only the
@@ -11,11 +11,14 @@ photograph; nothing here recalculates official capacity, occupancy, balance or
 excess. Detected entries, internal transfers and classified exits are one
 durable event row per logical fact, with the event's own origin classification,
 clinical instant or date when a source provides one, detection interval,
-attributed sector quality and deterministic fingerprint.
+attributed sector quality and deterministic fingerprint. The module also owns
+the served-export audit log: one aggregate row per workbook served, with no
+nominal payload and no persisted file.
 """
 
 from __future__ import annotations
 
+from django.conf import settings
 from django.db import models
 
 from apps.census.models import (
@@ -516,3 +519,52 @@ class DailyStatisticsEvent(models.Model):
             f"{self.kind} {self.record} @ {self.bed} "
             f"report {self.report_id}"
         )
+
+
+class StatisticsExportLog(models.Model):
+    """One audit row of a daily statistics workbook served to a user.
+
+    The log answers who received which reproducible revision and how much was
+    served, and nothing else: it keeps aggregate counts and references only,
+    never a patient name, record or row content, and the workbook it describes
+    is generated in memory and never persisted. A row is created only after the
+    workbook exists and the response is ready to be served, so a failed
+    generation leaves no success behind.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="daily_statistics_exports",
+        help_text="Authenticated user the workbook was served to",
+    )
+    report = models.ForeignKey(
+        DailyStatisticsReport,
+        on_delete=models.PROTECT,
+        related_name="export_logs",
+        help_text="Exact revision the served workbook reproduced",
+    )
+    served_at = models.DateTimeField(
+        auto_now_add=True,
+        help_text="Instant the workbook was generated and ready to be served",
+    )
+    sheet_count = models.PositiveIntegerField(
+        help_text="Aggregate number of worksheets served",
+    )
+    row_count = models.PositiveIntegerField(
+        help_text="Aggregate number of data rows served, section titles excluded",
+    )
+
+    class Meta:
+        ordering = ["-served_at", "-pk"]
+        indexes = [
+            models.Index(
+                fields=["report", "served_at"],
+                name="dsr_export_report_idx",
+            ),
+        ]
+        verbose_name = "Statistics Export Log"
+        verbose_name_plural = "Statistics Export Logs"
+
+    def __str__(self) -> str:
+        return f"export report {self.report_id} at {self.served_at}"

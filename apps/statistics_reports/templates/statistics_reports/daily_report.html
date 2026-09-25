@@ -47,6 +47,13 @@
     <span class="badge bg-light text-dark border">Censo de fechamento: execução {{ projection.report.closing_run_id }}</span>
     <span class="badge bg-light text-dark border">Catálogo vigente desde: {{ projection.report.catalog.effective_from|date:"d/m/Y" }}</span>
     <span class="badge bg-light text-dark border">{{ projection.report.algorithm_version }}</span>
+    {% if perms.statistics_reports.export_daily_statistics %}
+    <a class="btn btn-sm btn-outline-primary ms-auto"
+       href="{% url 'statistics_reports:daily_report_export' %}{% if selected_date %}?date={{ selected_date|date:'Y-m-d' }}{% endif %}">
+      <i class="bi bi-file-earmark-spreadsheet"></i>
+      Exportar XLSX
+    </a>
+    {% endif %}
   </div>
   {% if projection.quality_warnings %}
   <div class="alert alert-warning small" role="alert">

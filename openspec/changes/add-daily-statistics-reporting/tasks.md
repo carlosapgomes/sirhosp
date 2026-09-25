@@ -41,9 +41,9 @@
 
 ## 8. SLICE-DSRS-S7 — XLSX e auditoria de exportação
 
-- [ ] 8.1 RED: adicionar testes para permissão independente, uma folha por setor, nomes válidos/únicos, seções vazias, quantidades, campos/ordenação, formula injection, `no-store`, ausência de arquivo persistido e log somente após resposta pronta; registrar RED em container
-- [ ] 8.2 GREEN: implementar exporter `openpyxl`, endpoint e log agregado de arquivo gerado/servido a partir da mesma projeção da página; repetir testes focados e regressões locais
-- [ ] 8.3 Gerar `/tmp/sirhosp-slice-DSRS-S7-report.md` e executar check, lint, typecheck e Markdown alterado
+- [x] 8.1 RED: adicionar testes para permissão independente, uma folha por setor, nomes válidos/únicos, seções vazias, quantidades, campos/ordenação, formula injection, `no-store`, ausência de arquivo persistido e log somente após resposta pronta; registrar RED em container
+- [x] 8.2 GREEN: implementar exporter `openpyxl`, endpoint e log agregado de arquivo gerado/servido a partir da mesma projeção da página; repetir testes focados e regressões locais
+- [x] 8.3 Gerar `/tmp/sirhosp-slice-DSRS-S7-report.md` e executar check, lint, typecheck e Markdown alterado
 
 ## 9. SLICE-DSRS-S8 — Ativação futura e observabilidade
 
