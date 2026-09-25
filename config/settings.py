@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -129,3 +130,25 @@ LOGOUT_REDIRECT_URL = "/"
 SUMMARY_CHUNK_DAYS: int = int(os.getenv("SUMMARY_CHUNK_DAYS", "3"))
 # Overlap between consecutive chunks in days (default: 1).
 SUMMARY_OVERLAP_DAYS: int = int(os.getenv("SUMMARY_OVERLAP_DAYS", "1"))
+
+# ---------------------------------------------------------------------------
+# Daily statistics reporting (DSRS)
+# ---------------------------------------------------------------------------
+# First eligible America/Bahia local date (YYYY-MM-DD) declared for the daily
+# statistics feature. Unset means the feature is not activated yet: no date is
+# eligible and the closing command fails closed instead of rebuilding any
+# earlier history.
+_STATISTICS_ACTIVATION_DATE = os.getenv("STATISTICS_ACTIVATION_DATE", "").strip()
+STATISTICS_ACTIVATION_DATE: date | None = (
+    date.fromisoformat(_STATISTICS_ACTIVATION_DATE)
+    if _STATISTICS_ACTIVATION_DATE
+    else None
+)
+# Number of closed America/Bahia local dates the automatic finalization may
+# consider at once (default: 7). The batch closes only the most recent closed
+# dates, so no request triggers a large historical rebuild; an older
+# post-activation date is reachable through an explicit single-date request.
+# A non-positive value is refused by the command without processing any date.
+STATISTICS_FINALIZATION_LOOKBACK_DAYS: int = int(
+    os.getenv("STATISTICS_FINALIZATION_LOOKBACK_DAYS", "7")
+)

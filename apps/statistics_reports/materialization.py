@@ -1,4 +1,4 @@
-"""Atomic materialization of the daily statistics revision (DSRS-S2..S4).
+"""Atomic materialization of the daily statistics revision (DSRS-S2..S5).
 
 One call materializes, for one ``America/Bahia`` local date, the reproducible
 revision consumed by the page and the workbook of later slices:
@@ -27,6 +27,12 @@ backfill can be triggered from here. Automatic revisions reuse the same
 selected closing photograph: late clinical evidence changes the derived events,
 never the census close it was read from, and no clinical source record is
 ever written here.
+
+The close-of-day helpers of DSRS-S5 build the operational contract on top of
+that primitive: which closed local dates are eligible for automatic
+finalization, and a one-date close that reports an incomplete day structurally
+instead of raising, so a batch finalizer neither invents a day nor discards the
+remaining eligible dates.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 from django.db import models, transaction
 
@@ -73,7 +79,26 @@ class DateBeforeActivationError(DailyStatisticsMaterializationError):
 
 
 class IncompleteStatisticalDayError(DailyStatisticsMaterializationError):
-    """The day has no accepted opening or closing census photograph."""
+    """The day has no accepted opening or closing census photograph.
+
+    The structured reasons stay available on the exception so a batch
+    finalizer can report the day without selecting its window twice and
+    without raising for an operational, non-exceptional state.
+    """
+
+    def __init__(
+        self,
+        *,
+        local_date: date,
+        incomplete_reasons: Sequence[str],
+    ) -> None:
+        self.local_date = local_date
+        self.incomplete_reasons = tuple(incomplete_reasons)
+        super().__init__(
+            f"Local date {local_date.isoformat()} has no complete accepted "
+            "census window: "
+            f"{', '.join(self.incomplete_reasons) or 'unknown reason'}."
+        )
 
 
 @dataclass(frozen=True)
@@ -86,6 +111,112 @@ class MaterializationOutcome:
 
     report: DailyStatisticsReport
     created: bool
+
+
+@dataclass(frozen=True)
+class DailyStatisticsCloseOutcome:
+    """Result of closing one local date, with or without a revision.
+
+    ``report`` is ``None`` exactly when the date has no complete accepted
+    census window; the structured ``incomplete_reasons`` keep that state
+    explicit instead of a raised error, so a batch finalizer can report the day
+    without inventing data or discarding the remaining eligible dates.
+    """
+
+    local_date: date
+    report: DailyStatisticsReport | None
+    created: bool
+    incomplete_reasons: tuple[str, ...] = ()
+
+
+def eligible_finalization_dates(
+    *,
+    activation_date: date,
+    today: date,
+    lookback_days: int,
+) -> tuple[date, ...]:
+    """Closed local dates eligible for automatic finalization, ascending.
+
+    Eligibility is the intersection of two bounds, so the automatic window
+    never grows into an unbounded historical sweep:
+
+    - the last ``lookback_days`` closed local dates, i.e. ``today - 1``
+      backwards to ``today - lookback_days``; the day still being observed
+      never closes itself here;
+    - the dates at/after the declared activation boundary, so no date before
+      activation is ever rebuilt.
+
+    An older post-activation date stays reachable only through an explicit
+    single-date request, never through this automatic selection.
+
+    Args:
+        activation_date: First eligible local date declared for the feature.
+        today: Current ``America/Bahia`` local date.
+        lookback_days: Positive number of closed local dates to consider.
+
+    Returns:
+        The eligible local dates, or an empty tuple when none is eligible yet.
+
+    Raises:
+        ValueError: When ``lookback_days`` is not a positive integer.
+    """
+    if lookback_days < 1:
+        raise ValueError(
+            f"lookback_days must be positive, got {lookback_days}."
+        )
+    first_candidate = max(
+        activation_date,
+        today - timedelta(days=lookback_days),
+    )
+    if first_candidate >= today:
+        return ()
+    return tuple(
+        first_candidate + timedelta(days=offset)
+        for offset in range((today - first_candidate).days)
+    )
+
+
+def close_daily_statistics(
+    *,
+    local_date: date,
+    activation_date: date,
+    origin_policy: OriginPolicy = DEFAULT_ORIGIN_POLICY,
+) -> DailyStatisticsCloseOutcome:
+    """Close one local date, or report it as structurally incomplete.
+
+    Args:
+        local_date: Local ``America/Bahia`` calendar date to close.
+        activation_date: First eligible local date declared for the feature;
+            an earlier ``local_date`` is refused instead of backfilled.
+        origin_policy: Versioned origin classification of the revision.
+
+    Returns:
+        The ready revision with ``created`` telling whether this call
+        published it, or an explicit incomplete result carrying the structured
+        reasons of the day.
+
+    Raises:
+        DateBeforeActivationError: When ``local_date`` precedes
+            ``activation_date``.
+    """
+    try:
+        outcome = materialize_daily_statistics(
+            local_date=local_date,
+            activation_date=activation_date,
+            origin_policy=origin_policy,
+        )
+    except IncompleteStatisticalDayError as exc:
+        return DailyStatisticsCloseOutcome(
+            local_date=local_date,
+            report=None,
+            created=False,
+            incomplete_reasons=exc.incomplete_reasons,
+        )
+    return DailyStatisticsCloseOutcome(
+        local_date=local_date,
+        report=outcome.report,
+        created=outcome.created,
+    )
 
 
 def materialize_daily_statistics(
@@ -123,9 +254,8 @@ def materialize_daily_statistics(
     window = select_daily_statistics_window(local_date)
     if not window.complete or window.opening is None or window.closing is None:
         raise IncompleteStatisticalDayError(
-            f"Local date {local_date.isoformat()} has no complete accepted "
-            "census window: "
-            f"{', '.join(window.incomplete_reasons) or 'unknown reason'}."
+            local_date=local_date,
+            incomplete_reasons=window.incomplete_reasons,
         )
 
     closing = window.closing

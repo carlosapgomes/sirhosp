@@ -29,9 +29,9 @@
 
 ## 6. SLICE-DSRS-S5 — Fechamento diário operacional
 
-- [ ] 6.1 RED: adicionar testes de integração para comando por data, finalização limitada a datas pós-ativação, no-op idempotente, falha segura, qualidade degradada e concorrência; registrar RED em container
-- [ ] 6.2 GREEN: implementar management command de materialização/finalização diária com coordenação PostgreSQL, saída sem identidade clínica e nenhum rebuild histórico implícito; repetir testes focados e regressões operacionais locais
-- [ ] 6.3 Gerar `/tmp/sirhosp-slice-DSRS-S5-report.md` e executar check, lint, typecheck e Markdown alterado
+- [x] 6.1 RED: adicionar testes de integração para comando por data, finalização limitada a datas pós-ativação, no-op idempotente, falha segura, qualidade degradada e concorrência; registrar RED em container
+- [x] 6.2 GREEN: implementar management command de materialização/finalização diária com coordenação PostgreSQL, saída sem identidade clínica e nenhum rebuild histórico implícito; repetir testes focados e regressões operacionais locais
+- [x] 6.3 Gerar `/tmp/sirhosp-slice-DSRS-S5-report.md` e executar check, lint, typecheck e Markdown alterado
 
 ## 7. SLICE-DSRS-S6 — Página e navegação autorizadas
 
