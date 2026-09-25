@@ -1,0 +1,139 @@
+{% extends "base_sidebar.html" %}
+{% block page_title %}Estatísticas{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Estatísticas</li>
+  </ol>
+</nav>
+<div class="container-fluid py-3">
+  <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Relatório estatístico diário</h2>
+  <p class="text-muted small mb-3">
+    Relatório nominal por setor, materializado a partir dos censos de abertura e
+    de fechamento aceitos e das evidências clínicas persistidas. O conteúdo
+    reúne eventos confirmados ou detectados entre fotografias censitárias
+    consecutivas: movimentações ocorridas integralmente entre duas fotografias
+    não são observáveis.
+  </p>
+
+  <form method="get" action="{% url 'statistics_reports:daily_report' %}" class="row g-2 align-items-end mb-4">
+    <div class="col-auto">
+      <label class="form-label small mb-1" for="statistics-date">Data do relatório</label>
+      <input type="date" class="form-control form-control-sm" id="statistics-date" name="date"
+             value="{% if selected_date %}{{ selected_date|date:'Y-m-d' }}{% endif %}">
+    </div>
+    <div class="col-auto">
+      <button type="submit" class="btn btn-sm btn-primary">Ver relatório</button>
+    </div>
+  </form>
+
+  {% if not projection %}
+  <div class="alert alert-info" role="status">
+    {% if selected_date %}
+    Nenhum relatório materializado para <strong>{{ selected_date|date:"d/m/Y" }}</strong>.
+    {% else %}
+    Nenhum relatório estatístico materializado até agora.
+    {% endif %}
+    Dias sem censo de abertura e de fechamento aceitos, ou anteriores à data de
+    ativação da funcionalidade, não são reconstruídos automaticamente.
+  </div>
+  {% else %}
+  <div class="d-flex flex-wrap gap-1 align-items-center mb-2">
+    <span class="badge bg-light text-dark border">Data: {{ projection.report.local_date|date:"d/m/Y" }}</span>
+    <span class="badge bg-light text-dark border">Revisão: {{ projection.report.revision }}</span>
+    <span class="badge bg-light text-dark border">Período: {{ projection.report.opening_run.finished_at|date:"d/m/Y H:i" }} a {{ projection.report.closing_run.finished_at|date:"d/m/Y H:i" }}</span>
+    <span class="badge bg-light text-dark border">Censo de fechamento: execução {{ projection.report.closing_run_id }}</span>
+    <span class="badge bg-light text-dark border">Catálogo vigente desde: {{ projection.report.catalog.effective_from|date:"d/m/Y" }}</span>
+    <span class="badge bg-light text-dark border">{{ projection.report.algorithm_version }}</span>
+  </div>
+  {% if projection.quality_warnings %}
+  <div class="alert alert-warning small" role="alert">
+    <strong>Qualidade do período:</strong>
+    {% for code in projection.quality_warnings %}
+    <span class="badge bg-warning text-dark me-1">{{ code }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% for group in projection.groups %}
+  <div class="card border-0 shadow-sm mb-3{% if group.is_unknown_section %} border border-warning{% endif %}" id="statistics-group-{{ group.key }}">
+    <button type="button"
+            class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2 w-100 text-start border-0"
+            data-bs-toggle="collapse"
+            data-bs-target="#statistics-sector-{{ group.key }}"
+            aria-expanded="false"
+            aria-controls="statistics-sector-{{ group.key }}">
+      <span class="h6 fw-bold mb-0 d-flex align-items-center" style="color: var(--sirhosp-sidebar-bg);">
+        <i class="bi bi-chevron-right me-2 collapse-icon" aria-hidden="true"></i>
+        {{ group.title }}
+        {% if group.is_unknown_section %}
+        <span class="badge bg-warning text-dark ms-1">sem agrupamento oficial</span>
+        {% endif %}
+      </span>
+      <span class="d-flex flex-wrap gap-1 align-items-center">
+        {% for badge in group.header_badges %}
+        <span class="badge {{ badge.css }}">{{ badge.label }}</span>
+        {% endfor %}
+      </span>
+    </button>
+    <div class="collapse" id="statistics-sector-{{ group.key }}">
+      <div class="card-body">
+        {% for section in group.lists %}
+        <div class="mb-2">
+          <button type="button"
+                  class="btn btn-sm btn-light w-100 d-flex justify-content-between align-items-center collapsed"
+                  data-bs-toggle="collapse"
+                  data-bs-target="#statistics-list-{{ group.key }}-{{ section.key }}"
+                  aria-expanded="false"
+                  aria-controls="statistics-list-{{ group.key }}-{{ section.key }}">
+            <span>{{ section.title }}</span>
+            <span class="badge bg-secondary">{{ section.badge_count }}</span>
+          </button>
+          <div class="collapse" id="statistics-list-{{ group.key }}-{{ section.key }}">
+            <ul class="list-group list-group-flush border-start border-end border-bottom">
+              {% if section.patients %}
+              {% for patient in section.patients %}
+              <li class="list-group-item px-3 py-2">
+                <div class="d-flex flex-wrap gap-2 align-items-baseline">
+                  <span class="badge bg-light text-dark border">Leito {{ patient.bed|default:"não informado" }}</span>
+                  <span class="fw-semibold">{{ patient.name }}</span>
+                  <span class="text-muted small">Prontuário {{ patient.record }}</span>
+                  {% if patient.specialty %}
+                  <span class="badge bg-light text-dark border">{{ patient.specialty }}</span>
+                  {% endif %}
+                </div>
+              </li>
+              {% endfor %}
+              {% else %}
+              {% for row in section.events %}
+              <li class="list-group-item px-3 py-2">
+                <div class="d-flex flex-wrap gap-2 align-items-baseline">
+                  <span class="badge bg-light text-dark border">Leito {{ row.event.bed|default:"não informado" }}</span>
+                  <span class="fw-semibold">{{ row.event.name }}</span>
+                  <span class="text-muted small">Prontuário {{ row.event.record }}</span>
+                  <span class="badge bg-primary">{{ row.label }}</span>
+                </div>
+                <div class="small text-muted">
+                  Momento clínico: {{ row.clinical_display }} · Detecção: {{ row.detection_display }}
+                </div>
+                <div class="small text-muted">
+                  Origem: {{ row.origin_display }} · Destino: {{ row.destination_display }}
+                </div>
+              </li>
+              {% empty %}
+              <li class="list-group-item px-3 py-2 text-muted small">{{ section.empty_label }}</li>
+              {% endfor %}
+              {% endif %}
+            </ul>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>
+{% endblock %}

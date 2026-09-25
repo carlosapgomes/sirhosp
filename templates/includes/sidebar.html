@@ -21,6 +21,12 @@
       <i class="bi bi-door-open"></i>
       Leitos
     </a>
+    {% if perms.statistics_reports.view_daily_statistics %}
+    <a href="{% url 'statistics_reports:daily_report' %}" class="sirhosp-sidebar-link {% if active_menu == 'estatisticas' %}active{% endif %}">
+      <i class="bi bi-bar-chart"></i>
+      Estatísticas
+    </a>
+    {% endif %}
     <a href="{% url 'census:hospital_flow' %}" class="sirhosp-sidebar-link {% if active_menu == 'fluxo' %}active{% endif %}">
       <i class="bi bi-graph-up"></i>
       Fluxo Hospitalar

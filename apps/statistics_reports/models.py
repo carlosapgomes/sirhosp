@@ -151,6 +151,16 @@ class DailyStatisticsReport(models.Model):
         ]
         verbose_name = "Daily Statistics Report"
         verbose_name_plural = "Daily Statistics Reports"
+        permissions = [
+            (
+                "view_daily_statistics",
+                "Can view the daily statistics report",
+            ),
+            (
+                "export_daily_statistics",
+                "Can export the daily statistics report",
+            ),
+        ]
 
     def __str__(self) -> str:
         return (

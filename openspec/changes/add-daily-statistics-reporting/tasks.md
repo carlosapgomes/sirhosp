@@ -35,9 +35,9 @@
 
 ## 7. SLICE-DSRS-S6 — Página e navegação autorizadas
 
-- [ ] 7.1 RED: adicionar testes para `/statistics/`, permissões, default de data, estado sem relatório, `no-store`, menu entre Leitos e Fluxo Hospitalar, badges, collapsibles acessíveis, eventos com origem/destino não identificado e ordenação por leito; registrar RED em container
-- [ ] 7.2 GREEN: implementar rota, view fina, apresentação, template e menu consumindo somente a revisão materializada; repetir testes focados e verificar orçamento de queries
-- [ ] 7.3 Gerar `/tmp/sirhosp-slice-DSRS-S6-report.md` e executar check, lint, typecheck e Markdown alterado
+- [x] 7.1 RED: adicionar testes para `/statistics/`, permissões, default de data, estado sem relatório, `no-store`, menu entre Leitos e Fluxo Hospitalar, badges, collapsibles acessíveis, eventos com origem/destino não identificado e ordenação por leito; registrar RED em container
+- [x] 7.2 GREEN: implementar rota, view fina, apresentação, template e menu consumindo somente a revisão materializada; repetir testes focados e verificar orçamento de queries
+- [x] 7.3 Gerar `/tmp/sirhosp-slice-DSRS-S6-report.md` e executar check, lint, typecheck e Markdown alterado
 
 ## 8. SLICE-DSRS-S7 — XLSX e auditoria de exportação
 
