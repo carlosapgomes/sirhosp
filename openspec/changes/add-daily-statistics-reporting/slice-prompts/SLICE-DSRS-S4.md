@@ -15,6 +15,16 @@ Classificar desaparecimentos observados como óbito, alta, transferência ou
 distintas; inferir setor somente com procedência; e publicar nova revisão
 atômica quando evidência tardia mudar o resultado.
 
+Decisão humana registrada durante a execução: a transferência com destino não
+identificado é ancorada na saída. Quando um prontuário presente desaparece do
+censo seguinte e reaparece depois na cadeia, uma reaparição com agrupamento
+resolvido continua representada pelo único fato de S3; uma reaparição sem
+grupo resolvido confirma `internal_transfer` com origem no setor deixado e
+destino nulo. `alta_em` sem `saida_em` e `PatientMovement` não confirmam
+transferência. A constraint de endpoints deve continuar exigindo endpoint para
+entradas/transferências, mas permitir óbito, alta ou saída não classificada sem
+setor quando nenhuma posição anterior unívoca existir.
+
 ## Requisitos verificáveis
 
 - **R1:** precedência é óbito > `saida_em` > transferência > saída não
@@ -24,9 +34,11 @@ atômica quando evidência tardia mudar o resultado.
 - **R3:** alta usa saída efetiva, não `alta_em` isolada.
 - **R4:** setor ausente na evidência usa apenas a última posição unívoca anterior
   e registra atribuição inferida; caso contrário fica desconhecido.
-- **R5:** transferência confirmada sem destino conhecido usa `Transferência
-  interna — destino não identificado`; desaparecimento sem evidência de
-  transferência usa `Saída do setor — destino não identificado`, nunca alta.
+- **R5:** transferência confirmada pela sequência saída→gap→reaparição sem
+  agrupamento resolvido usa `Transferência interna — destino não identificado`;
+  reaparição resolvida preserva o único fato de S3, e desaparecimento sem
+  evidência de transferência usa `Saída do setor — destino não identificado`,
+  nunca alta. `alta_em` isolado e `PatientMovement` não confirmam transferência.
 - **R6:** mesma fonte/fingerprint é idempotente; evidência tardia diferente gera
   nova revisão corrente e preserva a anterior como superseded.
 - **R7:** fotografia final permanece a do mesmo fechamento durante revisão de
