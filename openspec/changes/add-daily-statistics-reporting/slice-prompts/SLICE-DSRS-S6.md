@@ -14,6 +14,13 @@ Entregar `/statistics/` somente leitura, protegida por permissão, com data
 default segura, período/qualidade explícitos e accordions por setor consumindo
 exclusivamente a revisão materializada.
 
+Decisão humana registrada durante a execução: criar agora as permissões
+`view_daily_statistics` e `export_daily_statistics` em `Meta.permissions`, com
+migration própria. Eventos com origem e destino nulos não podem desaparecer nem
+ser atribuídos arbitrariamente: a página os mostra uma única vez em uma seção
+de relatório `Setor não identificado`, que S7 espelhará em worksheet
+condicional.
+
 ## Requisitos verificáveis
 
 - **R1:** rota canônica `/statistics/` exige autenticação e permissão de consulta;
@@ -25,7 +32,8 @@ exclusivamente a revisão materializada.
   saldo ou excedente sem recalcular métricas.
 - **R5:** accordion do setor contém entradas, saídas, eventos com origem ou
   destino não identificado e pacientes; cada lista mantém badge zero e estado
-  vazio quando aplicável.
+  vazio quando aplicável. Eventos com ambos os endpoints nulos aparecem uma
+  única vez na seção de relatório `Setor não identificado`.
 - **R6:** controles de collapse preservam rótulos e estados acessíveis.
 - **R7:** pacientes/eventos usam ordenação natural compartilhada.
 - **R8:** item `Estatísticas` aparece somente com permissão, entre `Leitos` e
@@ -43,6 +51,8 @@ expected_files:
   - config/urls.py
   - templates/includes/sidebar.html
   - tests/integration/test_daily_statistics_page.py
+  - apps/statistics_reports/models.py
+  - apps/statistics_reports/migrations/0004_statistics_permissions.py
 allowed_incidental_files: []
 out_of_scope:
   - XLSX e log de exportação
@@ -52,8 +62,9 @@ out_of_scope:
   - systemd e produção
 ```
 
-Limite: sete arquivos. Pare se precisar duplicar o grafo do catálogo, expor a
-página apenas por `is_staff` ou aumentar queries por setor.
+Limite: nove arquivos, incluindo os dois arquivos explicitamente autorizados
+para as permissões dedicadas. Pare se precisar duplicar o grafo do catálogo,
+expor a página apenas por `is_staff` ou aumentar queries por setor.
 
 ## Matriz requisito -> arquivo -> teste/check
 

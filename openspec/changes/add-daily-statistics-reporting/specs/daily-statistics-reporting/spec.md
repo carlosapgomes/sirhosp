@@ -366,6 +366,13 @@ origem ou destino não identificado e pacientes do fechamento.
 - **THEN** seu título e badge zero continuam visíveis
 - **AND** a interface apresenta estado vazio explícito
 
+#### Scenario: Evento não possui setor atribuível
+
+- **WHEN** um evento materializado não possui setor de origem nem de destino
+- **THEN** a página o exibe uma única vez na seção de relatório
+  `Setor não identificado`
+- **AND** não o omite nem o atribui arbitrariamente a um agrupamento oficial
+
 ### Requirement: Pacientes são ordenados naturalmente por leito
 
 O sistema SHALL ordenar pacientes por leito em ordem natural alfanumérica,
@@ -394,6 +401,14 @@ ordenação apresentadas na página.
 - **WHEN** um usuário autorizado exporta um relatório
 - **THEN** o workbook contém uma folha por agrupamento oficial exibido
 - **AND** cada folha identifica o nome completo do setor
+
+#### Scenario: Workbook possui eventos sem setor atribuível
+
+- **WHEN** a revisão selecionada contém evento sem origem nem destino setorial
+- **THEN** o workbook contém também a folha condicional
+  `Setor não identificado`
+- **AND** essa folha preserva o evento sem representá-lo como agrupamento
+  oficial
 
 #### Scenario: Folha contém todas as tabelas
 

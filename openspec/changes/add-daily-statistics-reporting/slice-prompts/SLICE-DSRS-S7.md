@@ -14,12 +14,18 @@ Gerar um XLSX seguro e reproduzível da mesma projeção da página, com uma fol
 por setor, todas as seções fixas e registro de usuário/data/revisão somente
 depois de o arquivo estar pronto para ser servido.
 
+Decisão humana herdada de S6: quando a revisão contiver eventos com origem e
+destino nulos, adicionar uma worksheet condicional `Setor não identificado`
+para espelhar a seção de relatório da página. Ela não representa agrupamento
+oficial e não existe quando não houver esses eventos.
+
 ## Requisitos verificáveis
 
 - **R1:** exportação exige `export_daily_statistics`, independente da permissão
   de consulta, e usa `private, no-store`.
 - **R2:** workbook contém uma folha por agrupamento oficial, nome válido/único e
-  nome completo dentro da folha.
+  nome completo dentro da folha; eventos sem ambos os endpoints usam a folha
+  condicional `Setor não identificado` e nunca são omitidos.
 - **R3:** cada folha contém, na ordem, internações, transferências de entrada,
   óbitos, transferências de saída, altas, eventos com origem ou destino não
   identificado e pacientes finais.
@@ -38,7 +44,7 @@ depois de o arquivo estar pronto para ser servido.
 ```yaml
 expected_files:
   - apps/statistics_reports/models.py
-  - apps/statistics_reports/migrations/0003_statistics_export_log.py
+  - apps/statistics_reports/migrations/0005_statistics_export_log.py
   - apps/statistics_reports/export.py
   - apps/statistics_reports/views.py
   - apps/statistics_reports/urls.py
@@ -52,9 +58,9 @@ out_of_scope:
   - deploy/systemd e produção
 ```
 
-Limite: sete arquivos. Se DSRS-S4 já tiver usado o número `0003`, ajuste apenas
-o número da migration, sem reescrever migrations aplicadas. Pare se a geração
-exigir nova dependência ou armazenamento em disco.
+Limite: sete arquivos. S4 usa `0003` e S6 usa `0004`; use `0005` para o log de
+exportação sem reescrever migrations aplicadas. Pare se a geração exigir nova
+dependência ou armazenamento em disco.
 
 ## Matriz requisito -> arquivo -> teste/check
 
