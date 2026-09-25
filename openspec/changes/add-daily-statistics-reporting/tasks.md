@@ -17,9 +17,9 @@
 
 ## 4. SLICE-DSRS-S3 — Entradas e transferências detectadas
 
-- [ ] 4.1 RED: adicionar testes para comparação âncora→abertura→fechamento, internação externa, transferência hospitalar, troca de leito sem evento, identidade ambígua, origem desconhecida, evento único com duas pernas e ordenação natural; registrar RED em container
-- [ ] 4.2 GREEN: implementar política versionada de origem e derivação idempotente de entradas/transferências a partir de censos consecutivos, mantendo intervalos de detecção e os rótulos explícitos `Entrada no setor — origem não identificada` e `Transferência interna — origem não identificada`; repetir testes focados e regressões locais
-- [ ] 4.3 Gerar `/tmp/sirhosp-slice-DSRS-S3-report.md` e executar check, lint, typecheck e Markdown alterado
+- [x] 4.1 RED: adicionar testes para comparação âncora→abertura→fechamento, internação externa, transferência hospitalar, troca de leito sem evento, identidade ambígua, origem desconhecida, evento único com duas pernas e ordenação natural; registrar RED em container
+- [x] 4.2 GREEN: implementar política versionada de origem e derivação idempotente de entradas/transferências a partir de censos consecutivos, mantendo intervalos de detecção e os rótulos explícitos `Entrada no setor — origem não identificada` e `Transferência interna — origem não identificada`; repetir testes focados e regressões locais
+- [x] 4.3 Gerar `/tmp/sirhosp-slice-DSRS-S3-report.md` e executar check, lint, typecheck e Markdown alterado
 
 ## 5. SLICE-DSRS-S4 — Saídas, precedência e revisões automáticas
 

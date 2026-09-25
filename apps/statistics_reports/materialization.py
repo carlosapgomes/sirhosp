@@ -1,4 +1,4 @@
-"""Atomic materialization of the daily statistics final photograph (DSRS-S2).
+"""Atomic materialization of the daily statistics revision (DSRS-S2, DSRS-S3).
 
 One call materializes, for one ``America/Bahia`` local date, the reproducible
 revision consumed by the page and the workbook of later slices:
@@ -9,6 +9,10 @@ revision consumed by the page and the workbook of later slices:
   only copy its persisted metrics;
 - patients are the nominal rows of the closing census photograph, attributed
   to the official grouping by the shared occupancy assignment primitive;
+- detected entries and internal transfers are derived from the consecutive
+  accepted census photographs (DSRS-S3) and persisted as one row per logical
+  fact, with the versioned origin classification, the detection interval and
+  the explicit quality of ambiguous identity or grouping;
 - a deterministic SHA-256 source fingerprint makes a repeated build a no-op
   and publishes a superseding revision only when the sources changed.
 
@@ -32,11 +36,20 @@ from django.db import models, transaction
 from apps.census.models import CensusSnapshot, OccupancyMeasurement
 from apps.census.occupancy import assign_official_group_keys
 from apps.ingestion.models import IngestionRun
+from apps.statistics_reports.events import (
+    EntryDerivation,
+    derive_entry_events,
+)
 from apps.statistics_reports.models import (
+    DailyStatisticsEvent,
     DailyStatisticsPatient,
     DailyStatisticsReport,
     DailyStatisticsReportStatus,
     DailyStatisticsSector,
+)
+from apps.statistics_reports.origin_policy import (
+    DEFAULT_ORIGIN_POLICY,
+    OriginPolicy,
 )
 from apps.statistics_reports.selection import (
     AcceptedCensus,
@@ -73,6 +86,7 @@ def materialize_daily_statistics(
     *,
     local_date: date,
     activation_date: date,
+    origin_policy: OriginPolicy = DEFAULT_ORIGIN_POLICY,
 ) -> MaterializationOutcome:
     """Materialize or reuse the ready revision of one Bahia local date.
 
@@ -80,6 +94,10 @@ def materialize_daily_statistics(
         local_date: Local ``America/Bahia`` calendar date to materialize.
         activation_date: First eligible local date declared for the feature;
             an earlier ``local_date`` is refused instead of backfilled.
+        origin_policy: Versioned origin classification in force for the
+            detected entries of this revision; its version is part of the
+            source fingerprint, so changing the mapping publishes a new
+            revision.
 
     Returns:
         The ready revision of ``local_date`` and whether it was created now.
@@ -122,10 +140,20 @@ def materialize_daily_statistics(
             measurement=closing.measurement,
             snapshots=photograph,
         )
+        derivation = derive_entry_events(
+            window=window,
+            origin_policy=origin_policy,
+        )
+        quality_codes = _quality_codes(
+            window=window,
+            derivation=derivation,
+        )
         fingerprint = _source_fingerprint(
             window=window,
             photograph=photograph,
             assignment=assignment,
+            derivation=derivation,
+            quality_codes=quality_codes,
         )
         if current is not None and current.source_fingerprint == fingerprint:
             # Same sources: the current ready revision is already the answer.
@@ -141,6 +169,7 @@ def materialize_daily_statistics(
             activation_date=activation_date,
             fingerprint=fingerprint,
             revision=_next_revision(local_date),
+            quality_codes=quality_codes,
         )
         sectors = _create_sectors(report=report, measurement=closing.measurement)
         _create_patients(
@@ -149,6 +178,7 @@ def materialize_daily_statistics(
             assignment=assignment,
             sectors=sectors,
         )
+        _create_events(report=report, derivation=derivation, sectors=sectors)
         return MaterializationOutcome(report=report, created=True)
 
 
@@ -181,18 +211,32 @@ def _next_revision(local_date: date) -> int:
     return int(highest or 0) + 1
 
 
+def _quality_codes(
+    *,
+    window: DailyStatisticsWindow,
+    derivation: EntryDerivation,
+) -> tuple[str, ...]:
+    """Structured quality codes of the revision, without duplicates."""
+    return tuple(
+        dict.fromkeys((*window.quality_warnings, *derivation.quality_codes))
+    )
+
+
 def _source_fingerprint(
     *,
     window: DailyStatisticsWindow,
     photograph: Sequence[CensusSnapshot],
     assignment: Mapping[int, str | None],
+    derivation: EntryDerivation,
+    quality_codes: Sequence[str],
 ) -> str:
     """Deterministic SHA-256 of every source value this revision copies.
 
     The payload covers the selected runs, the exact measurement and catalog
-    context, the copied official sector metrics and the nominal closing rows
-    with their resolved grouping, so an unchanged source set is recognized as
-    the same revision.
+    context, the copied official sector metrics, the nominal closing rows with
+    their resolved grouping and the whole compared census chain with its
+    derived events and origin policy version, so an unchanged source set is
+    recognized as the same revision.
     """
     assert window.closing is not None
     measurement = window.closing.measurement
@@ -205,7 +249,13 @@ def _source_fingerprint(
         "catalog": measurement.catalog_id,
         "algorithm_version": measurement.algorithm_version,
         "captured_at": measurement.captured_at.isoformat(),
-        "quality_warnings": list(window.quality_warnings),
+        "origin_policy_version": derivation.origin_policy_version,
+        "quality_warnings": list(quality_codes),
+        "census_chain": [
+            [photograph_entry.run.pk, photograph_entry.captured_at.isoformat()]
+            for photograph_entry in derivation.chain
+        ],
+        "events": [event.fingerprint for event in derivation.events],
         "sectors": _sector_payload(measurement),
         "patients": [
             [
@@ -259,6 +309,7 @@ def _create_report(
     activation_date: date,
     fingerprint: str,
     revision: int,
+    quality_codes: Sequence[str],
 ) -> DailyStatisticsReport:
     """Persist the ready revision header of one materialized day."""
     assert window.opening is not None
@@ -276,7 +327,7 @@ def _create_report(
         catalog=measurement.catalog,
         algorithm_version=measurement.algorithm_version,
         source_fingerprint=fingerprint,
-        quality_warnings_json=list(window.quality_warnings),
+        quality_warnings_json=list(quality_codes),
     )
 
 
@@ -340,3 +391,77 @@ def _create_patients(
         )
     if rows:
         DailyStatisticsPatient.objects.bulk_create(rows)
+
+
+def _create_events(
+    *,
+    report: DailyStatisticsReport,
+    derivation: EntryDerivation,
+    sectors: Mapping[str, DailyStatisticsSector],
+) -> None:
+    """Persist one durable row per detected entry or internal transfer.
+
+    A transition only observed between two census photographs carries no
+    clinical instant: ``occurred_at`` and ``occurred_on`` stay null and the
+    detection interval keeps the uncertainty, so no hour and no clinical date
+    are synthesized.
+    """
+    rows: list[DailyStatisticsEvent] = []
+    for event in derivation.events:
+        snapshot_pk = event.census_snapshot.pk
+        rows.append(
+            DailyStatisticsEvent(
+                report=report,
+                kind=event.kind,
+                origin_nature=event.origin_nature,
+                origin_value=event.origin_value,
+                origin_policy_version=event.origin_policy_version,
+                origin_sector=_attributed_sector(
+                    sectors=sectors,
+                    stable_key=event.origin_stable_key,
+                    report=report,
+                    snapshot_pk=snapshot_pk,
+                ),
+                destination_sector=_attributed_sector(
+                    sectors=sectors,
+                    stable_key=event.destination_stable_key,
+                    report=report,
+                    snapshot_pk=snapshot_pk,
+                ),
+                census_snapshot_id=snapshot_pk,
+                record=event.record,
+                name=event.name,
+                bed=event.bed,
+                occurred_at=None,
+                occurred_on=None,
+                detected_not_before=event.detected_not_before,
+                detected_at=event.detected_at,
+                fingerprint=event.fingerprint,
+            )
+        )
+    if rows:
+        DailyStatisticsEvent.objects.bulk_create(rows)
+
+
+def _attributed_sector(
+    *,
+    sectors: Mapping[str, DailyStatisticsSector],
+    stable_key: str | None,
+    report: DailyStatisticsReport,
+    snapshot_pk: int,
+) -> DailyStatisticsSector | None:
+    """Persisted sector row of one resolved stable key, or ``None``.
+
+    ``None`` keeps an event endpoint that could not be identified explicit.
+    """
+    if stable_key is None:
+        return None
+    sector = sectors.get(stable_key)
+    if sector is None:
+        # A derived stable key can only come from the groups of this exact
+        # measurement; reaching this branch would mean a silently lost sector.
+        raise DailyStatisticsMaterializationError(
+            f"Event census row {snapshot_pk} resolved to the unknown official "
+            f"group {stable_key!r} of measurement {report.measurement_id}."
+        )
+    return sector

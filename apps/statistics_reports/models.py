@@ -1,4 +1,4 @@
-"""Materialized daily statistics projection (DSRS-S2).
+"""Materialized daily statistics projection (DSRS-S2, DSRS-S3).
 
 The projection is owned by the reporting module: source facts stay in the
 census, ingestion and clinical apps, while this app persists only the
@@ -8,7 +8,9 @@ catalog context, a deterministic source fingerprint and the quality metadata of
 the selected window. Sectors copy the metrics already persisted by that exact
 measurement and patients are the nominal rows of the closing census
 photograph; nothing here recalculates official capacity, occupancy, balance or
-excess.
+excess. Detected entries and internal transfers are one durable event row per
+logical fact, with the event's own origin classification, detection interval
+and deterministic fingerprint.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from apps.census.models import (
     OccupancyCalculationStatus,
     OccupancyMeasurement,
 )
+from apps.statistics_reports.origin_policy import OriginNature
 
 
 class DailyStatisticsReportStatus(models.TextChoices):
@@ -254,3 +257,176 @@ class DailyStatisticsPatient(models.Model):
 
     def __str__(self) -> str:
         return f"{self.record} @ {self.bed} report {self.report_id}"
+
+
+class DailyStatisticsEventKind(models.TextChoices):
+    """Stable normalized kind of one detected report event.
+
+    A confirmed internal transfer is one single kind: both legs live in the
+    same event row instead of being duplicated as independent facts.
+    """
+
+    HOSPITAL_ADMISSION = "hospital_admission", "Internação hospitalar"
+    INTERNAL_TRANSFER = "internal_transfer", "Transferência interna"
+    UNCLASSIFIED_ENTRY = (
+        "unclassified_entry",
+        "Entrada no setor — origem não identificada",
+    )
+
+
+class DailyStatisticsEvent(models.Model):
+    """One detected logical event of a revision.
+
+    A sector change is stored once, carrying origin and destination, and is
+    read as the origin's exit and as the destination's entry. The origin
+    classification records the policy version and the normalized source value
+    that produced it, so an entry never becomes an admission silently.
+    Clinical time stays distinct from detection: a transition only observed
+    between two census photographs keeps its detection interval and stores no
+    synthesized instant.
+    """
+
+    report = models.ForeignKey(
+        DailyStatisticsReport,
+        on_delete=models.CASCADE,
+        related_name="events",
+    )
+    kind = models.CharField(
+        max_length=30,
+        choices=DailyStatisticsEventKind.choices,
+        help_text="Stable normalized kind of the detected fact",
+    )
+    origin_nature = models.CharField(
+        max_length=30,
+        choices=OriginNature.choices,
+        default=OriginNature.UNKNOWN,
+        help_text="Institutional nature attributed to the event origin",
+    )
+    origin_value = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text=(
+            "Normalized source origin value the classification used; empty "
+            "when the origin came from a census position instead"
+        ),
+    )
+    origin_policy_version = models.CharField(
+        max_length=30,
+        help_text=(
+            "Version of the origin policy in force when this event was "
+            "derived; stored for audit even when the origin came from a "
+            "resolved census position"
+        ),
+    )
+    origin_sector = models.ForeignKey(
+        DailyStatisticsSector,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="origin_events",
+        help_text=(
+            "Official grouping the patient left; null keeps an unidentified "
+            "origin explicit instead of inventing it"
+        ),
+    )
+    destination_sector = models.ForeignKey(
+        DailyStatisticsSector,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="destination_events",
+        help_text=(
+            "Official grouping the patient reached; null keeps an "
+            "unidentified destination explicit instead of inventing it"
+        ),
+    )
+    census_snapshot = models.ForeignKey(
+        CensusSnapshot,
+        on_delete=models.PROTECT,
+        related_name="daily_statistics_events",
+        help_text="Detecting census row this event was observed on",
+    )
+    record = models.CharField(
+        max_length=255,
+        help_text="Normalized patient record of the detecting row",
+    )
+    name = models.CharField(
+        max_length=512,
+        help_text="Nominal patient name at detection time",
+    )
+    bed = models.CharField(
+        max_length=50,
+        help_text="Bed of the detecting row",
+    )
+    occurred_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Exact aware clinical instant when the source provides one; null "
+            "never synthesizes an hour"
+        ),
+    )
+    occurred_on = models.DateField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Clinical date when only a date exists, without an hour; null "
+            "never synthesizes a clinical date"
+        ),
+    )
+    detected_not_before = models.DateTimeField(
+        help_text="Instant of the accepted census photograph before the change",
+    )
+    detected_at = models.DateTimeField(
+        help_text="Instant of the accepted census photograph detecting the change",
+    )
+    fingerprint = models.CharField(
+        max_length=64,
+        help_text=(
+            "Deterministic SHA-256 identity of this detected fact inside its "
+            "revision"
+        ),
+    )
+
+    class Meta:
+        ordering = ["report", "detected_at", "pk"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["report", "fingerprint"],
+                name="uq_daily_statistics_event_report_fingerprint",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(origin_sector__isnull=False)
+                | models.Q(destination_sector__isnull=False),
+                name="ck_daily_statistics_event_has_endpoint",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    detected_at__gte=models.F("detected_not_before")
+                ),
+                name="ck_daily_statistics_event_detection_order",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["report", "kind"],
+                name="dse_report_kind_idx",
+            ),
+            models.Index(
+                fields=["report", "origin_sector"],
+                name="dse_report_origin_idx",
+            ),
+            models.Index(
+                fields=["report", "destination_sector"],
+                name="dse_report_dest_idx",
+            ),
+        ]
+        verbose_name = "Daily Statistics Event"
+        verbose_name_plural = "Daily Statistics Events"
+
+    def __str__(self) -> str:
+        return (
+            f"{self.kind} {self.record} @ {self.bed} "
+            f"report {self.report_id}"
+        )
