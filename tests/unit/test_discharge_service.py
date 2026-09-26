@@ -140,7 +140,13 @@ class TestProcessDischarges:
             source_system="tasy",
             name="FULANO",
         )
-        already_discharged_date = timezone.now() - timedelta(hours=2)
+        # Synthetic timezone-aware reference: 10:00 in the operational
+        # timezone keeps ``reference - 2 h`` in the same operational day, so
+        # the scenario never depends on the current wall clock.
+        reference_datetime = timezone.localtime().replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+        already_discharged_date = reference_datetime - timedelta(hours=2)
         Admission.objects.create(
             patient=patient,
             source_admission_key="ADM-001",
@@ -159,7 +165,7 @@ class TestProcessDischarges:
             }
         ]
 
-        result = process_discharges(patients)
+        result = process_discharges(patients, discharge_date=reference_datetime)
         assert result["already_discharged"] == 1
         assert result["discharge_set"] == 0
 
@@ -231,6 +237,12 @@ class TestProcessDischarges:
 
     def test_multiple_patients_mixed_results(self):
         """Mixed results: some found, some not, some already discharged."""
+        # Synthetic timezone-aware reference: 10:00 in the operational
+        # timezone keeps ``reference - 3 h`` in the same operational day, so
+        # the scenario never depends on the current wall clock.
+        reference_datetime = timezone.localtime().replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
         # Patient 1: normal discharge
         p1 = Patient.objects.create(
             patient_source_key="111", source_system="tasy", name="P1")
@@ -244,7 +256,7 @@ class TestProcessDischarges:
         Admission.objects.create(
             patient=p2, source_admission_key="A2", source_system="tasy",
             admission_date=timezone.now() - timedelta(days=5),
-            discharge_date=timezone.now() - timedelta(hours=3))
+            discharge_date=reference_datetime - timedelta(hours=3))
 
         # Patient 3: not in DB (no Patient created)
         # Patient 4: no prontuario (empty)
@@ -263,7 +275,7 @@ class TestProcessDischarges:
              "especialidade": "", "data_internacao": ""},
         ]
 
-        result = process_discharges(patients)
+        result = process_discharges(patients, discharge_date=reference_datetime)
         assert result["total_pdf"] == 4
         assert result["discharge_set"] == 2       # P1 + P3 recovered
         assert result["already_discharged"] == 1  # P2
