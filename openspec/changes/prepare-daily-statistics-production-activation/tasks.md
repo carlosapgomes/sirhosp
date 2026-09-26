@@ -1,8 +1,8 @@
 ## 1. Preflight somente leitura
 
-- [ ] 1.1 RED: adicionar testes sintéticos para tag/release imutável, comparação de assets, `.env` allowlisted, data futura, timer diário inativo, cadências recentes e saída sem PHI; executar o teste focado em container e registrar a falha esperada
-- [ ] 1.2 GREEN: implementar o preflight host-level fail-closed sem comandos mutáveis, rede/systemd/journal reais nos testes ou persistência de evidência; repetir o teste focado e regressões locais
-- [ ] 1.3 Gerar `/tmp/sirhosp-slice-PDSPA-S1-report.md` com antes/depois, comandos, riscos e prova de que nenhuma operação de produção foi executada; validar lint, typecheck e Markdown proporcionais
+- [x] 1.1 RED: adicionar testes sintéticos para tag/release imutável, comparação de assets, `.env` allowlisted, data futura, timer diário inativo, cadências recentes e saída sem PHI; executar o teste focado em container e registrar a falha esperada
+- [x] 1.2 GREEN: implementar o preflight host-level fail-closed sem comandos mutáveis, rede/systemd/journal reais nos testes ou persistência de evidência; repetir o teste focado e regressões locais
+- [x] 1.3 Gerar `/tmp/sirhosp-slice-PDSPA-S1-report.md` com antes/depois, comandos, riscos e prova de que nenhuma operação de produção foi executada; validar lint, typecheck e Markdown proporcionais
 
 ## 2. Assets na release imutável
 
