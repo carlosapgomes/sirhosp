@@ -29,7 +29,9 @@ production surface. It pins:
   single-date rerun, disable and rollback runbook plus the activation
   preconditions for the intraday discharge, D-1 and death cadences;
 - R6: the units and runbook use dates, revisions, status and counts only,
-  never clinical identity, and never a mutating or extraction command.
+  never clinical identity, and never a mutating or extraction command;
+- PDSPA-S2 R1/R2: the immutable release workflow verifies and attaches both
+  units (plus the activation preflight) in its single draft creation.
 """
 
 from __future__ import annotations
@@ -54,6 +56,9 @@ SETTINGS_SOURCE = ROOT / "config" / "settings.py"
 LOOKBACK_VAR = "STATISTICS_FINALIZATION_LOOKBACK_DAYS"
 LOOKBACK_UNIT_DEFAULT = "7"
 ENV_FILE_LINE = "EnvironmentFile=-/srv/apps/prisma/.env"
+
+WORKFLOW = ROOT / ".github" / "workflows" / "publish-release-image.yml"
+PREFLIGHT_ASSET = "deploy/daily-statistics-activation-preflight.sh"
 
 SERVICE_NAME = "sirhosp-daily-statistics.service"
 TIMER_NAME = "sirhosp-daily-statistics.timer"
@@ -570,3 +575,30 @@ def test_runbook_documents_aggregate_observation_without_identity(runbook: str) 
         "identidade",
     ):
         assert marker in runbook, f"runbook must document {marker!r}"
+
+
+# ---------------------------------------------------------------------------
+# PDSPA-S2 — both units are assets of the immutable release draft
+# ---------------------------------------------------------------------------
+
+
+def test_units_are_verified_and_attached_in_the_single_release_draft() -> None:
+    """R1/R2: the release workflow checks both unit files (and the activation
+    preflight) with ``test -f`` before the draft exists and attaches them as
+    arguments of the single draft creation preceding the image build."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    normalized = " ".join(workflow.split())
+    create = normalized.index("gh release create")
+
+    for name in ALL_UNIT_FILES:
+        asset = f"deploy/systemd/{name}"
+        assert asset in workflow, f"release draft must attach {asset!r}"
+    assert 'for asset in "${SYSTEMD_ASSETS[@]}"' in workflow
+    assert normalized.index('test -f "${asset}"') < create
+    assert f'PREFLIGHT_ASSET="{PREFLIGHT_ASSET}"' in workflow
+    assert normalized.index('test -f "${PREFLIGHT_ASSET}"') < create
+
+    create_statement = normalized[create : create + 400]
+    assert '"${SYSTEMD_ASSETS[@]}"' in create_statement
+    assert '"${PREFLIGHT_ASSET}"' in create_statement
+    assert create < normalized.index("uses: docker/build-push-action@")

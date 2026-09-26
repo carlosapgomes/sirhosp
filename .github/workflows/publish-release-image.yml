@@ -118,6 +118,7 @@ jobs:
           set -euo pipefail
           UPGRADE_ASSET="docs/releases/${RELEASE_TAG}-upgrade.md"
           SCHEDULER_ASSET="deploy/exit-reconciliation-scheduler.sh"
+          PREFLIGHT_ASSET="deploy/daily-statistics-activation-preflight.sh"
           SYSTEMD_ASSETS=(
             deploy/systemd/sirhosp-discharges.service
             deploy/systemd/sirhosp-discharges.timer
@@ -125,9 +126,12 @@ jobs:
             deploy/systemd/sirhosp-historical-recovery.timer
             deploy/systemd/sirhosp-stale-reconciliation.service
             deploy/systemd/sirhosp-stale-reconciliation.timer
+            deploy/systemd/sirhosp-daily-statistics.service
+            deploy/systemd/sirhosp-daily-statistics.timer
           )
           test -f "${UPGRADE_ASSET}"
           test -f "${SCHEDULER_ASSET}"
+          test -f "${PREFLIGHT_ASSET}"
           for asset in "${SYSTEMD_ASSETS[@]}"; do
             test -f "${asset}"
           done
@@ -142,7 +146,7 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" compose.hospital.yml "${UPGRADE_ASSET}" \
             "${SCHEDULER_ASSET}" "${SYSTEMD_ASSETS[@]}" \
-            "${release_args[@]}"
+            "${PREFLIGHT_ASSET}" "${release_args[@]}"
 
       - name: Generate image metadata
         id: metadata

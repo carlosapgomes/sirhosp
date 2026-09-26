@@ -6,9 +6,9 @@
 
 ## 2. Assets na release imutável
 
-- [ ] 2.1 RED: adicionar testes de contrato para exigir preflight e os dois units de estatísticas antes da criação do draft, anexá-los na mesma operação e impedir publicação parcial; registrar RED em container
-- [ ] 2.2 GREEN: atualizar o workflow de release para validar e anexar os três assets sem alterar releases já publicadas; repetir testes focados e regressões de release
-- [ ] 2.3 Gerar `/tmp/sirhosp-slice-PDSPA-S2-report.md` e validar workflow, check, lint, typecheck e Markdown alterado sem criar tag, draft, imagem ou release
+- [x] 2.1 RED: adicionar testes de contrato para exigir preflight e os dois units de estatísticas antes da criação do draft, anexá-los na mesma operação e impedir publicação parcial; registrar RED em container
+- [x] 2.2 GREEN: atualizar o workflow de release para validar e anexar os três assets sem alterar releases já publicadas; repetir testes focados e regressões de release
+- [x] 2.3 Gerar `/tmp/sirhosp-slice-PDSPA-S2-report.md` e validar workflow, check, lint, typecheck e Markdown alterado sem criar tag, draft, imagem ou release
 
 ## 3. Checkpoint humano e runbook
 

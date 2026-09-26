@@ -11,10 +11,27 @@ COMPOSE = ROOT / "compose.hospital.yml"
 NEXT_RELEASE = "v0.1.0-rc.24"
 NEXT_RUNBOOK = ROOT / "docs" / "releases" / f"{NEXT_RELEASE}-upgrade.md"
 
+PREFLIGHT_ASSET = "deploy/daily-statistics-activation-preflight.sh"
+DAILY_STATISTICS_UNIT_ASSETS = (
+    "deploy/systemd/sirhosp-daily-statistics.service",
+    "deploy/systemd/sirhosp-daily-statistics.timer",
+)
+
 
 def _workflow_text() -> str:
     assert WORKFLOW.exists(), "release image workflow must exist"
     return WORKFLOW.read_text(encoding="utf-8")
+
+
+def _workflow_array(workflow: str, name: str) -> str:
+    """Body of the ``name=(...)`` shell array declared by the workflow."""
+    match = re.search(
+        rf"^[ \t]*{name}=\(\n(?P<body>.*?)^[ \t]*\)$",
+        workflow,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, f"release workflow must declare the {name} array"
+    return match.group("body")
 
 
 def _compose_text() -> str:
@@ -75,6 +92,64 @@ def test_release_attaches_version_specific_upgrade_runbook() -> None:
     assert normalized.index(require_asset) < normalized.index(
         "uses: docker/build-push-action@"
     )
+
+
+def test_release_verifies_and_attaches_daily_statistics_assets_in_one_draft() -> None:
+    """PDSPA-S2 R1/R2/R3/R4: the activation preflight and both
+    daily-statistics units are checked with ``test -f`` and attached as
+    arguments of the single draft creation that precedes the image build and
+    the publication, so a missing asset never yields a partial release."""
+    workflow = _workflow_text()
+    normalized = " ".join(workflow.split())
+    create_marker = "gh release create"
+    assert normalized.count(create_marker) == 1, "one single draft creation"
+    create = normalized.index(create_marker)
+    assert "set -euo pipefail" in workflow
+
+    # The preflight and the units belong to the same tag's runtime set.
+    assert f'PREFLIGHT_ASSET="{PREFLIGHT_ASSET}"' in workflow
+    systemd_assets = _workflow_array(workflow, "SYSTEMD_ASSETS")
+    for unit in DAILY_STATISTICS_UNIT_ASSETS:
+        assert unit in systemd_assets, f"release draft must attach {unit!r}"
+
+    # R1: every new asset is verified before the draft exists (the units
+    # through the ``test -f`` loop over ``SYSTEMD_ASSETS``).
+    assert 'for asset in "${SYSTEMD_ASSETS[@]}"' in workflow
+    assert normalized.index('test -f "${PREFLIGHT_ASSET}"') < create
+    assert normalized.index('test -f "${asset}"') < create
+
+    # R2: both new assets are arguments of that single draft creation.
+    create_statement = normalized[create : create + 400]
+    for argument in (
+        '"${PREFLIGHT_ASSET}"',
+        '"${SYSTEMD_ASSETS[@]}"',
+        '"${release_args[@]}"',
+    ):
+        assert argument in create_statement, f"draft creation must pass {argument}"
+
+    # R3: the complete draft precedes image build/push and publication.
+    build = normalized.index("uses: docker/build-push-action@")
+    publish = normalized.index('gh release edit "$RELEASE_TAG" --draft=false')
+    assert create < build < publish
+
+
+def test_release_never_mutates_assets_after_the_draft_is_created() -> None:
+    """PDSPA-S2 R5: the draft creation is the only asset operation; the
+    remaining release steps only flip the draft flag and verify the
+    immutability of the published release."""
+    workflow = _workflow_text()
+
+    assert re.findall(r"gh release edit[^\n]*", workflow) == [
+        'gh release edit "$RELEASE_TAG" --draft=false'
+    ]
+    for forbidden in (
+        "gh release upload",
+        "gh release delete",
+        "--clobber",
+        "releases/assets",
+        "upload_url",
+    ):
+        assert forbidden not in workflow, f"release must not {forbidden!r}"
 
 
 def test_release_image_and_release_are_immutable_and_channel_safe() -> None:
