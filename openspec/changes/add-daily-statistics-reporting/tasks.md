@@ -47,9 +47,9 @@
 
 ## 9. SLICE-DSRS-S8 — Ativação futura e observabilidade
 
-- [ ] 9.1 RED: adicionar validações sintéticas/estáticas para serviço e timer de fechamento, data de ativação obrigatória, ausência de backfill implícito, precedência operacional e logs sem identidade; registrar a falha esperada
-- [ ] 9.2 GREEN: adicionar runtime systemd, documentação de ativação/rollback e observabilidade agregada, condicionado à evidência das cadências de altas intradiárias, D-1 e óbitos; executar validações focadas sem operar produção
-- [ ] 9.3 Gerar `/tmp/sirhosp-slice-DSRS-S8-report.md`, validar deploy/docs e executar `./scripts/markdown-lint.sh`
+- [x] 9.1 RED: adicionar validações sintéticas/estáticas para serviço e timer de fechamento, data de ativação obrigatória, ausência de backfill implícito, precedência operacional e logs sem identidade; registrar a falha esperada
+- [x] 9.2 GREEN: adicionar runtime systemd, documentação de ativação/rollback e observabilidade agregada, condicionado à evidência das cadências de altas intradiárias, D-1 e óbitos; executar validações focadas sem operar produção
+- [x] 9.3 Gerar `/tmp/sirhosp-slice-DSRS-S8-report.md`, validar deploy/docs e executar `./scripts/markdown-lint.sh`
 
 ## 10. Gate final e handoff
 

@@ -1153,6 +1153,245 @@ systemctl daemon-reload
 
 ---
 
+## 5c. Relatório estatístico diário — ativação futura e runbook (DSRS-S8)
+
+Esta seção descreve a suíte **desabilitada por padrão** que finaliza o relatório
+estatístico diário no servidor hospitalar (`/srv/apps/prisma`, sem clone do
+repositório). O service executa um único comando one-shot —
+`materialize_daily_statistics --finalize` — pelo runner `historical_recovery` do
+`compose.hospital.yml`, com `--profile recovery` e `run --rm`; nunca pelo serviço
+de aplicação, nunca pelo fluxo PDF legado e sem introduzir agendador novo (o
+systemd continua sendo o único dono de cada responsabilidade periódica).
+
+A finalização **não** altera fontes clínicas, **não** persiste workbook e **não**
+reconstrói nenhum dia anterior à data de ativação: ela fecha apenas datas locais
+`America/Bahia` já concluídas, completas, iguais ou posteriores à data de
+ativação e dentro da janela limitada de datas fechadas. Página e XLSX continuam
+lendo somente a revisão materializada da data selecionada.
+
+### 5c.1 Agendamento (America/Bahia, offset fixo)
+
+| Timer | Comando | Agendamento (`OnCalendar`) | `Persistent` | O que executa |
+| --- | --- | --- | --- | --- |
+| `sirhosp-daily-statistics.timer` | `materialize_daily_statistics --finalize` | `OnCalendar=*-*-* 07:30:00 America/Bahia` | `true` | Fecha as datas locais elegíveis (concluídas, completas, pós-ativação e dentro de `STATISTICS_FINALIZATION_LOOKBACK_DAYS`, default 7) e publica a revisão corrente de cada uma. |
+
+`America/Bahia` no literal `OnCalendar=` torna o disparo independente do fuso do
+host. O horário `07:30:00` é posterior ao fechamento do dia alvo por duas razões
+verificáveis:
+
+- a fotografia de fechamento é o último censo aceito iniciado a partir de 20:00 e
+  concluído antes da meia-noite, logo uma data local só é elegível a partir de
+  00:00 do dia seguinte — e o comando nunca materializa a data corrente;
+- a recuperação D-1 roda às 05:00 com `TimeoutStartSec=7200` (seção 5b.1), então
+  a janela máxima de recuperação termina às 07:00.
+
+O disparo às 07:30 também é **escalonado** dos offsets horários fixos `:13`
+(altas intradiárias), `:47` (varredura de órfãs) e `05:00` (recuperação D-1):
+são instantes de disparo distintos, mas **não** há garantia de não sobreposição.
+Como o service declara `TimeoutStartSec=1800`, uma execução iniciada às 07:30
+pode continuar em andamento às 07:47 e além, e as cadências horárias podem ainda
+estar rodando às 07:30; não há `After=`/`Wants=` ligando a finalização a essas
+cadências nem lock compartilhado entre workflows.
+
+A operação não depende dessa exclusão: o que sustenta a finalização é o próprio
+comportamento dela. Ela é **limitada** (fecha somente datas concluídas,
+completas, pós-ativação e dentro de `STATISTICS_FINALIZATION_LOOKBACK_DAYS`),
+**idempotente** (reexecutar reaproveita a revisão corrente, `created=false`),
+**atômica** (a revisão candidata é concluída em uma transação e só então se torna
+a única revisão pronta da data) e **coordenada no PostgreSQL**
+(`select_for_update` no run de fechamento compartilhado e na revisão). As
+cadências de ingestão/reconciliação existentes (`:13`, `:47`, `05:00`) mantêm a
+própria coordenação (fila, batch aberto e locks advisory próprios); esta suíte
+não afirma exclusão mútua entre workflows.
+
+O timer não declara `RandomizedDelay` (offset determinístico) e usa
+`Persistent=true`; o modo `--finalize` é idempotente e limitado à janela de datas
+fechadas, então um disparo recuperado após indisponibilidade não gera backfill
+histórico.
+
+**Janela de fechamento (`STATISTICS_FINALIZATION_LOOKBACK_DAYS`).** O modo
+`--finalize` considera no máximo as `N` datas locais fechadas mais recentes
+(`N = STATISTICS_FINALIZATION_LOOKBACK_DAYS`, default 7). O unit declara
+`Environment=STATISTICS_FINALIZATION_LOOKBACK_DAYS=7` como default seguro e
+repassa a variável **por referência** ao container one-shot:
+
+```bash
+docker compose --env-file /srv/apps/prisma/.env \
+  -f /srv/apps/prisma/compose.hospital.yml --profile recovery run --rm \
+  -e STATISTICS_ACTIVATION_DATE -e STATISTICS_FINALIZATION_LOOKBACK_DAYS \
+  historical_recovery uv run --no-sync python manage.py \
+  materialize_daily_statistics --finalize
+```
+
+Como `compose.hospital.yml` inicia os containers com um mapeamento fixo de
+ambiente (que não lista as variáveis DSRS), sem esse repasse um valor declarado
+no `.env` do hospital seria ignorado e o comando cairia silenciosamente no
+default 7. O `EnvironmentFile` do `.env` do hospital sobrepõe o `Environment=`
+da unidade, portanto o valor declarado é o que o Django recebe: um valor **não
+positivo** chega ao comando e é recusado antes de inspecionar qualquer data —
+nunca é convertido em 7 silenciosamente. O default 7 vale somente quando a
+variável não é declarada no `.env`.
+
+### 5c.2 Artefatos, instalação e baseline desabilitado
+
+Os dois units vivem em `deploy/systemd/` (`sirhosp-daily-statistics.service` e
+`sirhosp-daily-statistics.timer`).
+
+**Pré-requisito de publicação:** estas unidades ainda **não** estão anexadas à
+release imutável pelo workflow de release; até que um slice operacional seguinte
+as publique junto dos demais assets, elas não devem ser instaladas em produção.
+Depois da publicação, a instalação usa a mesma tag da release imutável (exemplo
+sintético com a tag `v1.0.0-rc.N`):
+
+```bash
+cd /srv/apps/prisma
+
+mkdir -p deploy/systemd
+for unit in sirhosp-daily-statistics.service sirhosp-daily-statistics.timer; do
+  curl -fL -o "deploy/systemd/${unit}" \
+    "https://github.com/carlosapgomes/sirhosp/releases/download/v1.0.0-rc.N/${unit}"
+done
+
+# Copia os units para o systemd (NÃO habilita nem inicia nada)
+sudo install -m 0644 deploy/systemd/sirhosp-daily-statistics.service \
+  deploy/systemd/sirhosp-daily-statistics.timer /etc/systemd/system/
+systemctl daemon-reload
+```
+
+**Baseline desabilitado:** o service é `Type=oneshot`, roda como `User=root`
+(acesso ao socket do Docker), com saída em journal, `SyslogIdentifier` próprio e
+**sem** `Restart=`. Confirme que nada foi ativado na primeira instalação:
+
+```bash
+systemctl is-enabled sirhosp-daily-statistics.timer
+systemctl list-timers --all | grep sirhosp-daily-statistics || true
+```
+
+A saída esperada é `disabled` até a ativação explícita da seção 5c.3.
+
+### 5c.3 Pré-condições de ativação e evidência das cadências
+
+Habilitar o timer é um checkpoint separado do deploy, condicionado a:
+
+- **Data de ativação obrigatória e futura.** `STATISTICS_ACTIVATION_DATE`
+  (`YYYY-MM-DD`, local `America/Bahia`) declarada no `.env` do hospital. Sem
+  ela nenhuma data é elegível: o comando falha fechado e nada é materializado.
+  Datas anteriores à ativação permanecem indisponíveis — o modo `--finalize`
+  nunca reconstrói histórico e nenhum backfill é executado por esta suíte.
+- **Evidência operacional das cadências que alimentam as saídas do dia.** Antes
+  de ativar, confirme no journal que as cadências da seção 5b estão de fato
+  executando: altas intradiárias (`sirhosp-discharges.timer`,
+  `*:13:00 America/Bahia`) e recuperação D-1
+  (`sirhosp-historical-recovery.timer`, `05:00:00 America/Bahia`) com os quatro
+  extratores na ordem canônica da seção 5b.1 — incluindo a extração de óbitos
+  (`deaths`). Sem essa evidência a publicação pode até ocorrer com aviso de
+  qualidade, mas não pode afirmar frescor da fonte que não foi observado.
+- **Units instalados a partir da release publicada** (seção 5c.2).
+
+Verificação e ativação:
+
+```bash
+cd /srv/apps/prisma
+
+# 1) Declare a data de ativação no .env (obrigatória; sempre uma data futura)
+grep -n '^STATISTICS_ACTIVATION_DATE=' .env
+
+# 2) Evidência das cadências de alta intradiária, D-1 e óbitos
+journalctl -u sirhosp-discharges.service --since "-3 days" | tail -20
+journalctl -u sirhosp-historical-recovery.service --since "-7 days" | tail -20
+
+# 3) Habilita o timer de finalização diária
+sudo systemctl enable --now sirhosp-daily-statistics.timer
+systemctl list-timers sirhosp-daily-statistics.timer
+```
+
+Execuções manuais de validação usam
+`systemctl start sirhosp-daily-statistics.service` (oneshot); nenhum destes
+passos liga o agendamento sozinho.
+
+### 5c.4 Observação agregada (sem identidade)
+
+A finalização escreve no journal apenas linhas técnicas com **data, status,
+revisão, IDs técnicos e contagens agregadas** — `date=`, `status=`, `revision=`,
+`created=`, `report=`, `sectors=`, `events=` — e a linha de totais
+`totals dates=... materialized=... reused=... incomplete=... failed=...`.
+Nunca há identidade de paciente, prontuário, nome, leito ou texto clínico; uma
+falha é reduzida a um token técnico seguro (`error=<Classe>`).
+
+```bash
+systemctl status sirhosp-daily-statistics.service
+journalctl -u sirhosp-daily-statistics.service --since "-2 days"
+systemctl list-timers --all | grep sirhosp-daily-statistics
+```
+
+O que observar:
+
+- `status=ready` na data esperada e `created=true|false` indicando revisão nova
+  ou reaproveitada (idempotência do mesmo fingerprint de fontes);
+- `quality=...` quando a data foi publicada com aviso de qualidade — o aviso não
+  substitui a evidência das cadências;
+- `incomplete` e `reasons=...` quando a data ainda não está fechada ou completa:
+  o modo `--finalize` reporta e segue para as demais datas elegíveis sem
+  inventar dados;
+- `failed` quando uma data falhou; o batch termina com exit diferente de zero e a
+  falha fica visível no journal da unidade (sem `Restart=`, a recuperação é o
+  próximo disparo);
+- a janela declarada aparece na saída da unidade: um `CommandError` de
+  `STATISTICS_FINALIZATION_LOOKBACK_DAYS` no journal significa valor não positivo
+  configurado no `.env` — nada é materializado e o batch não roda até o valor ser
+  corrigido (o default 7 aplica-se apenas quando a variável não é declarada);
+- a auditoria de exportação (`StatisticsExportLog`) registra usuário, revisão,
+  instante servido e contagens de folhas e linhas, sem payload nominal.
+
+### 5c.5 Rerun de uma data após evidência tardia
+
+Evidência tardia (alta ou óbito conciliado depois do fechamento) entra por um
+rerun da mesma data local. O rerun é idempotente: cria uma nova revisão quando o
+fingerprint das fontes mudou, reaproveita a existente quando não mudou e nunca
+altera a fotografia de fechamento nem qualquer registro clínico de origem.
+
+```bash
+cd /srv/apps/prisma
+docker compose --env-file .env -f compose.hospital.yml --profile recovery run \
+  --rm -e STATISTICS_ACTIVATION_DATE historical_recovery \
+  uv run --no-sync python manage.py materialize_daily_statistics --date 2026-10-01
+```
+
+Substitua a data por uma data local `America/Bahia` **igual ou posterior** à data
+de ativação. Se a data de ativação não chegar ao container, o comando falha
+fechado com mensagem explícita e nada é materializado. Datas anteriores à
+ativação permanecem indisponíveis: o backfill clínico autorizado da seção 5b.7 é
+outra operação e não materializa o relatório.
+
+### 5c.6 Desativação e rollback
+
+Desativar a finalização não apaga dados e não toca nas fontes clínicas:
+
+```bash
+sudo systemctl disable --now sirhosp-daily-statistics.timer
+sudo systemctl disable --now sirhosp-daily-statistics.service
+systemctl list-timers --all | grep sirhosp-daily-statistics || true
+```
+
+Rollback completo (remoção das unidades após desativar):
+
+```bash
+sudo rm -f /etc/systemd/system/sirhosp-daily-statistics.service \
+  /etc/systemd/system/sirhosp-daily-statistics.timer
+systemctl daemon-reload
+```
+
+Ordem de rollback recomendada (Migration Plan do change): desabilitar a
+materialização e a navegação/exportação primeiro. A projeção é isolada —
+`IngestionRun`, `CensusSnapshot`, medições de ocupação, internações, altas e
+óbitos **não** são removidos nem alterados por esta suíte, e as fontes clínicas
+ficam preservadas; nenhum workbook precisa ser apagado porque nenhum é
+persistido. A remoção das tabelas de relatório, se decidida, é uma migration
+posterior depois da aprovação de retenção e auditoria, e não faz parte deste
+rollback operacional.
+
+---
+
 ## 6. Healthcheck
 
 ```bash

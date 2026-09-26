@@ -1,0 +1,51 @@
+# SIRHOSP — Finalização diária do relatório estatístico (America/Bahia,
+# DSRS-S8). One-shot: fecha apenas datas locais já concluídas, completas,
+# iguais ou posteriores à data de ativação declarada e dentro da janela
+# limitada de datas fechadas, pelo modo `materialize_daily_statistics
+# --finalize`. Nunca roda em loop, nunca materializa a data corrente e nunca
+# reconstrói histórico: sem `STATISTICS_ACTIVATION_DATE` declarada o comando
+# falha fechado e nada é materializado.
+#
+# Executa pelo runner one-shot `historical_recovery` do compose hospitalar
+# (perfil `recovery`, `run --rm`) — nunca pelo serviço de aplicação, nunca
+# pelo fluxo PDF legado e nunca a partir de um clone do repositório. O
+# `compose.hospital.yml` inicia os containers com um mapeamento fixo de
+# ambiente, então a unidade repassa explicitamente a data de ativação e a
+# janela limitada de fechamento declaradas no `.env` do hospital para o
+# container efêmero (`-e`, por referência); o valor padrão vazio da data e o
+# padrão 7 da janela mantêm, respectivamente, o fail-closed e o lote limitado
+# quando a variável não existe no `.env`.
+#
+# Saída integral em journal, com identificador próprio, apenas datas, status,
+# revisão, IDs técnicos e contagens agregadas — sem identidade clínica.
+# Instalada desabilitada; a ativação é um checkpoint explícito do operador
+# (ver `deploy/README.md`, seção 5c).
+[Unit]
+Description=SIRHOSP — Finalização diária do relatório estatístico (America/Bahia, DSRS-S8)
+Documentation=https://github.com/carlosapgomes/sirhosp
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# docker compose exige acesso ao socket do Docker.
+User=root
+WorkingDirectory=/srv/apps/prisma
+# Data de ativação declarada no .env do hospital; o padrão vazio é
+# intencional (fail-closed, sem backfill implícito).
+Environment=STATISTICS_ACTIVATION_DATE=
+# Janela limitada de datas fechadas do modo `--finalize`. O padrão 7 é o
+# mesmo default do Django (`config/settings.py`) e existe para que o valor
+# repassado ao container nunca chegue vazio: um valor não positivo declarado
+# no .env é repassado como está e recusado pelo comando antes de processar
+# qualquer data (nunca volta silenciosamente para 7).
+Environment=STATISTICS_FINALIZATION_LOOKBACK_DAYS=7
+EnvironmentFile=-/srv/apps/prisma/.env
+ExecStart=/usr/bin/docker compose --env-file /srv/apps/prisma/.env -f /srv/apps/prisma/compose.hospital.yml --profile recovery run --rm -e STATISTICS_ACTIVATION_DATE -e STATISTICS_FINALIZATION_LOOKBACK_DAYS historical_recovery uv run --no-sync python manage.py materialize_daily_statistics --finalize
+TimeoutStartSec=1800
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sirhosp-daily-statistics
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,37 @@
+# SIRHOSP — Timer de finalização diária do relatório estatístico
+# (America/Bahia, DSRS-S8). Dispara uma vez por dia às 07:30:00 no fuso
+# literal `America/Bahia`, depois de o dia alvo estar fechado:
+#
+# - o dia só é elegível a partir de 00:00 do dia seguinte, porque a fotografia
+#   de fechamento é o último censo aceito entre 20:00 e 24:00;
+# - a recuperação D-1 roda às 05:00 com `TimeoutStartSec=7200` (seção 5b.1),
+#   logo a janela máxima de recuperação termina às 07:00.
+#
+# O disparo às 07:30 é escalonado dos offsets horários :13 (altas) e :47
+# (varredura) e do disparo de 05:00 (recuperação D-1): são instantes distintos,
+# mas isso não é garantia de não sobreposição. Como o service declara
+# `TimeoutStartSec=1800`, uma execução iniciada às 07:30 pode ainda estar em
+# andamento às 07:47 e além, e as cadências horárias podem estar rodando às
+# 07:30. Não há relação de ordem nem de exclusão mútua entre esta finalização e
+# essas cadências. O que sustenta a operação é o próprio comportamento da
+# finalização: limitada (datas fechadas), idempotente (reexecutar reaproveita a
+# revisão corrente), atômica (publicação em transação única) e coordenada no
+# PostgreSQL por row locks; as cadências de ingestão/reconciliação existentes
+# mantêm a própria coordenação (fila, batch aberto e locks advisory próprios).
+#
+# `Persistent=true` recupera um disparo perdido após indisponibilidade do host
+# (o modo `--finalize` é idempotente e limitado à janela de datas fechadas);
+# sem atraso aleatório de disparo, mantendo o offset determinístico. O timer
+# nunca inicia nada por conta própria: só dispara após habilitação explícita do
+# operador, documentada em `deploy/README.md`, seção 5c.
+[Unit]
+Description=SIRHOSP — Timer de finalização diária do relatório estatístico (America/Bahia)
+Documentation=https://github.com/carlosapgomes/sirhosp
+
+[Timer]
+OnCalendar=*-*-* 07:30:00 America/Bahia
+Persistent=true
+RemainAfterElapse=no
+
+[Install]
+WantedBy=timers.target
