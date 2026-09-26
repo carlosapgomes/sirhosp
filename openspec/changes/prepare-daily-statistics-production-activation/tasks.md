@@ -18,5 +18,5 @@
 
 ## 4. Gate final do change
 
-- [ ] 4.1 Executar integrações relevantes e `./scripts/test-in-container.sh quality-gate`, `./scripts/markdown-lint.sh`, `openspec validate prepare-daily-statistics-production-activation --strict` e `git diff --check`, registrando os resultados em `/tmp/sirhosp-slice-PDSPA-S4-report.md`
-- [ ] 4.2 Revisar diff, scripts e documentação para confirmar ausência de PHI/credenciais, comandos mutáveis no preflight, tag/release criada, ativação, backfill, execução de extrator, Celery/Redis ou alteração clínica; parar para aceite humano
+- [x] 4.1 Executar integrações relevantes e `./scripts/test-in-container.sh quality-gate`, `./scripts/markdown-lint.sh`, `openspec validate prepare-daily-statistics-production-activation --strict` e `git diff --check`, registrando os resultados em `/tmp/sirhosp-slice-PDSPA-S4-report.md`
+- [x] 4.2 Revisar diff, scripts e documentação para confirmar ausência de PHI/credenciais, comandos mutáveis no preflight, tag/release criada, ativação, backfill, execução de extrator, Celery/Redis ou alteração clínica; parar para aceite humano
