@@ -14,6 +14,15 @@ Adicionar contrato systemd e runbook para finalizar somente dias pós-ativação
 com rollback, observabilidade agregada e pré-condições explícitas de cadência de
 altas intradiárias, recuperação D-1 e óbitos.
 
+Decisão humana registrada durante a execução: foi autorizada excepcionalmente
+uma terceira rodada S8, limitada a substituir afirmações de que o disparo das
+07:30 “não colide” com `:13`/`:47` por documentação verdadeira de instantes de
+disparo escalonados, sem garantia de não sobreposição. O runbook e o comentário
+do timer devem explicar que a materialização é idempotente, limitada e
+coordenada no PostgreSQL, enquanto as cadências existentes mantêm sua própria
+coordenação. Atualize o teste estático e o relatório; não altere horários,
+locks, unidades existentes nem o blast radius.
+
 ## Requisitos verificáveis
 
 - **R1:** service executa o management command pelo padrão operacional do
