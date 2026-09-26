@@ -98,7 +98,9 @@ def test_release_verifies_and_attaches_daily_statistics_assets_in_one_draft() ->
     """PDSPA-S2 R1/R2/R3/R4: the activation preflight and both
     daily-statistics units are checked with ``test -f`` and attached as
     arguments of the single draft creation that precedes the image build and
-    the publication, so a missing asset never yields a partial release."""
+    the publication, so a missing asset never yields a partial release. The
+    standalone Compose attached first by that draft is verified in the same
+    pre-draft block."""
     workflow = _workflow_text()
     normalized = " ".join(workflow.split())
     create_marker = "gh release create"
@@ -113,7 +115,11 @@ def test_release_verifies_and_attaches_daily_statistics_assets_in_one_draft() ->
         assert unit in systemd_assets, f"release draft must attach {unit!r}"
 
     # R1: every new asset is verified before the draft exists (the units
-    # through the ``test -f`` loop over ``SYSTEMD_ASSETS``).
+    # through the ``test -f`` loop over ``SYSTEMD_ASSETS``), including the
+    # standalone Compose that the draft attaches as its first argument.
+    compose_asset_check = "test -f compose.hospital.yml"
+    assert compose_asset_check in normalized
+    assert normalized.index(compose_asset_check) < create
     assert 'for asset in "${SYSTEMD_ASSETS[@]}"' in workflow
     assert normalized.index('test -f "${PREFLIGHT_ASSET}"') < create
     assert normalized.index('test -f "${asset}"') < create

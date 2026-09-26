@@ -129,6 +129,7 @@ jobs:
             deploy/systemd/sirhosp-daily-statistics.service
             deploy/systemd/sirhosp-daily-statistics.timer
           )
+          test -f compose.hospital.yml
           test -f "${UPGRADE_ASSET}"
           test -f "${SCHEDULER_ASSET}"
           test -f "${PREFLIGHT_ASSET}"
