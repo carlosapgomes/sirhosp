@@ -53,6 +53,6 @@
 
 ## 10. Gate final e handoff
 
-- [ ] 10.1 Executar `./scripts/test-in-container.sh check`, testes unitários e de integração relevantes, `lint` e `typecheck`, registrando resultados
-- [ ] 10.2 Executar `./scripts/test-in-container.sh quality-gate`, `./scripts/markdown-lint.sh` e `openspec validate add-daily-statistics-reporting --strict`
-- [ ] 10.3 Revisar diff, migrations, permissões, logs e artefatos para confirmar ausência de dados reais, correção manual, backfill histórico, workbook persistido, Celery/Redis e alteração das fontes clínicas; preparar ativação futura e parar antes de qualquer ação em produção
+- [x] 10.1 Executar `./scripts/test-in-container.sh check`, testes unitários e de integração relevantes, `lint` e `typecheck`, registrando resultados
+- [x] 10.2 Executar `./scripts/test-in-container.sh quality-gate`, `./scripts/markdown-lint.sh` e `openspec validate add-daily-statistics-reporting --strict`
+- [x] 10.3 Revisar diff, migrations, permissões, logs e artefatos para confirmar ausência de dados reais, correção manual, backfill histórico, workbook persistido, Celery/Redis e alteração das fontes clínicas; preparar ativação futura e parar antes de qualquer ação em produção
