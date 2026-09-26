@@ -46,6 +46,12 @@ out_of_scope:
 Limite: dois arquivos. Pare e reporte se for necessário alterar runtime clínico,
 schema, unit ou dependência do projeto.
 
+Decisão humana registrada durante a execução: foi autorizada excepcionalmente
+uma terceira e última rodada de correção/revisão, limitada a impedir que função
+não chamada, dead code ou dispatch indireto satisfaçam o contrato executável do
+scheduler. O P2 sobre metadata de release malformada permanece report-only e
+não autoriza ampliação desta rodada. Se o P1 persistir, pare sem quarta rodada.
+
 ## Matriz requisito -> arquivo -> teste/check
 
 | Requisito | Arquivo | Evidência |
