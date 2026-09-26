@@ -31,7 +31,15 @@ production surface. It pins:
 - R6: the units and runbook use dates, revisions, status and counts only,
   never clinical identity, and never a mutating or extraction command;
 - PDSPA-S2 R1/R2: the immutable release workflow verifies and attaches both
-  units (plus the activation preflight) in its single draft creation.
+  units (plus the activation preflight) in its single draft creation;
+- PDSPA-S3 R1-R6: the runbook downloads the preflight and both units from one
+  immutable tag, installs them without enabling or starting anything, runs the
+  read-only preflight before human acceptance and the separate activation,
+  requires a new preflight when the evidence expired, collects only aggregated
+  journal evidence, limits the rollback to the two statistics units and makes
+  no absolute non-overlap claim; both activation shell blocks fail closed (the
+  preflight status survives ``tee`` and the cadence counts are asserted before
+  the single ``enable``).
 """
 
 from __future__ import annotations
@@ -602,3 +610,253 @@ def test_units_are_verified_and_attached_in_the_single_release_draft() -> None:
     assert '"${SYSTEMD_ASSETS[@]}"' in create_statement
     assert '"${PREFLIGHT_ASSET}"' in create_statement
     assert create < normalized.index("uses: docker/build-push-action@")
+
+
+# ---------------------------------------------------------------------------
+# PDSPA-S3 — runbook: install disabled, preflight, human acceptance, explicit
+# activation, aggregate observation and isolated rollback
+# ---------------------------------------------------------------------------
+
+TAG_PLACEHOLDER = "v1.0.0-rc.N"
+PREFLIGHT_ASSET_NAME = PREFLIGHT_ASSET.split("/")[-1]
+PREFLIGHT_COMMAND = f"./deploy/{PREFLIGHT_ASSET_NAME} {TAG_PLACEHOLDER}"
+PREFLIGHT_RELEASE_ASSETS = (PREFLIGHT_ASSET_NAME, SERVICE_NAME, TIMER_NAME)
+RELEASE_DOWNLOAD_RE = re.compile(r"releases/download/([^/\s\"']+)/([A-Za-z0-9._-]+)")
+UPSTREAM_UNIT_NAMES = ("sirhosp-discharges", "sirhosp-historical-recovery")
+ROLLBACK_HEADING = "### 5c.7 "
+
+
+def _release_downloads(runbook: str) -> list[tuple[str, str]]:
+    """``(tag, asset)`` pairs the runbook downloads from the release URL."""
+    return RELEASE_DOWNLOAD_RE.findall(runbook)
+
+
+FENCED_SHELL_BLOCK_RE = re.compile(r"^```(?:bash|sh)\n(.*?)^```$", re.DOTALL | re.MULTILINE)
+
+ACTIVATION_ENABLE_LINE = f"sudo systemctl enable --now {TIMER_NAME}"
+
+# Guard that turns a non-positive cadence count into a failing block: the
+# ``test ... -gt 0`` is followed by an explicit ``exit 1``, so the enable below
+# it is unreachable when the aggregated evidence is absent.
+ACTIVATION_GUARD_RE = re.compile(
+    r'test "\$\{(?P<count>\w+)\}" -gt 0 \\\n\s*\|\| \{[^\n]*exit 1[^\n]*\}',
+)
+
+
+def _shell_blocks(document: str) -> list[str]:
+    """Fenced ``bash``/``sh`` snippets of a document, fences stripped."""
+    return FENCED_SHELL_BLOCK_RE.findall(document)
+
+
+def test_runbook_downloads_preflight_and_units_from_the_same_immutable_tag(
+    runbook: str,
+) -> None:
+    """PDSPA-S3 R1: the read-only preflight and both units are downloaded from
+    one single immutable release tag, never from a working copy or another
+    version."""
+    downloads = _release_downloads(runbook)
+    assert downloads, "runbook must download the release assets by tag"
+    assert {tag for tag, _asset in downloads} == {TAG_PLACEHOLDER}
+    assets = {asset for _tag, asset in downloads}
+    for asset in PREFLIGHT_RELEASE_ASSETS:
+        assert asset in assets, f"runbook must download {asset!r} from the release"
+    assert f"chmod +x deploy/{PREFLIGHT_ASSET_NAME}" in runbook
+
+
+def test_runbook_install_step_stays_disabled_and_activates_nothing(
+    runbook: str,
+) -> None:
+    """PDSPA-S3 R1: the installation step only copies the units and reloads
+    systemd; the single ``systemctl enable`` of the whole runbook is the
+    explicit later activation of the timer."""
+    install = runbook.index("sudo install -m 0644")
+    assert "NÃO habilita nem inicia nada" in runbook
+    assert runbook.index("systemctl daemon-reload") > install
+    assert re.findall(r"(?m)^\s*(?:sudo )?systemctl enable[^\n]*", runbook) == [
+        "sudo systemctl enable --now sirhosp-daily-statistics.timer"
+    ]
+
+
+def test_runbook_orders_install_preflight_acceptance_and_activation(
+    runbook: str,
+) -> None:
+    """PDSPA-S3 R1/R2/R4: install (disabled) < preflight execution < human
+    acceptance < explicit activation, so no activation can precede the
+    preflight or its review."""
+    markers = (
+        "sudo install -m 0644",
+        PREFLIGHT_COMMAND,
+        "aceite humano",
+        "systemctl enable --now sirhosp-daily-statistics.timer",
+    )
+    for marker in markers:
+        assert marker in runbook, f"runbook must document {marker!r}"
+    indices = [runbook.index(marker) for marker in markers]
+    assert indices == sorted(indices), "runbook steps are out of order"
+
+
+def test_runbook_preflight_collection_preserves_a_nonzero_status(
+    runbook: str,
+) -> None:
+    """PDSPA-S3 R2: the aggregated preflight output is collected through
+    ``tee`` only under ``pipefail`` plus an explicit nonzero-status abort, so a
+    failed preflight (exit 1/2/3) is never masked by the successful ``tee`` nor
+    archived as approved evidence."""
+    blocks = [
+        block
+        for block in _shell_blocks(runbook)
+        if "tee " in block and PREFLIGHT_ASSET_NAME in block
+    ]
+    assert len(blocks) == 1, "exactly one block collects the preflight output"
+    block = blocks[0]
+    assert "set -o pipefail" in block, "tee must not mask the preflight status"
+    tee_pipeline = block.index("| tee ")
+    assert block.index("set -o pipefail") < tee_pipeline
+    assert PREFLIGHT_COMMAND in block[:tee_pipeline]
+    collected = block[tee_pipeline:]
+    assert "exit 1" in collected, (
+        "a failed preflight must abort the collection with a nonzero status"
+    )
+    for swallow in ("|| true", "|| :"):
+        assert swallow not in collected, (
+            f"the preflight status must not be swallowed by {swallow!r}"
+        )
+
+
+def test_runbook_activation_guards_the_enable_behind_positive_counts(
+    runbook: str,
+) -> None:
+    """PDSPA-S3 R4: the activation block runs under ``set -euo pipefail``,
+    assigns each cadence count and reaches the single ``systemctl enable``
+    only after a ``test ... -gt 0`` guard that exits nonzero — a 0 count can
+    no longer fall through to the activation."""
+    blocks = [block for block in _shell_blocks(runbook) if ACTIVATION_ENABLE_LINE in block]
+    assert len(blocks) == 1, "the enable lives in exactly one documented block"
+    block = blocks[0]
+    assert "set -euo pipefail" in block
+    guarded = ACTIVATION_GUARD_RE.findall(block)
+    assert guarded == [
+        "hourly_discharges_success",
+        "d1_recovery_success",
+    ], f"both cadence counts must be guarded by an explicit test, got {guarded!r}"
+    enable = block.index(ACTIVATION_ENABLE_LINE)
+    first_guard = ACTIVATION_GUARD_RE.search(block)
+    assert first_guard is not None
+    for count in guarded:
+        assignment = f'{count}="$('
+        assert assignment in block, f"{count!r} must be assigned from the journal"
+        assert block.index(assignment) < enable, f"{count!r} must precede the enable"
+    assert block.index("grep -cF") < first_guard.start()
+    assert block.rindex("exit 1") < enable, "every guard must abort before the enable"
+
+
+def test_runbook_documents_the_preflight_interface_and_fail_closed_checks(
+    runbook: str,
+) -> None:
+    """PDSPA-S3 R2/R3: the runbook documents the read-only, fail-closed
+    interface, its enumerated checks, the technical failure reasons and the
+    absence of any bypass for a failed preflight."""
+    for marker in (
+        "somente leitura",
+        "fail-closed",
+        f"{PREFLIGHT_ASSET_NAME} <release-tag-exata>",
+        "[preflight] result=PASS",
+        "[preflight] result=FAIL",
+        "não existe caminho de exceção",
+        "release",
+        "asset_match",
+        "scheduler_contract",
+        "image_version",
+        "activation_date",
+        "daily_timer_state",
+        "upstream_timer_state",
+        "cadence_hourly_discharges",
+        "cadence_d1_recovery",
+    ):
+        assert marker in runbook, f"runbook must document {marker!r}"
+    for reason in (
+        "local_asset_mismatch",
+        "activation_date_not_future",
+        "cadence_stale",
+        "journal_unavailable",
+    ):
+        assert reason in runbook, f"runbook must enumerate {reason!r}"
+    for forbidden in ("--force", "--skip", "bypass", "override", "sem-preflight"):
+        assert forbidden not in runbook.lower(), (
+            f"runbook must not document a bypass ({forbidden!r})"
+        )
+
+
+def test_runbook_requires_a_new_preflight_when_the_evidence_expires(
+    runbook: str,
+) -> None:
+    """PDSPA-S3 R2: the preflight evidence expires with the 2 h / 30 h
+    freshness windows and a previous PASS never authorizes a later
+    activation."""
+    lowered = runbook.lower()
+    assert "expira" in lowered
+    assert "novo preflight" in lowered
+    assert "não autoriza" in lowered
+    assert "2 horas" in runbook
+    assert "30 horas" in runbook
+
+
+def test_runbook_collects_only_aggregate_journal_evidence(runbook: str) -> None:
+    """PDSPA-S3 R3/R5: cadence evidence is collected as aggregated marker
+    counts without copying raw journal lines, and no extractor is triggered
+    artificially to produce evidence."""
+    for marker in (
+        "mode=hourly-discharges result=success",
+        "mode=d1-recovery result=success",
+    ):
+        assert marker in runbook, f"runbook must collect {marker!r}"
+    assert "grep -cF" in runbook
+    assert "agregad" in runbook.lower()
+    for line in runbook.replace("\\\n", " ").splitlines():
+        if "journalctl" in line:
+            assert "grep" in line or SERVICE_NAME in line, (
+                f"runbook must not copy raw journal lines ({line.strip()!r})"
+            )
+    for forbidden in (
+        "| tail",
+        "tail -",
+        "-o json",
+        "MESSAGE",
+        "extract_",
+        "run_exit_reconciliation_runtime",
+        "reset-failed",
+    ):
+        assert forbidden not in runbook, f"runbook must not use {forbidden!r}"
+    for upstream in UPSTREAM_UNIT_NAMES:
+        assert f"systemctl start {upstream}" not in runbook
+
+
+def test_runbook_rollback_is_limited_to_the_daily_statistics_units(
+    runbook: str,
+) -> None:
+    """PDSPA-S3 R5: the rollback disables and removes only the two statistics
+    units and preserves materialized reports, clinical sources and the
+    upstream cadences."""
+    rollback = _section(runbook, ROLLBACK_HEADING)
+    for marker in (
+        "systemctl disable --now sirhosp-daily-statistics.timer",
+        "systemctl disable --now sirhosp-daily-statistics.service",
+        f"/etc/systemd/system/{SERVICE_NAME}",
+        f"/etc/systemd/system/{TIMER_NAME}",
+        "relatórios",
+        "fontes clínicas",
+    ):
+        assert marker in rollback, f"rollback must document {marker!r}"
+    for upstream in UPSTREAM_UNIT_NAMES:
+        assert upstream not in rollback, f"rollback must not touch {upstream!r}"
+
+
+def test_runbook_rejects_the_absolute_non_overlap_claim(runbook: str) -> None:
+    """PDSPA-S3 R6: the runbook keeps the staggered-trigger contract with
+    possible overlap and never claims non-overlap between workflows."""
+    lowered = runbook.lower()
+    for forbidden in FORBIDDEN_ABSOLUTE_NON_COLLISION:
+        assert forbidden not in lowered, (
+            f"runbook must not claim non-overlapping executions ({forbidden!r})"
+        )
+    assert "não afirma exclusão mútua entre workflows" in lowered

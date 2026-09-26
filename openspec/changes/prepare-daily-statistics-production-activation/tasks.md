@@ -12,9 +12,9 @@
 
 ## 3. Checkpoint humano e runbook
 
-- [ ] 3.1 RED: adicionar testes estáticos para instalação desabilitada, execução do preflight, aceite humano, revalidação por expiração, ativação explícita posterior, observação agregada e rollback isolado; registrar RED em container
-- [ ] 3.2 GREEN: atualizar o runbook com o fluxo por tag exata e motivos fail-closed, sem documentar bypass, execução artificial de extrator ou persistência de journal clínico; repetir testes focados
-- [ ] 3.3 Gerar `/tmp/sirhosp-slice-PDSPA-S3-report.md` e executar check, lint, typecheck, Markdown e OpenSpec strict sem operar produção
+- [x] 3.1 RED: adicionar testes estáticos para instalação desabilitada, execução do preflight, aceite humano, revalidação por expiração, ativação explícita posterior, observação agregada e rollback isolado; registrar RED em container
+- [x] 3.2 GREEN: atualizar o runbook com o fluxo por tag exata e motivos fail-closed, sem documentar bypass, execução artificial de extrator ou persistência de journal clínico; repetir testes focados
+- [x] 3.3 Gerar `/tmp/sirhosp-slice-PDSPA-S3-report.md` e executar check, lint, typecheck, Markdown e OpenSpec strict sem operar produção
 
 ## 4. Gate final do change
 

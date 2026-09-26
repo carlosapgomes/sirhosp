@@ -1169,6 +1169,12 @@ reconstrói nenhum dia anterior à data de ativação: ela fecha apenas datas lo
 ativação e dentro da janela limitada de datas fechadas. Página e XLSX continuam
 lendo somente a revisão materializada da data selecionada.
 
+O fluxo operacional é composto de checkpoints independentes, sempre nesta ordem:
+instalação desabilitada (5c.2), preflight somente leitura (5c.3), aceite e
+ativação explícita (5c.4), observação agregada (5c.5), rerun de uma data (5c.6)
+e desativação/rollback (5c.7). Nada é automático: o preflight por si só não
+autoriza produção e a ativação é um comando manual separado.
+
 ### 5c.1 Agendamento (America/Bahia, offset fixo)
 
 | Timer | Comando | Agendamento (`OnCalendar`) | `Persistent` | O que executa |
@@ -1234,23 +1240,35 @@ variável não é declarada no `.env`.
 
 ### 5c.2 Artefatos, instalação e baseline desabilitado
 
-Os dois units vivem em `deploy/systemd/` (`sirhosp-daily-statistics.service` e
-`sirhosp-daily-statistics.timer`).
+A release imutável publica, da mesma tag, o preflight
+`deploy/daily-statistics-activation-preflight.sh` e os dois units
+`deploy/systemd/sirhosp-daily-statistics.service` e
+`deploy/systemd/sirhosp-daily-statistics.timer`. O workflow de release valida os
+três arquivos e os anexa na criação do draft, junto de `compose.hospital.yml`,
+da imagem e dos assets das cadências; a tag e os assets não podem ser alterados
+depois. **Pré-requisito:** o scheduler
+`deploy/exit-reconciliation-scheduler.sh` e os seis units das cadências de saída
+instalados da **mesma** tag (seção 5b.2) — o preflight compara byte a byte os
+dez assets instalados contra a release e uma cópia local divergente reprova.
 
-**Pré-requisito de publicação:** estas unidades ainda **não** estão anexadas à
-release imutável pelo workflow de release; até que um slice operacional seguinte
-as publique junto dos demais assets, elas não devem ser instaladas em produção.
-Depois da publicação, a instalação usa a mesma tag da release imutável (exemplo
-sintético com a tag `v1.0.0-rc.N`):
+Instalação no servidor hospitalar (exemplo sintético com a tag `v1.0.0-rc.N`;
+troque pela tag exata publicada). Esta etapa **não** habilita nem inicia nada:
 
 ```bash
 cd /srv/apps/prisma
 
 mkdir -p deploy/systemd
-for unit in sirhosp-daily-statistics.service sirhosp-daily-statistics.timer; do
-  curl -fL -o "deploy/systemd/${unit}" \
-    "https://github.com/carlosapgomes/sirhosp/releases/download/v1.0.0-rc.N/${unit}"
-done
+
+# Preflight da MESMA tag imutável dos units
+curl -fL -o deploy/daily-statistics-activation-preflight.sh \
+  "https://github.com/carlosapgomes/sirhosp/releases/download/v1.0.0-rc.N/daily-statistics-activation-preflight.sh"
+chmod +x deploy/daily-statistics-activation-preflight.sh
+
+# Os dois units de estatísticas da MESMA tag imutável
+curl -fL -o deploy/systemd/sirhosp-daily-statistics.service \
+  "https://github.com/carlosapgomes/sirhosp/releases/download/v1.0.0-rc.N/sirhosp-daily-statistics.service"
+curl -fL -o deploy/systemd/sirhosp-daily-statistics.timer \
+  "https://github.com/carlosapgomes/sirhosp/releases/download/v1.0.0-rc.N/sirhosp-daily-statistics.timer"
 
 # Copia os units para o systemd (NÃO habilita nem inicia nada)
 sudo install -m 0644 deploy/systemd/sirhosp-daily-statistics.service \
@@ -1267,49 +1285,158 @@ systemctl is-enabled sirhosp-daily-statistics.timer
 systemctl list-timers --all | grep sirhosp-daily-statistics || true
 ```
 
-A saída esperada é `disabled` até a ativação explícita da seção 5c.3.
+A saída esperada é `disabled` até a ativação explícita da seção 5c.4.
 
-### 5c.3 Pré-condições de ativação e evidência das cadências
+### 5c.3 Preflight somente leitura (fail-closed)
 
-Habilitar o timer é um checkpoint separado do deploy, condicionado a:
+O preflight `deploy/daily-statistics-activation-preflight.sh` roda no host, é
+**somente leitura** e **fail-closed**, e não é autorização para ativar produção.
+Uso: `daily-statistics-activation-preflight.sh <release-tag-exata>` — uma tag
+exata por execução, sem default, e nenhuma cópia local substitui a validação da
+release imutável.
 
-- **Data de ativação obrigatória e futura.** `STATISTICS_ACTIVATION_DATE`
-  (`YYYY-MM-DD`, local `America/Bahia`) declarada no `.env` do hospital. Sem
-  ela nenhuma data é elegível: o comando falha fechado e nada é materializado.
-  Datas anteriores à ativação permanecem indisponíveis — o modo `--finalize`
-  nunca reconstrói histórico e nenhum backfill é executado por esta suíte.
-- **Evidência operacional das cadências que alimentam as saídas do dia.** Antes
-  de ativar, confirme no journal que as cadências da seção 5b estão de fato
-  executando: altas intradiárias (`sirhosp-discharges.timer`,
-  `*:13:00 America/Bahia`) e recuperação D-1
-  (`sirhosp-historical-recovery.timer`, `05:00:00 America/Bahia`) com os quatro
-  extratores na ordem canônica da seção 5b.1 — incluindo a extração de óbitos
-  (`deaths`). Sem essa evidência a publicação pode até ocorrer com aviso de
-  qualidade, mas não pode afirmar frescor da fonte que não foi observado.
-- **Units instalados a partir da release publicada** (seção 5c.2).
+Checks emitidos como `[preflight] check=<nome> status=PASS|FAIL`:
 
-Verificação e ativação:
+| Check | O que prova |
+| --- | --- |
+| `release` | a tag existe, está publicada (não é draft) e a release é imutável |
+| `asset_match` | os dez assets instalados (scheduler, preflight, os dois units de estatísticas e os seis units das cadências de saída) são byte a byte os da mesma tag |
+| `scheduler_contract` | o runtime canônico de quatro extratores (`discharges`, `admissions`, `deaths`, `official_census`) está no branch executável dos modos `hourly-discharges` e `d1-recovery` |
+| `image_version` | `SIRHOSP_VERSION` do `.env` é igual à tag exata (prova host-level de que a imagem do Compose pertence à release) |
+| `activation_date` | `STATISTICS_ACTIVATION_DATE` unívoca e estritamente futura em `America/Bahia` |
+| `daily_timer_state` | o timer de estatísticas continua `disabled`/`inactive` (baseline pré-ativação) |
+| `upstream_timer_state` | os timers de altas intradiárias e de recuperação D-1 estão `enabled`/`active` |
+| `cadence_hourly_discharges` | existe sucesso de `hourly-discharges` nas últimas 2 horas |
+| `cadence_d1_recovery` | existe sucesso de `d1-recovery` nas últimas 30 horas |
+
+Dependências explícitas do host: `bash`, `curl`, `python3`, `cmp`, `systemctl`,
+`journalctl`, `date`, `grep`, `mktemp`, `rm`. A saída é composta apenas de linhas
+`[preflight] check=... status=...` com tag, nome de check, modo, janela e motivo
+técnico enumerado: mensagens brutas do journal, credenciais e identidade clínica
+nunca são copiadas.
+
+Execução (a mesma tag exata instalada na seção 5c.2):
 
 ```bash
+cd /srv/apps/prisma
+./deploy/daily-statistics-activation-preflight.sh v1.0.0-rc.N
+```
+
+Códigos de saída: `0` = preflight aprovado; `1` = um ou mais checks falharam;
+`2` = uso incorreto (sem tag ou tag fora do formato); `3` = dependência do host
+ausente. Guarde a saída agregada para o registro de mudança — o bloco abaixo
+**falha fechado**: com `set -o pipefail` o código de saída do preflight
+atravessa o `tee` e qualquer status diferente de zero interrompe o bloco, de
+modo que uma execução reprovada nunca é aceita como evidência aprovada:
+
+```bash
+set -o pipefail
+./deploy/daily-statistics-activation-preflight.sh v1.0.0-rc.N \
+  | tee "/tmp/sirhosp-preflight-v1.0.0-rc.N.txt" \
+  || { echo 'preflight reprovado (status != 0) — ativação bloqueada' >&2; exit 1; }
+```
+
+`[preflight] result=PASS` é pré-condição, não autorização: **não existe caminho de exceção** para `[preflight] result=FAIL` — nenhuma ativação deve ocorrer com evidência pendente. Corrija a causa, reexecute o preflight e colete uma saída nova antes de seguir para a seção 5c.4.
+
+Falhas e ação esperada (motivos técnicos enumerados):
+
+- `release_unavailable`, `release_tag_mismatch`, `release_is_draft`,
+  `release_not_immutable`, `release_not_published`, `release_asset_missing`,
+  `release_unverified`: tag errada, release ainda em draft ou asset ausente —
+  corrija/publica a release antes de reinstalar.
+- `local_asset_missing`, `local_asset_mismatch`, `release_asset_unavailable`:
+  cópia instalada ausente ou divergente da tag — reinstale os assets da
+  seção 5c.2 (runtime imutável não aceita ajuste local).
+- `env_file_unreadable`, `env_value_missing`, `env_value_duplicate`,
+  `env_value_ambiguous`: declare `SIRHOSP_VERSION` e `STATISTICS_ACTIVATION_DATE`
+  uma única vez, com sintaxe simples, no `.env` do hospital.
+- `env_date_invalid`, `activation_date_not_future`: a data de ativação precisa
+  ser uma data válida e estritamente futura em `America/Bahia`.
+- `timer_not_disabled`, `timer_not_inactive`: o timer de estatísticas já foi
+  ativado — o baseline pré-ativação não está mais íntegro; desative conforme a
+  seção 5c.7 antes de reexecutar o preflight.
+- `upstream_timer_not_enabled`, `upstream_timer_not_active`,
+  `unit_state_unavailable`: as cadências de saída não estão habilitadas/ativas —
+  trate como bloqueio, não como ruído.
+- `cadence_stale`, `journal_unavailable`: evidência das cadências expirada ou
+  journal indisponível — aguarde a próxima execução normal das cadências.
+  **Nunca** dispare extratores manualmente para produzir evidência.
+- `scheduler_contract_missing`, `scheduler_contract_unreadable`: o scheduler da
+  release não comprova o runtime canônico de quatro extratores (incluindo
+  óbitos) — bloqueio até a release correta ser instalada.
+- `missing_dependency`: instale a dependência de host ausente e reexecute.
+
+### 5c.4 Aceite humano e ativação explícita
+
+Instalação, preflight, aceite humano e ativação são checkpoints separados: o
+preflight não ativa nada e a ativação nunca é automática.
+
+1. **Aceite humano.** Revise a saída do preflight e registre no ticket/registro
+   de mudança da organização a tag exata, o `[preflight] result=PASS` e as
+   contagens agregadas. O registro contém apenas evidência operacional
+   agregada: nunca anexe journal bruto das cadências, log clínico, credencial ou
+   workbook.
+2. **Frescor da evidência.** A evidência expira junto com as janelas verificadas
+   pelo preflight — 2 horas para a alta intradiária e 30 horas para a
+   recuperação D-1. Se a ativação não acontecer enquanto essas janelas
+   continuarem válidas, a evidência anterior **não autoriza** a ativação:
+   execute um novo preflight e registre a saída nova.
+3. **Pré-condições de ativação.** `STATISTICS_ACTIVATION_DATE` (`YYYY-MM-DD`,
+   local `America/Bahia`) declarada como data futura no `.env` do hospital
+   (obrigatória; sem ela o comando falha fechado e nada é materializado); units
+   instalados a partir da release publicada (seção 5c.2); evidência recente das
+   cadências que alimentam as saídas do dia — altas intradiárias
+   (`sirhosp-discharges.timer`, `*:13:00 America/Bahia`) e recuperação D-1
+   (`sirhosp-historical-recovery.timer`, `05:00:00 America/Bahia`) com os quatro
+   extratores na ordem canônica da seção 5b.1, incluindo a extração de óbitos
+   (`deaths`). Datas anteriores à ativação permanecem indisponíveis: o modo
+   `--finalize` nunca reconstrói histórico e nenhum backfill é executado por
+   esta suíte.
+
+Ativação (comando manual separado, depois do aceite; o bloco **falha fechado**:
+`set -euo pipefail` e cada contagem é verificada antes do único `enable`):
+
+```bash
+set -euo pipefail
 cd /srv/apps/prisma
 
 # 1) Declare a data de ativação no .env (obrigatória; sempre uma data futura)
 grep -n '^STATISTICS_ACTIVATION_DATE=' .env
 
-# 2) Evidência das cadências de alta intradiária, D-1 e óbitos
-journalctl -u sirhosp-discharges.service --since "-3 days" | tail -20
-journalctl -u sirhosp-historical-recovery.service --since "-7 days" | tail -20
+# 2) Evidência agregada das cadências de alta intradiária e de recuperação D-1.
+#    Contagem > 0 = evidência recente; 0 = evidência ausente/obsoleta, nada é
+#    ativado. O `|| true` existe apenas para que a contagem 0 seja impressa e
+#    testada abaixo: journal vazio ou leitura de journal indisponível também
+#    resultam em 0.
+hourly_discharges_success="$(journalctl -q --no-pager --since "-2 hours" \
+  -u sirhosp-discharges.service -o cat \
+  | grep -cF 'mode=hourly-discharges result=success' || true)"
+d1_recovery_success="$(journalctl -q --no-pager --since "-30 hours" \
+  -u sirhosp-historical-recovery.service -o cat \
+  | grep -cF 'mode=d1-recovery result=success' || true)"
+echo "cadence_hourly_discharges=${hourly_discharges_success}"
+echo "cadence_d1_recovery=${d1_recovery_success}"
 
-# 3) Habilita o timer de finalização diária
+# 3) Guarda fail-closed: as duas contagens precisam ser maiores que zero
+test "${hourly_discharges_success}" -gt 0 \
+  || { echo "abortado: cadence_hourly_discharges=${hourly_discharges_success} — evidência ausente/obsoleta" >&2; exit 1; }
+test "${d1_recovery_success}" -gt 0 \
+  || { echo "abortado: cadence_d1_recovery=${d1_recovery_success} — evidência ausente/obsoleta" >&2; exit 1; }
+
+# 4) Só com as duas contagens > 0: habilita o timer de finalização diária
 sudo systemctl enable --now sirhosp-daily-statistics.timer
 systemctl list-timers sirhosp-daily-statistics.timer
 ```
 
-Execuções manuais de validação usam
-`systemctl start sirhosp-daily-statistics.service` (oneshot); nenhum destes
-passos liga o agendamento sozinho.
+A contagem precisa ser maior que zero para cada modo — o `test` acima interrompe
+o bloco com `exit 1` **antes** do `enable`, então contagem 0 (evidência ausente
+ou obsoleta) não ativa nada. Os marcadores são agregados
+(`mode=<modo> result=<estado>`) e o sucesso D-1 só vale porque o
+runtime da mesma tag foi validado pelo preflight. Execuções manuais de validação
+usam `systemctl start sirhosp-daily-statistics.service` (oneshot); apenas o
+`systemctl enable` do timer liga o agendamento.
 
-### 5c.4 Observação agregada (sem identidade)
+### 5c.5 Observação agregada (sem identidade)
 
 A finalização escreve no journal apenas linhas técnicas com **data, status,
 revisão, IDs técnicos e contagens agregadas** — `date=`, `status=`, `revision=`,
@@ -1343,7 +1470,7 @@ O que observar:
 - a auditoria de exportação (`StatisticsExportLog`) registra usuário, revisão,
   instante servido e contagens de folhas e linhas, sem payload nominal.
 
-### 5c.5 Rerun de uma data após evidência tardia
+### 5c.6 Rerun de uma data após evidência tardia
 
 Evidência tardia (alta ou óbito conciliado depois do fechamento) entra por um
 rerun da mesma data local. O rerun é idempotente: cria uma nova revisão quando o
@@ -1363,9 +1490,12 @@ fechado com mensagem explícita e nada é materializado. Datas anteriores à
 ativação permanecem indisponíveis: o backfill clínico autorizado da seção 5b.7 é
 outra operação e não materializa o relatório.
 
-### 5c.6 Desativação e rollback
+### 5c.7 Desativação e rollback
 
-Desativar a finalização não apaga dados e não toca nas fontes clínicas:
+Desativar a finalização não apaga dados e não toca nas fontes clínicas; o
+rollback remove **apenas** os dois units de estatísticas e preserva os
+relatórios materializados, as fontes clínicas e as cadências de altas e
+recuperação D-1:
 
 ```bash
 sudo systemctl disable --now sirhosp-daily-statistics.timer
