@@ -4,10 +4,11 @@
 #                     (host-level, somente leitura, fail-closed)
 #
 # Checkpoint executado no host do hospital imediatamente ANTES do checkpoint
-# humano de ativação de `sirhosp-daily-statistics.timer` (runbook em
-# deploy/README.md, seção 5c). Ele não é autorização para ativar produção:
-# comprova procedência imutável, fronteira de ativação futura e frescor
-# agregado das cadências de saída, e termina sem alterar estado algum.
+# humano de ativação da finalização estatística adaptativa (runbook em
+# deploy/README.md). Ele não é autorização para ativar produção: comprova
+# procedência imutável, fronteira de ativação segura e frescor agregado das
+# cadências naturais do `census_orchestrator`, e termina sem alterar estado
+# algum.
 #
 # Uso: daily-statistics-activation-preflight.sh <release-tag-exata>
 #
@@ -17,11 +18,12 @@
 #                        release é imutável;
 #   asset_match          cada asset obrigatório da própria release é baixado
 #                        e comparado byte a byte com a cópia instalada —
-#                        este preflight e o scheduler em <hospital>/deploy/,
-#                        além dos units de finalização e das cadências de
-#                        saída em <systemd>/ (a comparação byte a byte dos
-#                        units instalados é o que prova que os calendários
-#                        systemd correspondem à release);
+#                        o Compose hospitalar standalone, este preflight e o
+#                        scheduler sob <hospital>/, além dos units de
+#                        finalização e das cadências de saída em <systemd>/ (a
+#                        comparação byte a byte dos units instalados é o que
+#                        prova que os calendários systemd correspondem à
+#                        release);
 #   image_version        SIRHOSP_VERSION do .env é igual à tag exata. É a
 #                        única prova disponível no host de que a imagem
 #                        configurada no Compose pertence à release: a imagem
@@ -36,30 +38,40 @@
 #                        sucesso D-1. Comentários, dead code e texto solto
 #                        nunca satisfazem o contrato;
 #   activation_date      STATISTICS_ACTIVATION_DATE declarada de forma
-#                        inequívoca e estritamente futura em America/Bahia;
-#   daily_timer_state    o timer de estatísticas continua desabilitado e
-#                        inativo (baseline pré-ativação);
-#   upstream_timer_state os timers de altas intradiárias e de recuperação
-#                        D-1 estão habilitados e ativos;
+#                        inequívoca: data futura ou, no bootstrap inicial, a
+#                        data corrente declarada antes das 20:00 America/Bahia.
+#                        Data passada, ausente, inválida ou bootstrap corrente
+#                        iniciado às 20:00 ou depois falham fechado;
+#   legacy_timer_state   os timers hourly, D-1 e de estatísticas continuam
+#                        desabilitados e inativos (fallback manual inerte);
+#   orchestrator_service o serviço conhecido `census_orchestrator` existe no
+#                        Compose hospitalar;
 #   cadence_hourly_discharges / cadence_d1_recovery
-#                        existem os marcadores agregados `mode=<modo>
-#                        result=success` no journal, dentro das janelas de 2
-#                        e 30 horas respectivamente.
+#                        existem provas agregadas de execuções naturais do
+#                        `census_orchestrator` nos logs do Compose, dentro das
+#                        janelas de 2 e 30 horas: o marcador canônico
+#                        `mode=<modo> result=success source=adaptive-orchestrator`
+#                        ou, na transição RC31, um bloco ordenado e isolado
+#                        (início, dispatch do modo, resumo sem falha e fim); o
+#                        D-1 exige ainda os quatro extratores canônicos,
+#                        incluindo óbitos, e resumo 4/4.
 #
-# Nenhum `enable`, `start`, `restart` ou `stop` é executado; nenhum container
-# Docker, comando Django, extrator, materialização, cliente de banco ou
-# backfill é acionado; nenhum estado do host é alterado. Qualquer
-# pré-condição ausente ou divergente falha fechado com motivo técnico
-# enumerado.
+# Docker é consultado exclusivamente por uma interface read-only fechada por
+# subcomando — `compose ... ps` e `compose ... logs --since <janela> --no-color`
+# para o serviço conhecido. Nenhum `exec`, `run`, `up`, `start`, `restart`,
+# `stop`, `inspect` é executado; nenhum comando Django, extrator,
+# materialização, cliente de banco ou backfill é acionado; nenhum estado do
+# host é alterado. Qualquer pré-condição ausente ou divergente falha fechado
+# com motivo técnico enumerado.
 #
 # Saída: apenas linhas `[preflight] ...` com tag, nomes de check, estados,
-# modos, janelas e motivos enumerados — é o artefato agregado que o operador
-# anexa ao registro de mudança. O conteúdo do journal é usado somente como
-# predicado interno: mensagens brutas, credenciais e identidade clínica nunca
-# são impressas.
+# unidades, service, janelas e origens enumeradas — é o artefato agregado que
+# o operador anexa ao registro de mudança. Os logs do container são usados
+# somente como predicado interno: mensagens brutas, credenciais e identidade
+# clínica nunca são impressas.
 #
-# Dependências explícitas do host: bash, curl, python3, cmp, systemctl,
-# journalctl, date, grep, mktemp, rm.
+# Dependências explícitas do host: bash, curl, python3, cmp, systemctl, date,
+# grep, mktemp, rm, docker.
 # =============================================================================
 set -euo pipefail
 # Ordenação determinística (comparação lexicográfica de datas ISO-8601) e
@@ -76,9 +88,13 @@ RELEASE_API_URL="${RELEASE_API_URL:-https://api.github.com/repos/carlosapgomes/s
 
 ENV_FILE="${HOSPITAL_DIR}/.env"
 DEPLOY_DIR="${HOSPITAL_DIR}/deploy"
+COMPOSE_FILE="${HOSPITAL_DIR}/compose.hospital.yml"
 
+COMPOSE_ASSET="compose.hospital.yml"
 SCHEDULER_ASSET="exit-reconciliation-scheduler.sh"
 PREFLIGHT_ASSET="daily-statistics-activation-preflight.sh"
+
+ORCHESTRATOR_SERVICE="census_orchestrator"
 
 DAILY_SERVICE="sirhosp-daily-statistics.service"
 DAILY_TIMER="sirhosp-daily-statistics.timer"
@@ -89,8 +105,12 @@ D1_TIMER="sirhosp-historical-recovery.timer"
 STALE_SERVICE="sirhosp-stale-reconciliation.service"
 STALE_TIMER="sirhosp-stale-reconciliation.timer"
 
+# Timers legados de fallback: o caminho adaptativo os mantém inertes.
+LEGACY_TIMERS=("${HOURLY_TIMER}" "${D1_TIMER}" "${DAILY_TIMER}")
+
 # `asset|local-path` — bytes que devem coincidir com a release imutável.
 FILE_ASSETS=(
+    "${COMPOSE_ASSET}|${COMPOSE_FILE}"
     "${SCHEDULER_ASSET}|${DEPLOY_DIR}/${SCHEDULER_ASSET}"
     "${PREFLIGHT_ASSET}|${DEPLOY_DIR}/${PREFLIGHT_ASSET}"
     "${DAILY_SERVICE}|${SYSTEMD_UNIT_DIR}/${DAILY_SERVICE}"
@@ -120,13 +140,11 @@ CANONICAL_RUNTIME_BRANCHES=(
     "hourly-discharges:${HOURLY_RUNTIME_DISPATCH}"
 )
 
-# Marcadores agregados emitidos pelo scheduler (nunca reproduzidos na saída).
-HOURLY_MARKER="mode=hourly-discharges result=success"
-D1_MARKER="mode=d1-recovery result=success"
-HOURLY_WINDOW="-2 hours"
-D1_WINDOW="-30 hours"
+# Janelas de frescor das cadências naturais do orquestrador.
+HOURLY_WINDOW="2h"
+D1_WINDOW="30h"
 
-HOST_DEPENDENCIES=(bash curl python3 cmp systemctl journalctl date grep mktemp rm)
+HOST_DEPENDENCIES=(bash curl python3 cmp systemctl date grep mktemp rm docker)
 
 TAG=""
 TMP_DIR=""
@@ -165,10 +183,12 @@ usage() {
     cat >&2 <<'EOF'
 Uso: daily-statistics-activation-preflight.sh <release-tag-exata>
 
-Preflight somente leitura do fechamento estatístico diário: valida a tag
-publicada e imutável, a procedência byte a byte dos assets instalados, a
-fronteira de ativação futura, o baseline desabilitado do timer de estatísticas
-e a evidência agregada recente das cadências de saída.
+Preflight somente leitura da finalização estatística adaptativa: valida a tag
+publicada e imutável, a procedência byte a byte dos assets instalados
+(incluindo o Compose hospitalar), a fronteira de ativação segura, o estado
+desabilitado/inativo dos timers legados e a evidência agregada recente das
+cadências naturais do census_orchestrator, consultada apenas por Docker
+read-only.
 
 Nenhum estado do host é alterado e o preflight não autoriza ativação.
 EOF
@@ -654,7 +674,7 @@ check_image_version() {
 }
 
 check_activation_date() {
-    local value today normalized
+    local value today normalized now_hour
     read_env_value STATISTICS_ACTIVATION_DATE
     if [ "${ENV_STATUS}" != "ok" ]; then
         fail activation_date "$(env_failure_reason)" "key=STATISTICS_ACTIVATION_DATE"
@@ -675,7 +695,20 @@ check_activation_date() {
         pass activation_date "window=strictly_future"
         return 0
     fi
-    fail activation_date activation_date_not_future
+    if [[ "${value}" == "${today}" ]]; then
+        now_hour="$(TZ=America/Bahia date '+%H')"
+        if [[ ! "${now_hour}" =~ ^[0-9]{2}$ ]]; then
+            fail activation_date clock_unavailable
+            return 0
+        fi
+        if [ "$((10#${now_hour}))" -lt 20 ]; then
+            pass activation_date "window=bootstrap_current"
+            return 0
+        fi
+        fail activation_date bootstrap_after_boundary
+        return 0
+    fi
+    fail activation_date activation_date_in_past
     return 0
 }
 
@@ -689,77 +722,202 @@ systemctl_state() {
     systemctl "${verb}" "${unit}" 2>/dev/null || true
 }
 
-check_daily_timer_state() {
-    local enabled active
-    enabled="$(systemctl_state is-enabled "${DAILY_TIMER}")"
-    active="$(systemctl_state is-active "${DAILY_TIMER}")"
-    if [ -z "${enabled}" ] || [ -z "${active}" ]; then
-        fail daily_timer_state unit_state_unavailable "unit=${DAILY_TIMER}"
-        return 0
-    fi
-    if [ "${enabled}" != "disabled" ]; then
-        fail daily_timer_state timer_not_disabled "unit=${DAILY_TIMER}"
-        return 0
-    fi
-    if [ "${active}" != "inactive" ]; then
-        fail daily_timer_state timer_not_inactive "unit=${DAILY_TIMER}"
-        return 0
-    fi
-    pass daily_timer_state "unit=${DAILY_TIMER}"
-}
-
-check_upstream_timers() {
+# R3: os três timers legados (hourly, D-1 e estatístico) permanecem como
+# fallback manual inerte — desabilitados e inativos.
+check_legacy_timer_state() {
     local unit enabled active
-    for unit in "${HOURLY_TIMER}" "${D1_TIMER}"; do
+    for unit in "${LEGACY_TIMERS[@]}"; do
         enabled="$(systemctl_state is-enabled "${unit}")"
         active="$(systemctl_state is-active "${unit}")"
         if [ -z "${enabled}" ] || [ -z "${active}" ]; then
-            fail upstream_timer_state unit_state_unavailable "unit=${unit}"
+            fail legacy_timer_state unit_state_unavailable "unit=${unit}"
             continue
         fi
-        if [ "${enabled}" != "enabled" ]; then
-            fail upstream_timer_state upstream_timer_not_enabled "unit=${unit}"
+        if [ "${enabled}" != "disabled" ]; then
+            fail legacy_timer_state timer_not_disabled "unit=${unit}"
             continue
         fi
-        if [ "${active}" != "active" ]; then
-            fail upstream_timer_state upstream_timer_not_active "unit=${unit}"
+        if [ "${active}" != "inactive" ]; then
+            fail legacy_timer_state timer_not_inactive "unit=${unit}"
             continue
         fi
-        pass upstream_timer_state "unit=${unit}"
+        pass legacy_timer_state "unit=${unit}"
     done
 }
 
-# 0 = marcador presente, 1 = ausente, 2 = journal indisponível. O conteúdo é
-# escrito em arquivo temporário e nunca ecoado.
-journal_has_marker() {
-    local unit="$1" since="$2" marker="$3" journal_file="$4"
-    if ! journalctl -q --no-pager --since "${since}" -u "${unit}" -o cat \
-        >"${journal_file}" 2>/dev/null; then
-        return 2
-    fi
-    if grep -qF -- "${marker}" "${journal_file}"; then
-        return 0
-    fi
-    return 1
+# R7: interface Docker read-only e fechada por subcomando. Somente `ps` e
+# `logs` são aceitos; qualquer outro verbo é recusado antes de qualquer
+# execução. O Compose consultado é o asset imutável já comparado byte a byte.
+docker_query() {
+    local subcommand="$1"
+    shift
+    case "${subcommand}" in
+        ps|logs) ;;
+        *) return 1 ;;
+    esac
+    docker compose -f "${COMPOSE_FILE}" "${subcommand}" "$@"
 }
 
+check_orchestrator_service() {
+    local services_file="${TMP_DIR}/compose-services.txt"
+    if ! docker_query ps --services >"${services_file}" 2>/dev/null; then
+        fail orchestrator_service compose_ps_unavailable \
+            "service=${ORCHESTRATOR_SERVICE}"
+        return 0
+    fi
+    if ! grep -qxF -- "${ORCHESTRATOR_SERVICE}" "${services_file}"; then
+        fail orchestrator_service orchestrator_service_missing \
+            "service=${ORCHESTRATOR_SERVICE}"
+        return 0
+    fi
+    pass orchestrator_service "service=${ORCHESTRATOR_SERVICE}"
+}
+
+# Parser fail-closed da evidência agregada. Aceita o marcador canônico ou um
+# bloco RC31 ordenado e isolado — início, dispatch do modo, resumo sem falha e
+# fim — sempre da mesma execução. O log bruto é apenas predicado: imprime um
+# único token de status e nunca ecoa conteúdo.
+parse_cadence_evidence() {
+    python3 - "$1" "$2" <<'PY'
+"""Evidência de cadência do census_orchestrator, sem ecoar log bruto."""
+import re
+import sys
+
+CANONICAL_MARKERS = {
+    "hourly": "mode=hourly-discharges result=success source=adaptive-orchestrator",
+    "d1": "mode=d1-recovery result=success source=adaptive-orchestrator",
+}
+
+BLOCK = {
+    "d1": {
+        "start": re.compile(r"Quiet-window D-1 recovery start:"),
+        "dispatch": re.compile(
+            r"exit_reconciliation_runtime: mode=d1 "
+            r"date=\d{2}/\d{2}/\d{4} "
+            r"extractors=discharges,admissions,deaths,official_census(?![\w,])"
+        ),
+        "finish": re.compile(r"Quiet-window D-1 recovery finished:"),
+        "expected_steps": 4,
+    },
+    "hourly": {
+        "start": re.compile(r"Intraday hourly recovery start:"),
+        "dispatch": re.compile(
+            r"exit_reconciliation_runtime: mode=hourly "
+            r"date=\d{2}/\d{2}/\d{4} extractors=discharges(?![\w,])"
+        ),
+        "finish": re.compile(r"Intraday hourly recovery finished:"),
+        "expected_steps": 1,
+    },
+}
+
+SUMMARY = re.compile(
+    r"Steps:\s*(?P<steps>\d+)\s*\|\s*"
+    r"Succeeded:\s*(?P<succeeded>\d+)\s*\|\s*"
+    r"Failed:\s*(?P<failed>\d+)\s*\|\s*"
+    r"Skipped:\s*(?P<skipped>\d+)"
+)
+
+# Prefixo opcional do `docker compose logs` (nome do serviço/container + `|`).
+LOG_PREFIX = re.compile(r"^[\w.-]+\s+\|\s?")
+
+
+def strip_prefix(line):
+    return LOG_PREFIX.sub("", line, count=1)
+
+
+def classify(text):
+    events = []
+    for mode, spec in BLOCK.items():
+        for kind in ("start", "dispatch", "finish"):
+            if spec[kind].search(text):
+                events.append((kind, mode, None))
+    match = SUMMARY.search(text)
+    if match:
+        counts = {key: int(value) for key, value in match.groupdict().items()}
+        events.append(("summary", None, counts))
+    return events
+
+
+def has_isolated_block(events, mode):
+    expected = BLOCK[mode]["expected_steps"]
+    for index in range(len(events) - 3):
+        first, second, third, fourth = events[index:index + 4]
+        if first[0] != "start" or first[1] != mode:
+            continue
+        if second[0] != "dispatch" or second[1] != mode:
+            continue
+        if third[0] != "summary":
+            continue
+        counts = third[2]
+        if counts["steps"] != expected or counts["succeeded"] != expected:
+            continue
+        if counts["failed"] != 0 or counts["skipped"] != 0:
+            continue
+        if fourth[0] != "finish" or fourth[1] != mode:
+            continue
+        return True
+    return False
+
+
+def main():
+    if len(sys.argv) != 3:
+        print("status=missing")
+        return 0
+    mode = sys.argv[1]
+    path = sys.argv[2]
+    if mode not in BLOCK:
+        print("status=missing")
+        return 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        print("status=missing")
+        return 0
+
+    if CANONICAL_MARKERS[mode] in text:
+        print("status=canonical")
+        return 0
+
+    events = []
+    for line in text.splitlines():
+        events.extend(classify(strip_prefix(line)))
+
+    print("status=rc31" if has_isolated_block(events, mode) else "status=missing")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+}
+
+# Consulta silenciosa dos logs do serviço conhecido; o arquivo fica sob o
+# diretório temporário removido pelo `trap` e nunca é ecoado.
 check_cadence() {
-    local check="$1" unit="$2" since="$3" marker="$4" window="$5"
-    local outcome=0
-    journal_has_marker "${unit}" "${since}" "${marker}" \
-        "${DOWNLOAD_DIR}/${check}.journal" || outcome=$?
-    case "${outcome}" in
-        0) pass "${check}" "unit=${unit}" "window=${window}" ;;
-        1) fail "${check}" cadence_stale "unit=${unit}" "window=${window}" ;;
-        *) fail "${check}" journal_unavailable "unit=${unit}" "window=${window}" ;;
+    local check="$1" mode="$2" window="$3"
+    local log_file="${TMP_DIR}/${check}.compose.log"
+    if ! docker_query logs --since "${window}" --no-color "${ORCHESTRATOR_SERVICE}" \
+        >"${log_file}" 2>/dev/null; then
+        fail "${check}" compose_logs_unavailable "window=${window}"
+        return 0
+    fi
+    local evidence
+    evidence="$(parse_cadence_evidence "${mode}" "${log_file}")" \
+        || evidence="status=missing"
+    case "${evidence}" in
+        status=canonical)
+            pass "${check}" "source=adaptive-orchestrator" "window=${window}" ;;
+        status=rc31)
+            pass "${check}" "source=rc31-orchestrator" "window=${window}" ;;
+        *)
+            fail "${check}" cadence_stale "window=${window}" ;;
     esac
 }
 
 check_cadences() {
-    check_cadence cadence_hourly_discharges "${HOURLY_SERVICE}" "${HOURLY_WINDOW}" \
-        "${HOURLY_MARKER}" "2h"
-    check_cadence cadence_d1_recovery "${D1_SERVICE}" "${D1_WINDOW}" \
-        "${D1_MARKER}" "30h"
+    check_cadence cadence_hourly_discharges hourly "${HOURLY_WINDOW}"
+    check_cadence cadence_d1_recovery d1 "${D1_WINDOW}"
 }
 
 main() {
@@ -788,8 +946,8 @@ main() {
     check_scheduler_contract
     check_image_version
     check_activation_date
-    check_daily_timer_state
-    check_upstream_timers
+    check_legacy_timer_state
+    check_orchestrator_service
     check_cadences
 
     if [ "${FAILURES}" -gt 0 ]; then

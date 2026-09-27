@@ -21,10 +21,10 @@
 
 ## 4. SLICE-OASF-S3 — Preflight reconhece o runtime adaptativo
 
-- [ ] 4.1 Adicionar testes RED do preflight para Compose imutável, bootstrap corrente antes das 20:00, timers hourly/D-1 legados desabilitados, evidências naturais hourly/D-1 do container e allowlist de comandos Docker read-only.
-- [ ] 4.2 Implementar o parser fail-closed dos marcadores canônicos e das sequências transitórias ordenadas da RC31, sem ecoar log bruto, combinar execuções ou aceitar journals manuais; verificar GREEN focado com fixtures sintéticas adversariais.
-- [ ] 4.3 Executar `./scripts/test-in-container.sh unit`, lint/typecheck proporcionais e OpenSpec strict; gerar `/tmp/sirhosp-slice-OASF-S3-report.md` com RED/GREEN e snippets antes/depois.
-- [ ] 4.4 Obter revisão independente do slice e corrigir apenas achados P0/P1 antes de marcar o slice concluído.
+- [x] 4.1 Adicionar testes RED do preflight para Compose imutável, bootstrap corrente antes das 20:00, timers hourly/D-1 legados desabilitados, evidências naturais hourly/D-1 do container e allowlist de comandos Docker read-only.
+- [x] 4.2 Implementar o parser fail-closed dos marcadores canônicos e das sequências transitórias ordenadas da RC31, sem ecoar log bruto, combinar execuções ou aceitar journals manuais; verificar GREEN focado com fixtures sintéticas adversariais.
+- [x] 4.3 Executar `./scripts/test-in-container.sh unit`, lint/typecheck proporcionais e OpenSpec strict; gerar `/tmp/sirhosp-slice-OASF-S3-report.md` com RED/GREEN e snippets antes/depois.
+- [x] 4.4 Obter revisão independente do slice e corrigir apenas achados P0/P1 antes de marcar o slice concluído.
 
 ## 5. SLICE-OASF-S4 — Handoff operacional e assets de fallback
 
