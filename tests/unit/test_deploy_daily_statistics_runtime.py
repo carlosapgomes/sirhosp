@@ -1,4 +1,4 @@
-"""Deploy contract tests for the DSRS-S8 daily-statistics runtime and runbook.
+"""Deploy contract tests for the OASF-S4 adaptive statistics handoff.
 
 Static text/parse assertions plus synthetic management-command calls (the
 activation boundary and the non-positive finalization window are both refused
@@ -6,40 +6,33 @@ before any date is processed): the suite never invokes ``systemctl``,
 ``docker``, the materialization command against real data or any other
 production surface. It pins:
 
-- R1: the service runs ``materialize_daily_statistics --finalize`` exactly
-  once through the hospital one-shot runtime
-  (``compose.hospital.yml`` + ``--profile recovery run --rm`` on
-  ``historical_recovery``), and the timer carries one documented
-  ``America/Bahia`` calendar that only fires after the target local day is
-  closed and the maximum D-1 recovery window of the existing units elapsed;
-  the 07:30 trigger is documented as staggered from the existing :13/:47/05:00
-  offsets with no guarantee of non-overlap and no cross-workflow mutual
-  exclusion (the finalization itself is bounded, idempotent, atomic and
-  PostgreSQL-coordinated, while the existing cadences keep their own
-  coordination);
-- R2: the activation boundary is declared in the hospital environment file,
-  forwarded explicitly into the one-shot container, documented as required in
-  ``.env.example`` and refused when undeclared, so no earlier date is ever
-  reconstructed; the bounded finalization window is forwarded by reference the
-  same way, with a safe unit default of 7 and no silent fallback when a
-  declared value is non-positive;
-- R3: the units declare user, working directory, environment, dependencies,
-  failure policy and journal output like the existing units;
-- R4/R5: ``deploy/README.md`` carries the install, enable, verify, observe,
-  single-date rerun, disable and rollback runbook plus the activation
-  preconditions for the intraday discharge, D-1 and death cadences;
-- R6: the units and runbook use dates, revisions, status and counts only,
-  never clinical identity, and never a mutating or extraction command;
-- PDSPA-S2 R1/R2: the immutable release workflow verifies and attaches both
-  units (plus the activation preflight) in its single draft creation;
-- PDSPA-S3 R1-R6: the runbook downloads the preflight and both units from one
-  immutable tag, installs them without enabling or starting anything, runs the
-  read-only preflight before human acceptance and the separate activation,
-  requires a new preflight when the evidence expired, collects only aggregated
-  journal evidence, limits the rollback to the two statistics units and makes
-  no absolute non-overlap claim; both activation shell blocks fail closed (the
-  preflight status survives ``tee`` and the cadence counts are asserted before
-  the single ``enable``).
+- R1: ``sirhosp-discharges.timer``, ``sirhosp-historical-recovery.timer``,
+  ``sirhosp-daily-statistics.timer`` and
+  ``sirhosp-daily-statistics.service`` declare themselves an inert manual
+  fallback owned by the adaptive census orchestrator, never the normal
+  schedule, and never instruct enabling or starting a timer;
+- R2: ``.env.example`` documents a future boundary by default, the same-day
+  bootstrap allowed only before 20:00 ``America/Bahia`` and the permanent
+  refusal of any past date; the fallback one-shot still forwards the declared
+  boundary and the bounded finalization window, with the safe default of 7 and
+  no silent fallback when a declared value is non-positive;
+- R3-R7, R9-R10: ``deploy/README.md`` (section 5c) documents installation,
+  configuration, preflight, human acceptance and activation as separate ordered
+  checkpoints, activates only through
+  ``docker compose up -d --no-deps --force-recreate census_orchestrator``,
+  preserves the natural hourly/D-1 evidence before recreation, validates the
+  three fallback timers ``disabled``/``inactive``, proves zero reports before
+  the boundary with an aggregate count, observes only dates, revisions, status,
+  counts and aggregate markers, declares the read-only Docker socket privilege,
+  documents the post-05:00 ``d1_recovery_not_confirmed`` recovery and the 07:30
+  human checkpoint, restricts the manual warning removal to a proven D-1
+  success and rolls back without deleting revisions or reverting migrations;
+- R8: ``docs/releases/v0.1.0-rc.32-upgrade.md`` carries backup, dormant deploy,
+  fail-closed preflight, acceptance, isolated activation, observation and the
+  exact-tag rollback with guarded mutable blocks;
+- PDSPA-S2: the immutable release workflow verifies and attaches both
+  statistics units (plus the activation preflight) in its single draft
+  creation.
 """
 
 from __future__ import annotations
@@ -60,6 +53,7 @@ SYSTEMD_DIR = ROOT / "deploy" / "systemd"
 README = ROOT / "deploy" / "README.md"
 ENV_EXAMPLE = ROOT / ".env.example"
 SETTINGS_SOURCE = ROOT / "config" / "settings.py"
+RC32_RUNBOOK = ROOT / "docs" / "releases" / "v0.1.0-rc.32-upgrade.md"
 
 LOOKBACK_VAR = "STATISTICS_FINALIZATION_LOOKBACK_DAYS"
 LOOKBACK_UNIT_DEFAULT = "7"
@@ -72,16 +66,39 @@ SERVICE_NAME = "sirhosp-daily-statistics.service"
 TIMER_NAME = "sirhosp-daily-statistics.timer"
 ALL_UNIT_FILES = (SERVICE_NAME, TIMER_NAME)
 
+HOURLY_TIMER = "sirhosp-discharges.timer"
 D1_RECOVERY_TIMER = "sirhosp-historical-recovery.timer"
 D1_RECOVERY_SERVICE = "sirhosp-historical-recovery.service"
 
+# R1: the three fixed timers and the statistics one-shot are inert manual
+# fallback — every one of them stays disabled/inactive on the adaptive path.
+FALLBACK_UNITS = (HOURLY_TIMER, D1_RECOVERY_TIMER, SERVICE_NAME, TIMER_NAME)
+FALLBACK_TIMERS = (HOURLY_TIMER, D1_RECOVERY_TIMER, TIMER_NAME)
+FALLBACK_OWNER = {
+    HOURLY_TIMER: "adaptive census orchestrator",
+    D1_RECOVERY_TIMER: "adaptive census orchestrator",
+    SERVICE_NAME: "orquestrador adaptativo",
+    TIMER_NAME: "orquestrador adaptativo",
+}
+
 CALENDAR_LITERAL = "OnCalendar=*-*-* 07:30:00 America/Bahia"
+D1_CALENDAR_LITERAL = "OnCalendar=*-*-* 05:00:00 America/Bahia"
+HOURLY_CALENDAR_LITERAL = "OnCalendar=*-*-* *:13:00 America/Bahia"
 BAHIA_DAILY_CALENDAR_RE = re.compile(
     r"^OnCalendar=\*-\*-\* (\d{2}):(\d{2}):(\d{2}) America/Bahia$", re.MULTILINE
 )
 
-# The 07:30 trigger is staggered from the existing :13/:47/05:00 offsets, but
-# executions are not mutually exclusive, so no S8 artifact may fall back to an
+ADAPTIVE_MARKERS = (
+    "mode=d1-recovery result=success source=adaptive-orchestrator",
+    "mode=hourly-discharges result=success source=adaptive-orchestrator",
+)
+PREFLIGHT_ASSET_NAME = PREFLIGHT_ASSET.split("/")[-1]
+TAG_PLACEHOLDER = "v1.0.0-rc.N"
+
+RECREATE_COMMAND = "up -d --no-deps --force-recreate census_orchestrator"
+PREFLIGHT_COMMAND = f"./deploy/{PREFLIGHT_ASSET_NAME} {TAG_PLACEHOLDER}"
+
+# Executions are not mutually exclusive, so no artifact may fall back to an
 # absolute non-collision claim.
 FORBIDDEN_ABSOLUTE_NON_COLLISION = (
     "não colide",
@@ -137,18 +154,15 @@ MUTATING_OR_EXTRACTION_COMMANDS = (
 )
 
 
+def _read(path: Path) -> str:
+    assert path.exists(), f"{path} must exist"
+    return path.read_text(encoding="utf-8")
+
+
 def _unit_text(name: str) -> str:
     path = SYSTEMD_DIR / name
     assert path.exists(), f"systemd unit {name!r} must exist"
     return path.read_text(encoding="utf-8")
-
-
-def _calendar_seconds(text: str) -> int:
-    """Seconds-of-day of the single ``America/Bahia`` daily calendar."""
-    matches = BAHIA_DAILY_CALENDAR_RE.findall(text)
-    assert len(matches) == 1, "unit must declare exactly one daily Bahia calendar"
-    hour, minute, second = (int(part) for part in matches[0])
-    return hour * 3600 + minute * 60 + second
 
 
 def _exec_start(text: str) -> str:
@@ -190,25 +204,89 @@ def _section(document: str, start_heading: str) -> str:
     return "\n".join(chunk)
 
 
+FENCED_SHELL_BLOCK_RE = re.compile(
+    r"^```(?:bash|sh)\n(.*?)^```$", re.DOTALL | re.MULTILINE
+)
+
+
+def _shell_blocks(document: str) -> list[str]:
+    """Fenced ``bash``/``sh`` snippets of a document, fences stripped."""
+    return FENCED_SHELL_BLOCK_RE.findall(document)
+
+
 @pytest.fixture(scope="module")
 def runbook() -> str:
-    return _section(README.read_text(encoding="utf-8"), "## 5c.")
+    return _section(_read(README), "## 5c.")
+
+
+@pytest.fixture(scope="module")
+def rc32_runbook() -> str:
+    return _read(RC32_RUNBOOK)
 
 
 def _deploy_docs() -> dict[str, str]:
-    """The S8 timer comment and runbook text that state the cadence contract."""
+    """The fallback timer comment and runbook text that state the contract."""
     return {
         TIMER_NAME: _unit_text(TIMER_NAME),
-        "deploy/README.md": README.read_text(encoding="utf-8"),
+        "deploy/README.md": _read(README),
     }
 
 
 # ---------------------------------------------------------------------------
-# R1 — scheduled command, hospital one-shot runtime and timer calendar
+# R1 — the fixed units are inert manual fallback, never the normal schedule
 # ---------------------------------------------------------------------------
 
 
-def test_service_runs_only_the_finalize_command_once() -> None:
+@pytest.mark.parametrize("name", FALLBACK_UNITS)
+def test_fallback_units_declare_inert_manual_fallback(name: str) -> None:
+    lowered = _unit_text(name).lower()
+    for marker in ("fallback", "manual", "census_orchestrator"):
+        assert marker in lowered, f"{name} must declare {marker!r}"
+    assert FALLBACK_OWNER[name] in lowered, f"{name} must name the adaptive owner"
+    assert ("disabled" in lowered) or ("desabilitado" in lowered)
+    assert ("inactive" in lowered) or ("inativo" in lowered)
+
+
+@pytest.mark.parametrize("name", FALLBACK_UNITS)
+def test_fallback_units_never_offer_a_normal_schedule(name: str) -> None:
+    """No fallback unit may present itself as the primary scheduler or tell the
+    operator to enable/start it."""
+    lowered = _unit_text(name).lower()
+    for forbidden in (
+        "systemctl enable",
+        "systemctl start",
+        "enable --now",
+        "enabled only",
+        "habilite",
+        "scheduler prim",
+        "primary schedul",
+        "agendamento principal",
+        "o único dono",
+    ):
+        assert forbidden not in lowered, f"{name} must not instruct {forbidden!r}"
+
+
+def test_fallback_timers_keep_one_documented_bahia_calendar() -> None:
+    calendars = {
+        HOURLY_TIMER: HOURLY_CALENDAR_LITERAL,
+        D1_RECOVERY_TIMER: D1_CALENDAR_LITERAL,
+        TIMER_NAME: CALENDAR_LITERAL,
+    }
+    daily_calendars = (D1_RECOVERY_TIMER, TIMER_NAME)
+    for name, literal in calendars.items():
+        text = _unit_text(name)
+        assert text.count("OnCalendar=") == 1
+        assert literal in text
+        assert "America/Bahia" in text
+        assert "Persistent=true" in text
+        assert "RemainAfterElapse=no" in text
+        assert "RandomizedDelay" not in text
+        assert "ExecStart=" not in text
+        if name in daily_calendars:
+            assert len(BAHIA_DAILY_CALENDAR_RE.findall(text)) == 1
+
+
+def test_fallback_service_runs_only_the_manual_finalize_command() -> None:
     text = _unit_text(SERVICE_NAME)
     assert text.count("ExecStart=") == 1
     assert "materialize_daily_statistics --finalize" in text
@@ -216,7 +294,7 @@ def test_service_runs_only_the_finalize_command_once() -> None:
     assert re.findall(r"manage\.py ([a-z_]+)", text) == ["materialize_daily_statistics"]
 
 
-def test_service_uses_the_hospital_oneshot_runtime() -> None:
+def test_fallback_service_uses_the_hospital_oneshot_runtime() -> None:
     text = _unit_text(SERVICE_NAME)
     for marker in (
         "docker compose",
@@ -235,37 +313,45 @@ def test_service_uses_the_hospital_oneshot_runtime() -> None:
     assert not re.search(r"\bweb\b", lowered)
 
 
-def test_timer_declares_one_documented_bahia_calendar() -> None:
+def test_fallback_service_declares_the_full_runtime_contract() -> None:
+    text = _unit_text(SERVICE_NAME)
+    for marker in (
+        "[Unit]",
+        "[Service]",
+        "[Install]",
+        "Description=",
+        "Documentation=https://github.com/carlosapgomes/sirhosp",
+        "After=network-online.target docker.service",
+        "Wants=network-online.target docker.service",
+        "Type=oneshot",
+        "User=root",
+        "WorkingDirectory=/srv/apps/prisma",
+        "TimeoutStartSec=",
+        "StandardOutput=journal",
+        "StandardError=journal",
+        "SyslogIdentifier=sirhosp-daily-statistics",
+        "WantedBy=multi-user.target",
+    ):
+        assert marker in text, f"service must declare {marker!r}"
+    assert "Restart=" not in text
+
+
+def test_daily_statistics_timer_declares_documentation_and_install_target() -> None:
     text = _unit_text(TIMER_NAME)
-    assert text.count("OnCalendar=") == 1
-    assert CALENDAR_LITERAL in text
-    assert "America/Bahia" in text
-    assert "Persistent=true" in text
-    assert "RemainAfterElapse=no" in text
-    assert "RandomizedDelay" not in text
-    assert "ExecStart=" not in text
-
-
-def test_timer_fires_after_the_day_close_and_the_d1_recovery_window() -> None:
-    """The target day must already be closed (after midnight, past the
-    20:00–24:00 closing window) and the maximum D-1 recovery window derived
-    from the existing units (05:00 + ``TimeoutStartSec``) must have elapsed,
-    so the finalization never runs before its evidence cadence finished."""
-    schedule = _calendar_seconds(_unit_text(TIMER_NAME))
-    assert schedule >= 1 * 3600, "the target local day must already be closed"
-
-    d1_start = _calendar_seconds(_unit_text(D1_RECOVERY_TIMER))
-    timeout_match = re.search(
-        r"TimeoutStartSec=(\d+)", _unit_text(D1_RECOVERY_SERVICE)
-    )
-    assert timeout_match is not None, "D-1 recovery unit must declare TimeoutStartSec"
-    d1_timeout = int(timeout_match.group(1))
-    assert schedule >= d1_start + d1_timeout
+    for marker in (
+        "[Unit]",
+        "[Timer]",
+        "[Install]",
+        "Description=",
+        "Documentation=",
+        "WantedBy=timers.target",
+    ):
+        assert marker in text, f"timer must declare {marker!r}"
 
 
 def test_docs_reject_the_absolute_non_collision_claim() -> None:
     """Distinct trigger instants are not a guarantee that executions cannot
-    overlap, so no S8 artifact may claim 07:30 never collides with :13/:47."""
+    overlap, so no artifact may claim 07:30 never collides with :13/:47."""
     for label, text in _deploy_docs().items():
         lowered = text.lower()
         for forbidden in FORBIDDEN_ABSOLUTE_NON_COLLISION:
@@ -275,59 +361,61 @@ def test_docs_reject_the_absolute_non_collision_claim() -> None:
             )
 
 
-def test_docs_document_staggered_triggers_with_possible_overlap() -> None:
-    """The timer comment and runbook must state the truthful contract: the
-    trigger instants are staggered, executions can still overlap because the
-    service timeout (``TimeoutStartSec=1800``) outlasts the gap to the next
-    cadence, no ordering/conflict relationship exists, and the supported
-    behavior is bounded, idempotent, atomic and PostgreSQL-coordinated while
-    the existing ingestion/reconciliation cadences keep their own
-    coordination."""
-    for label, text in _deploy_docs().items():
-        lowered = text.lower()
-        for marker in (
-            "escalonad",
-            "sobreposi",
-            "timeoutstartsec=1800",
-            "não há",
-            "exclusão mútua",
-            "idempotent",
-            "limitad",
-            "atômic",
-            "postgresql",
-            "coordena",
-        ):
-            assert marker in lowered, f"{label} must document {marker!r}"
-
-
 def test_docs_disclaim_cross_workflow_mutual_exclusion() -> None:
-    """The docs explicitly disclaim any mutual exclusion between this
+    """The docs explicitly disclaim any mutual exclusion between the fallback
     finalization and the existing cadences; only the finalization's own
     bounded/idempotent/atomic/PostgreSQL-coordinated behavior is claimed."""
     docs = _deploy_docs()
-    assert "não afirma exclusão mútua entre workflows" in docs[
-        "deploy/README.md"
-    ].lower()
-    assert "não há relação de ordem nem de exclusão mútua" in docs[
-        TIMER_NAME
-    ].lower()
+    assert "não afirma exclusão mútua entre workflows" in docs["deploy/README.md"].lower()
+    assert "não há relação de ordem nem de exclusão mútua" in docs[TIMER_NAME].lower()
+
+
+def test_units_are_install_inert() -> None:
+    for name in ALL_UNIT_FILES:
+        text = _unit_text(name)
+        assert "systemctl enable" not in text
+        assert "systemctl start" not in text
+        assert "enable --now" not in text
+
+
+def test_units_never_carry_patient_identity() -> None:
+    for name in ALL_UNIT_FILES:
+        lowered = _unit_text(name).lower()
+        for token in IDENTITY_TOKENS:
+            assert token not in lowered, f"{name} must not carry {token!r}"
+
+
+def test_units_never_run_an_extraction_or_destructive_command() -> None:
+    for name in ALL_UNIT_FILES:
+        lowered = _unit_text(name).lower()
+        for token in MUTATING_OR_EXTRACTION_COMMANDS:
+            assert token not in lowered, f"{name} must not reference {token!r}"
+
+
+def test_contract_suite_reads_text_only() -> None:
+    """R7: the validation is static/synthetic — this module imports no process
+    execution primitive, so it cannot shell out to systemctl, docker or the
+    materialization command against real data."""
+    imported = set(globals())
+    for primitive in ("subprocess", "os", "shutil", "socket"):
+        assert primitive not in imported
 
 
 # ---------------------------------------------------------------------------
-# R2 — required, declared activation boundary and no implicit backfill
+# R2 — declared, fail-closed boundary and the bounded manual window
 # ---------------------------------------------------------------------------
 
 
-def test_env_example_documents_the_required_activation_date() -> None:
-    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+def test_env_example_documents_the_boundary_rules() -> None:
+    text = _read(ENV_EXAMPLE)
     assert "STATISTICS_ACTIVATION_DATE=" in text
     lowered = text.lower()
-    assert "obrigat" in lowered
-    assert "futura" in lowered
-    assert "backfill" in lowered
+    for marker in ("obrigat", "futura", "bootstrap", "20:00", "passada", "backfill"):
+        assert marker in lowered, f".env.example must document {marker!r}"
+    assert "America/Bahia" in text
 
 
-def test_service_forwards_the_declared_activation_date() -> None:
+def test_fallback_service_forwards_the_declared_activation_date() -> None:
     text = _unit_text(SERVICE_NAME)
     # Empty default so an undeclared boundary fails closed inside the command
     # instead of silently materializing history.
@@ -344,7 +432,7 @@ def test_undeclared_activation_date_fails_closed_without_materializing() -> None
         call_command("materialize_daily_statistics", "--finalize")
 
 
-def test_service_forwards_the_configured_finalization_lookback() -> None:
+def test_fallback_service_forwards_the_configured_finalization_lookback() -> None:
     """``compose.hospital.yml`` starts the containers with a fixed environment
     mapping that does not list the DSRS variables, so a window declared in the
     hospital ``.env`` only reaches the one-shot container when the unit repasses
@@ -359,14 +447,14 @@ def test_service_forwards_the_configured_finalization_lookback() -> None:
     assert f"-e {LOOKBACK_VAR}=" not in _exec_start(text)
 
 
-def test_service_establishes_the_safe_lookback_default_of_seven() -> None:
+def test_fallback_service_establishes_the_safe_lookback_default_of_seven() -> None:
     """An unset window must resolve to the safe default of 7 in the unit and in
     Django settings; an empty forwarded value would break the container instead
     of running the bounded batch."""
     assert f"Environment={LOOKBACK_VAR}={LOOKBACK_UNIT_DEFAULT}" in _unit_text(
         SERVICE_NAME
     )
-    settings_source = SETTINGS_SOURCE.read_text(encoding="utf-8")
+    settings_source = _read(SETTINGS_SOURCE)
     assert f'os.getenv("{LOOKBACK_VAR}", "{LOOKBACK_UNIT_DEFAULT}")' in settings_source
 
 
@@ -412,99 +500,41 @@ def test_non_positive_configured_lookback_is_refused_before_processing(
 
 
 # ---------------------------------------------------------------------------
-# R3 — declared user, directory, environment, dependencies, failure and output
+# R3-R7, R9-R10 — deploy/README.md, section 5c
 # ---------------------------------------------------------------------------
 
 
-def test_service_declares_the_full_runtime_contract() -> None:
-    text = _unit_text(SERVICE_NAME)
+def test_runbook_documents_the_adaptive_owner_and_fallback_units(
+    runbook: str,
+) -> None:
     for marker in (
-        "[Unit]",
-        "[Service]",
-        "[Install]",
-        "Description=",
-        "Documentation=https://github.com/carlosapgomes/sirhosp",
-        "After=network-online.target docker.service",
-        "Wants=network-online.target docker.service",
-        "Type=oneshot",
-        "User=root",
-        "WorkingDirectory=/srv/apps/prisma",
-        "TimeoutStartSec=",
-        "StandardOutput=journal",
-        "StandardError=journal",
-        "SyslogIdentifier=sirhosp-daily-statistics",
-        "WantedBy=multi-user.target",
-    ):
-        assert marker in text, f"service must declare {marker!r}"
-    assert "Restart=" not in text
-
-
-def test_timer_declares_documentation_and_install_target() -> None:
-    text = _unit_text(TIMER_NAME)
-    for marker in (
-        "[Unit]",
-        "[Timer]",
-        "[Install]",
-        "Description=",
-        "Documentation=",
-        "WantedBy=timers.target",
-    ):
-        assert marker in text, f"timer must declare {marker!r}"
-
-
-def test_units_are_install_inert() -> None:
-    for name in ALL_UNIT_FILES:
-        text = _unit_text(name)
-        assert "systemctl enable" not in text
-        assert "systemctl start" not in text
-        assert "enable --now" not in text
-
-
-# ---------------------------------------------------------------------------
-# R6/R7 — no clinical identity, no mutating command, no production execution
-# ---------------------------------------------------------------------------
-
-
-def test_units_never_carry_patient_identity() -> None:
-    for name in ALL_UNIT_FILES:
-        lowered = _unit_text(name).lower()
-        for token in IDENTITY_TOKENS:
-            assert token not in lowered, f"{name} must not carry {token!r}"
-
-
-def test_units_never_run_an_extraction_or_destructive_command() -> None:
-    for name in ALL_UNIT_FILES:
-        lowered = _unit_text(name).lower()
-        for token in MUTATING_OR_EXTRACTION_COMMANDS:
-            assert token not in lowered, f"{name} must not reference {token!r}"
-
-
-def test_contract_suite_reads_text_only() -> None:
-    """R7: the validation is static/synthetic — this module imports no process
-    execution primitive, so it cannot shell out to systemctl, docker or the
-    materialization command against real data."""
-    imported = set(globals())
-    for primitive in ("subprocess", "os", "shutil", "socket"):
-        assert primitive not in imported
-
-
-# ---------------------------------------------------------------------------
-# R4 — runbook: install, enable, verify, observe, rerun, disable, rollback
-# ---------------------------------------------------------------------------
-
-
-def test_runbook_documents_units_calendar_and_command(runbook: str) -> None:
-    for marker in (
-        SERVICE_NAME,
-        TIMER_NAME,
-        CALENDAR_LITERAL,
+        "census_orchestrator",
+        "materialize_daily_statistics --date",
         "materialize_daily_statistics --finalize",
+        "fallback manual",
+        "ADR-0012",
         "historical_recovery",
         "--profile recovery",
         "run --rm",
         "America/Bahia",
     ):
         assert marker in runbook, f"runbook must document {marker!r}"
+    for unit in FALLBACK_TIMERS:
+        assert unit in runbook, f"runbook must name the fallback unit {unit!r}"
+
+
+def test_runbook_downloads_preflight_and_units_from_the_same_immutable_tag(
+    runbook: str,
+) -> None:
+    """The read-only preflight and both units are downloaded from one single
+    immutable release tag, never from a working copy or another version."""
+    downloads = re.findall(r"releases/download/([^/\s\"']+)/([A-Za-z0-9._-]+)", runbook)
+    assert downloads, "runbook must download the release assets by tag"
+    assert {tag for tag, _asset in downloads} == {TAG_PLACEHOLDER}
+    assets = {asset for _tag, asset in downloads}
+    for asset in (PREFLIGHT_ASSET_NAME, SERVICE_NAME, TIMER_NAME):
+        assert asset in assets, f"runbook must download {asset!r} from the release"
+    assert f"chmod +x deploy/{PREFLIGHT_ASSET_NAME}" in runbook
 
 
 def test_runbook_documents_installation_as_a_disabled_baseline(runbook: str) -> None:
@@ -518,15 +548,267 @@ def test_runbook_documents_installation_as_a_disabled_baseline(runbook: str) -> 
         assert marker in runbook, f"runbook must document {marker!r}"
 
 
-def test_runbook_documents_activation_requiring_the_future_date(runbook: str) -> None:
+def test_runbook_never_enables_a_legacy_timer(runbook: str) -> None:
+    """R4: activation never enables the hourly, D-1 or statistics timer."""
+    assert "systemctl enable" not in runbook
+    assert "systemctl start" not in runbook
+    for unit in FALLBACK_TIMERS:
+        assert f"systemctl enable --now {unit}" not in runbook
+
+
+def test_runbook_validates_the_three_fallback_timers_disabled_and_inactive(
+    runbook: str,
+) -> None:
+    """R5: the runbook validates the three fallback timers before activating."""
+    for unit in FALLBACK_TIMERS:
+        assert unit in runbook, f"runbook must validate {unit!r}"
     for marker in (
-        "STATISTICS_ACTIVATION_DATE",
-        "obrigatória",
-        "futura",
-        "systemctl enable --now sirhosp-daily-statistics.timer",
-        "list-timers",
+        "systemctl is-enabled",
+        "systemctl is-active",
+        "legacy_timer_state",
+        "inactive",
     ):
         assert marker in runbook, f"runbook must document {marker!r}"
+
+
+def test_runbook_documents_the_preflight_interface_and_fail_closed_checks(
+    runbook: str,
+) -> None:
+    for marker in (
+        "somente leitura",
+        "fail-closed",
+        f"{PREFLIGHT_ASSET.split('/')[-1]} <release-tag-exata>",
+        "[preflight] result=PASS",
+        "[preflight] result=FAIL",
+        "não existe caminho de exceção",
+        "release",
+        "asset_match",
+        "scheduler_contract",
+        "image_version",
+        "activation_date",
+        "legacy_timer_state",
+        "orchestrator_service",
+        "cadence_hourly_discharges",
+        "cadence_d1_recovery",
+    ):
+        assert marker in runbook, f"runbook must document {marker!r}"
+    for reason in (
+        "local_asset_mismatch",
+        "activation_date_in_past",
+        "bootstrap_after_boundary",
+        "cadence_stale",
+        "compose_logs_unavailable",
+        "timer_not_disabled",
+        "orchestrator_service_missing",
+    ):
+        assert reason in runbook, f"runbook must enumerate {reason!r}"
+    for forbidden in ("--skip", "bypass", "override", "sem-preflight"):
+        assert forbidden not in runbook.lower(), (
+            f"runbook must not document a bypass ({forbidden!r})"
+        )
+
+
+def test_runbook_declares_the_read_only_docker_socket_privilege(runbook: str) -> None:
+    """R9: the operator privilege needed by the read-only Docker interface."""
+    lowered = runbook.lower()
+    for marker in ("socket do docker", "privilégio", "somente leitura"):
+        assert marker in lowered, f"runbook must declare {marker!r}"
+
+
+def test_runbook_orders_install_preflight_acceptance_and_activation(
+    runbook: str,
+) -> None:
+    """R3: install (disabled) < preflight execution < human acceptance < the
+    isolated activation, so no activation can precede the preflight or its
+    review."""
+    markers = (
+        "sudo install -m 0644",
+        PREFLIGHT_COMMAND,
+        "aceite humano",
+        RECREATE_COMMAND,
+    )
+    for marker in markers:
+        assert marker in runbook, f"runbook must document {marker!r}"
+    indices = [runbook.index(marker) for marker in markers]
+    assert indices == sorted(indices), "runbook steps are out of order"
+
+
+def test_runbook_preflight_collection_preserves_a_nonzero_status(
+    runbook: str,
+) -> None:
+    """The aggregated preflight output is collected through ``tee`` only under
+    ``pipefail`` plus an explicit nonzero-status abort, so a failed preflight is
+    never masked by the successful ``tee`` nor archived as approved evidence."""
+    blocks = [
+        block
+        for block in _shell_blocks(runbook)
+        if "tee " in block and PREFLIGHT_ASSET.split("/")[-1] in block
+    ]
+    assert len(blocks) == 1, "exactly one block collects the preflight output"
+    block = blocks[0]
+    assert "pipefail" in block, "tee must not mask the preflight status"
+    tee_pipeline = block.index("| tee ")
+    assert block.index("pipefail") < tee_pipeline
+    assert PREFLIGHT_COMMAND in block[:tee_pipeline]
+    collected = block[tee_pipeline:]
+    assert "exit 1" in collected, (
+        "a failed preflight must abort the collection with a nonzero status"
+    )
+    for swallow in ("|| true", "|| :"):
+        assert swallow not in collected, (
+            f"the preflight status must not be swallowed by {swallow!r}"
+        )
+
+
+ACTIVATION_GUARD_RE = re.compile(
+    r'test "\$\{(?P<count>\w+)\}" -gt 0 \\\n\s*\|\| \{[^\n]*exit 1[^\n]*\}',
+)
+
+
+def _recreate_blocks(document: str) -> list[str]:
+    """Blocks that recreate the orchestrator (activation and rollback)."""
+    return [block for block in _shell_blocks(document) if RECREATE_COMMAND in block]
+
+
+def test_runbook_activation_recreates_only_the_orchestrator(runbook: str) -> None:
+    """R4: every recreation block recreates only the orchestrator, with the
+    documented flags, and enables no timer."""
+    blocks = _recreate_blocks(runbook)
+    assert blocks, "the recreation must be documented"
+    for block in blocks:
+        assert "set -euo pipefail" in block
+        assert re.findall(r"up -d[^\n]*", block) == [
+            "up -d --no-deps --force-recreate census_orchestrator"
+        ]
+        assert "systemctl enable" not in block
+
+
+def test_runbook_guards_evidence_and_fallback_state_before_the_recreate(
+    runbook: str,
+) -> None:
+    """R5: the activation block confirms the boundary, the inert fallback
+    timers and the fresh natural cadence evidence before the recreation."""
+    block = _recreate_blocks(runbook)[0]
+    recreate = block.index(RECREATE_COMMAND)
+    assert "STATISTICS_ACTIVATION_DATE" in block[:recreate]
+    for unit in FALLBACK_TIMERS:
+        assert block.index(unit) < recreate, f"{unit!r} must be validated first"
+    assert block.index("systemctl is-enabled") < recreate
+    assert block.index("systemctl is-active") < recreate
+    guarded = ACTIVATION_GUARD_RE.findall(block)
+    assert guarded == [
+        "hourly_discharges_success",
+        "d1_recovery_success",
+    ], f"both cadence counts must be guarded by an explicit test, got {guarded!r}"
+    first_guard = ACTIVATION_GUARD_RE.search(block)
+    assert first_guard is not None
+    assert block.index("grep -cF") < first_guard.start()
+    for count in guarded:
+        assert f'{count}="$(' in block, f"{count!r} must be assigned before the guard"
+    assert block.rindex("exit 1") < recreate, "every guard must abort before it"
+
+
+def test_runbook_collects_only_aggregate_cadence_evidence(runbook: str) -> None:
+    """R5/R7: the natural D-1/hourly evidence is collected from the orchestrator
+    container as aggregated marker counts before recreation, without copying raw
+    log lines and without triggering any extraction."""
+    for marker in ADAPTIVE_MARKERS:
+        assert marker in runbook, f"runbook must collect {marker!r}"
+    assert "grep -cF" in runbook
+    assert "agregad" in runbook.lower()
+    for forbidden in (
+        "| tail",
+        "tail -",
+        "-o json",
+        "MESSAGE",
+        "extract_",
+        "run_exit_reconciliation_runtime",
+        "reset-failed",
+    ):
+        assert forbidden not in runbook, f"runbook must not use {forbidden!r}"
+    for line in runbook.replace("\\\n", " ").splitlines():
+        if "journalctl" in line:
+            assert "grep" in line or SERVICE_NAME in line, (
+                f"runbook must not copy raw journal lines ({line.strip()!r})"
+            )
+
+
+def test_runbook_confirms_health_and_zero_reports_before_the_boundary(
+    runbook: str,
+) -> None:
+    """R5: after activation the operator confirms health and proves that no
+    report earlier than the boundary exists, using an aggregate count only."""
+    for marker in (
+        "docker compose --env-file .env -f \"$COMPOSE_FILE\" ps census_orchestrator",
+        "reports_before_boundary",
+        "local_date__lt",
+        'test "${reports_before_boundary}" = "0"',
+    ):
+        assert marker in runbook, f"runbook must document {marker!r}"
+
+
+def test_runbook_documents_aggregate_observation_without_identity(
+    runbook: str,
+) -> None:
+    """R7: observation uses dates, revisions, status, counts and aggregate
+    markers only — never names, records, beds, clinical text or raw logs."""
+    for marker in (
+        "date=",
+        "status=",
+        "revision=",
+        "created=",
+        "quality=",
+        "contagens",
+        "identidade",
+        "Daily statistics finalization finished",
+    ):
+        assert marker in runbook, f"runbook must document {marker!r}"
+
+
+def test_runbook_documents_the_post_05_recovery_and_0730_checkpoint(
+    runbook: str,
+) -> None:
+    """R10: after 05:00 an unexpected missing revision triggers the adaptive
+    recovery and at 07:30 the absence of a ready revision raises an alert and
+    requires a human decision with no automatic retry."""
+    for marker in (
+        "05:00",
+        "07:30",
+        "d1_recovery_not_confirmed",
+        "d1_recovery_incomplete",
+        "alerta",
+        "decisão humana",
+        "nenhum retry automático",
+    ):
+        assert marker in runbook, f"runbook must document {marker!r}"
+    lowered = runbook.lower()
+    assert "não dispara" in lowered
+    assert "não executa" in lowered
+
+
+def test_runbook_documents_the_manual_warning_removal_rules(runbook: str) -> None:
+    """R10: the manual fallback only removes the degraded D-1 warnings after a
+    proven D-1 success and never uses ``--finalize`` to clean them."""
+    lowered = runbook.lower()
+    for marker in (
+        "depois de sucesso d-1 comprovado",
+        "nunca usa `--finalize` para limpá-lo",
+        "`--date`",
+    ):
+        assert marker in lowered, f"runbook must document {marker!r}"
+
+
+def test_runbook_documents_the_boundary_bootstrap_window(runbook: str) -> None:
+    """R2: future boundary by default, same-day bootstrap only before 20:00
+    ``America/Bahia`` and no past date ever."""
+    lowered = runbook.lower()
+    for marker in (
+        "20:00",
+        "bootstrap",
+        "data passada",
+        "futura",
+    ):
+        assert marker in lowered, f"runbook must document {marker!r}"
 
 
 def test_runbook_forbids_backfill_before_activation(runbook: str) -> None:
@@ -545,48 +827,53 @@ def test_runbook_documents_the_forwarded_lookback_window(runbook: str) -> None:
         assert marker in runbook, f"runbook must document {marker!r}"
 
 
-def test_runbook_documents_single_date_rerun_disable_and_rollback(runbook: str) -> None:
+def test_runbook_documents_single_date_rerun_and_rollback(runbook: str) -> None:
     for marker in (
         "materialize_daily_statistics --date",
-        "systemctl disable --now sirhosp-daily-statistics.timer",
         "rollback",
         "fontes clínicas",
     ):
         assert marker in runbook, f"runbook must document {marker!r}"
 
 
-# ---------------------------------------------------------------------------
-# R5/R6 — cadence preconditions and identity-free observation
-# ---------------------------------------------------------------------------
+ROLLBACK_HEADING = "### 5c.7 "
+UPSTREAM_UNIT_NAMES = ("sirhosp-discharges", "sirhosp-historical-recovery")
 
 
-def test_runbook_conditions_activation_on_cadence_evidence(runbook: str) -> None:
+def test_runbook_rollback_removes_the_boundary_without_destroying_data(
+    runbook: str,
+) -> None:
+    """R6: the rollback removes or reverts the boundary and recreates only the
+    orchestrator, preserving revisions, clinical sources and migrations."""
+    rollback = _section(runbook, ROLLBACK_HEADING)
     for marker in (
-        "sirhosp-discharges.timer",
-        "*:13:00 America/Bahia",
-        "sirhosp-historical-recovery.timer",
-        "05:00:00 America/Bahia",
-        "deaths",
-        "journalctl",
-        "evidência",
+        "STATISTICS_ACTIVATION_DATE",
+        RECREATE_COMMAND,
+        "revisões",
+        "migrations",
+        "fontes clínicas",
+        "desabilitad",
     ):
-        assert marker in runbook, f"runbook must document {marker!r}"
+        assert marker in rollback, f"rollback must document {marker!r}"
+    for forbidden in ("systemctl enable", "manage.py migrate", "DROP ", "flush"):
+        assert forbidden not in rollback, f"rollback must not use {forbidden!r}"
+    for upstream in UPSTREAM_UNIT_NAMES:
+        assert upstream not in rollback, f"rollback must not touch {upstream!r}"
 
 
-def test_runbook_documents_aggregate_observation_without_identity(runbook: str) -> None:
-    for marker in (
-        "journalctl -u sirhosp-daily-statistics.service",
-        "date=",
-        "status=",
-        "revision=",
-        "created=",
-        "identidade",
-    ):
-        assert marker in runbook, f"runbook must document {marker!r}"
+def test_runbook_rejects_the_absolute_non_overlap_claim(runbook: str) -> None:
+    """The fallback trigger keeps the staggered-trigger contract with possible
+    overlap and never claims non-overlap between workflows."""
+    lowered = runbook.lower()
+    for forbidden in FORBIDDEN_ABSOLUTE_NON_COLLISION:
+        assert forbidden not in lowered, (
+            f"runbook must not claim non-overlapping executions ({forbidden!r})"
+        )
+    assert "não afirma exclusão mútua entre workflows" in lowered
 
 
 # ---------------------------------------------------------------------------
-# PDSPA-S2 — both units are assets of the immutable release draft
+# PDSPA-S2 — both unit assets travel with the immutable release draft
 # ---------------------------------------------------------------------------
 
 
@@ -594,7 +881,7 @@ def test_units_are_verified_and_attached_in_the_single_release_draft() -> None:
     """R1/R2: the release workflow checks both unit files (and the activation
     preflight) with ``test -f`` before the draft exists and attaches them as
     arguments of the single draft creation preceding the image build."""
-    workflow = WORKFLOW.read_text(encoding="utf-8")
+    workflow = _read(WORKFLOW)
     normalized = " ".join(workflow.split())
     create = normalized.index("gh release create")
 
@@ -613,250 +900,138 @@ def test_units_are_verified_and_attached_in_the_single_release_draft() -> None:
 
 
 # ---------------------------------------------------------------------------
-# PDSPA-S3 — runbook: install disabled, preflight, human acceptance, explicit
-# activation, aggregate observation and isolated rollback
+# R8 — docs/releases/v0.1.0-rc.32-upgrade.md
 # ---------------------------------------------------------------------------
 
-TAG_PLACEHOLDER = "v1.0.0-rc.N"
-PREFLIGHT_ASSET_NAME = PREFLIGHT_ASSET.split("/")[-1]
-PREFLIGHT_COMMAND = f"./deploy/{PREFLIGHT_ASSET_NAME} {TAG_PLACEHOLDER}"
-PREFLIGHT_RELEASE_ASSETS = (PREFLIGHT_ASSET_NAME, SERVICE_NAME, TIMER_NAME)
-RELEASE_DOWNLOAD_RE = re.compile(r"releases/download/([^/\s\"']+)/([A-Za-z0-9._-]+)")
-UPSTREAM_UNIT_NAMES = ("sirhosp-discharges", "sirhosp-historical-recovery")
-ROLLBACK_HEADING = "### 5c.7 "
+RC32_TAG = "v0.1.0-rc.32"
+RC31_TAG = "v0.1.0-rc.31"
 
 
-def _release_downloads(runbook: str) -> list[tuple[str, str]]:
-    """``(tag, asset)`` pairs the runbook downloads from the release URL."""
-    return RELEASE_DOWNLOAD_RE.findall(runbook)
-
-
-FENCED_SHELL_BLOCK_RE = re.compile(r"^```(?:bash|sh)\n(.*?)^```$", re.DOTALL | re.MULTILINE)
-
-ACTIVATION_ENABLE_LINE = f"sudo systemctl enable --now {TIMER_NAME}"
-
-# Guard that turns a non-positive cadence count into a failing block: the
-# ``test ... -gt 0`` is followed by an explicit ``exit 1``, so the enable below
-# it is unreachable when the aggregated evidence is absent.
-ACTIVATION_GUARD_RE = re.compile(
-    r'test "\$\{(?P<count>\w+)\}" -gt 0 \\\n\s*\|\| \{[^\n]*exit 1[^\n]*\}',
-)
-
-
-def _shell_blocks(document: str) -> list[str]:
-    """Fenced ``bash``/``sh`` snippets of a document, fences stripped."""
-    return FENCED_SHELL_BLOCK_RE.findall(document)
-
-
-def test_runbook_downloads_preflight_and_units_from_the_same_immutable_tag(
-    runbook: str,
+def test_rc32_runbook_declares_the_change_and_the_base_release(
+    rc32_runbook: str,
 ) -> None:
-    """PDSPA-S3 R1: the read-only preflight and both units are downloaded from
-    one single immutable release tag, never from a working copy or another
-    version."""
-    downloads = _release_downloads(runbook)
-    assert downloads, "runbook must download the release assets by tag"
-    assert {tag for tag, _asset in downloads} == {TAG_PLACEHOLDER}
-    assets = {asset for _tag, asset in downloads}
-    for asset in PREFLIGHT_RELEASE_ASSETS:
-        assert asset in assets, f"runbook must download {asset!r} from the release"
-    assert f"chmod +x deploy/{PREFLIGHT_ASSET_NAME}" in runbook
+    for marker in (
+        RC32_TAG,
+        RC31_TAG,
+        "orchestrate-adaptive-statistics-finalization",
+        "ADR-0012",
+        "census_orchestrator",
+        "Nenhuma migration",
+        "Nenhuma credencial nova",
+    ):
+        assert marker in rc32_runbook, f"RC32 runbook must declare {marker!r}"
 
 
-def test_runbook_install_step_stays_disabled_and_activates_nothing(
-    runbook: str,
+def test_rc32_runbook_backs_up_and_deploys_dormant_assets(
+    rc32_runbook: str,
 ) -> None:
-    """PDSPA-S3 R1: the installation step only copies the units and reloads
-    systemd; the single ``systemctl enable`` of the whole runbook is the
-    explicit later activation of the timer."""
-    install = runbook.index("sudo install -m 0644")
-    assert "NÃO habilita nem inicia nada" in runbook
-    assert runbook.index("systemctl daemon-reload") > install
-    assert re.findall(r"(?m)^\s*(?:sudo )?systemctl enable[^\n]*", runbook) == [
-        "sudo systemctl enable --now sirhosp-daily-statistics.timer"
-    ]
+    for marker in (
+        "pg_dump",
+        "--format=custom",
+        "pg_restore --list",
+        "backups/",
+        "up -d --remove-orphans",
+        "migrate --noinput",
+        "dormente",
+        "systemctl is-enabled",
+    ):
+        assert marker in rc32_runbook, f"RC32 runbook must document {marker!r}"
+    for unit in FALLBACK_TIMERS:
+        assert unit in rc32_runbook, f"RC32 runbook must name {unit!r}"
 
 
-def test_runbook_orders_install_preflight_acceptance_and_activation(
-    runbook: str,
+def test_rc32_runbook_orders_backup_preflight_acceptance_and_activation(
+    rc32_runbook: str,
 ) -> None:
-    """PDSPA-S3 R1/R2/R4: install (disabled) < preflight execution < human
-    acceptance < explicit activation, so no activation can precede the
-    preflight or its review."""
     markers = (
-        "sudo install -m 0644",
-        PREFLIGHT_COMMAND,
+        "pg_dump",
+        "up -d --remove-orphans",
+        './deploy/daily-statistics-activation-preflight.sh "${NEW_VERSION}"',
         "aceite humano",
-        "systemctl enable --now sirhosp-daily-statistics.timer",
+        RECREATE_COMMAND,
     )
     for marker in markers:
-        assert marker in runbook, f"runbook must document {marker!r}"
-    indices = [runbook.index(marker) for marker in markers]
-    assert indices == sorted(indices), "runbook steps are out of order"
+        assert marker in rc32_runbook, f"RC32 runbook must document {marker!r}"
+    indices = [rc32_runbook.index(marker) for marker in markers]
+    assert indices == sorted(indices), "RC32 runbook steps are out of order"
 
 
-def test_runbook_preflight_collection_preserves_a_nonzero_status(
-    runbook: str,
-) -> None:
-    """PDSPA-S3 R2: the aggregated preflight output is collected through
-    ``tee`` only under ``pipefail`` plus an explicit nonzero-status abort, so a
-    failed preflight (exit 1/2/3) is never masked by the successful ``tee`` nor
-    archived as approved evidence."""
-    blocks = [
-        block
-        for block in _shell_blocks(runbook)
-        if "tee " in block and PREFLIGHT_ASSET_NAME in block
-    ]
-    assert len(blocks) == 1, "exactly one block collects the preflight output"
-    block = blocks[0]
-    assert "set -o pipefail" in block, "tee must not mask the preflight status"
-    tee_pipeline = block.index("| tee ")
-    assert block.index("set -o pipefail") < tee_pipeline
-    assert PREFLIGHT_COMMAND in block[:tee_pipeline]
-    collected = block[tee_pipeline:]
-    assert "exit 1" in collected, (
-        "a failed preflight must abort the collection with a nonzero status"
-    )
-    for swallow in ("|| true", "|| :"):
-        assert swallow not in collected, (
-            f"the preflight status must not be swallowed by {swallow!r}"
+def test_rc32_runbook_guards_every_mutable_block(rc32_runbook: str) -> None:
+    blocks = _shell_blocks(rc32_runbook)
+    assert blocks, "RC32 runbook must document guarded shell blocks"
+    for block in blocks:
+        assert "set -euo pipefail" in block, (
+            f"every mutable block must fail closed: {block.splitlines()[:1]!r}"
         )
 
 
-def test_runbook_activation_guards_the_enable_behind_positive_counts(
-    runbook: str,
+def test_rc32_runbook_activates_only_the_orchestrator_and_enables_no_timer(
+    rc32_runbook: str,
 ) -> None:
-    """PDSPA-S3 R4: the activation block runs under ``set -euo pipefail``,
-    assigns each cadence count and reaches the single ``systemctl enable``
-    only after a ``test ... -gt 0`` guard that exits nonzero — a 0 count can
-    no longer fall through to the activation."""
-    blocks = [block for block in _shell_blocks(runbook) if ACTIVATION_ENABLE_LINE in block]
-    assert len(blocks) == 1, "the enable lives in exactly one documented block"
-    block = blocks[0]
-    assert "set -euo pipefail" in block
-    guarded = ACTIVATION_GUARD_RE.findall(block)
-    assert guarded == [
-        "hourly_discharges_success",
-        "d1_recovery_success",
-    ], f"both cadence counts must be guarded by an explicit test, got {guarded!r}"
-    enable = block.index(ACTIVATION_ENABLE_LINE)
-    first_guard = ACTIVATION_GUARD_RE.search(block)
-    assert first_guard is not None
-    for count in guarded:
-        assignment = f'{count}="$('
-        assert assignment in block, f"{count!r} must be assigned from the journal"
-        assert block.index(assignment) < enable, f"{count!r} must precede the enable"
-    assert block.index("grep -cF") < first_guard.start()
-    assert block.rindex("exit 1") < enable, "every guard must abort before the enable"
-
-
-def test_runbook_documents_the_preflight_interface_and_fail_closed_checks(
-    runbook: str,
-) -> None:
-    """PDSPA-S3 R2/R3: the runbook documents the read-only, fail-closed
-    interface, its enumerated checks, the technical failure reasons and the
-    absence of any bypass for a failed preflight."""
-    for marker in (
-        "somente leitura",
-        "fail-closed",
-        f"{PREFLIGHT_ASSET_NAME} <release-tag-exata>",
-        "[preflight] result=PASS",
-        "[preflight] result=FAIL",
-        "não existe caminho de exceção",
-        "release",
-        "asset_match",
-        "scheduler_contract",
-        "image_version",
-        "activation_date",
-        "daily_timer_state",
-        "upstream_timer_state",
-        "cadence_hourly_discharges",
-        "cadence_d1_recovery",
-    ):
-        assert marker in runbook, f"runbook must document {marker!r}"
-    for reason in (
-        "local_asset_mismatch",
-        "activation_date_not_future",
-        "cadence_stale",
-        "journal_unavailable",
-    ):
-        assert reason in runbook, f"runbook must enumerate {reason!r}"
-    for forbidden in ("--force", "--skip", "bypass", "override", "sem-preflight"):
-        assert forbidden not in runbook.lower(), (
-            f"runbook must not document a bypass ({forbidden!r})"
-        )
-
-
-def test_runbook_requires_a_new_preflight_when_the_evidence_expires(
-    runbook: str,
-) -> None:
-    """PDSPA-S3 R2: the preflight evidence expires with the 2 h / 30 h
-    freshness windows and a previous PASS never authorizes a later
-    activation."""
-    lowered = runbook.lower()
-    assert "expira" in lowered
-    assert "novo preflight" in lowered
-    assert "não autoriza" in lowered
-    assert "2 horas" in runbook
-    assert "30 horas" in runbook
-
-
-def test_runbook_collects_only_aggregate_journal_evidence(runbook: str) -> None:
-    """PDSPA-S3 R3/R5: cadence evidence is collected as aggregated marker
-    counts without copying raw journal lines, and no extractor is triggered
-    artificially to produce evidence."""
-    for marker in (
-        "mode=hourly-discharges result=success",
-        "mode=d1-recovery result=success",
-    ):
-        assert marker in runbook, f"runbook must collect {marker!r}"
-    assert "grep -cF" in runbook
-    assert "agregad" in runbook.lower()
-    for line in runbook.replace("\\\n", " ").splitlines():
-        if "journalctl" in line:
-            assert "grep" in line or SERVICE_NAME in line, (
-                f"runbook must not copy raw journal lines ({line.strip()!r})"
+    lowered = rc32_runbook.lower()
+    for forbidden in ("systemctl enable", "systemctl start", "systemctl restart"):
+        assert forbidden not in lowered, f"RC32 runbook must not use {forbidden!r}"
+    for line in rc32_runbook.splitlines():
+        if "up -d" in line and "census_orchestrator" in line:
+            assert RECREATE_COMMAND in line, (
+                "the orchestrator must only be recreated in isolation"
             )
-    for forbidden in (
-        "| tail",
-        "tail -",
-        "-o json",
-        "MESSAGE",
-        "extract_",
-        "run_exit_reconciliation_runtime",
-        "reset-failed",
-    ):
-        assert forbidden not in runbook, f"runbook must not use {forbidden!r}"
-    for upstream in UPSTREAM_UNIT_NAMES:
-        assert f"systemctl start {upstream}" not in runbook
 
 
-def test_runbook_rollback_is_limited_to_the_daily_statistics_units(
-    runbook: str,
+def test_rc32_runbook_preserves_natural_evidence_before_recreation(
+    rc32_runbook: str,
 ) -> None:
-    """PDSPA-S3 R5: the rollback disables and removes only the two statistics
-    units and preserves materialized reports, clinical sources and the
-    upstream cadences."""
-    rollback = _section(runbook, ROLLBACK_HEADING)
-    for marker in (
-        "systemctl disable --now sirhosp-daily-statistics.timer",
-        "systemctl disable --now sirhosp-daily-statistics.service",
-        f"/etc/systemd/system/{SERVICE_NAME}",
-        f"/etc/systemd/system/{TIMER_NAME}",
-        "relatórios",
-        "fontes clínicas",
-    ):
-        assert marker in rollback, f"rollback must document {marker!r}"
-    for upstream in UPSTREAM_UNIT_NAMES:
-        assert upstream not in rollback, f"rollback must not touch {upstream!r}"
-
-
-def test_runbook_rejects_the_absolute_non_overlap_claim(runbook: str) -> None:
-    """PDSPA-S3 R6: the runbook keeps the staggered-trigger contract with
-    possible overlap and never claims non-overlap between workflows."""
-    lowered = runbook.lower()
-    for forbidden in FORBIDDEN_ABSOLUTE_NON_COLLISION:
-        assert forbidden not in lowered, (
-            f"runbook must not claim non-overlapping executions ({forbidden!r})"
+    for marker in ADAPTIVE_MARKERS:
+        assert marker in rc32_runbook, f"RC32 runbook must collect {marker!r}"
+    assert "grep -cF" in rc32_runbook
+    assert rc32_runbook.index("grep -cF") < rc32_runbook.index(RECREATE_COMMAND)
+    for forbidden in ("| tail", "-o json", "MESSAGE", "extract_", "reset-failed"):
+        assert forbidden not in rc32_runbook, (
+            f"RC32 runbook must not use {forbidden!r}"
         )
-    assert "não afirma exclusão mútua entre workflows" in lowered
+
+
+def test_rc32_runbook_observes_and_verifies_without_identity(
+    rc32_runbook: str,
+) -> None:
+    for marker in (
+        "date=",
+        "status=",
+        "revision=",
+        "reports_before_boundary",
+        "identidade",
+        "somente leitura",
+        "socket do Docker",
+    ):
+        assert marker in rc32_runbook, f"RC32 runbook must document {marker!r}"
+
+
+def test_rc32_runbook_documents_the_recovery_checkpoints(rc32_runbook: str) -> None:
+    for marker in (
+        "05:00",
+        "07:30",
+        "d1_recovery_not_confirmed",
+        "d1_recovery_incomplete",
+        "decisão humana",
+        "nenhum retry automático",
+        "depois de sucesso D-1 comprovado",
+        "nunca usa `--finalize` para limpá-lo",
+    ):
+        assert marker in rc32_runbook, f"RC32 runbook must document {marker!r}"
+
+
+def test_rc32_runbook_rolls_back_the_exact_previous_tag_without_data_loss(
+    rc32_runbook: str,
+) -> None:
+    rollback_index = rc32_runbook.index("## Rollback")
+    rollback = rc32_runbook[rollback_index:]
+    for marker in (
+        f"OLD_VERSION={RC31_TAG}",
+        "STATISTICS_ACTIVATION_DATE",
+        RECREATE_COMMAND,
+        "revisões",
+        "Nenhuma migration",
+    ):
+        assert marker in rollback, f"RC32 rollback must document {marker!r}"
+    for forbidden in ("systemctl enable", "manage.py migrate", "DROP "):
+        assert forbidden not in rollback, f"RC32 rollback must not use {forbidden!r}"

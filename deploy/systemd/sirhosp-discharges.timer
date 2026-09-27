@@ -1,10 +1,16 @@
 # SIRHOSP — hourly current-day discharge timer (America/Bahia, RPSA-S12).
-# Fires every hour at minute 13, staggered from the 05:00 D-1 recovery and
-# the :47 stale sweep. America/Bahia on the OnCalendar line makes the
-# schedule host-timezone independent. Persistent=true runs a missed trigger
-# after downtime. Deterministic on purpose: no start randomization, so the
-# three schedules keep fixed, distinct offsets. Enabled only by explicit
-# operator action (never on install).
+# Manual fallback for the intraday discharge cadence: the adaptive census orchestrator
+# (`census_orchestrator`) owns that cadence inside its loop
+# (change orchestrate-intraday-discharge-recovery), so no fixed timer is the
+# normal schedule. This timer stays disabled and inactive on the adaptive
+# path; enabling it is a manual operator decision for operation outside the
+# orchestrator (e.g. maintenance), never a step of the statistics activation
+# documented in deploy/README.md, section 5c.
+# When manually enabled it fires every hour at minute 13, staggered from the
+# 05:00 D-1 recovery and the :47 stale sweep. America/Bahia on the OnCalendar
+# line makes the schedule host-timezone independent. Persistent=true runs a
+# missed trigger after downtime. Deterministic on purpose: no start
+# randomization, so the three fallback schedules keep fixed, distinct offsets.
 [Unit]
 Description=SIRHOSP — Timer de extração horária de altas do dia (America/Bahia)
 Documentation=https://github.com/carlosapgomes/sirhosp

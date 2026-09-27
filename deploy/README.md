@@ -930,6 +930,18 @@ nenhum destes passos liga o agendamento.
 
 ### 5b.3 Ativação: smoke test D-1 manual e enablement
 
+> **Caminho adaptativo.** Desde a ADR-0010 e a ADR-0012, a recuperação D-1 e a
+> cadência intradiária de altas no caminho primário pertencem ao orquestrador
+> adaptativo de censo (`census_orchestrator`), que as executa dentro do loop
+> quando a fila está drenada e nenhum batch está aberto. Os timers
+> `sirhosp-historical-recovery.timer` e `sirhosp-discharges.timer` permanecem
+> **fallback manual inerte** e devem ficar `disabled`/`inactive` no caminho
+> primário (o preflight da seção 5c.3 exige esse estado). O smoke test e o
+> enablement descritos abaixo são a operação manual de fallback — manutenção ou
+> catch-up com o orquestrador parado — e **não** fazem parte da ativação
+> estatística da seção 5c, que recria somente o orquestrador e nunca liga
+> timers.
+
 Deploy, validação manual e ativação de timers são **checkpoints separados**.
 Antes de habilitar o timer de D-1, execute um smoke test manual com os quatro
 extratores para a data anterior em `America/Bahia` e confira sucesso e
@@ -1153,71 +1165,87 @@ systemctl daemon-reload
 
 ---
 
-## 5c. Relatório estatístico diário — ativação futura e runbook (DSRS-S8)
+## 5c. Relatório estatístico diário — finalização adaptativa e fallback manual (DSRS-S8/OASF)
 
-Esta seção descreve a suíte **desabilitada por padrão** que finaliza o relatório
-estatístico diário no servidor hospitalar (`/srv/apps/prisma`, sem clone do
-repositório). O service executa um único comando one-shot —
-`materialize_daily_statistics --finalize` — pelo runner `historical_recovery` do
-`compose.hospital.yml`, com `--profile recovery` e `run --rm`; nunca pelo serviço
-de aplicação, nunca pelo fluxo PDF legado e sem introduzir agendador novo (o
-systemd continua sendo o único dono de cada responsabilidade periódica).
+Esta seção descreve a finalização do relatório estatístico diário no servidor
+hospitalar (`/srv/apps/prisma`, sem clone do repositório) depois do change
+`orchestrate-adaptive-statistics-finalization`. O **dono do agendamento** é o
+orquestrador adaptativo de censo (seção 5, `run_adaptive_census_cycles --loop`):
+depois da tentativa D-1 e na primeira iteração em que não existam runs
+`queued`/`running` nem batch de censo aberto, o próprio loop chama
+`materialize_daily_statistics --date <D-1>` (data anterior em `America/Bahia`),
+antes da recuperação intradiária e do próximo ciclo censitário. A decisão
+arquitetural está na ADR-0012.
 
 A finalização **não** altera fontes clínicas, **não** persiste workbook e **não**
 reconstrói nenhum dia anterior à data de ativação: ela fecha apenas datas locais
-`America/Bahia` já concluídas, completas, iguais ou posteriores à data de
-ativação e dentro da janela limitada de datas fechadas. Página e XLSX continuam
-lendo somente a revisão materializada da data selecionada.
+`America/Bahia` concluídas, completas e iguais ou posteriores à fronteira
+declarada. Página e XLSX continuam lendo somente a revisão materializada da data
+selecionada.
+
+Os três timers fixos (`sirhosp-discharges.timer`,
+`sirhosp-historical-recovery.timer` e `sirhosp-daily-statistics.timer`) são
+**fallback manual inerte**: permanecem `disabled`/`inactive` no caminho
+adaptativo e o preflight exige essa condição. Os services one-shot continuam
+disponíveis para operação manual limitada (seção 5c.6).
 
 O fluxo operacional é composto de checkpoints independentes, sempre nesta ordem:
-instalação desabilitada (5c.2), preflight somente leitura (5c.3), aceite e
-ativação explícita (5c.4), observação agregada (5c.5), rerun de uma data (5c.6)
-e desativação/rollback (5c.7). Nada é automático: o preflight por si só não
-autoriza produção e a ativação é um comando manual separado.
+instalação desabilitada (5c.2), configuração da fronteira, preflight somente
+leitura (5c.3), aceitação humana explícita (5c.4), observação agregada
+(5c.5), recuperação pós-05:00 e rerun manual (5c.6) e desativação/rollback
+(5c.7). Nada é automático: o preflight por si só não autoriza produção e a
+ativação é um comando manual separado.
 
-### 5c.1 Agendamento (America/Bahia, offset fixo)
+O que sustenta a operação é o comportamento da própria finalização: **limitada**
+(datas fechadas e iguais ou posteriores à fronteira), **idempotente**
+(reexecutar reaproveita a revisão corrente, `created=false`), **atômica** (a
+revisão candidata é concluída em uma transação e só então se torna a única
+revisão pronta da data) e **coordenada no PostgreSQL** (`select_for_update` no
+run de fechamento compartilhado e na revisão). As cadências de
+ingestão/reconciliação mantêm a própria coordenação (fila, batch aberto e locks
+advisory próprios); esta suíte **não afirma exclusão mútua entre workflows**.
 
-| Timer | Comando | Agendamento (`OnCalendar`) | `Persistent` | O que executa |
-| --- | --- | --- | --- | --- |
-| `sirhosp-daily-statistics.timer` | `materialize_daily_statistics --finalize` | `OnCalendar=*-*-* 07:30:00 America/Bahia` | `true` | Fecha as datas locais elegíveis (concluídas, completas, pós-ativação e dentro de `STATISTICS_FINALIZATION_LOOKBACK_DAYS`, default 7) e publica a revisão corrente de cada uma. |
+### 5c.1 Propriedade adaptativa, fronteira declarada e fallback inerte
 
-`America/Bahia` no literal `OnCalendar=` torna o disparo independente do fuso do
-host. O horário `07:30:00` é posterior ao fechamento do dia alvo por duas razões
-verificáveis:
+| Runtime | Comando | Agendamento | O que faz |
+| --- | --- | --- | --- |
+| orquestrador adaptativo (`census_orchestrator`) | `materialize_daily_statistics --date <D-1>` | dentro do loop, na primeira drenagem segura depois da tentativa D-1 | Publica a revisão da data D-1 respeitando a fronteira e registra um aviso técnico quando a recuperação D-1 falhou ou não pôde ser comprovada. |
+| `sirhosp-daily-statistics.service` + `sirhosp-daily-statistics.timer` (fallback manual) | `materialize_daily_statistics --finalize` | `OnCalendar=*-*-* 07:30:00 America/Bahia` (timer desabilitado) | Fecha as datas locais elegíveis dentro de `STATISTICS_FINALIZATION_LOOKBACK_DAYS` quando o operador decide rodar a suíte manualmente. |
+| `sirhosp-discharges.timer` (fallback manual) | cadência intradiária de altas pelo scheduler da seção 5b | `OnCalendar=*-*-* *:13:00 America/Bahia` (timer desabilitado) | Repete a cadência que o orquestrador já executa naturalmente dentro do loop. |
+| `sirhosp-historical-recovery.timer` (fallback manual) | recuperação D-1 pelo scheduler da seção 5b | `OnCalendar=*-*-* 05:00:00 America/Bahia` (timer desabilitado) | Repete a recuperação D-1 que o orquestrador já executa naturalmente na janela `[01:00, 05:00)` `America/Bahia`. |
 
-- a fotografia de fechamento é o último censo aceito iniciado a partir de 20:00 e
-  concluído antes da meia-noite, logo uma data local só é elegível a partir de
-  00:00 do dia seguinte — e o comando nunca materializa a data corrente;
-- a recuperação D-1 roda às 05:00 com `TimeoutStartSec=7200` (seção 5b.1), então
-  a janela máxima de recuperação termina às 07:00.
+**Fronteira declarada.** `STATISTICS_ACTIVATION_DATE` (`YYYY-MM-DD`, local
+`America/Bahia`) no `.env` do hospital é entregue ao container persistente pelo
+`compose.hospital.yml` (`STATISTICS_ACTIVATION_DATE: "${STATISTICS_ACTIVATION_DATE:-}"`,
+default **vazio fail-closed**, ao lado de
+`STATISTICS_FINALIZATION_LOOKBACK_DAYS: "${STATISTICS_FINALIZATION_LOOKBACK_DAYS:-7}"`).
+O caminho adaptativo usa a data D-1 explícita e **não** depende do lookback; a
+janela limita somente o fallback manual `--finalize`.
 
-O disparo às 07:30 também é **escalonado** dos offsets horários fixos `:13`
-(altas intradiárias), `:47` (varredura de órfãs) e `05:00` (recuperação D-1):
-são instantes de disparo distintos, mas **não** há garantia de não sobreposição.
-Como o service declara `TimeoutStartSec=1800`, uma execução iniciada às 07:30
-pode continuar em andamento às 07:47 e além, e as cadências horárias podem ainda
-estar rodando às 07:30; não há `After=`/`Wants=` ligando a finalização a essas
-cadências nem lock compartilhado entre workflows.
+Regras da fronteira (as mesmas validadas pelo preflight da seção 5c.3):
 
-A operação não depende dessa exclusão: o que sustenta a finalização é o próprio
-comportamento dela. Ela é **limitada** (fecha somente datas concluídas,
-completas, pós-ativação e dentro de `STATISTICS_FINALIZATION_LOOKBACK_DAYS`),
-**idempotente** (reexecutar reaproveita a revisão corrente, `created=false`),
-**atômica** (a revisão candidata é concluída em uma transação e só então se torna
-a única revisão pronta da data) e **coordenada no PostgreSQL**
-(`select_for_update` no run de fechamento compartilhado e na revisão). As
-cadências de ingestão/reconciliação existentes (`:13`, `:47`, `05:00`) mantêm a
-própria coordenação (fila, batch aberto e locks advisory próprios); esta suíte
-não afirma exclusão mútua entre workflows.
+- o padrão é uma data **futura** ao dia corrente em `America/Bahia`;
+- o **bootstrap corrente** aceita a data local corrente somente **antes das
+  20:00** `America/Bahia`, com o runtime estatístico ainda **dormente**;
+- **data passada é sempre recusada** (`activation_date_in_past`): nenhum
+  backfill anterior à fronteira é executado e datas anteriores permanecem
+  indisponíveis — o modo `--finalize` nunca reconstrói histórico;
+- às 20:00 ou depois, a data corrente falha fechado
+  (`bootstrap_after_boundary`).
 
-O timer não declara `RandomizedDelay` (offset determinístico) e usa
-`Persistent=true`; o modo `--finalize` é idempotente e limitado à janela de datas
-fechadas, então um disparo recuperado após indisponibilidade não gera backfill
-histórico.
+Configurar o `.env` **não** altera um container já em execução: a fronteira
+chega ao runtime apenas pela recriação isolada do orquestrador (seção 5c.4).
 
-**Janela de fechamento (`STATISTICS_FINALIZATION_LOOKBACK_DAYS`).** O modo
-`--finalize` considera no máximo as `N` datas locais fechadas mais recentes
-(`N = STATISTICS_FINALIZATION_LOOKBACK_DAYS`, default 7). O unit declara
+**Marcadores canônicos agregados.** Cada cadência natural do orquestrador emite
+o marcador técnico correspondente somente depois de o comando interno retornar
+com sucesso: `mode=d1-recovery result=success source=adaptive-orchestrator` e
+`mode=hourly-discharges result=success source=adaptive-orchestrator`. Eles são a
+evidência agregada que o preflight consome; nenhum log bruto é copiado.
+
+**Janela do fallback manual
+(`STATISTICS_FINALIZATION_LOOKBACK_DAYS`).** O modo `--finalize` considera no
+máximo as `N` datas locais fechadas mais recentes (`N =
+STATISTICS_FINALIZATION_LOOKBACK_DAYS`, default 7). O unit declara
 `Environment=STATISTICS_FINALIZATION_LOOKBACK_DAYS=7` como default seguro e
 repassa a variável **por referência** ao container one-shot:
 
@@ -1249,7 +1277,9 @@ da imagem e dos assets das cadências; a tag e os assets não podem ser alterado
 depois. **Pré-requisito:** o scheduler
 `deploy/exit-reconciliation-scheduler.sh` e os seis units das cadências de saída
 instalados da **mesma** tag (seção 5b.2) — o preflight compara byte a byte os
-dez assets instalados contra a release e uma cópia local divergente reprova.
+onze assets instalados contra a release (Compose, scheduler, preflight, os dois
+units de estatísticas e os seis units das cadências de saída) e uma cópia local
+divergente reprova.
 
 Instalação no servidor hospitalar (exemplo sintético com a tag `v1.0.0-rc.N`;
 troque pela tag exata publicada). Esta etapa **não** habilita nem inicia nada:
@@ -1278,14 +1308,19 @@ systemctl daemon-reload
 
 **Baseline desabilitado:** o service é `Type=oneshot`, roda como `User=root`
 (acesso ao socket do Docker), com saída em journal, `SyslogIdentifier` próprio e
-**sem** `Restart=`. Confirme que nada foi ativado na primeira instalação:
+**sem** `Restart=`. Confirme que nada foi ativado e que os **três** timers de
+fallback continuam inertes na primeira instalação:
 
 ```bash
 systemctl is-enabled sirhosp-daily-statistics.timer
-systemctl list-timers --all | grep sirhosp-daily-statistics || true
+systemctl is-active sirhosp-daily-statistics.timer
+systemctl is-enabled sirhosp-discharges.timer sirhosp-historical-recovery.timer
+systemctl list-timers --all | grep -E 'sirhosp-(daily-statistics|discharges|historical-recovery)' || true
 ```
 
-A saída esperada é `disabled` até a ativação explícita da seção 5c.4.
+A saída esperada é `disabled` (e `inactive`) para os três timers até a
+habilitação manual explicitamente decidida pelo operador. Nenhum preset habilita
+qualquer um deles.
 
 ### 5c.3 Preflight somente leitura (fail-closed)
 
@@ -1300,20 +1335,28 @@ Checks emitidos como `[preflight] check=<nome> status=PASS|FAIL`:
 | Check | O que prova |
 | --- | --- |
 | `release` | a tag existe, está publicada (não é draft) e a release é imutável |
-| `asset_match` | os dez assets instalados (scheduler, preflight, os dois units de estatísticas e os seis units das cadências de saída) são byte a byte os da mesma tag |
-| `scheduler_contract` | o runtime canônico de quatro extratores (`discharges`, `admissions`, `deaths`, `official_census`) está no branch executável dos modos `hourly-discharges` e `d1-recovery` |
+| `asset_match` | os onze assets instalados (Compose hospitalar, scheduler, preflight, os dois units de estatísticas e os seis units das cadências de saída) são byte a byte os da mesma tag |
+| `scheduler_contract` | o runtime canônico de quatro extratores (`discharges`, `admissions`, `deaths`, `official_census`) está no branch executável dos modos `hourly-discharges` e `d1-recovery` do scheduler |
 | `image_version` | `SIRHOSP_VERSION` do `.env` é igual à tag exata (prova host-level de que a imagem do Compose pertence à release) |
-| `activation_date` | `STATISTICS_ACTIVATION_DATE` unívoca e estritamente futura em `America/Bahia` |
-| `daily_timer_state` | o timer de estatísticas continua `disabled`/`inactive` (baseline pré-ativação) |
-| `upstream_timer_state` | os timers de altas intradiárias e de recuperação D-1 estão `enabled`/`active` |
-| `cadence_hourly_discharges` | existe sucesso de `hourly-discharges` nas últimas 2 horas |
-| `cadence_d1_recovery` | existe sucesso de `d1-recovery` nas últimas 30 horas |
+| `activation_date` | `STATISTICS_ACTIVATION_DATE` declarada de forma inequívoca: data futura ou bootstrap da data corrente **antes das 20:00** `America/Bahia` |
+| `legacy_timer_state` | os timers `sirhosp-discharges.timer`, `sirhosp-historical-recovery.timer` e `sirhosp-daily-statistics.timer` continuam `disabled`/`inactive` (fallback manual inerte) |
+| `orchestrator_service` | o serviço conhecido `census_orchestrator` existe no Compose hospitalar |
+| `cadence_hourly_discharges` | existe o marcador agregado de sucesso hourly nas últimas 2 horas, **nos logs do orquestrador** |
+| `cadence_d1_recovery` | existe o marcador agregado de sucesso D-1 nas últimas 30 horas, **nos logs do orquestrador** |
 
 Dependências explícitas do host: `bash`, `curl`, `python3`, `cmp`, `systemctl`,
-`journalctl`, `date`, `grep`, `mktemp`, `rm`. A saída é composta apenas de linhas
-`[preflight] check=... status=...` com tag, nome de check, modo, janela e motivo
-técnico enumerado: mensagens brutas do journal, credenciais e identidade clínica
-nunca são copiadas.
+`date`, `grep`, `mktemp`, `rm`, `docker`. A leitura do runtime usa uma interface
+Docker **somente leitura**, fechada por subcomando: `docker compose ... ps` para
+confirmar o serviço conhecido e `docker compose ... logs --since <janela>
+--no-color census_orchestrator` para as cadências. Nenhum `exec`, `run`, `up`,
+`restart`, `inspect`, comando Django, extrator ou materialização é executado, e
+nenhum estado do host é alterado. Por isso o operador precisa do **privilégio de
+leitura** do socket do Docker (o mesmo acesso usado pelo serviço
+`census_orchestrator`, que roda como `User=root`); o preflight não escreve no
+socket. A saída é composta apenas de linhas `[preflight] check=... status=...`
+com tag, nome de check, unidade, serviço, janela, modo, origem e motivo técnico
+enumerado: mensagens brutas dos logs, credenciais e identidade clínica nunca são
+copiadas.
 
 Execução (a mesma tag exata instalada na seção 5c.2):
 
@@ -1325,18 +1368,21 @@ cd /srv/apps/prisma
 Códigos de saída: `0` = preflight aprovado; `1` = um ou mais checks falharam;
 `2` = uso incorreto (sem tag ou tag fora do formato); `3` = dependência do host
 ausente. Guarde a saída agregada para o registro de mudança — o bloco abaixo
-**falha fechado**: com `set -o pipefail` o código de saída do preflight
-atravessa o `tee` e qualquer status diferente de zero interrompe o bloco, de
-modo que uma execução reprovada nunca é aceita como evidência aprovada:
+**falha fechado**: com `pipefail` o código de saída do preflight atravessa o
+`tee` e qualquer status diferente de zero interrompe o bloco, de modo que uma
+execução reprovada nunca é aceita como evidência aprovada:
 
 ```bash
-set -o pipefail
+set -euo pipefail
+cd /srv/apps/prisma
 ./deploy/daily-statistics-activation-preflight.sh v1.0.0-rc.N \
   | tee "/tmp/sirhosp-preflight-v1.0.0-rc.N.txt" \
   || { echo 'preflight reprovado (status != 0) — ativação bloqueada' >&2; exit 1; }
 ```
 
-`[preflight] result=PASS` é pré-condição, não autorização: **não existe caminho de exceção** para `[preflight] result=FAIL` — nenhuma ativação deve ocorrer com evidência pendente. Corrija a causa, reexecute o preflight e colete uma saída nova antes de seguir para a seção 5c.4.
+`[preflight] result=PASS` é pré-condição, não autorização: **não existe caminho de exceção** para `[preflight] result=FAIL` — nenhuma
+ativação deve ocorrer com evidência pendente. Corrija a causa, reexecute o preflight e colete uma saída
+nova antes de seguir para a seção 5c.4.
 
 Falhas e ação esperada (motivos técnicos enumerados):
 
@@ -1350,17 +1396,19 @@ Falhas e ação esperada (motivos técnicos enumerados):
 - `env_file_unreadable`, `env_value_missing`, `env_value_duplicate`,
   `env_value_ambiguous`: declare `SIRHOSP_VERSION` e `STATISTICS_ACTIVATION_DATE`
   uma única vez, com sintaxe simples, no `.env` do hospital.
-- `env_date_invalid`, `activation_date_not_future`: a data de ativação precisa
-  ser uma data válida e estritamente futura em `America/Bahia`.
-- `timer_not_disabled`, `timer_not_inactive`: o timer de estatísticas já foi
-  ativado — o baseline pré-ativação não está mais íntegro; desative conforme a
-  seção 5c.7 antes de reexecutar o preflight.
-- `upstream_timer_not_enabled`, `upstream_timer_not_active`,
-  `unit_state_unavailable`: as cadências de saída não estão habilitadas/ativas —
-  trate como bloqueio, não como ruído.
-- `cadence_stale`, `journal_unavailable`: evidência das cadências expirada ou
-  journal indisponível — aguarde a próxima execução normal das cadências.
-  **Nunca** dispare extratores manualmente para produzir evidência.
+- `env_date_invalid`, `activation_date_in_past`, `bootstrap_after_boundary`: a
+  fronteira precisa ser uma data válida e futura em `America/Bahia`; a data
+  corrente só vale como bootstrap antes das 20:00 locais.
+- `timer_not_disabled`, `timer_not_inactive`, `unit_state_unavailable`: um dos
+  três timers de fallback está habilitado/ativo — o caminho adaptativo exige
+  `disabled`/`inactive`; corrija o estado antes de reexecutar o preflight.
+- `orchestrator_service_missing`, `compose_ps_unavailable`: o serviço
+  `census_orchestrator` não foi encontrado no Compose hospitalar — trate como
+  bloqueio.
+- `cadence_stale`, `compose_logs_unavailable`: não há sucesso natural recente do
+  orquestrador (hourly em 2 horas, D-1 em 30 horas) ou os logs não puderam ser
+  lidos. Aguarde a próxima execução natural das cadências. **Nunca** dispare
+  extratores, materialização ou marcadores manualmente para produzir evidência.
 - `scheduler_contract_missing`, `scheduler_contract_unreadable`: o scheduler da
   release não comprova o runtime canônico de quatro extratores (incluindo
   óbitos) — bloqueio até a release correta ser instalada.
@@ -1368,157 +1416,275 @@ Falhas e ação esperada (motivos técnicos enumerados):
 
 ### 5c.4 Aceite humano e ativação explícita
 
-Instalação, preflight, aceite humano e ativação são checkpoints separados: o
-preflight não ativa nada e a ativação nunca é automática.
+Instalação, configuração, preflight, aceite humano e ativação são checkpoints
+separados: o preflight não ativa nada e a ativação nunca é automática.
 
 1. **Aceite humano.** Revise a saída do preflight e registre no ticket/registro
    de mudança da organização a tag exata, o `[preflight] result=PASS` e as
    contagens agregadas. O registro contém apenas evidência operacional
-   agregada: nunca anexe journal bruto das cadências, log clínico, credencial ou
+   agregada: nunca anexe log bruto das cadências, log clínico, credencial ou
    workbook.
 2. **Frescor da evidência.** A evidência expira junto com as janelas verificadas
    pelo preflight — 2 horas para a alta intradiária e 30 horas para a
    recuperação D-1. Se a ativação não acontecer enquanto essas janelas
    continuarem válidas, a evidência anterior **não autoriza** a ativação:
    execute um novo preflight e registre a saída nova.
-3. **Pré-condições de ativação.** `STATISTICS_ACTIVATION_DATE` (`YYYY-MM-DD`,
-   local `America/Bahia`) declarada como data futura no `.env` do hospital
-   (obrigatória; sem ela o comando falha fechado e nada é materializado); units
-   instalados a partir da release publicada (seção 5c.2); evidência recente das
-   cadências que alimentam as saídas do dia — altas intradiárias
-   (`sirhosp-discharges.timer`, `*:13:00 America/Bahia`) e recuperação D-1
-   (`sirhosp-historical-recovery.timer`, `05:00:00 America/Bahia`) com os quatro
-   extratores na ordem canônica da seção 5b.1, incluindo a extração de óbitos
-   (`deaths`). Datas anteriores à ativação permanecem indisponíveis: o modo
-   `--finalize` nunca reconstrói histórico e nenhum backfill é executado por
+3. **Pré-condições de ativação.** `STATISTICS_ACTIVATION_DATE` declarada no
+   `.env` do hospital (obrigatória; sem ela o comando falha fechado e nada é
+   materializado) como data futura ou como bootstrap corrente antes das 20:00
+   `America/Bahia`; units instalados a partir da release publicada (seção 5c.2);
+   evidência natural recente das cadências do orquestrador; os três timers de
+   fallback `disabled`/`inactive`. Datas anteriores à ativação permanecem
+   indisponíveis: nada reconstrói histórico e nenhum backfill é executado por
    esta suíte.
+4. **Ativação explícita.** A fronteira só chega a um novo container pela
+   recriação **isolada** do `census_orchestrator`: nenhum timer é habilitado e
+   nenhum outro serviço é recriado.
 
 Ativação (comando manual separado, depois do aceite; o bloco **falha fechado**:
-`set -euo pipefail` e cada contagem é verificada antes do único `enable`):
+`set -euo pipefail`, os três timers conferidos e cada contagem verificada antes
+da única recriação):
 
 ```bash
 set -euo pipefail
 cd /srv/apps/prisma
+export COMPOSE_FILE=compose.hospital.yml
+export RELEASE_TAG=v1.0.0-rc.N
 
-# 1) Declare a data de ativação no .env (obrigatória; sempre uma data futura)
-grep -n '^STATISTICS_ACTIVATION_DATE=' .env
+# 1) Fronteira declarada e versão da imagem da release aceita.
+grep -n '^STATISTICS_ACTIVATION_DATE=[0-9]' .env
+grep -n "^SIRHOSP_VERSION=${RELEASE_TAG}$" .env
 
-# 2) Evidência agregada das cadências de alta intradiária e de recuperação D-1.
-#    Contagem > 0 = evidência recente; 0 = evidência ausente/obsoleta, nada é
-#    ativado. O `|| true` existe apenas para que a contagem 0 seja impressa e
-#    testada abaixo: journal vazio ou leitura de journal indisponível também
-#    resultam em 0.
-hourly_discharges_success="$(journalctl -q --no-pager --since "-2 hours" \
-  -u sirhosp-discharges.service -o cat \
-  | grep -cF 'mode=hourly-discharges result=success' || true)"
-d1_recovery_success="$(journalctl -q --no-pager --since "-30 hours" \
-  -u sirhosp-historical-recovery.service -o cat \
-  | grep -cF 'mode=d1-recovery result=success' || true)"
+# 2) Os três timers de fallback continuam desabilitados e inativos.
+for timer in sirhosp-discharges.timer sirhosp-historical-recovery.timer sirhosp-daily-statistics.timer; do
+  test "$(systemctl is-enabled "${timer}")" = "disabled" \
+    || { echo "abortado: ${timer} habilitado" >&2; exit 1; }
+  test "$(systemctl is-active "${timer}")" = "inactive" \
+    || { echo "abortado: ${timer} ativo" >&2; exit 1; }
+done
+echo "legacy_timer_state=disabled,inactive"
+
+# 3) Evidência natural do orquestrador AINDA em execução, coletada antes de a
+#    recriação destruir o container atual. Contagem > 0 = evidência fresca;
+#    0 = evidência ausente/obsoleta e nada é ativado. O `|| true` existe
+#    apenas para que a contagem 0 seja impressa e testada abaixo.
+hourly_discharges_success="$(
+  docker compose --env-file .env -f "$COMPOSE_FILE" logs --since 2h --no-color census_orchestrator \
+    | grep -cF 'mode=hourly-discharges result=success source=adaptive-orchestrator' || true
+)"
+d1_recovery_success="$(
+  docker compose --env-file .env -f "$COMPOSE_FILE" logs --since 30h --no-color census_orchestrator \
+    | grep -cF 'mode=d1-recovery result=success source=adaptive-orchestrator' || true
+)"
 echo "cadence_hourly_discharges=${hourly_discharges_success}"
 echo "cadence_d1_recovery=${d1_recovery_success}"
-
-# 3) Guarda fail-closed: as duas contagens precisam ser maiores que zero
 test "${hourly_discharges_success}" -gt 0 \
   || { echo "abortado: cadence_hourly_discharges=${hourly_discharges_success} — evidência ausente/obsoleta" >&2; exit 1; }
 test "${d1_recovery_success}" -gt 0 \
   || { echo "abortado: cadence_d1_recovery=${d1_recovery_success} — evidência ausente/obsoleta" >&2; exit 1; }
 
-# 4) Só com as duas contagens > 0: habilita o timer de finalização diária
-sudo systemctl enable --now sirhosp-daily-statistics.timer
-systemctl list-timers sirhosp-daily-statistics.timer
+# 4) Só com fronteira, fallback inerte e evidência fresca: recriação ISOLADA do
+#    orquestrador para carregar a configuração.
+docker compose --env-file .env -f "$COMPOSE_FILE" config --quiet
+docker compose --env-file .env -f "$COMPOSE_FILE" pull census_orchestrator
+docker compose --env-file .env -f "$COMPOSE_FILE" up -d --no-deps --force-recreate census_orchestrator
+docker compose --env-file .env -f "$COMPOSE_FILE" ps census_orchestrator
 ```
 
-A contagem precisa ser maior que zero para cada modo — o `test` acima interrompe
-o bloco com `exit 1` **antes** do `enable`, então contagem 0 (evidência ausente
-ou obsoleta) não ativa nada. Os marcadores são agregados
-(`mode=<modo> result=<estado>`) e o sucesso D-1 só vale porque o
-runtime da mesma tag foi validado pelo preflight. Execuções manuais de validação
-usam `systemctl start sirhosp-daily-statistics.service` (oneshot); apenas o
-`systemctl enable` do timer liga o agendamento.
+Verificação pós-ativação (saúde, fronteira no novo container, ausência de
+relatórios anteriores à fronteira por contagem agregada e fallback ainda
+inerte):
+
+```bash
+set -euo pipefail
+cd /srv/apps/prisma
+export COMPOSE_FILE=compose.hospital.yml
+
+docker compose --env-file .env -f "$COMPOSE_FILE" ps census_orchestrator
+
+boundary_in_container="$(
+  docker compose --env-file .env -f "$COMPOSE_FILE" exec -T census_orchestrator \
+    sh -c 'test -n "${STATISTICS_ACTIVATION_DATE:-}" && echo set || echo unset'
+)"
+echo "boundary_in_container=${boundary_in_container}"
+test "${boundary_in_container}" = "set"
+
+activation_date="$(grep -E '^STATISTICS_ACTIVATION_DATE=' .env | cut -d= -f2-)"
+test -n "${activation_date}"
+reports_before_boundary="$(
+  docker compose --env-file .env -f "$COMPOSE_FILE" exec -T web \
+    uv run --no-sync python manage.py shell -c \
+    "from apps.statistics_reports.models import DailyStatisticsReport as R; print(R.objects.filter(local_date__lt='${activation_date}').count())" \
+  | tr -d '\r'
+)"
+echo "reports_before_boundary=${reports_before_boundary}"
+test "${reports_before_boundary}" = "0"
+
+for timer in sirhosp-discharges.timer sirhosp-historical-recovery.timer sirhosp-daily-statistics.timer; do
+  test "$(systemctl is-enabled "${timer}")" = "disabled"
+  test "$(systemctl is-active "${timer}")" = "inactive"
+done
+echo "legacy_timer_state=disabled,inactive"
+```
+
+Nenhuma dessas verificações imprime identidade clínica: apenas estado de
+container, fronteira configurada e contagens agregadas.
 
 ### 5c.5 Observação agregada (sem identidade)
 
 A finalização escreve no journal apenas linhas técnicas com **data, status,
 revisão, IDs técnicos e contagens agregadas** — `date=`, `status=`, `revision=`,
-`created=`, `report=`, `sectors=`, `events=` — e a linha de totais
-`totals dates=... materialized=... reused=... incomplete=... failed=...`.
-Nunca há identidade de paciente, prontuário, nome, leito ou texto clínico; uma
-falha é reduzida a um token técnico seguro (`error=<Classe>`).
+`created=`, `report=`, `sectors=`, `events=`, `quality=` — e a linha de totais
+`totals dates=... materialized=... reused=... incomplete=... failed=...`. No
+caminho adaptativo, essas linhas aparecem nos **logs do `census_orchestrator`**,
+junto do marcador resumido
+`Daily statistics finalization finished: local date <D-1>, duration <s>` (ou
+`Daily statistics finalization failed: local date <D-1>, <Classe>`). Nunca há
+identidade de paciente, prontuário, nome, leito ou texto clínico; uma falha é
+reduzida a um token técnico seguro e a classe da exceção.
 
 ```bash
-systemctl status sirhosp-daily-statistics.service
-journalctl -u sirhosp-daily-statistics.service --since "-2 days"
-systemctl list-timers --all | grep sirhosp-daily-statistics
+cd /srv/apps/prisma
+docker compose --env-file .env -f compose.hospital.yml logs --since 30h --no-color census_orchestrator \
+  | grep -E 'mode=(d1-recovery|hourly-discharges) result=success source=adaptive-orchestrator|Daily statistics finalization (finished|failed)|quality=|status='
+
+# Fallback manual (service systemd desabilitado, apenas quando executado):
+journalctl -q --no-pager --since "-2 days" -u sirhosp-daily-statistics.service \
+  | grep -E 'date=|status=|revision=|created=|quality=|totals '
 ```
 
 O que observar:
 
 - `status=ready` na data esperada e `created=true|false` indicando revisão nova
   ou reaproveitada (idempotência do mesmo fingerprint de fontes);
-- `quality=...` quando a data foi publicada com aviso de qualidade — o aviso não
-  substitui a evidência das cadências;
+- `quality=` quando a data foi publicada com aviso técnico —
+  `d1_recovery_incomplete` (falha D-1 observada no processo) ou
+  `d1_recovery_not_confirmed` (processo reiniciado que não pôde comprovar o
+  resultado anterior) —; o aviso participa da revisão e não substitui a
+  evidência das cadências;
 - `incomplete` e `reasons=...` quando a data ainda não está fechada ou completa:
-  o modo `--finalize` reporta e segue para as demais datas elegíveis sem
-  inventar dados;
-- `failed` quando uma data falhou; o batch termina com exit diferente de zero e a
-  falha fica visível no journal da unidade (sem `Restart=`, a recuperação é o
-  próximo disparo);
-- a janela declarada aparece na saída da unidade: um `CommandError` de
-  `STATISTICS_FINALIZATION_LOOKBACK_DAYS` no journal significa valor não positivo
-  configurado no `.env` — nada é materializado e o batch não roda até o valor ser
-  corrigido (o default 7 aplica-se apenas quando a variável não é declarada);
-- a auditoria de exportação (`StatisticsExportLog`) registra usuário, revisão,
+  o comando reporta e segue sem inventar dados, e nenhum relatório é publicado;
+- `failed` e a classe técnica quando uma data falhou: a tentativa lógica da
+  data é consumida no processo corrente, o loop segue para o ciclo censitário e
+  o aviso correspondente é preservado na revisão;
+- os marcadores `mode=d1-recovery result=success source=adaptive-orchestrator` e
+  `mode=hourly-discharges result=success source=adaptive-orchestrator`, que
+  provam a cadência natural do orquestrador sem expor linhas brutas;
+- A auditoria de exportação (`StatisticsExportLog`) registra usuário, revisão,
   instante servido e contagens de folhas e linhas, sem payload nominal.
 
-### 5c.6 Rerun de uma data após evidência tardia
+Colete somente as linhas agregadas acima; não copie o log bruto do container,
+nem mensagens clínicas, para tickets, anexos ou terminal compartilhado.
 
-Evidência tardia (alta ou óbito conciliado depois do fechamento) entra por um
-rerun da mesma data local. O rerun é idempotente: cria uma nova revisão quando o
-fingerprint das fontes mudou, reaproveita a existente quando não mudou e nunca
-altera a fotografia de fechamento nem qualquer registro clínico de origem.
+### 5c.6 Recuperação pós-05:00, checkpoint das 07:30 e rerun manual
+
+**Recuperação adaptativa pós-05:00.** A pendência de finalização vive na memória
+do processo. Um processo que reinicia depois das 05:00 `America/Bahia` usa a
+**ausência durável de revisão `ready`** para a data D-1 como marcador de uma
+finalização perdida e faz **uma única** tentativa de recuperação na primeira
+drenagem segura, publicando a revisão com o aviso
+`d1_recovery_not_confirmed` quando não pode comprovar o resultado anterior. Essa
+recuperação **não** reabre o D-1 fora da janela, **não** varre histórico, **não**
+exige ação do operador e **não** existe timer de retry.
+
+**Checkpoint humano das 07:30.** Às 07:30 o operador confere se a data D-1
+esperada já tem revisão `ready`. Se não tiver, o checkpoint **alerta** e exige
+**decisão humana** (investigar a causa e decidir o fallback): o runbook **não dispara** extração, **não executa** materialização e não faz qualquer **retry**
+automático por calendário. Este bloco é somente leitura:
 
 ```bash
+set -euo pipefail
 cd /srv/apps/prisma
-docker compose --env-file .env -f compose.hospital.yml --profile recovery run \
-  --rm -e STATISTICS_ACTIVATION_DATE historical_recovery \
-  uv run --no-sync python manage.py materialize_daily_statistics --date 2026-10-01
+export COMPOSE_FILE=compose.hospital.yml
+
+expected_date="$(TZ=America/Bahia date -d 'yesterday' '+%F')"
+ready_revisions="$(
+  docker compose --env-file .env -f "$COMPOSE_FILE" exec -T web \
+    uv run --no-sync python manage.py shell -c \
+    "from apps.statistics_reports.models import DailyStatisticsReport as R; print(R.objects.filter(local_date='${expected_date}', status='ready').count())" \
+  | tr -d '\r'
+)"
+echo "ready_revisions=${ready_revisions} date=${expected_date}"
+test "${ready_revisions}" -gt 0 \
+  || echo "alerta: nenhuma revisão pronta para ${expected_date} às 07:30 — decisão humana necessária (nenhum retry automático)"
 ```
 
-Substitua a data por uma data local `America/Bahia` **igual ou posterior** à data
-de ativação. Se a data de ativação não chegar ao container, o comando falha
-fechado com mensagem explícita e nada é materializado. Datas anteriores à
-ativação permanecem indisponíveis: o backfill clínico autorizado da seção 5b.7 é
-outra operação e não materializa o relatório.
+**Fallback manual e rerun de uma data.** Evidência tardia (alta ou óbito
+conciliado depois do fechamento) entra por um rerun da mesma data local. O rerun
+é idempotente: cria uma nova revisão quando o fingerprint das fontes mudou,
+reaproveita a existente quando não mudou e nunca altera a fotografia de
+fechamento nem qualquer registro clínico de origem.
+
+```bash
+set -euo pipefail
+cd /srv/apps/prisma
+export COMPOSE_FILE=compose.hospital.yml
+target_date=2026-10-01   # data local America/Bahia, igual ou posterior à fronteira
+
+docker compose --env-file .env -f "$COMPOSE_FILE" --profile recovery run --rm \
+  -e STATISTICS_ACTIVATION_DATE historical_recovery \
+  uv run --no-sync python manage.py materialize_daily_statistics --date "${target_date}"
+```
+
+Substitua a data por uma data local `America/Bahia` **igual ou posterior** à
+fronteira. Se `STATISTICS_ACTIVATION_DATE` não chegar ao container, o comando
+falha fechado com mensagem explícita e nada é materializado. Datas anteriores à
+fronteira permanecem indisponíveis: o backfill clínico autorizado da seção 5b.7
+é outra operação e não materializa o relatório.
+
+Regras do fallback manual para avisos degradados:
+
+- o fallback manual só remove `d1_recovery_incomplete` ou
+  `d1_recovery_not_confirmed` **depois de sucesso D-1 comprovado** para a mesma
+  data, executando o rerun de `--date` sem aviso e conferindo nova revisão;
+- sem essa evidência, **preserve o aviso** e investigue: o aviso é a informação
+  que explica por que a revisão publicada pode ter menos eventos;
+- o fallback manual **nunca usa `--finalize` para limpá-lo**: o modo batch não
+  aceita `--quality-warning` e não deve ser usado para reescrever uma revisão
+  degradada, apenas para fechar datas elegíveis sem aviso.
 
 ### 5c.7 Desativação e rollback
 
-Desativar a finalização não apaga dados e não toca nas fontes clínicas; o
-rollback remove **apenas** os dois units de estatísticas e preserva os
-relatórios materializados, as fontes clínicas e as cadências de altas e
-recuperação D-1:
+O rollback da finalização estatística remove (ou reverte) a fronteira declarada
+e restaura o runtime estatístico ao estado **dormente**, sem apagar dados: as
+revisões materializadas permanecem auditáveis, as fontes clínicas não são
+alteradas, **nenhuma migration é revertida** e a cadência intradiária de altas
+do orquestrador não é interrompida. Nenhum timer de fallback (altas, D-1 ou
+estatísticas) é habilitado ou desabilitado pelo rollback — eles apenas continuam
+`disabled`/`inactive`.
 
 ```bash
-sudo systemctl disable --now sirhosp-daily-statistics.timer
-sudo systemctl disable --now sirhosp-daily-statistics.service
-systemctl list-timers --all | grep sirhosp-daily-statistics || true
+set -euo pipefail
+cd /srv/apps/prisma
+export COMPOSE_FILE=compose.hospital.yml
+
+# 1) Guarda reversível do .env e remoção da fronteira estatística.
+cp -p .env ".env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+sed -i 's/^STATISTICS_ACTIVATION_DATE=.*/STATISTICS_ACTIVATION_DATE=/' .env
+grep -n '^STATISTICS_ACTIVATION_DATE=$' .env
+
+# 2) Recriação ISOLADA do orquestrador com a fronteira removida.
+docker compose --env-file .env -f "$COMPOSE_FILE" config --quiet
+docker compose --env-file .env -f "$COMPOSE_FILE" up -d --no-deps --force-recreate census_orchestrator
+docker compose --env-file .env -f "$COMPOSE_FILE" ps census_orchestrator
+
+# 3) O unit de fallback continua inerte.
+test "$(systemctl is-enabled sirhosp-daily-statistics.timer)" = "disabled"
+test "$(systemctl is-active sirhosp-daily-statistics.timer)" = "inactive"
+echo "daily_statistics_timer=disabled,inactive"
 ```
 
-Rollback completo (remoção das unidades após desativar):
+Alternativa equivalente: restaurar a release anterior no `.env`
+(`SIRHOSP_VERSION`) e recriar somente o `census_orchestrator`. Em ambos os casos:
 
-```bash
-sudo rm -f /etc/systemd/system/sirhosp-daily-statistics.service \
-  /etc/systemd/system/sirhosp-daily-statistics.timer
-systemctl daemon-reload
-```
-
-Ordem de rollback recomendada (Migration Plan do change): desabilitar a
-materialização e a navegação/exportação primeiro. A projeção é isolada —
-`IngestionRun`, `CensusSnapshot`, medições de ocupação, internações, altas e
-óbitos **não** são removidos nem alterados por esta suíte, e as fontes clínicas
-ficam preservadas; nenhum workbook precisa ser apagado porque nenhum é
-persistido. A remoção das tabelas de relatório, se decidida, é uma migration
-posterior depois da aprovação de retenção e auditoria, e não faz parte deste
-rollback operacional.
+- **não** exclua revisões nem páginas: nada é apagado e nenhuma data é
+  reconstruída;
+- **não** reverta migrations nem restaure o banco: o schema permanece válido e
+  compatível (a restauração de banco só é considerada por decisão separada, se
+  houver incompatibilidade não esperada);
+- **não** habilite timers de fallback nem altere as cadências de altas e D-1;
+- os units de estatísticas podem permanecer instalados (assets da release) desde
+  que `disabled`/`inactive`; o rollback de imagem não exige removê-los.
 
 ---
 

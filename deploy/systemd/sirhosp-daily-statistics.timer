@@ -1,5 +1,14 @@
-# SIRHOSP — Timer de finalização diária do relatório estatístico
-# (America/Bahia, DSRS-S8). Dispara uma vez por dia às 07:30:00 no fuso
+# SIRHOSP — Fallback manual da finalização diária do relatório estatístico
+# (America/Bahia, DSRS-S8/OASF). O agendamento pertence ao orquestrador adaptativo
+# (`census_orchestrator`), que materializa a data D-1 dentro do próprio loop
+# (ADR-0012). Este timer permanece desabilitado e inativo no caminho primário e
+# só é habilitado por decisão manual do operador para operação fora do
+# orquestrador. A ativação estatística documentada em `deploy/README.md`,
+# seção 5c, recria somente o orquestrador e nunca liga este timer nem os
+# timers de fallback de altas (`sirhosp-discharges.timer`) e de recuperação
+# D-1 (`sirhosp-historical-recovery.timer`).
+#
+# Quando habilitado manualmente, dispara uma vez por dia às 07:30:00 no fuso
 # literal `America/Bahia`, depois de o dia alvo estar fechado:
 #
 # - o dia só é elegível a partir de 00:00 do dia seguinte, porque a fotografia
@@ -9,23 +18,24 @@
 #
 # O disparo às 07:30 é escalonado dos offsets horários :13 (altas) e :47
 # (varredura) e do disparo de 05:00 (recuperação D-1): são instantes distintos,
-# mas isso não é garantia de não sobreposição. Como o service declara
-# `TimeoutStartSec=1800`, uma execução iniciada às 07:30 pode ainda estar em
-# andamento às 07:47 e além, e as cadências horárias podem estar rodando às
-# 07:30. Não há relação de ordem nem de exclusão mútua entre esta finalização e
-# essas cadências. O que sustenta a operação é o próprio comportamento da
-# finalização: limitada (datas fechadas), idempotente (reexecutar reaproveita a
-# revisão corrente), atômica (publicação em transação única) e coordenada no
-# PostgreSQL por row locks; as cadências de ingestão/reconciliação existentes
-# mantêm a própria coordenação (fila, batch aberto e locks advisory próprios).
+# mas isso não elimina a possibilidade de execuções concorrentes. Como o
+# service declara `TimeoutStartSec=1800`, uma execução iniciada às 07:30 pode
+# ainda estar em andamento às 07:47 e além, e as cadências horárias podem estar
+# rodando às 07:30. Não há relação de ordem nem de exclusão mútua entre esta
+# finalização manual e essas cadências. O que sustenta a operação é o próprio
+# comportamento da finalização: limitada (datas fechadas), idempotente
+# (reexecutar reaproveita a revisão corrente), atômica (publicação em transação
+# única) e coordenada no PostgreSQL por row locks; as cadências de
+# ingestão/reconciliação existentes mantêm a própria coordenação (fila, batch
+# aberto e locks advisory próprios).
 #
 # `Persistent=true` recupera um disparo perdido após indisponibilidade do host
 # (o modo `--finalize` é idempotente e limitado à janela de datas fechadas);
 # sem atraso aleatório de disparo, mantendo o offset determinístico. O timer
-# nunca inicia nada por conta própria: só dispara após habilitação explícita do
-# operador, documentada em `deploy/README.md`, seção 5c.
+# nunca inicia nada por conta própria: só dispara após habilitação manual
+# explícita do operador, documentada em `deploy/README.md`, seção 5c.
 [Unit]
-Description=SIRHOSP — Timer de finalização diária do relatório estatístico (America/Bahia)
+Description=SIRHOSP — Fallback manual da finalização diária do relatório estatístico (America/Bahia)
 Documentation=https://github.com/carlosapgomes/sirhosp
 
 [Timer]

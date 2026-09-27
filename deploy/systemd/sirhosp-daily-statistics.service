@@ -1,11 +1,14 @@
-# SIRHOSP — Finalização diária do relatório estatístico (America/Bahia,
-# DSRS-S8). One-shot: fecha apenas datas locais já concluídas, completas,
-# iguais ou posteriores à data de ativação declarada e dentro da janela
-# limitada de datas fechadas, pelo modo `materialize_daily_statistics
-# --finalize`. Nunca roda em loop, nunca materializa a data corrente e nunca
+# SIRHOSP — Fallback manual da finalização diária do relatório estatístico
+# (America/Bahia, DSRS-S8/OASF). O agendamento pertence ao orquestrador adaptativo
+# (`census_orchestrator`): depois da tentativa D-1 e na primeira iteração em que
+# a fila esteja drenada e nenhum batch aberto, o próprio loop materializa a data
+# D-1 (ADR-0012). Este service one-shot permanece como fallback manual inerte —
+# instalado desabilitado e inativo no caminho adaptativo — e executa somente o
+# modo `--finalize`: fecha as datas locais já concluídas, completas, iguais ou
+# posteriores à data de ativação declarada e dentro da janela limitada de datas
+# fechadas. Nunca roda em loop, nunca materializa a data corrente e nunca
 # reconstrói histórico: sem `STATISTICS_ACTIVATION_DATE` declarada o comando
 # falha fechado e nada é materializado.
-#
 # Executa pelo runner one-shot `historical_recovery` do compose hospitalar
 # (perfil `recovery`, `run --rm`) — nunca pelo serviço de aplicação, nunca
 # pelo fluxo PDF legado e nunca a partir de um clone do repositório. O
@@ -15,13 +18,13 @@
 # container efêmero (`-e`, por referência); o valor padrão vazio da data e o
 # padrão 7 da janela mantêm, respectivamente, o fail-closed e o lote limitado
 # quando a variável não existe no `.env`.
-#
 # Saída integral em journal, com identificador próprio, apenas datas, status,
 # revisão, IDs técnicos e contagens agregadas — sem identidade clínica.
-# Instalada desabilitada; a ativação é um checkpoint explícito do operador
-# (ver `deploy/README.md`, seção 5c).
+# Instalado desabilitado: a ativação estatística é a recriação isolada do
+# orquestrador (ver `deploy/README.md`, seção 5c), nunca a habilitação deste
+# timer ou deste service.
 [Unit]
-Description=SIRHOSP — Finalização diária do relatório estatístico (America/Bahia, DSRS-S8)
+Description=SIRHOSP — Fallback manual da finalização diária do relatório estatístico (America/Bahia, DSRS-S8)
 Documentation=https://github.com/carlosapgomes/sirhosp
 After=network-online.target docker.service
 Wants=network-online.target docker.service

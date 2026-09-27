@@ -1,10 +1,18 @@
 # SIRHOSP — D-1 historical recovery timer (America/Bahia, RPSA-S12).
-# Fires daily at 05:00:00 America/Bahia (host-timezone independent) and
-# requests recovery for the previous Bahia calendar date. Persistent=true
-# catches a missed trigger after downtime; no start randomization keeps
-# the fixed 05:00 offset deterministic relative to the hourly :13/:47
-# timers. Delivered disabled; enabled only after the manual D-1 smoke test
-# passes.
+# Manual fallback for the daily D-1 recovery: the adaptive census orchestrator
+# (`census_orchestrator`) runs that recovery in-process inside its quiet window
+# [01:00, 05:00) America/Bahia (ADR-0010, change
+# orchestrate-d1-exit-recovery), so no fixed timer is the normal schedule.
+# This timer stays disabled and inactive on the adaptive path; enabling it is
+# a manual operator decision for operation outside the orchestrator (e.g. a
+# controlled catch-up with the orchestrator stopped), never a step of the
+# statistics activation documented in deploy/README.md, section 5c.
+#
+# When manually enabled it fires daily at 05:00:00 America/Bahia
+# (host-timezone independent) and requests recovery for the previous Bahia
+# calendar date. Persistent=true catches a missed trigger after downtime; no
+# start randomization keeps the fixed 05:00 offset deterministic relative to
+# the hourly :13/:47 fallback schedules.
 [Unit]
 Description=SIRHOSP — Timer de recuperação histórica D-1 (05:00 America/Bahia)
 Documentation=https://github.com/carlosapgomes/sirhosp

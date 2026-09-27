@@ -28,10 +28,10 @@
 
 ## 5. SLICE-OASF-S4 — Handoff operacional e assets de fallback
 
-- [ ] 5.1 Atualizar os contratos estáticos dos units hourly, D-1 e estatístico para fallback desabilitado e adicionar testes RED/GREEN que rejeitem a antiga ativação por timer.
-- [ ] 5.2 Atualizar `deploy/README.md`, `.env.example` e o runbook `v0.1.0-rc.32` para instalação dormente, preflight, aceite humano, recriação isolada do orquestrador, checkpoint de ausência às 07:30, fallback que preserva avisos sem D-1 comprovado, observação e rollback; verificar contratos estáticos.
-- [ ] 5.3 Executar `./scripts/test-in-container.sh unit`, Markdown lint e OpenSpec strict; gerar `/tmp/sirhosp-slice-OASF-S4-report.md` com RED/GREEN e snippets antes/depois.
-- [ ] 5.4 Obter revisão independente do slice e corrigir apenas achados P0/P1 antes de marcar o slice concluído.
+- [x] 5.1 Atualizar os contratos estáticos dos units hourly, D-1 e estatístico para fallback desabilitado e adicionar testes RED/GREEN que rejeitem a antiga ativação por timer.
+- [x] 5.2 Atualizar `deploy/README.md`, `.env.example` e o runbook `v0.1.0-rc.32` para instalação dormente, preflight, aceite humano, recriação isolada do orquestrador, checkpoint de ausência às 07:30, fallback que preserva avisos sem D-1 comprovado, observação e rollback; verificar contratos estáticos.
+- [x] 5.3 Executar `./scripts/test-in-container.sh unit`, Markdown lint e OpenSpec strict; gerar `/tmp/sirhosp-slice-OASF-S4-report.md` com RED/GREEN e snippets antes/depois.
+- [x] 5.4 Obter revisão independente do slice e corrigir apenas achados P0/P1 antes de marcar o slice concluído.
 
 ## 6. Gate final e ativação operacional
 
