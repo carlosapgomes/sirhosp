@@ -17,6 +17,7 @@ Registros de decisoes arquiteturais importantes do projeto.
 | [ADR-0009](ADR-0009-reconciliacao-canonica-de-saidas-e-identidade-longitudinal-de-internacoes.md) | Reconciliação canônica de saídas e identidade longitudinal de internações | Proposed | 2026-09-03 |
 | [ADR-0010](ADR-0010-recuperacao-d1-orquestrada-pelo-ciclo-adaptativo.md)                          | Recuperação D-1 orquestrada pelo ciclo adaptativo de censo                | Proposed | 2026-09-06 |
 | [ADR-0011](ADR-0011-projecao-diaria-materializada-e-versionada-para-relatorios-estatisticos.md)   | Projeção diária materializada e versionada para relatórios estatísticos   | Accepted | 2026-09-24 |
+| [ADR-0012](ADR-0012-finalizacao-estatistica-orquestrada-pela-drenagem-adaptativa.md)              | Finalização estatística orquestrada pela drenagem adaptativa              | Proposed | 2026-09-27 |
 
 ## ADRs Deprecated/Superseded
 

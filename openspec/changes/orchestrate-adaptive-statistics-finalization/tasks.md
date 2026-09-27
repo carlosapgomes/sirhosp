@@ -12,12 +12,12 @@
 
 ## 3. SLICE-OASF-S2 — Pipeline adaptativo D-1 → estatísticas
 
-- [ ] 3.1 Adicionar testes RED para ordem D-1 → drenagem → materialização → hourly → censo, pendência sem chamadas repetidas, reavaliação da fila, restart após 05:00 com/sem revisão pronta, recusa de segunda tentativa no mesmo processo, falhas isoladas e logs agregados.
-- [ ] 3.2 Implementar a FSM em memória, a recuperação pós-05:00 baseada em revisão `ready` e os marcadores canônicos D-1/hourly, chamando a data D-1 explícita uma vez por processo na primeira drenagem segura; verificar GREEN focado.
-- [ ] 3.3 Passar fronteira/lookback ao `census_orchestrator` no Compose, manter os timers hourly/D-1/estatístico como fallback inerte e fixar esses contratos em testes estáticos.
-- [ ] 3.4 Criar ADR-0012 e atualizar seu índice com propriedade adaptativa, alternativas, rollback e ausência de nova infraestrutura; executar Markdown lint.
-- [ ] 3.5 Executar `./scripts/test-in-container.sh unit`, lint/typecheck proporcionais e OpenSpec strict; gerar `/tmp/sirhosp-slice-OASF-S2-report.md` com RED/GREEN e snippets antes/depois.
-- [ ] 3.6 Obter revisão independente do slice e corrigir apenas achados P0/P1 antes de marcar o slice concluído.
+- [x] 3.1 Adicionar testes RED para ordem D-1 → drenagem → materialização → hourly → censo, pendência sem chamadas repetidas, reavaliação da fila, restart após 05:00 com/sem revisão pronta, recusa de segunda tentativa no mesmo processo, falhas isoladas e logs agregados.
+- [x] 3.2 Implementar a FSM em memória, a recuperação pós-05:00 baseada em revisão `ready` e os marcadores canônicos D-1/hourly, chamando a data D-1 explícita uma vez por processo na primeira drenagem segura; verificar GREEN focado.
+- [x] 3.3 Passar fronteira/lookback ao `census_orchestrator` no Compose, manter os timers hourly/D-1/estatístico como fallback inerte e fixar esses contratos em testes estáticos.
+- [x] 3.4 Criar ADR-0012 e atualizar seu índice com propriedade adaptativa, alternativas, rollback e ausência de nova infraestrutura; executar Markdown lint.
+- [x] 3.5 Executar `./scripts/test-in-container.sh unit`, lint/typecheck proporcionais e OpenSpec strict; gerar `/tmp/sirhosp-slice-OASF-S2-report.md` com RED/GREEN e snippets antes/depois.
+- [x] 3.6 Obter revisão independente do slice e corrigir apenas achados P0/P1 antes de marcar o slice concluído.
 
 ## 4. SLICE-OASF-S3 — Preflight reconhece o runtime adaptativo
 

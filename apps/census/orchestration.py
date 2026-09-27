@@ -28,6 +28,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from django.conf import settings
 from django.core.management import call_command
 from django.db import close_old_connections, connection
 from django.db.models.functions import Coalesce
@@ -36,6 +37,10 @@ from django.utils import timezone
 from apps.census.stale_admissions import observe_accepted_census_run
 from apps.ingestion.models import CensusExecutionBatch, IngestionRun
 from apps.ingestion.stale_recovery import recover_stale_ingestion_runs
+from apps.statistics_reports.models import (
+    DailyStatisticsReport,
+    DailyStatisticsReportStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,35 @@ BAHIA_TZ = ZoneInfo("America/Bahia")
 # [D1_QUIET_START_HOUR, D1_QUIET_END_HOUR).
 D1_QUIET_START_HOUR = 1
 D1_QUIET_END_HOUR = 5
+
+# Daily statistics finalization (OASF-S2). The canonical aggregate markers
+# below are the only success evidence the read-only activation preflight parses
+# from this container's logs; each is emitted only after the matching
+# ``call_command`` returned successfully.
+D1_RECOVERY_SUCCESS_MARKER = (
+    "mode=d1-recovery result=success source=adaptive-orchestrator"
+)
+HOURLY_DISCHARGES_SUCCESS_MARKER = (
+    "mode=hourly-discharges result=success source=adaptive-orchestrator"
+)
+
+# Operational quality codes the adaptive loop may attach to a degraded
+# revision. They belong to the closed allowlist enforced by the materializer.
+D1_RECOVERY_INCOMPLETE_WARNING = "d1_recovery_incomplete"
+D1_RECOVERY_NOT_CONFIRMED_WARNING = "d1_recovery_not_confirmed"
+
+
+@dataclass
+class _PendingStatisticsFinalization:
+    """One America/Bahia local date awaiting the first drain-safe iteration.
+
+    The pending state lives only in this process: a restart is recovered
+    through the durable absence of a ready ``DailyStatisticsReport`` rather
+    than through additional persistence.
+    """
+
+    local_date: date
+    quality_warning: str | None = None
 
 
 def acquire_orchestrator_lock() -> bool:
@@ -410,6 +444,75 @@ def run_single_cycle(
 
 
 # ---------------------------------------------------------------------------
+# S4 — Adaptive statistics finalization
+# ---------------------------------------------------------------------------
+
+
+def _drain_is_safe(decision: OrchestratorDecision) -> bool:
+    """True when no ingestion run is queued/running and no batch is open.
+
+    Drainage is deliberately independent from the census cooldown: a pending
+    statistics date may be published while cooldown still prevents a new
+    census cycle (design D1).
+    """
+    return (
+        decision.active_queued == 0
+        and decision.active_running == 0
+        and not decision.open_batch_exists
+    )
+
+
+def _statistics_date_is_eligible(local_date: date) -> bool:
+    """True when the date is at or after the declared activation boundary."""
+    activation_date = settings.STATISTICS_ACTIVATION_DATE
+    if activation_date is None:
+        return False
+    return local_date >= activation_date
+
+
+def _daily_statistics_report_ready(local_date: date) -> bool:
+    """True when the date already has a ready statistics revision."""
+    return DailyStatisticsReport.objects.filter(
+        local_date=local_date,
+        status=DailyStatisticsReportStatus.READY,
+    ).exists()
+
+
+def _materialize_daily_statistics(
+    pending: _PendingStatisticsFinalization,
+) -> bool:
+    """Materialize one pending date; return True only on command success.
+
+    The failure branch records the target date and the technical exception
+    class only, so no nominal command output or clinical value is logged.
+    """
+    args = [
+        "materialize_daily_statistics",
+        "--date",
+        pending.local_date.isoformat(),
+    ]
+    if pending.quality_warning is not None:
+        args += ["--quality-warning", pending.quality_warning]
+    started = time_module.monotonic()
+    try:
+        call_command(*args)
+    except (Exception, SystemExit) as exc:
+        logger.error(
+            "Daily statistics finalization failed: local date %s, %s.",
+            pending.local_date.isoformat(),
+            type(exc).__name__,
+        )
+        return False
+    logger.info(
+        "Daily statistics finalization finished: local date %s, "
+        "duration %.0f seconds.",
+        pending.local_date.isoformat(),
+        time_module.monotonic() - started,
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
 # S3 — Continuous loop behavior
 # ---------------------------------------------------------------------------
 
@@ -430,21 +533,29 @@ def run_loop(
     The loop:
     1. Closes stale DB connections.
     2. Evaluates eligibility via ``compute_orchestrator_state``.
-    3. While blocked (active queue, open batch, cooldown, stale running):
-       logs the blocking reason and sleeps for ``sleep_seconds``.
-    4. When eligible inside the quiet window [01:00, 05:00) America/Bahia
+    3. When eligible inside the quiet window [01:00, 05:00) America/Bahia
        with no D-1 attempt yet for the current local date, runs the
        previous-day exit recovery in-process via ``call_command``
        (ADR-0010); a failure is logged and never blocks the cycle.
-    5. When eligible in a new America/Bahia local hour (no hourly attempt
+    4. Captures the previous America/Bahia local date as a pending daily
+       statistics finalization (OASF-S2) when it is at or after the declared
+       activation boundary. After 05:00, a process that lost its pending
+       state to a restart recovers it once through the durable absence of a
+       ready revision.
+    5. On the first iteration whose queue is drained and without an open
+       batch, materializes the pending date in-process via ``call_command``
+       (``materialize_daily_statistics --date``), before the intraday
+       recovery and the next census cycle. A failure is aggregated and never
+       blocks the loop.
+    6. When eligible in a new America/Bahia local hour (no hourly attempt
        yet in this process for that hour), runs the intraday discharge
        recovery in-process via ``call_command`` (``--mode hourly``); a
        failure is logged and never blocks the cycle.
-    6. When eligible, runs a single cycle via ``run_single_cycle``.
-    7. If the cycle fails (extraction_failed, ambiguous_runs,
+    7. When eligible, runs a single cycle via ``run_single_cycle``.
+    8. If the cycle fails (extraction_failed, ambiguous_runs,
        processing_failed, or unexpected outcome), sleeps for
        ``failure_backoff_minutes`` before retrying.
-    8. Checks ``should_stop`` at the top of each iteration to support
+    9. Checks ``should_stop`` at the top of each iteration to support
        graceful shutdown via SIGTERM/SIGINT.
 
     Args:
@@ -492,6 +603,12 @@ def run_loop(
     # most one hourly attempt per hour in this process run.
     last_hourly_run_hour: int | None = None
 
+    # Statistics finalization state (OASF-S2): the pending previous local
+    # date captured after the D-1 attempt (or reconstructed once after a
+    # post-05:00 restart) and the dates already attempted in this process.
+    pending_statistics: _PendingStatisticsFinalization | None = None
+    attempted_statistics_dates: set[date] = set()
+
     while not should_stop():
         # 1. Keep database connections healthy
         close_old_connections()
@@ -522,15 +639,10 @@ def run_loop(
             stale_running_minutes=stale_running_minutes,
         )
 
-        # 3. Blocked — log and sleep
-        if not decision.eligible:
-            logger.info(
-                "Cycle blocked: %s (sleep %ds).",
-                decision.blocked_reason,
-                sleep_seconds,
-            )
-            _sleep(sleep_seconds)
-            continue
+        # 3. Drain-safe state is evaluated from the same decision aggregates
+        # (queue drained and no open batch). Cooldown may block a new census
+        # without blocking the statistics publication.
+        drained = _drain_is_safe(decision)
 
         # 4. Quiet-window D-1 exit recovery (ADR-0010). Being eligible
         # means the queue is drained and no census batch is open — exactly
@@ -541,7 +653,8 @@ def run_loop(
         local_now = _now_fn().astimezone(BAHIA_TZ)
         local_date = local_now.date()
         if (
-            D1_QUIET_START_HOUR <= local_now.hour < D1_QUIET_END_HOUR
+            decision.eligible
+            and D1_QUIET_START_HOUR <= local_now.hour < D1_QUIET_END_HOUR
             and local_date != last_d1_run_date
         ):
             last_d1_run_date = local_date
@@ -551,6 +664,7 @@ def run_loop(
                 local_date,
             )
             _d1_started = time_module.monotonic()
+            d1_succeeded = False
             try:
                 call_command(
                     "run_exit_reconciliation_runtime", "--mode", "d1"
@@ -563,6 +677,11 @@ def run_loop(
                     "quiet-window D-1 recovery failed: %s",
                     type(exc).__name__,
                 )
+            else:
+                d1_succeeded = True
+                # Canonical aggregate evidence for the read-only preflight
+                # (OASF-S2): emitted only after a successful return.
+                logger.info(D1_RECOVERY_SUCCESS_MARKER)
             _d1_elapsed = time_module.monotonic() - _d1_started
             logger.info(
                 "Quiet-window D-1 recovery finished: local date %s, "
@@ -571,7 +690,78 @@ def run_loop(
                 _d1_elapsed,
             )
 
-        # 4.1 Intraday hourly exit recovery. Being eligible means the
+            # 4.0 Capture the statistics date (OASF-S2, design D1). Only a
+            # configured boundary at or before D-1 creates the pending
+            # finalization; a failed D-1 attempt still finalizes but records
+            # the allowlisted degradation warning.
+            statistics_target = local_date - timedelta(days=1)
+            if _statistics_date_is_eligible(statistics_target):
+                pending_statistics = _PendingStatisticsFinalization(
+                    local_date=statistics_target,
+                    quality_warning=(
+                        None
+                        if d1_succeeded
+                        else D1_RECOVERY_INCOMPLETE_WARNING
+                    ),
+                )
+
+            # 4.0.1 Re-evaluate after the D-1 attempt: if it occupied the
+            # queue or left a batch open, hourly and the next census cycle
+            # must wait for a later drained iteration.
+            decision = compute_orchestrator_state(
+                min_interval_minutes=min_interval_minutes,
+                stale_running_minutes=stale_running_minutes,
+            )
+            drained = _drain_is_safe(decision)
+
+        # 4.0.2 Post-05:00 restart recovery (OASF-S2, design D1). A process
+        # that lost its in-memory pending to a restart uses the durable
+        # absence of a ready revision as the marker of a missed D-1
+        # finalization. Only the previous local date is inspected; the
+        # attempted set prevents any repeat and D-1 is never re-run outside
+        # its window.
+        if (
+            pending_statistics is None
+            and local_now.hour >= D1_QUIET_END_HOUR
+        ):
+            statistics_target = local_date - timedelta(days=1)
+            if (
+                statistics_target not in attempted_statistics_dates
+                and _statistics_date_is_eligible(statistics_target)
+                and not _daily_statistics_report_ready(statistics_target)
+            ):
+                pending_statistics = _PendingStatisticsFinalization(
+                    local_date=statistics_target,
+                    quality_warning=D1_RECOVERY_NOT_CONFIRMED_WARNING,
+                )
+
+        # 4.1 Finalize the pending statistics date on the first drain-safe
+        # iteration, before the intraday recovery and the next census cycle.
+        # The logical attempt is consumed before the call, so a failure is
+        # never retried in this process; a restart is safe through the
+        # materializer idempotency.
+        if (
+            pending_statistics is not None
+            and drained
+            and pending_statistics.local_date not in attempted_statistics_dates
+        ):
+            attempted_statistics_dates.add(pending_statistics.local_date)
+            _materialize_daily_statistics(pending_statistics)
+            pending_statistics = None
+
+        # 4.2 A blocked loop observes and waits. A pending statistics date
+        # was already published above when the queue was drained, so a
+        # census cooldown never suppresses a confirmed publication.
+        if not decision.eligible:
+            logger.info(
+                "Cycle blocked: %s (sleep %ds).",
+                decision.blocked_reason,
+                sleep_seconds,
+            )
+            _sleep(sleep_seconds)
+            continue
+
+        # 4.3 Intraday hourly exit recovery. Being eligible means the
         # queue is drained and no census batch is open — exactly the
         # preconditions the hourly runtime requires. Run it in-process
         # once per local Bahia hour, after the D-1 step (when both fire,
@@ -600,6 +790,10 @@ def run_loop(
                     "intraday hourly recovery failed: %s",
                     type(exc).__name__,
                 )
+            else:
+                # Canonical aggregate evidence for the read-only preflight
+                # (OASF-S2): only a successful return emits the marker.
+                logger.info(HOURLY_DISCHARGES_SUCCESS_MARKER)
             _hourly_elapsed = time_module.monotonic() - _hourly_started
             logger.info(
                 "Intraday hourly recovery finished: local time %s, "

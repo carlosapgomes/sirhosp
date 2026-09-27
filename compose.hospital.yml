@@ -145,6 +145,12 @@ services:
 
   census_orchestrator:
     <<: *playwright-service
+    environment:
+      <<: *app-environment
+      # Fail-closed boundary: an absent value leaves the statistics runtime
+      # inert. The bounded lookback default matches Django settings.
+      STATISTICS_ACTIVATION_DATE: "${STATISTICS_ACTIVATION_DATE:-}"
+      STATISTICS_FINALIZATION_LOOKBACK_DAYS: "${STATISTICS_FINALIZATION_LOOKBACK_DAYS:-7}"
     command:
       - uv
       - run
