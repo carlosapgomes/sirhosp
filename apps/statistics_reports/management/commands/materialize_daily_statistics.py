@@ -3,21 +3,28 @@
 Two explicit modes, both idempotent and coordinated through PostgreSQL row
 locks taken by the materializer itself:
 
-- ``--date`` closes exactly the requested ``America/Bahia`` local date;
+- ``--date`` closes exactly the requested ``America/Bahia`` local date and may
+  carry ``--quality-warning`` codes, a repeatable and allowlisted declaration of
+  an operational degradation (a failed or unconfirmed D-1 reconciliation) that
+  the adaptive orchestrator publishes with the revision;
 - ``--finalize`` closes every eligible date: complete, equal to or later than
   the declared activation date, strictly before today and inside the
   configured lookback window of the most recent closed dates
   (``STATISTICS_FINALIZATION_LOOKBACK_DAYS``), so a day still being observed
   never closes itself, no earlier history is rebuilt and the automatic batch
-  never grows into an unbounded historical sweep.
+  never grows into an unbounded historical sweep. It never carries a
+  degradation warning: one observed D-1 outcome cannot be attributed to every
+  date of the window, so the combination is refused before anything is built.
 
 An incomplete day is an operational state, not a build failure: in the batch
 mode it is reported with its structured reasons and the remaining eligible
 dates are still processed, while an explicit ``--date`` refuses it with a
 non-zero exit. Every line written to stdout/stderr carries dates, technical
-run/report IDs, status and aggregate counts only, and a failure is reduced to a
-safe technical token so a raw driver or integrity message can never print
-nominal clinical values.
+run/report IDs, status, aggregate counts and enumerated quality codes only, and
+a failure is reduced to a safe technical token so a raw driver or integrity
+message can never print nominal clinical values. A ``--quality-warning`` value
+outside the closed allowlist is refused without echoing the value, so free text
+cannot be copied into the log or into the persisted revision.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from apps.statistics_reports.materialization import (
+    OPERATIONAL_QUALITY_CODE_ALLOWLIST,
     DailyStatisticsCloseOutcome,
     DailyStatisticsMaterializationError,
     close_daily_statistics,
@@ -62,17 +70,43 @@ class Command(BaseCommand):
                 "inside the configured lookback window."
             ),
         )
+        parser.add_argument(
+            "--quality-warning",
+            action="append",
+            dest="quality_warning",
+            default=None,
+            metavar="CODE",
+            help=(
+                "Operational quality code published with the requested "
+                "--date revision; repeatable and restricted to the closed "
+                f"allowlist {', '.join(OPERATIONAL_QUALITY_CODE_ALLOWLIST)}. "
+                "Never accepted together with --finalize."
+            ),
+        )
 
     def handle(self, *args, **options) -> None:
-        activation_date = _activation_date()
         requested_date = options["date"]
+        quality_warnings = tuple(options["quality_warning"] or ())
+        if options["finalize"] and quality_warnings:
+            # One observed D-1 outcome belongs to one date; spreading it over
+            # the whole eligible window would degrade clean dates too.
+            raise CommandError(
+                "--quality-warning is only accepted with --date: --finalize "
+                "never degrades a batch of dates."
+            )
+        activation_date = _activation_date()
         if requested_date is not None:
-            self._materialize_requested_date(requested_date, activation_date)
+            self._materialize_requested_date(
+                requested_date, activation_date, quality_warnings
+            )
         else:
             self._finalize_eligible_dates(activation_date)
 
     def _materialize_requested_date(
-        self, local_date: date, activation_date: date
+        self,
+        local_date: date,
+        activation_date: date,
+        operational_quality_codes: Sequence[str],
     ) -> None:
         """Close one explicitly requested date or refuse it safely."""
         try:
@@ -80,6 +114,7 @@ class Command(BaseCommand):
                 local_date=local_date,
                 activation_date=activation_date,
                 origin_policy=DEFAULT_ORIGIN_POLICY,
+                operational_quality_codes=operational_quality_codes,
             )
         except Exception as exc:
             raise CommandError(_failure_message(local_date, exc)) from exc

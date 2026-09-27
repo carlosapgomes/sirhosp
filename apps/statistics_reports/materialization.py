@@ -28,6 +28,14 @@ selected closing photograph: late clinical evidence changes the derived events,
 never the census close it was read from, and no clinical source record is
 ever written here.
 
+A caller may add one or more operational quality codes taken from a closed
+allowlist (an explicit D-1 reconciliation degradation declared by the adaptive
+orchestrator). They are unioned with the codes derived from the sources,
+deduplicated, persisted and fingerprinted like any other code, so a later call
+without them publishes the undegraded revision of the same date while the
+degraded one stays auditable. Free text is refused here, before any window is
+selected, so no arbitrary string can reach the persisted warnings.
+
 The close-of-day helpers of DSRS-S5 build the operational contract on top of
 that primitive: which closed local dates are eligible for automatic
 finalization, and a one-date close that reports an incomplete day structurally
@@ -76,6 +84,27 @@ class DailyStatisticsMaterializationError(Exception):
 
 class DateBeforeActivationError(DailyStatisticsMaterializationError):
     """The requested date precedes the declared activation boundary."""
+
+
+class UnknownOperationalQualityCodeError(DailyStatisticsMaterializationError):
+    """A caller-supplied operational quality code is not allowlisted.
+
+    The closed allowlist is what keeps ``quality_warnings_json`` enumerable:
+    free text is never persisted and never fingerprinted, so an operational
+    caller cannot turn a revision into an arbitrary note (and no clinical value
+    can be copied into it by accident).
+    """
+
+
+# The only operational quality codes a caller may attach to a revision.
+# ``d1_recovery_incomplete`` records a D-1 reconciliation failure observed by
+# the calling process; ``d1_recovery_not_confirmed`` records the uncertainty of
+# a restarted process that cannot prove the outcome of an earlier attempt.
+# Order here is the canonical order the codes are persisted in.
+OPERATIONAL_QUALITY_CODE_ALLOWLIST: tuple[str, ...] = (
+    "d1_recovery_incomplete",
+    "d1_recovery_not_confirmed",
+)
 
 
 class IncompleteStatisticalDayError(DailyStatisticsMaterializationError):
@@ -181,6 +210,7 @@ def close_daily_statistics(
     local_date: date,
     activation_date: date,
     origin_policy: OriginPolicy = DEFAULT_ORIGIN_POLICY,
+    operational_quality_codes: Sequence[str] = (),
 ) -> DailyStatisticsCloseOutcome:
     """Close one local date, or report it as structurally incomplete.
 
@@ -189,6 +219,8 @@ def close_daily_statistics(
         activation_date: First eligible local date declared for the feature;
             an earlier ``local_date`` is refused instead of backfilled.
         origin_policy: Versioned origin classification of the revision.
+        operational_quality_codes: Zero or more allowlisted operational codes
+            of this publication, such as a D-1 reconciliation degradation.
 
     Returns:
         The ready revision with ``created`` telling whether this call
@@ -198,12 +230,15 @@ def close_daily_statistics(
     Raises:
         DateBeforeActivationError: When ``local_date`` precedes
             ``activation_date``.
+        UnknownOperationalQualityCodeError: When a code outside the closed
+            allowlist is supplied.
     """
     try:
         outcome = materialize_daily_statistics(
             local_date=local_date,
             activation_date=activation_date,
             origin_policy=origin_policy,
+            operational_quality_codes=operational_quality_codes,
         )
     except IncompleteStatisticalDayError as exc:
         return DailyStatisticsCloseOutcome(
@@ -224,6 +259,7 @@ def materialize_daily_statistics(
     local_date: date,
     activation_date: date,
     origin_policy: OriginPolicy = DEFAULT_ORIGIN_POLICY,
+    operational_quality_codes: Sequence[str] = (),
 ) -> MaterializationOutcome:
     """Materialize or reuse the ready revision of one Bahia local date.
 
@@ -235,6 +271,11 @@ def materialize_daily_statistics(
             detected entries of this revision; its version is part of the
             source fingerprint, so changing the mapping publishes a new
             revision.
+        operational_quality_codes: Zero or more allowlisted operational codes
+            declared by the caller for this publication. They join the derived
+            codes in ``quality_warnings_json`` and in the source fingerprint,
+            so a later call without them publishes the undegraded revision
+            instead of silently reusing the degraded one.
 
     Returns:
         The ready revision of ``local_date`` and whether it was created now.
@@ -242,9 +283,13 @@ def materialize_daily_statistics(
     Raises:
         DateBeforeActivationError: When ``local_date`` precedes
             ``activation_date``.
+        UnknownOperationalQualityCodeError: When a code outside the closed
+            allowlist is supplied; the refusal happens before any window is
+            selected or any row is read.
         IncompleteStatisticalDayError: When the day lacks accepted opening or
             closing census photographs.
     """
+    declared_codes = _operational_quality_codes(operational_quality_codes)
     if local_date < activation_date:
         raise DateBeforeActivationError(
             f"Local date {local_date.isoformat()} precedes the declared "
@@ -283,6 +328,7 @@ def materialize_daily_statistics(
         quality_codes = _quality_codes(
             window=window,
             derivation=derivation,
+            operational_codes=declared_codes,
         )
         fingerprint = _source_fingerprint(
             window=window,
@@ -347,14 +393,49 @@ def _next_revision(local_date: date) -> int:
     return int(highest or 0) + 1
 
 
+def _operational_quality_codes(codes: Sequence[str]) -> tuple[str, ...]:
+    """Canonical allowlist view of the caller-declared operational codes.
+
+    The closed allowlist is the validation boundary: a value outside it is
+    refused here, before any window selection or database read. Accepted codes
+    are returned once each in allowlist order, so the persisted set and the
+    source fingerprint never depend on how the caller spelled or ordered its
+    request. The rejected value is deliberately not echoed, so free text (and
+    any clinical value typed by mistake) can neither be logged nor persisted.
+    """
+    requested = set(codes)
+    if not requested.issubset(OPERATIONAL_QUALITY_CODE_ALLOWLIST):
+        raise UnknownOperationalQualityCodeError(
+            "Operational quality codes are restricted to the closed "
+            f"allowlist: {', '.join(OPERATIONAL_QUALITY_CODE_ALLOWLIST)}."
+        )
+    return tuple(
+        code
+        for code in OPERATIONAL_QUALITY_CODE_ALLOWLIST
+        if code in requested
+    )
+
+
 def _quality_codes(
     *,
     window: DailyStatisticsWindow,
     derivation: EventDerivation,
+    operational_codes: Sequence[str] = (),
 ) -> tuple[str, ...]:
-    """Structured quality codes of the revision, without duplicates."""
+    """Structured quality codes of the revision, without duplicates.
+
+    Derived codes keep the exact order the window and the derivation chose, so
+    an already published revision keeps its fingerprint; the canonical
+    operational codes follow. A code shared by two sources is kept once.
+    """
     return tuple(
-        dict.fromkeys((*window.quality_warnings, *derivation.quality_codes))
+        dict.fromkeys(
+            (
+                *window.quality_warnings,
+                *derivation.quality_codes,
+                *operational_codes,
+            )
+        )
     )
 
 

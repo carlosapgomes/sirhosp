@@ -21,6 +21,12 @@ The synthetic census fixtures (catalog, accepted runs, photographs and nominal
 closing rows) are imported from the DSRS-S2 module instead of being duplicated,
 following the existing cross-module test helper reuse of ``tests/unit``.
 
+The operational degradation of the adaptive orchestrator (OASF-S1) is covered
+here as well: the explicit ``--quality-warning`` mode of one date materializes
+and persists the closed-allowlist D-1 warnings, they participate in the
+reproducible revision, and a later clean call publishes the undegraded revision
+while the degraded one stays auditable.
+
 Everything here uses synthetic runs, sectors, beds and patients; no real
 extraction data, no production access and no backfill.
 """
@@ -80,6 +86,16 @@ _READY_LINE = re.compile(
     r"opening_run=\d+ closing_run=\d+ sectors=\d+ patients=\d+ events=\d+ "
     r"quality=\S+"
 )
+
+# The two operational D-1 degradation codes of OASF-S1. They are spelled here
+# as the persisted contract instead of importing the implementation constants,
+# so a renamed literal cannot pass unnoticed.
+_D1_INCOMPLETE = "d1_recovery_incomplete"
+_D1_NOT_CONFIRMED = "d1_recovery_not_confirmed"
+
+# Synthetic nominal free text: only ever used as a refused ``--quality-warning``
+# value, never as clinical data.
+_SYNTHETIC_NOMINAL = "PACIENTE GERAL UM 111"
 
 
 @pytest.fixture
@@ -151,6 +167,14 @@ def _finalize(today: date) -> None:
     """Run the automatic mode with a deterministic Bahia ``today``."""
     with patch(f"{_COMMAND_MODULE}._bahia_today", return_value=today):
         call_command("materialize_daily_statistics", "--finalize")
+
+
+def _materialize_with_warnings(local_date: date, *codes: str) -> None:
+    """Run the explicit date mode of ``local_date`` with operational codes."""
+    arguments = ["--date", local_date.isoformat()]
+    for code in codes:
+        arguments += ["--quality-warning", code]
+    call_command("materialize_daily_statistics", *arguments)
 
 
 def _line_of(output: str, local_date: date) -> str:
@@ -613,6 +637,214 @@ class TestFailedClose:
         assert DailyStatisticsReport.objects.count() == 0
         assert "PACIENTE" not in out
         assert "PACIENTE" not in err
+
+
+# ---------------------------------------------------------------------------
+# OASF-S1 R1-R3 and R5 - explicit operational quality warnings
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestOperationalQualityWarnings:
+    """R1-R3/R5: allowlisted D-1 warnings degrade one date reproducibly."""
+
+    @pytest.mark.parametrize("code", [_D1_INCOMPLETE, _D1_NOT_CONFIRMED])
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_each_allowlisted_warning_is_persisted_once(
+        self, catalog, capsys, code
+    ):
+        _complete_day(catalog, DAY)
+
+        _materialize_with_warnings(DAY, code)
+
+        report = DailyStatisticsReport.objects.get(local_date=DAY)
+        assert report.quality_warnings_json == [code]
+        line = _line_of(capsys.readouterr().out, DAY)
+        assert _READY_LINE.fullmatch(line)
+        assert f" quality={code}" in line
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_warnings_are_deduplicated_and_ordered_after_derived_codes(
+        self, catalog, capsys
+    ):
+        _degraded_day(catalog)
+
+        _materialize_with_warnings(
+            DAY, _D1_NOT_CONFIRMED, _D1_INCOMPLETE, _D1_INCOMPLETE
+        )
+
+        report = DailyStatisticsReport.objects.get(local_date=DAY)
+        assert report.quality_warnings_json == [
+            QUALITY_MISSING_ANCHOR,
+            _D1_INCOMPLETE,
+            _D1_NOT_CONFIRMED,
+        ]
+        line = _line_of(capsys.readouterr().out, DAY)
+        assert _READY_LINE.fullmatch(line)
+        assert (
+            f"quality={QUALITY_MISSING_ANCHOR},{_D1_INCOMPLETE},"
+            f"{_D1_NOT_CONFIRMED}" in line
+        )
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_repeating_the_same_warning_set_is_a_no_op(self, catalog, capsys):
+        _complete_day(catalog, DAY)
+        _materialize_with_warnings(DAY, _D1_INCOMPLETE)
+        first = DailyStatisticsReport.objects.get(local_date=DAY)
+        capsys.readouterr()
+
+        _materialize_with_warnings(DAY, _D1_INCOMPLETE)
+
+        out = capsys.readouterr().out
+        assert DailyStatisticsReport.objects.count() == 1
+        assert DailyStatisticsReport.objects.get(local_date=DAY).pk == first.pk
+        assert "created=false" in _line_of(out, DAY)
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_a_successful_recovery_publishes_an_undegraded_revision(
+        self, catalog, capsys
+    ):
+        _complete_day(catalog, DAY)
+        _materialize_with_warnings(DAY, _D1_INCOMPLETE)
+        degraded = DailyStatisticsReport.objects.get(local_date=DAY)
+        capsys.readouterr()
+
+        call_command("materialize_daily_statistics", "--date", DAY.isoformat())
+
+        clean = DailyStatisticsReport.objects.get(
+            local_date=DAY,
+            status=DailyStatisticsReportStatus.READY,
+        )
+        assert clean.revision == 2
+        assert clean.quality_warnings_json == []
+        assert clean.source_fingerprint != degraded.source_fingerprint
+        kept = DailyStatisticsReport.objects.get(pk=degraded.pk)
+        assert kept.status == DailyStatisticsReportStatus.SUPERSEDED
+        assert kept.quality_warnings_json == [_D1_INCOMPLETE]
+        assert "created=true" in _line_of(capsys.readouterr().out, DAY)
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_running_without_the_warning_reuses_the_clean_revision(
+        self, catalog, capsys
+    ):
+        _complete_day(catalog, DAY)
+        _materialize_with_warnings(DAY, _D1_INCOMPLETE)
+        call_command("materialize_daily_statistics", "--date", DAY.isoformat())
+        clean = DailyStatisticsReport.objects.get(
+            local_date=DAY,
+            status=DailyStatisticsReportStatus.READY,
+        )
+        capsys.readouterr()
+
+        call_command("materialize_daily_statistics", "--date", DAY.isoformat())
+
+        out = capsys.readouterr().out
+        assert DailyStatisticsReport.objects.count() == 2
+        assert (
+            DailyStatisticsReport.objects.get(
+                local_date=DAY,
+                status=DailyStatisticsReportStatus.READY,
+            ).pk
+            == clean.pk
+        )
+        assert "created=false" in _line_of(out, DAY)
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_a_derived_code_survives_the_removal_of_the_warning(self, catalog):
+        _degraded_day(catalog)
+        _materialize_with_warnings(DAY, _D1_NOT_CONFIRMED)
+
+        call_command("materialize_daily_statistics", "--date", DAY.isoformat())
+
+        clean = DailyStatisticsReport.objects.get(
+            local_date=DAY,
+            status=DailyStatisticsReportStatus.READY,
+        )
+        assert clean.revision == 2
+        assert clean.quality_warnings_json == [QUALITY_MISSING_ANCHOR]
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_degraded_output_carries_only_technical_values(
+        self, catalog, capsys, caplog
+    ):
+        closing = _full_day(catalog)
+        _late_patient(closing, "333")
+
+        _materialize_with_warnings(DAY, _D1_INCOMPLETE, _D1_NOT_CONFIRMED)
+
+        out, err = capsys.readouterr()
+        line = _line_of(out, DAY)
+        assert _READY_LINE.fullmatch(line)
+        assert f"quality={_D1_INCOMPLETE},{_D1_NOT_CONFIRMED}" in line
+        assert f" patients={len(CLOSING_RECORDS) + 1} " in out
+        for captured in (out, err):
+            assert "PACIENTE" not in captured
+            assert "GERAL UM" not in captured
+            assert "=333" not in captured
+        for record in caplog.records:
+            assert "PACIENTE" not in record.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# OASF-S1 R4 - fail-closed refusal of unauthorized degradation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestOperationalQualityWarningsRefusal:
+    """R4: free text and the automatic mode are refused before any build."""
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_unknown_warning_text_fails_before_materialization(
+        self, catalog, capsys
+    ):
+        _complete_day(catalog, DAY)
+
+        with pytest.raises(CommandError, match="closed allowlist"):
+            _materialize_with_warnings(DAY, _SYNTHETIC_NOMINAL)
+
+        assert DailyStatisticsReport.objects.count() == 0
+        out, err = capsys.readouterr()
+        assert "PACIENTE" not in out
+        assert "PACIENTE" not in err
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=ACTIVATION)
+    def test_materializer_refuses_unknown_codes_at_its_own_boundary(
+        self, catalog
+    ):
+        _complete_day(catalog, DAY)
+
+        with pytest.raises(
+            DailyStatisticsMaterializationError, match="closed allowlist"
+        ):
+            close_daily_statistics(
+                local_date=DAY,
+                activation_date=ACTIVATION,
+                operational_quality_codes=(_D1_INCOMPLETE, _SYNTHETIC_NOMINAL),
+            )
+
+        assert DailyStatisticsReport.objects.count() == 0
+
+    @override_settings(STATISTICS_ACTIVATION_DATE=DAY)
+    def test_finalize_refuses_a_quality_warning(self, catalog, capsys):
+        _complete_day(catalog, DAY)
+
+        with patch(
+            f"{_COMMAND_MODULE}._bahia_today",
+            return_value=DAY + timedelta(days=1),
+        ):
+            with pytest.raises(CommandError, match="--finalize"):
+                call_command(
+                    "materialize_daily_statistics",
+                    "--finalize",
+                    "--quality-warning",
+                    _D1_INCOMPLETE,
+                )
+
+        assert DailyStatisticsReport.objects.count() == 0
+        out, err = capsys.readouterr()
+        assert f"date={DAY.isoformat()}" not in out
+        assert _D1_INCOMPLETE not in err
 
 
 # ---------------------------------------------------------------------------
