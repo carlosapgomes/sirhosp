@@ -16,7 +16,11 @@ same slice family can never disagree:
 - an event whose origin and destination are both unknown belongs to no official
   grouping: it is shown once in the report-level ``Setor não identificado``
   section instead of being omitted or arbitrarily attributed, and a closing
-  row without an official grouping stays there too.
+  row without an official grouping stays there too;
+- the closing nominal rows and every detected event are resolved to a mirrored
+  patient in one read-time lookup shared by the whole revision, so a name can
+  navigate without persisting any identity; a record matching more than one
+  patient is deliberately left unresolved.
 
 Every list keeps its title, its count badge and an explicit empty state, the
 shared natural bed ordering orders both events and patients, and the read-only
@@ -27,7 +31,7 @@ revision.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -35,6 +39,7 @@ from decimal import Decimal
 from django.utils import timezone
 
 from apps.census.models import OccupancyCalculationStatus
+from apps.patients.models import Patient
 from apps.statistics_reports.events import (
     entry_event_label,
     exit_event_label,
@@ -150,11 +155,23 @@ class EventRow:
     """One detected event with the wording the authorized surfaces render."""
 
     event: DailyStatisticsEvent
+    patient_id: int | None
     label: str
     origin_display: str
     destination_display: str
     clinical_display: str
     detection_display: str
+
+
+@dataclass(frozen=True)
+class PatientRow:
+    """One closing nominal row with the patient it resolves to, when unique."""
+
+    bed: str
+    name: str
+    record: str
+    specialty: str
+    patient_id: int | None
 
 
 @dataclass(frozen=True)
@@ -165,7 +182,7 @@ class SectorList:
     title: str
     empty_label: str
     events: tuple[EventRow, ...] = ()
-    patients: tuple[DailyStatisticsPatient, ...] = ()
+    patients: tuple[PatientRow, ...] = ()
 
     @property
     def badge_count(self) -> int:
@@ -193,7 +210,7 @@ class ReportGroup:
     transfer_exits: tuple[EventRow, ...] = ()
     discharges: tuple[EventRow, ...] = ()
     unidentified: tuple[EventRow, ...] = ()
-    patients: tuple[DailyStatisticsPatient, ...] = ()
+    patients: tuple[PatientRow, ...] = ()
 
     @property
     def entries(self) -> tuple[EventRow, ...]:
@@ -315,37 +332,41 @@ def build_daily_report_projection(
     """Render one materialized revision with a bounded number of queries.
 
     The revision is read as four bulk queries -- sectors, events, patients and
-    the report itself -- and grouped in memory, so the cost never grows with
-    the number of sectors, patients or detected events.
+    the resolution map of its nominal records -- and grouped in memory, so the
+    cost never grows with the number of sectors, patients or detected events.
+    A revision without a single record to resolve skips the resolution query.
     """
     sectors = tuple(DailyStatisticsSector.objects.filter(report=report))
+    events = tuple(
+        DailyStatisticsEvent.objects.filter(report=report).select_related(
+            "origin_sector", "destination_sector", "census_snapshot"
+        )
+    )
+    patients = tuple(DailyStatisticsPatient.objects.filter(report=report))
+    resolved = _resolved_patient_ids(
+        [event.record for event in events]
+        + [patient.record for patient in patients]
+    )
     rows = tuple(
         sorted(
-            (
-                _event_row(event)
-                for event in DailyStatisticsEvent.objects.filter(
-                    report=report
-                ).select_related(
-                    "origin_sector", "destination_sector", "census_snapshot"
-                )
-            ),
+            (_event_row(event, resolved=resolved) for event in events),
             key=_row_sort_key,
         )
     )
     buckets, unknown_events = _place_rows(rows)
-    patients = _patients_by_sector(report=report)
+    patients_by_sector = _patients_by_sector(rows=patients, resolved=resolved)
 
     groups = [
         _sector_group(
             sector=sector,
             buckets=buckets,
-            patients=patients.get(sector.pk, ()),
+            patients=patients_by_sector.get(sector.pk, ()),
         )
         for sector in sectors
     ]
     unknown_section = _unknown_section_group(
         events=unknown_events,
-        patients=patients.get(None, ()),
+        patients=patients_by_sector.get(None, ()),
     )
     if unknown_section is not None:
         groups.insert(0, unknown_section)
@@ -381,25 +402,70 @@ def _bahia_today() -> date:
 
 
 def _patients_by_sector(
-    *, report: DailyStatisticsReport
-) -> dict[int | None, tuple[DailyStatisticsPatient, ...]]:
+    *,
+    rows: Sequence[DailyStatisticsPatient],
+    resolved: Mapping[str, int],
+) -> dict[int | None, tuple[PatientRow, ...]]:
     """Closing nominal rows grouped by grouping and naturally ordered."""
-    grouped: dict[int | None, list[DailyStatisticsPatient]] = defaultdict(list)
-    for patient in DailyStatisticsPatient.objects.filter(report=report):
-        grouped[patient.sector_id].append(patient)
-    return {
-        sector_id: tuple(
-            sorted(rows, key=_patient_sort_key)
+    grouped: dict[int | None, list[PatientRow]] = defaultdict(list)
+    for patient in rows:
+        resolved_id = resolved.get(_record_key(patient.record))
+        grouped[patient.sector_id].append(
+            _patient_row(patient, patient_id=resolved_id)
         )
-        for sector_id, rows in grouped.items()
+    return {
+        sector_id: tuple(sorted(sector_rows, key=_patient_sort_key))
+        for sector_id, sector_rows in grouped.items()
     }
+
+
+def _resolved_patient_ids(records: Sequence[str]) -> dict[str, int]:
+    """Patient ``pk`` of every record matching exactly one mirrored patient.
+
+    One bulk query reads every non-empty record of the revision; the database
+    uniqueness is ``(source_system, patient_source_key)``, so a record carried
+    by more than one source system stays unresolved instead of being linked to
+    an arbitrary patient. Records are stripped because the persisted spelling
+    is not guaranteed to be clean.
+    """
+    wanted = {_record_key(record) for record in records} - {""}
+    if not wanted:
+        return {}
+    candidates: dict[str, list[int]] = defaultdict(list)
+    for source_key, patient_id in Patient.objects.filter(
+        patient_source_key__in=wanted
+    ).values_list("patient_source_key", "id"):
+        candidates[source_key].append(patient_id)
+    return {
+        record: candidate_ids[0]
+        for record, candidate_ids in candidates.items()
+        if len(candidate_ids) == 1
+    }
+
+
+def _record_key(record: str | None) -> str:
+    """Record spelling shared by the collected rows and the resolution map."""
+    return (record or "").strip()
+
+
+def _patient_row(
+    patient: DailyStatisticsPatient, *, patient_id: int | None
+) -> PatientRow:
+    """One closing nominal row with the identifier it resolves to, if any."""
+    return PatientRow(
+        bed=patient.bed,
+        name=patient.name,
+        record=patient.record,
+        specialty=patient.specialty,
+        patient_id=patient_id,
+    )
 
 
 def _sector_group(
     *,
     sector: DailyStatisticsSector,
     buckets: dict[tuple[int, str], list[EventRow]],
-    patients: Sequence[DailyStatisticsPatient],
+    patients: Sequence[PatientRow],
 ) -> ReportGroup:
     """One official grouping with its copied metrics and its lists."""
     def rows(bucket: str) -> tuple[EventRow, ...]:
@@ -424,7 +490,7 @@ def _sector_group(
 def _unknown_section_group(
     *,
     events: Sequence[EventRow],
-    patients: Sequence[DailyStatisticsPatient],
+    patients: Sequence[PatientRow],
 ) -> ReportGroup | None:
     """The conditional report-level section, only when it carries rows."""
     if not events and not patients:
@@ -552,17 +618,20 @@ def _row_sort_key(row: EventRow) -> tuple[object, ...]:
     ) + (event.detected_at, event.fingerprint)
 
 
-def _patient_sort_key(patient: DailyStatisticsPatient) -> tuple[object, ...]:
+def _patient_sort_key(patient: PatientRow) -> tuple[object, ...]:
     """Shared natural ordering of one closing nominal row."""
     return natural_bed_order_key(
         bed=patient.bed, name=patient.name, record=patient.record
     )
 
 
-def _event_row(event: DailyStatisticsEvent) -> EventRow:
+def _event_row(
+    event: DailyStatisticsEvent, *, resolved: Mapping[str, int]
+) -> EventRow:
     """One detected event with every wording the authorized surfaces render."""
     return EventRow(
         event=event,
+        patient_id=resolved.get(_record_key(event.record)),
         label=_event_label(event),
         origin_display=_origin_display(event),
         destination_display=_destination_display(event),

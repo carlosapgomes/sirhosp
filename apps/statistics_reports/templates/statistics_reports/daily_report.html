@@ -105,7 +105,13 @@
               <li class="list-group-item px-3 py-2">
                 <div class="d-flex flex-wrap gap-2 align-items-baseline">
                   <span class="badge bg-light text-dark border">Leito {{ patient.bed|default:"não informado" }}</span>
+                  {% if patient.patient_id %}
+                  <span class="fw-semibold"><a href="{% url 'patients:admission_list' patient.patient_id %}" class="text-decoration-none">{{ patient.name }}</a></span>
+                  {% elif patient.record.strip %}
+                  <span class="fw-semibold"><a href="{% url 'patients:patient_list' %}?q={{ patient.record }}" class="text-decoration-none">{{ patient.name }}</a></span>
+                  {% else %}
                   <span class="fw-semibold">{{ patient.name }}</span>
+                  {% endif %}
                   <span class="text-muted small">Prontuário {{ patient.record }}</span>
                   {% if patient.specialty %}
                   <span class="badge bg-light text-dark border">{{ patient.specialty }}</span>
@@ -118,7 +124,13 @@
               <li class="list-group-item px-3 py-2">
                 <div class="d-flex flex-wrap gap-2 align-items-baseline">
                   <span class="badge bg-light text-dark border">Leito {{ row.event.bed|default:"não informado" }}</span>
+                  {% if row.patient_id %}
+                  <span class="fw-semibold"><a href="{% url 'patients:admission_list' row.patient_id %}" class="text-decoration-none">{{ row.event.name }}</a></span>
+                  {% elif row.event.record.strip %}
+                  <span class="fw-semibold"><a href="{% url 'patients:patient_list' %}?q={{ row.event.record }}" class="text-decoration-none">{{ row.event.name }}</a></span>
+                  {% else %}
                   <span class="fw-semibold">{{ row.event.name }}</span>
+                  {% endif %}
                   <span class="text-muted small">Prontuário {{ row.event.record }}</span>
                   <span class="badge bg-primary">{{ row.label }}</span>
                 </div>

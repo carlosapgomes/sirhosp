@@ -20,6 +20,10 @@ Covers the vertical slice requirements:
   ``Leitos`` and ``Fluxo Hospitalar``, and is active on the report route;
 - R9: the page query budget does not grow with sectors, patients or events.
 
+The last section extends these tests with the LSPA-S1 nominal navigation: a
+nominal row links to the admissions page of its resolved patient, falls back
+to the patient search otherwise and stays plain text without a record.
+
 Everything here uses synthetic runs, sectors, beds and patients; no real
 extraction data, no production access and no backfill.
 """
@@ -41,13 +45,16 @@ from django.urls import reverse
 
 from apps.census.models import (
     CapacityCatalogVersion,
+    CensusSnapshot,
     OccupancyAgeBand,
     OccupancyCalculationStatus,
 )
 from apps.deaths.models import DeathRecord
+from apps.patients.models import Patient
 from apps.statistics_reports.materialization import materialize_daily_statistics
 from apps.statistics_reports.models import (
     DailyStatisticsEventKind,
+    DailyStatisticsPatient,
     DailyStatisticsReport,
     DailyStatisticsSector,
 )
@@ -938,7 +945,7 @@ class TestNaturalOrdering:
             "PACIENTE ORDEM UTI02",
             "PACIENTE ORDEM UTI10",
         ]
-        positions = [patients.index(f">{name}</span>") for name in expected]
+        positions = [patients.index(name) for name in expected]
         assert positions == sorted(positions)
 
     def test_events_follow_the_natural_bed_order(
@@ -1046,7 +1053,9 @@ class TestQueryBudget:
             big = build_daily_report_projection(wide_report)
         assert len(small.groups) < len(big.groups)
         assert small.report.events.count() < big.report.events.count()
-        assert len(small_ctx) == 3
+        # Sectors, events and patients plus the single resolution query of the
+        # nominal records; the wider revision stays on the same budget.
+        assert len(small_ctx) == 4
         assert len(big_ctx) == len(small_ctx)
 
 
@@ -1079,3 +1088,176 @@ class TestReadOnlySurface:
         assert "Período:" in html
         assert "não são observáveis" in html
         assert "ambiguous_sector_mapping" in html
+
+
+# ---------------------------------------------------------------------------
+# LSPA-S1 - nominal rows navigate to the patient admissions page
+# ---------------------------------------------------------------------------
+
+LSPA_RESOLVED_RECORD = "111"
+LSPA_UNRESOLVED_RECORD = "112"
+LSPA_BLANK_RECORD = "   "
+LSPA_BLANK_NAME = "PACIENTE SEM PRONTUARIO"
+
+
+def _registered_patient(*, record: str, source_system: str = "tasy") -> Patient:
+    """One synthetic mirrored patient whose source key is the given record."""
+    return Patient.objects.create(
+        patient_source_key=record,
+        source_system=source_system,
+        name=f"PACIENTE CADASTRADO {record.strip()}",
+    )
+
+
+def _blank_record_day(catalog: CapacityCatalogVersion) -> DailyStatisticsReport:
+    """One materialized day whose only nominal row carries a blank record.
+
+    The census identity contract never persists an identified row without a
+    record, so the blank nominal row of this day is created directly; the day
+    carries no movement and therefore no event at all.
+    """
+    report = _materialize_day(
+        catalog=catalog,
+        local_date=DAY,
+        lines=_base_lines(),
+        closing_lines=_base_lines(),
+    )
+    snapshot = CensusSnapshot.objects.filter(
+        ingestion_run=report.closing_run
+    ).first()
+    assert snapshot is not None
+    DailyStatisticsPatient.objects.create(
+        report=report,
+        sector=DailyStatisticsSector.objects.get(
+            report=report, stable_key=GERAL_KEY
+        ),
+        census_snapshot=snapshot,
+        bed="900-ZB",
+        name=LSPA_BLANK_NAME,
+        record=LSPA_BLANK_RECORD,
+        specialty="CLI",
+    )
+    return report
+
+
+@pytest.mark.django_db
+class TestNominalNavigationResolution:
+    def test_exactly_one_registered_patient_resolves_the_record(
+        self, report: DailyStatisticsReport
+    ) -> None:
+        registered = _registered_patient(record=LSPA_RESOLVED_RECORD)
+        moving = _registered_patient(record=MOVING_PATIENT)
+        with CaptureQueriesContext(connection) as queries:
+            projection = build_daily_report_projection(report)
+        geral = _group_of(projection, GERAL_KEY)
+        closing = next(
+            patient
+            for patient in geral.patients
+            if patient.record == LSPA_RESOLVED_RECORD
+        )
+        assert closing.patient_id == registered.pk
+        assert [row.patient_id for row in geral.exits] == [moving.pk]
+        assert len(
+            [
+                query
+                for query in queries.captured_queries
+                if '"patients_patient"' in query["sql"]
+            ]
+        ) == 1
+
+    def test_record_without_registered_patient_stays_unresolved(
+        self, report: DailyStatisticsReport
+    ) -> None:
+        registered = _registered_patient(record=LSPA_RESOLVED_RECORD)
+        projection = build_daily_report_projection(report)
+        geral = _group_of(projection, GERAL_KEY)
+        by_record = {patient.record: patient for patient in geral.patients}
+        assert by_record[LSPA_RESOLVED_RECORD].patient_id == registered.pk
+        assert by_record[LSPA_UNRESOLVED_RECORD].patient_id is None
+
+    def test_record_with_two_candidates_across_source_systems_is_unresolved(
+        self, report: DailyStatisticsReport
+    ) -> None:
+        _registered_patient(record=LSPA_UNRESOLVED_RECORD, source_system="tasy")
+        _registered_patient(record=LSPA_UNRESOLVED_RECORD, source_system="aghu")
+        projection = build_daily_report_projection(report)
+        geral = _group_of(projection, GERAL_KEY)
+        ambiguous = next(
+            patient
+            for patient in geral.patients
+            if patient.record == LSPA_UNRESOLVED_RECORD
+        )
+        assert ambiguous.patient_id is None
+
+    def test_blank_record_skips_the_resolution_query(
+        self, catalog: CapacityCatalogVersion
+    ) -> None:
+        report = _blank_record_day(catalog)
+        with CaptureQueriesContext(connection) as queries:
+            projection = build_daily_report_projection(report)
+        geral = _group_of(projection, GERAL_KEY)
+        assert [patient.record for patient in geral.patients] == [
+            LSPA_BLANK_RECORD
+        ]
+        assert [patient.patient_id for patient in geral.patients] == [None]
+        assert len(queries) == 3
+        assert not [
+            query
+            for query in queries.captured_queries
+            if '"patients_patient"' in query["sql"]
+        ]
+
+
+@pytest.mark.django_db
+class TestNominalNavigationRender:
+    def test_resolved_record_links_and_unresolved_record_searches(
+        self, viewer_client: Client, report: DailyStatisticsReport
+    ) -> None:
+        registered = _registered_patient(record=LSPA_RESOLVED_RECORD)
+        response = viewer_client.get(page_url(), {"date": DAY.isoformat()})
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert (
+            f'<a href="/patients/{registered.pk}/admissions/" '
+            'class="text-decoration-none">PACIENTE GERAL UM</a>'
+        ) in html
+        assert (
+            f'<a href="/patients/?q={LSPA_UNRESOLVED_RECORD}" '
+            'class="text-decoration-none">PACIENTE GERAL DOIS</a>'
+        ) in html
+
+    def test_row_without_record_stays_plain_text(
+        self, viewer_client: Client, catalog: CapacityCatalogVersion
+    ) -> None:
+        report = _blank_record_day(catalog)
+        sector = DailyStatisticsSector.objects.get(
+            report=report, stable_key=GERAL_KEY
+        )
+        response = viewer_client.get(page_url(), {"date": DAY.isoformat()})
+        assert response.status_code == 200
+        block = _sector_block(response.content.decode(), sector)
+        assert f">{LSPA_BLANK_NAME}</span>" in block
+        assert 'href="/patients/' not in block
+
+    def test_unknown_section_rows_reuse_the_same_navigation(
+        self, viewer_client: Client, catalog: CapacityCatalogVersion
+    ) -> None:
+        _materialize_day(
+            catalog=catalog,
+            local_date=DAY,
+            lines=_anchor_lines(),
+            closing_lines=_closing_lines_with_ordering(without_grouping=True),
+        )
+        unattributed = _registered_patient(record=UNATTRIBUTED_PATIENT)
+        ungrouped = _registered_patient(record=NO_GROUPING_PATIENT)
+        response = viewer_client.get(page_url(), {"date": DAY.isoformat()})
+        assert response.status_code == 200
+        block = _group_block(response.content.decode(), "unknown")
+        assert (
+            f'<a href="/patients/{unattributed.pk}/admissions/" '
+            f'class="text-decoration-none">{UNATTRIBUTED_NAME}</a>'
+        ) in block
+        assert (
+            f'<a href="/patients/{ungrouped.pk}/admissions/" '
+            f'class="text-decoration-none">{NO_GROUPING_NAME}</a>'
+        ) in block

@@ -45,6 +45,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
 from apps.census.models import CapacityCatalogVersion
+from apps.patients.models import Patient
 from apps.statistics_reports.export import (
     XLSX_CONTENT_TYPE,
     build_export_workbook,
@@ -68,6 +69,7 @@ from tests.integration.test_daily_statistics_page import (
     GERAL_CODE,
     GERAL_KEY,
     GERAL_SECTOR,
+    LSPA_RESOLVED_RECORD,
     MOVING_NAME,
     NO_GROUPING_CODE,
     NO_GROUPING_NAME,
@@ -763,3 +765,76 @@ class TestExportQueryBudget:
         assert big.status_code == 200
         assert len(_workbook(big).sheetnames) > len(_workbook(small).sheetnames)
         assert len(big_ctx) == len(small_ctx)
+
+
+# ---------------------------------------------------------------------------
+# LSPA-S1 - the workbook never carries the read-time navigation
+# ---------------------------------------------------------------------------
+
+REGISTERED_PATIENT_PK = 908172
+"""Identifier no count, label or revision of the workbook can carry."""
+
+
+def _workbook_cell_values(
+    workbook: Workbook,
+) -> dict[tuple[str, int, int], object]:
+    """Every written cell of one workbook, keyed by sheet, row and column."""
+    return {
+        (name, cell.row, cell.column): cell.value
+        for name in workbook.sheetnames
+        for row in workbook[name].iter_rows()
+        for cell in row
+    }
+
+
+@pytest.mark.django_db
+class TestWorkbookWithoutNominalNavigation:
+    def test_workbook_is_unchanged_while_the_projection_resolves_records(
+        self, export_client: Client, report: DailyStatisticsReport
+    ) -> None:
+        fingerprint = report.source_fingerprint
+        without_resolution = _workbook_cell_values(
+            load_workbook(
+                BytesIO(
+                    build_export_workbook(
+                        build_daily_report_projection(report)
+                    ).content
+                )
+            )
+        )
+        registered = Patient.objects.create(
+            pk=REGISTERED_PATIENT_PK,
+            patient_source_key=LSPA_RESOLVED_RECORD,
+            source_system="tasy",
+            name="PACIENTE CADASTRADO",
+        )
+        projection = build_daily_report_projection(report)
+        assert any(
+            patient.patient_id == registered.pk
+            for group in projection.groups
+            for patient in group.patients
+        )
+
+        response = export_client.get(export_url(), {"date": DAY.isoformat()})
+        assert response.status_code == 200
+        workbook = _workbook(response)
+        assert _workbook_cell_values(workbook) == without_resolution
+        assert not any(
+            value == registered.pk or value == str(registered.pk)
+            for value in without_resolution.values()
+        )
+        count, headers, rows = _section(
+            workbook[GERAL_SHEET], "Pacientes do fechamento"
+        )
+        geral = _group_of(projection, GERAL_KEY)
+        assert headers == PATIENT_HEADERS
+        assert count == len(geral.patients)
+        assert [row[1] for row in rows] == [
+            patient.name for patient in geral.patients
+        ]
+        assert (
+            DailyStatisticsReport.objects.get(
+                pk=report.pk
+            ).source_fingerprint
+            == fingerprint
+        )
