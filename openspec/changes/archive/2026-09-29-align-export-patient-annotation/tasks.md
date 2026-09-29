@@ -13,5 +13,5 @@
 
 ## 3. Gate final do change
 
-- [ ] 3.1 Executar `./scripts/test-in-container.sh quality-gate`, `./scripts/test-in-container.sh integration` (o quality-gate do container não inclui a suíte de integração) e `./scripts/markdown-lint.sh`, além de `openspec validate align-export-patient-annotation --strict`; registrar contagens e resultados no relatório final.
-- [ ] 3.2 Verificar diff completo: exatamente um arquivo de código, sem migrations, sem PHI/credenciais, sem mudança de runtime; arquivar com `--skip-specs` (sem delta de spec por design).
+- [x] 3.1 Executar `./scripts/test-in-container.sh quality-gate`, `./scripts/test-in-container.sh integration` (o quality-gate do container não inclui a suíte de integração) e `./scripts/markdown-lint.sh`, além de `openspec validate align-export-patient-annotation --strict`; registrar contagens e resultados no relatório final.
+- [x] 3.2 Verificar diff completo: exatamente um arquivo de código, sem migrations, sem PHI/credenciais, sem mudança de runtime; arquivar com `--skip-specs` (sem delta de spec por design).
