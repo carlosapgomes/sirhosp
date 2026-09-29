@@ -31,15 +31,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO
+from typing import Protocol
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.worksheet import Worksheet
 
-from apps.statistics_reports.models import (
-    DailyStatisticsPatient,
-    DailyStatisticsReport,
-)
+from apps.statistics_reports.models import DailyStatisticsReport
 from apps.statistics_reports.presentation import (
     PATIENT_LIST_TITLE,
     UNIDENTIFIED_LIST_TITLE,
@@ -271,6 +269,22 @@ def _event_values(row: EventRow) -> tuple[str, ...]:
     )
 
 
-def _patient_values(patient: DailyStatisticsPatient) -> tuple[str, ...]:
+class PatientExportRow(Protocol):
+    """Contract of the nominal fields the workbook reads from a patient row."""
+
+    @property
+    def bed(self) -> str: ...
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def record(self) -> str: ...
+
+    @property
+    def specialty(self) -> str: ...
+
+
+def _patient_values(patient: PatientExportRow) -> tuple[str, ...]:
     """Nominal fields of one closing patient row, as the page shows them."""
     return (patient.bed, patient.name, patient.record, patient.specialty)
