@@ -288,3 +288,41 @@ The driver refuses the production host outright; only
 - S1 proves auth with the Django test client and reserves the repeatable Playwright driver for S2. The runner tests in `tests/unit/test_verification_browser.py` drive fake pages and sessions: they test the runner, not the portal UI. The product proof is the real `run` command above.
 - The automated integration tests run the Django test client against real PostgreSQL in the isolated `sirhosp-test` project with synthetic data. They are tests, not the R8 operational proof: R8 requires the authorized runbook demonstration (doctor, open, real form login, close, and the revoked-session request) on the confirmed dev target, which stays BLOCKED until the operator authorizes a dev window and confirms a fictitious dataset.
 - The fingerprint check stops accidents. It is not an authorization boundary against an operator with direct database access.
+
+## MCP-assisted verification (skill)
+
+The project-local skill `.pi/skills/verify-sirhosp/` teaches a
+zero-context executor to drive the same dev session through Chrome DevTools
+MCP instead of the scripted Playwright driver: `SKILL.md` (launch, doctor,
+drive, evidence, cleanup, helpers) plus the feature map under `features/`
+(`README.md`, `authentication.md`, `navigation.md`, `census.md`, `htmx.md`).
+The skill reuses this runbook's doctor/open/status/close commands and
+exclusive contexts per run and role (`new_page` with `isolatedContext`).
+MCP evidence lives under `/tmp/sirhosp-verification-mcp/<run-id>/` with
+screenshots and sanitized notes, and survives `close` like the S2 evidence.
+
+Honesty rules for MCP rounds:
+
+- The skill is not a firewall and does not apply the S2 Playwright request
+  interceptor to MCP tools. Route discipline (reads only, no `/ingestao/*`,
+  no exports, no CRUD) is operator behavior: supervise every navigation.
+- Coverage labels stay explicit: `proven: playwright` (S2 `run`), versus
+  `demonstrated: mcp` (one assisted round drove it), versus `future`
+  (mapped but not executed). Documenting a feature is not proving it.
+- `list_network_requests` may return an empty listing in some MCP
+  contexts; record that honestly instead of claiming request coverage.
+
+## Skill maintenance
+
+- A route or template change (`templates/registration/login.html`,
+  `templates/includes/sidebar.html`, `templates/includes/topbar*.html`,
+  `templates/base_sidebar.html`,
+  `apps/services_portal/templates/services_portal/censo.html`) requires
+  updating the affected feature file and re-proving it (MCP round or S2
+  `run`); a stale map is a mapping bug.
+- Expanding to mutating operations (ingestion, exports, CRUD, summaries)
+  is another scope, not a skill edit by habit.
+- Next candidates, in order: MCP positive census filter with the
+  operator-supplied synthetic descriptor, MCP timed HTMX poll observation
+  on the real 60 s interval, MCP mobile toggle round-trip, admin-role MCP
+  pass for `Estatísticas` visibility.
