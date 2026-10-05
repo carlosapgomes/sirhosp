@@ -14,10 +14,19 @@ import secrets
 import subprocess
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Callable, Iterator, Sequence
+
+# This controller is executed directly (``python scripts/verify_portal.py``),
+# so the repository root is not on ``sys.path`` and the driver package next to
+# it would not import. Add the root before the first cross-package import.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from automation.verification import browser as browser_module  # noqa: E402
 
 STATE_ROOT = Path.home() / ".local" / "state" / "sirhosp-verification"
 
@@ -33,6 +42,23 @@ DEV_NETWORK = "sirhosp_default"
 DEV_DB_PORT = 5432
 PYTHON_BIN = "/opt/venv/bin/python"
 ALLOWED_ACTIONS = frozenset({"preflight", "owned-status", "prepare", "open", "close", "recover"})
+RUN_FEATURES = browser_module.FEATURES
+RUN_ROLES = browser_module.ROLE_NAMES
+RUN_INJECTIONS = (None, "assert", "timeout")
+RUN_TIMEOUT_MIN = 30
+QUEUE_PROBE_SOURCE = (
+    "import json;"
+    "from django.db.models import Count;"
+    "from apps.ingestion.models import IngestionRun;"
+    "from apps.summaries.models import SummaryRun;"
+    "counts={'ingestion:total': IngestionRun.objects.count(),"
+    " 'summary:total': SummaryRun.objects.count()};"
+    "counts.update({'ingestion:' + row['status']: row['count']"
+    " for row in IngestionRun.objects.values('status').annotate(count=Count('id'))});"
+    "counts.update({'summary:' + row['status']: row['count']"
+    " for row in SummaryRun.objects.values('status').annotate(count=Count('id'))});"
+    "print(json.dumps(counts))"
+)
 RUN_RE = re.compile(r"[0-9a-f]{32}\Z")
 SNAPSHOT_RE = re.compile(r"[0-9a-f]{64}\Z")
 FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -110,6 +136,21 @@ class StatusReport:
     state: str
     target: str
     run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    run_id: str
+    feature: str
+    status: str
+    exit_code: int
+    evidence_dir: str
+    cleanup: str
+    # The exact text the CLI prints. It is serialized, scrub-verified in memory
+    # and only then handed to ``print``, so a run secret can never reach stdout.
+    payload: str = ""
+    cases: tuple[Any, ...] = ()
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -867,6 +908,40 @@ def _collect_db_identity(target: Target) -> tuple[str, str, int]:
     if port_number != int(getattr(target, "db_port", port_number) or 0):
         raise Blocked("database port mismatch")
     return str(fingerprint), str(address), port_number
+
+
+def _queue_metadata(target: Target) -> dict[str, int]:
+    """Read-only queue counters used to detect jobs created by a run."""
+    _validate_runtime(target)
+    output = _command(
+        [
+            *getattr(target, "compose", ["docker", "compose"]),
+            "exec",
+            "-T",
+            "web",
+            PYTHON_BIN,
+            "manage.py",
+            "shell",
+            "--verbosity",
+            "0",
+            "-c",
+            QUEUE_PROBE_SOURCE,
+        ],
+        docker_host=getattr(target, "docker_host", None),
+        cwd=getattr(target, "checkout", None),
+    ).strip()
+    try:
+        payload = json.loads(output)
+    except ValueError as exc:
+        raise Failure("queue metadata response invalid") from exc
+    if not isinstance(payload, dict):
+        raise Failure("queue metadata response invalid")
+    counts: dict[str, int] = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or type(value) is not int or value < 0:
+            raise Failure("queue metadata response invalid")
+        counts[key] = value
+    return counts
 
 
 def _workers_running(target: Target) -> bool:
@@ -1786,6 +1861,171 @@ def cmd_callback(target: str, *, run_id: str) -> Verdict:
         return Verdict(status="PASS", revoked=True)
 
 
+def _resolve_viewports(names: Sequence[str]) -> tuple[browser_module.Viewport, ...]:
+    viewports: list[browser_module.Viewport] = []
+    for name in names:
+        viewport = browser_module.VIEWPORTS.get(name)
+        if viewport is None:
+            raise Blocked(f"unknown viewport {name}")
+        viewports.append(viewport)
+    if not viewports:
+        raise Blocked("at least one viewport is required")
+    return tuple(viewports)
+
+
+def _default_driver_factory(
+    *,
+    evidence_dir: Path,
+    redactions: tuple[str, ...],
+    expectations: Any,
+    queue_probe: Callable[[], dict[str, int]],
+    credentials: dict[str, str],
+) -> Any:
+    session = browser_module.PlaywrightBrowser(base_url=browser_module.DEV_ORIGIN)
+    return browser_module.SmokeDriver(
+        session=session,
+        evidence_dir=evidence_dir,
+        expectations=expectations,
+        credentials=credentials,
+        redactions=redactions,
+        queue_probe=queue_probe,
+    )
+
+
+def cmd_run(
+    target: str,
+    *,
+    feature: str,
+    roles: tuple[str, ...],
+    confirm_synthetic_data: bool,
+    expectations_path: str | None = None,
+    viewport_names: tuple[str, ...] | None = None,
+    inject_failure: str | None = None,
+    timeout_min: int = RUN_TIMEOUT_MIN,
+    driver_factory: Callable[..., Any] | None = None,
+) -> RunOutcome:
+    """Open one session, drive real browser journeys, always revoke it."""
+    if not confirm_synthetic_data:
+        raise Blocked("synthetic dataset confirmation required")
+    if feature not in RUN_FEATURES:
+        raise Blocked(f"unknown feature {feature}")
+    if inject_failure not in RUN_INJECTIONS:
+        raise Blocked(f"unknown injected failure {inject_failure}")
+    selected = tuple(roles)
+    if not selected or any(role not in RUN_ROLES for role in selected):
+        raise Blocked(f"unknown role in {selected}")
+    resolved = _resolve_target(target)
+    slug = str(getattr(resolved, "slug", target))
+    viewports = _resolve_viewports(viewport_names or tuple(browser_module.VIEWPORTS))
+    credentials = cmd_open(slug, confirm_fictitious=True, timeout_min=timeout_min)
+    run_id = credentials.run_id
+    evidence_dir = browser_module.EVIDENCE_ROOT / run_id
+    expectations = browser_module.load_expectations(expectations_path)
+    # Passwords stay in memory: they are only used to redact and to fill the
+    # login form, and never reach a file written by this command.
+    passwords = dict(credentials.passwords)
+    redactions = tuple(dict.fromkeys(passwords.values()))
+    evidence = browser_module.RunEvidence(
+        run_id=run_id,
+        feature=feature,
+        target=slug,
+        roles=selected,
+        viewports=tuple(viewport.name for viewport in viewports),
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+    factory = driver_factory or _default_driver_factory
+    driver = factory(
+        evidence_dir=evidence_dir,
+        redactions=redactions,
+        expectations=expectations,
+        queue_probe=lambda: _queue_metadata(resolved),
+        credentials=passwords,
+    )
+    close_error: str | None = None
+    verdict: Verdict | None = None
+    try:
+        driver.execute(
+            evidence,
+            feature=feature,
+            roles=selected,
+            viewports=viewports,
+            inject_failure=inject_failure,
+        )
+    except Exception as exc:
+        evidence.failure = f"{type(exc).__name__}: {exc}"
+    finally:
+        close_error = driver.close_browser()
+        try:
+            verdict = cmd_close(target, run_id=run_id)
+        except Exception as exc:
+            close_error = close_error or f"session close failed: {exc}"
+    cleanup = browser_module.PASS
+    if close_error is not None:
+        cleanup = browser_module.FAIL
+        evidence.failure = evidence.failure or close_error
+    if verdict is None or verdict.status != "PASS" or not verdict.revoked:
+        cleanup = browser_module.FAIL
+    evidence.cleanup = cleanup
+    evidence.finished_at = datetime.now(timezone.utc).isoformat()
+    browser_module.write_evidence(evidence_dir, evidence)
+    aggregate = browser_module.build_aggregate(evidence)
+    outcome = RunOutcome(
+        run_id=run_id,
+        feature=feature,
+        status=aggregate.status,
+        exit_code=aggregate.exit_code,
+        evidence_dir=str(evidence_dir),
+        cleanup=cleanup,
+        cases=tuple(evidence.cases),
+        reasons=aggregate.reasons,
+    )
+    printable = {key: value for key, value in asdict(outcome).items() if key != "payload"}
+    payload, clean = browser_module.sanitize_json_payload(printable, redactions)
+    if not clean:
+        # The stdout payload carried a run secret: it is already redacted in
+        # memory, but the outcome must not keep reporting PASS/exit 0. The
+        # redacted payload keeps the scrubbed reasons; only the downgrade
+        # marker (which carries no secret) is appended, so the secret is not
+        # reintroduced through the unredacted in-memory reasons.
+        marker = (
+            f"{browser_module.SANITIZATION_MARKER}: run secret reached the stdout payload"
+        )
+        try:
+            payload_obj = json.loads(payload)
+        except ValueError:
+            payload_obj = {}
+        if isinstance(payload_obj, dict):
+            printed_reasons = payload_obj.get("reasons")
+            if not isinstance(printed_reasons, list):
+                variants = browser_module.secret_variants(redactions)
+                printed_reasons = [
+                    browser_module.scrub_text(str(reason), variants)
+                    for reason in outcome.reasons
+                ]
+            downgraded_printed_reasons = [*printed_reasons, marker]
+            payload_obj["status"] = browser_module.FAIL
+            payload_obj["exit_code"] = browser_module.EXIT_CODES[browser_module.FAIL]
+            payload_obj["reasons"] = downgraded_printed_reasons
+            payload_obj[browser_module.SANITIZATION_KEY] = browser_module.FAIL
+            payload = json.dumps(payload_obj, separators=(",", ":"), ensure_ascii=False)
+        variants = browser_module.secret_variants(redactions)
+        downgraded_reasons = (
+            tuple(
+                browser_module.scrub_text(str(reason), variants)
+                for reason in outcome.reasons
+            )
+            + (marker,)
+        )
+        return replace(
+            outcome,
+            payload=payload,
+            status=browser_module.FAIL,
+            exit_code=browser_module.EXIT_CODES[browser_module.FAIL],
+            reasons=downgraded_reasons,
+        )
+    return replace(outcome, payload=payload)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Dev verification controller")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1807,6 +2047,19 @@ def build_parser() -> argparse.ArgumentParser:
     callback = sub.add_parser("callback", help="deadline callback for one owned run")
     callback.add_argument("--target", required=True)
     callback.add_argument("--run-id", required=True)
+    runner = sub.add_parser("run", help="run repeatable browser journeys on one dev session")
+    runner.add_argument("--target", default="dev")
+    runner.add_argument("--feature", required=True, choices=list(RUN_FEATURES))
+    runner.add_argument(
+        "--role", dest="roles", default="both", choices=[*RUN_ROLES, "both"]
+    )
+    runner.add_argument("--confirm-synthetic-data", action="store_true")
+    runner.add_argument("--expectations", default=None)
+    runner.add_argument(
+        "--viewport", default="both", choices=[*browser_module.VIEWPORTS, "both"]
+    )
+    runner.add_argument("--timeout-min", type=int, default=RUN_TIMEOUT_MIN)
+    runner.add_argument("--inject-failure", default=None, choices=["assert", "timeout"])
     return parser
 
 
@@ -1857,6 +2110,25 @@ def main(argv: list[str] | None = None) -> int:
             if verdict.status == "FAIL":
                 return 1
             return 2
+        if args.command == "run":
+            roles = RUN_ROLES if args.roles == "both" else (args.roles,)
+            viewport_names = (
+                tuple(browser_module.VIEWPORTS)
+                if args.viewport == "both"
+                else (args.viewport,)
+            )
+            outcome = cmd_run(
+                args.target,
+                feature=args.feature,
+                roles=tuple(roles),
+                confirm_synthetic_data=args.confirm_synthetic_data,
+                expectations_path=args.expectations,
+                viewport_names=viewport_names,
+                inject_failure=args.inject_failure,
+                timeout_min=args.timeout_min,
+            )
+            print(outcome.payload)
+            return outcome.exit_code
         if args.command == "callback":
             verdict = cmd_callback(args.target, run_id=args.run_id)
             print(json.dumps(asdict(verdict), separators=(",", ":")))

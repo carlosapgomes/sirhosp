@@ -4,6 +4,8 @@
 
 Use this runbook to open and close ephemeral portal accounts on dev.
 The controller owns one session per target and revokes both accounts on close.
+The `run` command performs that same cycle around one repeatable headless
+browser session and its evidence.
 Do not use this flow on production. R8 operational proof stays BLOCKED until the operator authorizes a dev window and confirms a fictitious dataset.
 
 ## Accounts and ownership
@@ -161,12 +163,128 @@ python manage.py verification_session close --dev-context-confirm --target dev -
 python manage.py verification_session recover --dev-context-confirm --target dev --expect-db-fingerprint <fp> --run-id <run-id> --expect-state <snapshot>
 ```
 
+## Repeatable browser run
+
+`run` opens one session with the same guards as `open`, drives real headless
+Chromium journeys without mocks, `force_login` or internal setters, writes
+evidence, and always revokes the owned pair afterwards. Passwords stay in
+memory: they are never printed, never written to the state record and never
+part of an artifact.
+
+```bash
+uv run python scripts/verify_portal.py run --feature auth --role both --confirm-synthetic-data
+uv run python scripts/verify_portal.py run --feature smoke --role both --confirm-synthetic-data
+```
+
+- `--feature auth` proves the login form, the authenticated shell, both
+  identities, per-role visibility of Estatísticas and the logout button.
+- `--feature smoke` adds census filters, the periodic HTMX badge and the
+  mobile menu.
+- `--role` is `user`, `admin` or `both`; `--viewport` is `desktop`, `mobile`
+  or `both`. Every role and viewport gets a fresh browser context.
+- `--confirm-synthetic-data` is the operator attestation. Without it the
+  command is BLOCKED before any account is written.
+- `--timeout-min` is the session lease (default 30 minutes) and arms the same
+  deadline timer as `open`.
+- `--expectations` points outside the checkout to the synthetic descriptor
+  described below.
+
+Viewport sizes are fixed at desktop 1440x900 and mobile 390x844. The desktop
+run observes two real HTMX polls on the real 60 s interval (no DOM
+substitution); the mobile run operates `sidebarToggle`, `sidebarOverlay` and
+Escape. The mobile logout clicks `sidebarToggle` first, because the Sair
+button only becomes reachable once the off-canvas menu is open.
+
+### Expected synthetic descriptors
+
+The positive census filter needs a descriptor supplied by the operator, and
+never one inferred from the filtered table:
+
+```json
+{
+  "census_filter": {
+    "query": {"q": "REGISTRO-FICTICIO", "unidade": "SETOR FICTICIO"},
+    "expect_registro": "0000000",
+    "expect_nome": "PACIENTE FICTICIO",
+    "expect_rows": 1
+  }
+}
+```
+
+`query` accepts only `q`, `unidade`, `especialidade`, `finding` and
+`ordenar`. Without the file, or with an unreadable or invalid file, the
+`census-filter-positive` case is BLOCKED with the reason; it is never PASS
+and never FAIL. A run that only lacks that prerequisite reports the aggregate
+as BLOCKED, and never as success.
+
+### Request policy
+
+Every request in every context, including redirects and popups, passes
+through one allowlist before it leaves the browser:
+
+- Portal reads: `/`, `/login/`, `/logout/`, `/painel/`, `/censo/`,
+  `/perfil/`, `/atualizacao-censo/` and `/static/`.
+- POST is allowed only on `/login/` and `/logout/`.
+- Business mutations are refused even as GET: `/ingestao/criar/`,
+  `/ingestao/sincronizar-internacoes/`,
+  `/ingestao/sincronizar-demograficos/`, `/censo/exportar/`,
+  `/statistics/export/` and `/reconciliacao/exportar/`.
+- External asset hosts are allowed only on their exact versioned paths
+  (Bootstrap, Bootstrap Icons, TomSelect on `cdn.jsdelivr.net`; HTMX on
+  `unpkg.com`, including the `/dist/htmx.min.js` redirect target).
+- Everything else, including any non-HTTPS request and any other host, is
+  refused.
+- The Cloudflare beacon injected by the edge is refused and recorded as
+  `edge_blocks`: it is telemetry, not product behavior, so it never fails an
+  otherwise clean run. Refusing it also prevents the edge RUM POST.
+
+The `policy-allowlist` case also attempts a real navigation to the
+demographics enqueue route and requires the browser to abort it.
+
+### Failure detection
+
+The run fails on any JavaScript error, any HTTP status at or above 400 on a
+portal route, any required asset that did not answer 200, and any change in
+the queue counters read before and after the journeys. Queue metadata is read
+only, no job is ever deleted, and a detected creation fails the run.
+
+### Controlled failure
+
+`--inject-failure assert` and `--inject-failure timeout` raise one genuine
+failure inside the driver after the journeys, so the cleanup path can be
+demonstrated on the real target without touching the product:
+
+```bash
+uv run python scripts/verify_portal.py run --feature auth --role user --viewport desktop \
+  --inject-failure assert --confirm-synthetic-data
+```
+
+The injected run returns FAIL, keeps every completed case and screenshot, and
+still closes the owned browser and the verification session before exiting.
+
+### Evidence and exit codes
+
+Each run writes `/tmp/sirhosp-verification/<run-id>/` with `report.json`, a
+`summary.md` table and screenshots taken before and after relevant actions.
+No artifact contains a password, cookie, authorization header or login
+payload: URLs are stored without their query string. Evidence is written
+after cleanup and survives it.
+
+One case returns PASS, FAIL, BLOCKED or SKIPPED with a reason. The aggregate
+uses FAIL over BLOCKED over SKIPPED, and exit code 0 requires every requested
+case to PASS together with an approved cleanup. Exit codes are 0 for PASS,
+1 for FAIL, 2 for BLOCKED and 3 for SKIPPED. A timeout, a missing browser, a
+missing credential or a missing descriptor never counts as success.
+
+The driver refuses the production host outright; only
+`https://portal-dev.verification.invalid` is accepted.
+
 ## Limits
 
 - One active session per target.
 - No human account changes.
 - No production target.
 - No model, migration, auth backend, settings, template, Compose, or dependency changes in this slice.
-- No browser driver in S1. S1 proves auth with the Django test client and reserves the repeatable Playwright driver for S2.
+- S1 proves auth with the Django test client and reserves the repeatable Playwright driver for S2. The runner tests in `tests/unit/test_verification_browser.py` drive fake pages and sessions: they test the runner, not the portal UI. The product proof is the real `run` command above.
 - The automated integration tests run the Django test client against real PostgreSQL in the isolated `sirhosp-test` project with synthetic data. They are tests, not the R8 operational proof: R8 requires the authorized runbook demonstration (doctor, open, real form login, close, and the revoked-session request) on the confirmed dev target, which stays BLOCKED until the operator authorizes a dev window and confirms a fictitious dataset.
 - The fingerprint check stops accidents. It is not an authorization boundary against an operator with direct database access.
