@@ -1,0 +1,140 @@
+{
+  "9bdf7c4a-dab5-4f1b-bf4c-b4b0e7d8a761": {
+    "projects": [
+      {
+        "path": "/projects/dev/sirhosp",
+        "lastUsed": 1790421043980
+      }
+    ],
+    "lastCwd": "/projects/dev/sirhosp",
+    "locale": "en"
+  },
+  "__settings__": {
+    "projects": [],
+    "quickPhrasesSeeded": true,
+    "settings": {
+      "promptMode": "append",
+      "customSystemPrompt": "",
+      "promptTemplate": "",
+      "promptOverrides": {},
+      "disabledSkills": [],
+      "disabledExtensions": [],
+      "disabledAgentTools": [
+        "terminal_create",
+        "terminal_list",
+        "terminal_close",
+        "terminal_input",
+        "terminal_key",
+        "terminal_read",
+        "terminal_wait",
+        "edit_soft"
+      ],
+      "disabledPluginTools": [],
+      "terminalToolsEnabled": false,
+      "terminalBash": false,
+      "terminalBashIdleMs": 15000,
+      "terminalBashMaxForegroundMs": 60000,
+      "toolWatchdogTimeoutMs": 1200000,
+      "readDirEnabled": true,
+      "toolApprovalEnabled": true,
+      "editSoftEnabled": false,
+      "questionnaireEnabled": true,
+      "goalModeEnabled": true,
+      "parallelReminderEnabled": true,
+      "thinkingWrap": false,
+      "toolsWrap": true,
+      "toolImagesEnabled": true,
+      "skillsFullText": [],
+      "visionBridgeEnabled": true,
+      "visionBridgeModel": null,
+      "subagentDefaultModel": null,
+      "retryMaxAttempts": 6,
+      "softCapTokens": 0,
+      "softCapByModel": {},
+      "visionBridgePromptMode": "append",
+      "visionBridgePrompt": "",
+      "scmCommitMsgPromptMode": "append",
+      "scmCommitMsgPrompt": "",
+      "reviewPrompt": "",
+      "reviewDisabledSkills": [],
+      "disabledPlugins": [],
+      "uiLayout": {},
+      "quickPhrases": [
+        "Continue",
+        "Summarize",
+        "Explain in detail",
+        "Check and fix issues",
+        "Add test coverage",
+        "Publish release"
+      ],
+      "quickPhrasesEnabled": true,
+      "defaultAgentPreset": "standard",
+      "defaultPermissionPreset": "workspace-write-never"
+    },
+    "projectModels": {
+      "/projects/dev/sarv2": "openrouter/meta/muse-spark-1.3"
+    }
+  },
+  "79d6930b-2502-4350-a3ba-5587c93ee273": {
+    "projects": [
+      {
+        "path": "/projects/dev/sarv2",
+        "lastUsed": 1790633338530
+      },
+      {
+        "path": "/projects/dev/hmd",
+        "lastUsed": 1790633322500
+      },
+      {
+        "path": "/projects/dev/sirhosp",
+        "lastUsed": 1790421085529
+      }
+    ],
+    "lastCwd": "/projects/dev/sarv2",
+    "locale": "en",
+    "projectModels": {
+      "/projects/dev/sarv2": "openrouter/meta/muse-spark-1.3"
+    }
+  },
+  "e4637606-b22e-4c9f-af1e-b30e2f9436ad": {
+    "projects": [
+      {
+        "path": "/projects/dev/sirhosp",
+        "lastUsed": 1790434981721
+      }
+    ],
+    "lastCwd": "/projects/dev/sirhosp",
+    "locale": "en"
+  },
+  "ebcfdcb3-6ea8-40c5-8b57-fa5ae05fc97e": {
+    "projects": [
+      {
+        "path": "/projects/dev/sarv2",
+        "lastUsed": 1790616381025
+      },
+      {
+        "path": "/projects/dev/sirhosp",
+        "lastUsed": 1790616356814
+      }
+    ],
+    "lastCwd": "/projects/dev/sarv2",
+    "locale": "en",
+    "projectModels": {
+      "/projects/dev/sarv2": "openai-codex/gpt-6-astra"
+    }
+  },
+  "f9b8d866-f64b-4dc3-8c4c-1be4c6729516": {
+    "projects": [
+      {
+        "path": "/projects/dev/sarv2",
+        "lastUsed": 1790633065533
+      },
+      {
+        "path": "/projects/dev/sirhosp",
+        "lastUsed": 1790633059764
+      }
+    ],
+    "lastCwd": "/projects/dev/sarv2",
+    "locale": "en"
+  }
+}

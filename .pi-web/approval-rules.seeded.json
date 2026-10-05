@@ -1,0 +1,12 @@
+[
+  "builtin.bash.chmod",
+  "builtin.bash.disk",
+  "builtin.bash.git-destructive",
+  "builtin.bash.rm-rf",
+  "builtin.bash.system-redirect",
+  "builtin.bash.win-del",
+  "builtin.file.outside-workspace",
+  "builtin.file.sensitive.env",
+  "builtin.file.sensitive.shell",
+  "builtin.file.sensitive.ssh"
+]
