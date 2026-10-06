@@ -20,8 +20,8 @@ future for MCP.
 
 ## How to get to it (user POV)
 
-- Log in and choose `Censo`, or open
-  `https://portal-dev.verification.invalid/censo/` directly.
+- Log in and choose `Censo`, or open `<origin>/censo/` (the canonical
+  dev `origin` from `doctor`) directly.
 - Read `Censo Hospitalar` with the capture line (`Censo capturado em`).
 - Type into `Nome ou Registro` (`#q`), pick `Setor / Unidade` (`#unidade`)
   or `Especialidade` (`#especialidade`), choose `Filtrar`.

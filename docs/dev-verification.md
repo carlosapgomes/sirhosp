@@ -18,10 +18,30 @@ Only these two owned rows carry a visible non-secret stamp in `first_name`.
 An active run shows `vfyA` plus the run id. A revoked run shows `vfyR` plus the run id.
 Usernames and emails stay fixed. Do not assert a human readable name for these rows.
 
+## Private origin profile
+
+The dev and production origins live only in one private file outside
+the checkout. No operational address is compiled into the controller,
+the driver, the tests, or these docs: every journey receives the
+validated canonical origin explicitly.
+
+```bash
+mkdir -p ~/.config/sirhosp
+cp docs/examples/verification.env.example ~/.config/sirhosp/verification.env
+chmod 0600 ~/.config/sirhosp/verification.env
+```
+
+Fill both keys privately with the operator-confirmed HTTPS origins, then
+prove the setup with `doctor` below. An empty template never enables an
+opening: `doctor`, `open` and `run` stay BLOCKED until both origins are
+valid, distinct, and strictly HTTPS. The production origin is refused by
+comparison and never contacted, not even to validate its value.
+
 ## Prerequisites
 
 Complete these checks before open.
 
+- The private origin profile exists with valid distinct dev/prod origins.
 - Target is dev and the checkout is the dev checkout.
 - The operator confirms the dataset is fictitious.
 - DEBUG is false for open. Close works with DEBUG true.
@@ -203,7 +223,7 @@ never one inferred from the filtered table:
 ```json
 {
   "census_filter": {
-    "query": {"q": "REGISTRO-FICTICIO", "unidade": "SETOR FICTICIO"},
+    "query": { "q": "REGISTRO-FICTICIO", "unidade": "SETOR FICTICIO" },
     "expect_registro": "0000000",
     "expect_nome": "PACIENTE FICTICIO",
     "expect_rows": 1
@@ -276,8 +296,9 @@ case to PASS together with an approved cleanup. Exit codes are 0 for PASS,
 1 for FAIL, 2 for BLOCKED and 3 for SKIPPED. A timeout, a missing browser, a
 missing credential or a missing descriptor never counts as success.
 
-The driver refuses the production host outright; only
-`https://portal-dev.verification.invalid` is accepted.
+The driver refuses the configured production origin outright; only the
+validated canonical dev origin reported by `doctor` (`origin` in its JSON)
+is accepted, and `open` photographs that same value for the whole run.
 
 ## Limits
 

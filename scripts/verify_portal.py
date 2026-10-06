@@ -27,6 +27,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from automation.verification import browser as browser_module  # noqa: E402
+from automation.verification import origins as origins_module  # noqa: E402
 
 STATE_ROOT = Path.home() / ".local" / "state" / "sirhosp-verification"
 
@@ -115,6 +116,9 @@ class ClosingRecord:
 class DoctorReport:
     status: str
     diagnostic: str | None = None
+    # The validated canonical dev origin (ORIG-001). PASS always carries it;
+    # assisted consumers (skill/MCP) must drive exactly this value.
+    origin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,10 @@ class OpenCredentials:
     run_id: str
     passwords: dict[str, str] = field(repr=False)
     target: str = "dev"
+    # The validated canonical dev origin photographed at opening (ORIG-001).
+    # The runner transmits this same value to the driver; it is never
+    # re-resolved from the profile mid-run.
+    origin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1331,7 +1339,20 @@ def _compensate_open_failure(
     raise original from None
 
 
+def _resolve_operation_origin() -> str:
+    """Validate the private origins before any opening effect (ORIG-001).
+
+    Runs before target, service, state, timer, account or credential work.
+    The diagnostic names the key and reason only, never the configured value.
+    """
+    try:
+        return origins_module.resolve_dev_origin()
+    except origins_module.OriginConfigError as exc:
+        raise Blocked(f"verification origin configuration invalid: {exc}") from None
+
+
 def cmd_doctor(target: str, *, confirm_fictitious: bool) -> DoctorReport:
+    origin = _resolve_operation_origin()
     resolved = _resolve_target(target)
     if not confirm_fictitious:
         raise Blocked("fictitious dataset confirmation required")
@@ -1339,7 +1360,7 @@ def cmd_doctor(target: str, *, confirm_fictitious: bool) -> DoctorReport:
     preflight = _run_django(resolved, "preflight", expect_db_fingerprint=fingerprint)
     _gate_open(resolved, preflight=preflight)
     _run_django(resolved, "owned-status", expect_db_fingerprint=fingerprint)
-    return DoctorReport(status="PASS")
+    return DoctorReport(status="PASS", origin=origin)
 
 
 def cmd_status(target: str) -> StatusReport:
@@ -1358,6 +1379,7 @@ def cmd_open(
     start: bool = False,
     timeout_min: int = 60,
 ) -> OpenCredentials:
+    origin = _resolve_operation_origin()
     resolved = _resolve_target(target)
     if not confirm_fictitious:
         raise Blocked("fictitious dataset confirmation required")
@@ -1516,7 +1538,7 @@ def cmd_open(
                 resolved, slug, run_id, timer_unit, exc, fingerprint=fingerprint
             )
         passwords = dict(opened["passwords"])
-        return OpenCredentials(run_id=run_id, passwords=passwords, target=slug)
+        return OpenCredentials(run_id=run_id, passwords=passwords, target=slug, origin=origin)
 
 
 def cmd_close(
@@ -1880,11 +1902,15 @@ def _default_driver_factory(
     expectations: Any,
     queue_probe: Callable[[], dict[str, int]],
     credentials: dict[str, str],
+    origin: str,
 ) -> Any:
-    session = browser_module.PlaywrightBrowser(base_url=browser_module.DEV_ORIGIN)
+    # The origin photographed at opening is transmitted explicitly; the
+    # factory never re-resolves the profile and never falls back.
+    session = browser_module.PlaywrightBrowser(base_url=origin)
     return browser_module.SmokeDriver(
         session=session,
         evidence_dir=evidence_dir,
+        base_url=origin,
         expectations=expectations,
         credentials=credentials,
         redactions=redactions,
@@ -1933,6 +1959,9 @@ def cmd_run(
         viewports=tuple(viewport.name for viewport in viewports),
         started_at=datetime.now(timezone.utc).isoformat(),
     )
+    origin = credentials.origin
+    if not origin:
+        raise Blocked("opening origin missing, refusing to drive an unverified target")
     factory = driver_factory or _default_driver_factory
     driver = factory(
         evidence_dir=evidence_dir,
@@ -1940,6 +1969,7 @@ def cmd_run(
         expectations=expectations,
         queue_probe=lambda: _queue_metadata(resolved),
         credentials=passwords,
+        origin=origin,
     )
     close_error: str | None = None
     verdict: Verdict | None = None
@@ -2089,6 +2119,7 @@ def main(argv: list[str] | None = None) -> int:
                         "run_id": credentials.run_id,
                         "target": credentials.target,
                         "passwords": dict(credentials.passwords),
+                        "origin": credentials.origin,
                     },
                     separators=(",", ":"),
                 )

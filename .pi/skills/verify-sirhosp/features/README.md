@@ -6,8 +6,8 @@ the matching feature file as the recipe.
 
 ## Baseline preconditions
 
-- Target is dev at `https://portal-dev.verification.invalid`. Production
-  `https://portal-prod.verification.invalid` is forbidden.
+- Target is the canonical dev `origin` reported by `doctor`. The
+  configured production origin is forbidden.
 - The operator confirms the dataset is fictitious
   (`--confirm-fictitious` / `--confirm-synthetic-data` is that attestation).
 - `verify_portal.py doctor --target dev --confirm-fictitious` reports PASS.

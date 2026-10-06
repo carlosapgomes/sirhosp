@@ -22,7 +22,7 @@ import pytest
 from automation.verification import browser
 
 RUN = "a" * 32
-ORIGIN = browser.DEV_ORIGIN
+ORIGIN = "https://portal-dev.verification.invalid"
 
 
 @pytest.fixture
@@ -39,7 +39,7 @@ def controller():
     "path", ["/", "/login/", "/logout/", "/painel/", "/censo/", "/perfil/", "/atualizacao-censo/"]
 )
 def test_policy_allows_shell_read_paths(path):
-    decision = browser.RequestPolicy().decide(f"{ORIGIN}{path}", "GET")
+    decision = browser.RequestPolicy(origin=ORIGIN).decide(f"{ORIGIN}{path}", "GET")
     assert decision.allowed is True
     assert decision.category == "allowed"
 
@@ -58,14 +58,14 @@ def test_policy_allows_shell_read_paths(path):
     ],
 )
 def test_policy_blocks_business_and_mutating_get_routes(path):
-    decision = browser.RequestPolicy().decide(f"{ORIGIN}{path}", "GET")
+    decision = browser.RequestPolicy(origin=ORIGIN).decide(f"{ORIGIN}{path}", "GET")
     assert decision.allowed is False
     assert decision.category == "policy"
     assert decision.reason
 
 
 def test_policy_allows_only_login_and_logout_posts():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     assert policy.decide(f"{ORIGIN}/login/", "POST").allowed is True
     assert policy.decide(f"{ORIGIN}/logout/", "POST").allowed is True
     for path in ("/painel/", "/censo/", "/perfil/", "/ingestao/criar/"):
@@ -73,7 +73,7 @@ def test_policy_allows_only_login_and_logout_posts():
 
 
 def test_policy_blocks_external_redirect_and_popup_targets():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     for url in (
         "https://evil.example/portal",
         "https://portal-dev.verification.invalid.evil.example/painel/",
@@ -83,12 +83,14 @@ def test_policy_blocks_external_redirect_and_popup_targets():
 
 
 def test_policy_blocks_insecure_scheme():
-    decision = browser.RequestPolicy().decide("http://portal-dev.verification.invalid/painel/", "GET")
+    decision = browser.RequestPolicy(origin=ORIGIN).decide(
+        ORIGIN.replace("https://", "http://") + "/painel/", "GET"
+    )
     assert decision.allowed is False
 
 
 def test_policy_allows_static_assets_and_ignores_favicon():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     assert policy.decide(f"{ORIGIN}/static/css/sirhosp.css", "GET").allowed is True
     favicon = policy.decide(f"{ORIGIN}/favicon.ico", "GET")
     assert favicon.allowed is True
@@ -96,7 +98,7 @@ def test_policy_allows_static_assets_and_ignores_favicon():
 
 
 def test_policy_allows_only_known_versioned_cdn_paths():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     for url in (
         "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css",
         "https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css",
@@ -125,7 +127,7 @@ def test_policy_allows_only_known_versioned_cdn_paths():
 
 
 def test_policy_blocks_cdn_posts():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     decision = policy.decide(
         "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css", "POST"
     )
@@ -133,7 +135,7 @@ def test_policy_blocks_cdn_posts():
 
 
 def test_policy_blocks_portal_origin_with_non_default_port():
-    decision = browser.RequestPolicy().decide(
+    decision = browser.RequestPolicy(origin=ORIGIN).decide(
         "https://portal-dev.verification.invalid:444/painel/", "GET"
     )
     assert decision.allowed is False
@@ -142,7 +144,7 @@ def test_policy_blocks_portal_origin_with_non_default_port():
 
 
 def test_policy_blocks_cdn_origin_with_non_default_port():
-    decision = browser.RequestPolicy().decide(
+    decision = browser.RequestPolicy(origin=ORIGIN).decide(
         "https://cdn.jsdelivr.net:8443/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css", "GET"
     )
     assert decision.allowed is False
@@ -151,7 +153,7 @@ def test_policy_blocks_cdn_origin_with_non_default_port():
 
 
 def test_policy_allows_default_and_explicit_default_port_origins():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     assert policy.decide(f"{ORIGIN}/painel/", "GET").allowed is True
     assert policy.decide("https://portal-dev.verification.invalid:443/painel/", "GET").allowed is True
     assert (
@@ -169,7 +171,7 @@ def test_policy_allows_default_and_explicit_default_port_origins():
 
 
 def test_policy_classifies_edge_telemetry_separately():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     beacon = policy.decide(
         "https://static.cloudflareinsights.com/beacon.min.js/v31edd",
         "GET",
@@ -191,7 +193,7 @@ def test_sanitize_url_drops_query_and_fragment():
 
 
 def test_observations_separate_violations_from_expected_and_edge_blocks():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     allowed = browser.Observations(policy)
     allowed.decide("https://evil.example/x", "GET")
     assert len(allowed.violations) == 1
@@ -207,7 +209,7 @@ def test_observations_separate_violations_from_expected_and_edge_blocks():
 
 
 def test_observations_record_js_errors_but_not_resource_load_noise():
-    observed = browser.Observations(browser.RequestPolicy())
+    observed = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     observed.note_console("error", "Uncaught TypeError: x is undefined")
     observed.note_console("error", "Failed to load resource: net::ERR_FAILED")
     observed.note_console("log", "hello")
@@ -216,7 +218,7 @@ def test_observations_record_js_errors_but_not_resource_load_noise():
 
 
 def test_observations_redact_credentials_from_every_channel():
-    observed = browser.Observations(browser.RequestPolicy(), redactions=("SECRET-VALUE",))
+    observed = browser.Observations(browser.RequestPolicy(origin=ORIGIN), redactions=("SECRET-VALUE",))
     observed.note_console("error", "token SECRET-VALUE rejected")
     observed.note_page_error("SECRET-VALUE")
     assert all("SECRET-VALUE" not in entry for entry in observed.js_errors)
@@ -224,7 +226,7 @@ def test_observations_redact_credentials_from_every_channel():
 
 
 def test_observations_flag_unexpected_http_and_ignore_favicon():
-    observed = browser.Observations(browser.RequestPolicy())
+    observed = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     observed.note_response(f"{ORIGIN}/censo/", 200)
     observed.note_response(f"{ORIGIN}/censo/exportar/", 500)
     observed.note_response(f"{ORIGIN}/favicon.ico", 404)
@@ -234,7 +236,7 @@ def test_observations_flag_unexpected_http_and_ignore_favicon():
 
 
 def test_observations_track_required_assets_by_prefix():
-    observed = browser.Observations(browser.RequestPolicy())
+    observed = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     observed.note_response(f"{ORIGIN}/static/css/sirhosp.css", 200)
     observed.note_response("https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js", 200)
     observed.note_response(
@@ -255,7 +257,7 @@ def test_observations_track_required_assets_by_prefix():
 
 
 def test_observations_ignore_failures_of_edge_and_blocked_requests():
-    policy = browser.RequestPolicy()
+    policy = browser.RequestPolicy(origin=ORIGIN)
     observed = browser.Observations(policy)
     beacon = "https://static.cloudflareinsights.com/beacon.min.js/v1"
     observed.decide(beacon, "GET")
@@ -586,7 +588,7 @@ def _journey_context(expectations=None, observations=None, role="user", viewport
         viewport=viewport or browser.DESKTOP,
         page=FakePage(),
         context=None,
-        observations=observations or browser.Observations(browser.RequestPolicy()),
+        observations=observations or browser.Observations(browser.RequestPolicy(origin=ORIGIN)),
         expectations=expectations or browser.Expectations(),
         base_url=ORIGIN,
         evidence=browser.RunEvidence(
@@ -615,6 +617,7 @@ def _driver(session, tmp_path, cases, *, policy_cases=None, queue_probe=None, ex
     return browser.SmokeDriver(
         session=session,
         evidence_dir=tmp_path / "evidence",
+        base_url=ORIGIN,
         expectations=expectations,
         case_table=lambda feature, viewport: cases,
         policy_case_table=lambda feature, viewport: policy_cases or (),
@@ -825,6 +828,7 @@ def _patch_run(
         lambda *args, **kwargs: controller.OpenCredentials(
             run_id=RUN,
             passwords={"verify_user": "SECRET-USER", "verify_admin": "SECRET-ADMIN"},
+            origin=ORIGIN,
         ),
     )
     monkeypatch.setattr(
@@ -839,15 +843,17 @@ def _patch_run(
     captured = {}
     case_runner = runner or _PassRunner(browser)
 
-    def factory(*, evidence_dir, redactions, expectations, queue_probe, credentials):
+    def factory(*, evidence_dir, redactions, expectations, queue_probe, credentials, origin):
         captured["evidence_dir"] = evidence_dir
         captured["redactions"] = redactions
         captured["credentials"] = credentials
+        captured["origin"] = origin
         session = FakeSession(close_error=browser_close_error)
         captured["session"] = session
         driver = browser.SmokeDriver(
             session=session,
             evidence_dir=evidence_dir,
+            base_url=origin,
             expectations=expectations,
             credentials=credentials,
             redactions=redactions,
@@ -1147,13 +1153,13 @@ class _FakeRoute:
 def _owned_context(
     observations: browser.Observations | None = None, cdp: _FakeCDPSession | None = None
 ) -> tuple[_FakeLaunchBrowser, browser._RoleContext]:
-    session = browser.PlaywrightBrowser()
+    session = browser.PlaywrightBrowser(base_url=ORIGIN)
     fake = _FakeLaunchBrowser(cdp)
     session._browser = fake
     handle = session.new_role_context(
         role="user",
         viewport=browser.DESKTOP,
-        observations=observations or browser.Observations(browser.RequestPolicy()),
+        observations=observations or browser.Observations(browser.RequestPolicy(origin=ORIGIN)),
     )
     return fake, handle
 
@@ -1182,7 +1188,7 @@ def test_owned_context_attaches_the_cdp_hop_layer():
 
 
 def test_cdp_layer_refuses_a_hop_outside_the_policy():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, _ = _owned_context(observations)
     fake.cdp.handlers["Fetch.requestPaused"](
         {"requestId": "7", "request": {"url": "https://evil.example/steal", "method": "GET"}}
@@ -1196,7 +1202,7 @@ def test_cdp_layer_refuses_a_hop_outside_the_policy():
 
 
 def test_cdp_layer_continues_an_allowed_request_without_a_violation():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, _ = _owned_context(observations)
     fake.cdp.handlers["Fetch.requestPaused"](
         {"requestId": "8", "request": {"url": f"{ORIGIN}/painel/", "method": "GET"}}
@@ -1206,7 +1212,7 @@ def test_cdp_layer_continues_an_allowed_request_without_a_violation():
 
 
 def test_cdp_layer_records_a_failed_fail_request_as_a_violation():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, _ = _owned_context(observations, _FakeCDPSession(fail=("Fetch.failRequest",)))
     fake.cdp.handlers["Fetch.requestPaused"](
         {"requestId": "9", "request": {"url": "https://evil.example/steal", "method": "GET"}}
@@ -1217,7 +1223,7 @@ def test_cdp_layer_records_a_failed_fail_request_as_a_violation():
 
 
 def test_cdp_layer_records_a_failed_continue_request_and_releases_the_page():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, _ = _owned_context(observations, _FakeCDPSession(fail=("Fetch.continueRequest",)))
     fake.cdp.handlers["Fetch.requestPaused"](
         {"requestId": "10", "request": {"url": f"{ORIGIN}/painel/", "method": "GET"}}
@@ -1229,7 +1235,7 @@ def test_cdp_layer_records_a_failed_continue_request_and_releases_the_page():
 
 
 def test_cdp_layer_releases_the_page_when_fail_request_cannot_be_sent():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, _ = _owned_context(observations, _FakeCDPSession(fail=("Fetch.failRequest",)))
     fake.cdp.handlers["Fetch.requestPaused"](
         {"requestId": "11", "request": {"url": "https://evil.example/steal", "method": "GET"}}
@@ -1243,7 +1249,7 @@ def test_cdp_layer_releases_the_page_when_fail_request_cannot_be_sent():
 
 
 def test_cdp_release_failure_is_visible_and_resolves_the_paused_request():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     cdp = _FakeCDPSession(fail=("Fetch.failRequest",))
     cdp.pause("12")
     fake, _ = _owned_context(observations, cdp)
@@ -1261,7 +1267,7 @@ def test_cdp_release_failure_is_visible_and_resolves_the_paused_request():
 
 
 def test_cdp_action_failure_marks_fatal_even_when_release_succeeds():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     cdp = _FakeCDPSession(fail=("Fetch.failRequest",))
     cdp.pause("13")
     fake, _ = _owned_context(observations, cdp)
@@ -1279,7 +1285,7 @@ def test_cdp_action_failure_marks_fatal_even_when_release_succeeds():
 
 
 def test_cdp_action_failure_flags_fatal_before_any_release_attempt():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     seen: dict[str, bool] = {}
     cdp = _FakeCDPSession(
         fail=("Fetch.continueRequest",),
@@ -1313,7 +1319,7 @@ def test_driver_aborts_remaining_journeys_when_the_release_fails(tmp_path):
     cdp = _FakeCDPSession(fail=("Fetch.failRequest",))
     launch = _FakeLaunchBrowser(cdp)
     launch.context.close_error = "context already closing"
-    session = browser.PlaywrightBrowser()
+    session = browser.PlaywrightBrowser(base_url=ORIGIN)
     session._browser = launch
     executed: list[str] = []
 
@@ -1335,6 +1341,7 @@ def test_driver_aborts_remaining_journeys_when_the_release_fails(tmp_path):
     driver = browser.SmokeDriver(
         session=session,
         evidence_dir=tmp_path / "evidence",
+        base_url=ORIGIN,
         case_table=lambda feature, viewport: (("case-trigger", trigger), ("case-witness", witness)),
         policy_case_table=lambda feature, viewport: (),
     )
@@ -1367,7 +1374,7 @@ def test_driver_aborts_remaining_journeys_after_a_cdp_action_failure(tmp_path):
     # the failed CDP action alone must stop the run and fail it.
     cdp = _FakeCDPSession(fail=("Fetch.continueRequest",))
     launch = _FakeLaunchBrowser(cdp)
-    session = browser.PlaywrightBrowser()
+    session = browser.PlaywrightBrowser(base_url=ORIGIN)
     session._browser = launch
     executed: list[str] = []
 
@@ -1389,6 +1396,7 @@ def test_driver_aborts_remaining_journeys_after_a_cdp_action_failure(tmp_path):
     driver = browser.SmokeDriver(
         session=session,
         evidence_dir=tmp_path / "evidence",
+        base_url=ORIGIN,
         case_table=lambda feature, viewport: (("case-trigger", trigger), ("case-witness", witness)),
         policy_case_table=lambda feature, viewport: (),
     )
@@ -1422,7 +1430,7 @@ def test_owned_context_keeps_the_context_route_as_a_second_layer():
 
 
 def test_context_route_defers_recording_to_the_cdp_layer_on_owned_pages():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, handle = _owned_context(observations)
     owned = _FakeRoute("https://evil.example/one", page=handle.page)
     fake.context.route_handler(owned)
@@ -1435,7 +1443,7 @@ def test_context_route_defers_recording_to_the_cdp_layer_on_owned_pages():
 
 
 def test_context_route_still_continues_allowed_requests():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, handle = _owned_context(observations)
     allowed = _FakeRoute(f"{ORIGIN}/painel/", page=handle.page)
     fake.context.route_handler(allowed)
@@ -1444,7 +1452,7 @@ def test_context_route_still_continues_allowed_requests():
 
 
 def test_owned_context_blocks_websockets_with_a_passive_handler():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, _ = _owned_context(observations)
     assert fake.context.websocket_pattern == "**/*"
 
@@ -1464,7 +1472,7 @@ def test_owned_context_blocks_websockets_with_a_passive_handler():
 
 
 def test_popup_guard_marker_from_the_console_is_a_violation():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     observations.note_console(
         "error", f"{browser.POPUP_BLOCK_MARKER} open http://evil.example/steal?token=SECRET"
     )
@@ -1475,7 +1483,7 @@ def test_popup_guard_marker_from_the_console_is_a_violation():
 
 
 def test_unforeseen_popup_page_is_recorded_as_a_violation():
-    observations = browser.Observations(browser.RequestPolicy())
+    observations = browser.Observations(browser.RequestPolicy(origin=ORIGIN))
     fake, _ = _owned_context(observations)
     popup = _FakeObservedPage()
     fake.context.handlers["page"](popup)
@@ -1876,7 +1884,7 @@ class TestRealBrowserBoundaries:
                 tmp_path,
                 allowed.origin,
                 (("navigate", _navigation_case),),
-                policy=_AllowAllPolicy(),
+                policy=_AllowAllPolicy(origin="https://positive-control.verification.invalid"),
             )
             evidence = _real_evidence(allowed.origin)
             try:
@@ -2159,7 +2167,8 @@ class TestRealBrowserBoundaries:
             monkeypatch.setattr(browser, "EVIDENCE_ROOT", tmp_path / "evidence")
             monkeypatch.setattr(controller, "_resolve_target", lambda name: _target())
             monkeypatch.setattr(controller, "cmd_open", lambda *a, **k: controller.OpenCredentials(
-                run_id=RUN, passwords={"verify_user": password, "verify_admin": password + "-alt"}
+                run_id=RUN, passwords={"verify_user": password, "verify_admin": password + "-alt"},
+                origin=endpoint.origin,
             ))
             monkeypatch.setattr(
                 controller, "cmd_close", lambda *a, **k: controller.Verdict("PASS", True)
@@ -2169,6 +2178,7 @@ class TestRealBrowserBoundaries:
             )
 
             def factory(**kwargs):
+                kwargs.pop("origin", None)
                 session = browser.PlaywrightBrowser(base_url=endpoint.origin, timeout_ms=1200)
                 return browser.SmokeDriver(
                     session=session,

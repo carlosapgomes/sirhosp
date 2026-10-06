@@ -31,7 +31,9 @@ SKIPPED = "SKIPPED"
 
 EXIT_CODES = {PASS: 0, FAIL: 1, BLOCKED: 2, SKIPPED: 3}
 
-DEV_ORIGIN = "https://portal-dev.verification.invalid"
+# No operational origin lives in this module: every journey receives the
+# validated canonical origin explicitly (ORIG-001). Native tests pass http
+# loopback or .invalid origins; the private profile never allows http.
 EVIDENCE_ROOT = Path("/tmp/sirhosp-verification")
 
 # An allowed origin is scheme + host + effective port: the explicit port, or the
@@ -202,7 +204,7 @@ def effective_port(parts: SplitResult) -> int | None:
 
 @dataclass(frozen=True)
 class RequestPolicy:
-    origin: str = DEV_ORIGIN
+    origin: str
 
     def decide(self, url: str, method: str) -> PolicyDecision:
         parts = urlsplit(url)
@@ -213,8 +215,9 @@ class RequestPolicy:
             return PolicyDecision(False, "edge", "edge-injected telemetry refused")
         if parts.scheme in {"data", "blob"}:
             return PolicyDecision(True, "allowed", "inline asset")
-        # The authorized origin also fixes the scheme: the portal is reached
-        # over https and the synthetic verification origins over http.
+        # The authorized origin also fixes the scheme: the canonical
+        # verification origin uses https, while native tests drive http
+        # loopback or .invalid origins passed explicitly to the policy.
         origin = urlsplit(self.origin)
         if parts.scheme not in DEFAULT_PORTS or parts.scheme != origin.scheme:
             return PolicyDecision(False, "policy", "scheme outside the authorized origin")
@@ -1114,14 +1117,18 @@ def case_required_assets(ctx: JourneyContext) -> CaseOutcome:
 
 
 def case_policy_allowlist(ctx: JourneyContext) -> CaseOutcome:
-    probes = (
+    probes: list[tuple[str, str, str]] = [
         (f"{ctx.base_url}/ingestao/sincronizar-demograficos/", "GET", "demographics enqueue"),
         (f"{ctx.base_url}/ingestao/criar/", "GET", "ingestion run creation"),
         (f"{ctx.base_url}/censo/exportar/", "GET", "census export"),
         (f"{ctx.base_url}/statistics/export/", "GET", "statistics export"),
         ("https://evil.example/steal", "GET", "external redirect target"),
-        ("http://portal-dev.verification.invalid/painel/", "GET", "insecure scheme"),
-    )
+    ]
+    if ctx.base_url.startswith("https://"):
+        # The canonical verification origin is https: the same host over
+        # plain http must be refused. Native http loopback contexts skip
+        # this probe because http is their own authorized scheme.
+        probes.append((f"http{ctx.base_url[5:]}/painel/", "GET", "insecure scheme"))
     evidence = []
     for url, method, label in probes:
         decision = ctx.observations.policy.decide(url, method)
@@ -1240,7 +1247,7 @@ class SmokeDriver:
         session: Any,
         evidence_dir: Path,
         expectations: Expectations | None = None,
-        base_url: str = DEV_ORIGIN,
+        base_url: str,
         timeout_ms: int = 20000,
         case_table: Callable[[str, Viewport], CasePlan] | None = None,
         policy_case_table: Callable[[str, Viewport], CasePlan] | None = None,
@@ -1535,7 +1542,7 @@ class PlaywrightBrowser:
     """Owned headless Chromium session; always started headless."""
 
     def __init__(
-        self, *, base_url: str = DEV_ORIGIN, headless: bool = True, timeout_ms: int = 20000
+        self, *, base_url: str, headless: bool = True, timeout_ms: int = 20000
     ) -> None:
         self.base_url = base_url
         self.headless = headless

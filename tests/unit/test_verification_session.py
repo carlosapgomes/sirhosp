@@ -17,6 +17,27 @@ RUN = "a" * 32
 NEXT = "b" * 32
 SNAPSHOT = "c" * 64
 
+# Synthetic verification origins (ORIG-001): no operational FQDN may appear
+# in tracked or candidate files. The controller under test resolves its dev
+# origin from the private profile under $HOME; every test below provisions
+# that profile from these values unless it overrides $HOME itself.
+SYN_DEV_ORIGIN = "https://portal-dev.verification.invalid"
+SYN_PROD_ORIGIN = "https://portal-prod.verification.invalid"
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_origin_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    profile = home / ".config" / "sirhosp" / "verification.env"
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    profile.write_text(
+        f"SIRHOSP_VERIFY_DEV_ORIGIN={SYN_DEV_ORIGIN}\n"
+        f"SIRHOSP_VERIFY_PROD_ORIGIN={SYN_PROD_ORIGIN}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
 
 @pytest.fixture
 def controller():
@@ -127,11 +148,11 @@ def host(controller, tmp_path, monkeypatch):
 def test_r1_doctor_is_read_only(controller, host, tmp_path):
     assert controller.cmd_doctor("dev", confirm_fictitious=True).status == "PASS"
     assert set(host.calls) <= {"preflight", "owned-status", "gate"}
-    assert list(tmp_path.iterdir()) == []
+    assert not (tmp_path / "dev").exists()
 
 
 @pytest.mark.parametrize(
-    "target", ["prod", "portal-prod.verification.invalid", "https://portal-dev.verification.invalid"]
+    "target", ["prod", "staging", "https://portal-other.verification.invalid"]
 )
 def test_r1_wrong_target_precedes_start(controller, host, target):
     with pytest.raises(controller.Blocked):
@@ -3254,9 +3275,10 @@ def test_f8_cli_open_emits_returned_credentials_once(controller, monkeypatch, tm
     assert code == 0
     captured = capsys.readouterr()
     emitted = json.loads(captured.out)
-    assert set(emitted) == {"run_id", "target", "passwords"}
+    assert set(emitted) == {"run_id", "target", "passwords", "origin"}
     assert controller.RUN_RE.fullmatch(emitted["run_id"])
     assert emitted["target"] == "dev"
+    assert emitted["origin"] == SYN_DEV_ORIGIN
     assert emitted["passwords"] == {"verify_user": "u" * 43, "verify_admin": "a" * 43}
     for password in emitted["passwords"].values():
         assert captured.out.count(password) == 1, "credentials must be printed exactly once"
@@ -4162,3 +4184,98 @@ def test_cancel_repair_zero_exit_stop_never_queries_units(controller, monkeypatc
     assert verdict.revoked is True
     assert controller._read_state("dev").state == "CLOSED"
     assert ctx["show_calls"] == []
+
+
+# ---------------------------------------------------------------------------
+# ORIG-001 — private origins wired into doctor/open/run (R2/R4/R5)
+# ---------------------------------------------------------------------------
+
+
+def _empty_home(tmp_path, monkeypatch):
+    """Point $HOME at a directory without any private profile."""
+    home = tmp_path / "nohome"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def test_orig1_doctor_blocked_without_profile_and_without_effects(
+    controller, host, tmp_path, monkeypatch
+):
+    _empty_home(tmp_path, monkeypatch)
+    with pytest.raises(controller.Blocked):
+        controller.cmd_doctor("dev", confirm_fictitious=True)
+    assert host.calls == []
+    assert not (tmp_path / "dev").exists()
+
+
+def test_orig1_open_blocked_with_invalid_profile_and_without_effects(
+    controller, host, tmp_path, monkeypatch
+):
+    home = tmp_path / "home"
+    (home / ".config" / "sirhosp" / "verification.env").write_text(
+        "SIRHOSP_VERIFY_DEV_ORIGIN=http://portal-dev.verification.invalid/\n"
+        f"SIRHOSP_VERIFY_PROD_ORIGIN={SYN_PROD_ORIGIN}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(controller.Blocked):
+        controller.cmd_open("dev", confirm_fictitious=True)
+    assert "prepare" not in host.calls and "open" not in host.calls
+    assert "arm" not in host.calls
+    assert not (tmp_path / "dev").exists()
+
+
+def test_orig1_run_blocked_without_profile_before_open_effects(
+    controller, host, tmp_path, monkeypatch
+):
+    _empty_home(tmp_path, monkeypatch)
+    with pytest.raises(controller.Blocked):
+        controller.cmd_run(
+            "dev", feature="auth", roles=("user",), confirm_synthetic_data=True
+        )
+    assert host.calls == []
+
+
+def test_orig1_doctor_and_open_report_the_canonical_origin(controller, host):
+    doctor = controller.cmd_doctor("dev", confirm_fictitious=True)
+    assert doctor.status == "PASS"
+    assert doctor.origin == SYN_DEV_ORIGIN
+    opened = controller.cmd_open("dev", confirm_fictitious=True)
+    assert opened.origin == SYN_DEV_ORIGIN
+    assert opened.origin == doctor.origin
+
+
+def test_orig1_open_main_emission_includes_origin(controller, host, capsys):
+    assert controller.main(["open", "--target", "dev", "--confirm-fictitious"]) == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["origin"] == SYN_DEV_ORIGIN
+    assert payload["target"] == "dev"
+
+
+def test_orig1_doctor_main_emission_includes_origin(controller, host, capsys):
+    assert controller.main(["doctor", "--target", "dev", "--confirm-fictitious"]) == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["origin"] == SYN_DEV_ORIGIN
+    assert payload["status"] == "PASS"
+
+
+def test_orig1_close_and_status_are_independent_of_the_profile(
+    controller, host, tmp_path, monkeypatch
+):
+    opened = controller.cmd_open("dev", confirm_fictitious=True)
+    _empty_home(tmp_path, monkeypatch)
+    status = controller.cmd_status("dev")
+    assert status.state == "ACTIVE"
+    assert status.run_id == opened.run_id
+    verdict = controller.cmd_close("dev", run_id=opened.run_id)
+    assert verdict.status == "PASS"
+    assert verdict.revoked is True
+
+
+def test_orig1_stale_callback_is_independent_of_the_profile(
+    controller, host, tmp_path, monkeypatch
+):
+    controller.cmd_open("dev", confirm_fictitious=True)
+    _empty_home(tmp_path, monkeypatch)
+    verdict = controller.cmd_callback("dev", run_id=RUN)
+    assert verdict.status == "SKIPPED"

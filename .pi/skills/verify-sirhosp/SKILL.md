@@ -16,10 +16,15 @@ Authoritative references (read before driving):
 - `.pi/skills/verify-sirhosp/features/` — feature map (recipes per feature).
 - `openspec/changes/add-dev-browser-verification-suite/design.md` — D3, D4, D8.
 
-Fixed targets:
+Canonical target:
 
-- Dev portal: `https://portal-dev.verification.invalid`.
-- Production `https://portal-prod.verification.invalid` is forbidden. Never navigate there.
+- The dev portal origin comes only from the validated `doctor` JSON
+  (`origin` field): drive exactly that value, never a memorized address.
+- The configured production origin is forbidden. Never navigate there.
+- Before navigating, confirm `open.origin == doctor.origin`. On any
+  divergence, close the owned session with the canonical `close` command
+  and return BLOCKED for operator revalidation; never silently follow
+  the new origin.
 
 ## Launch
 
@@ -54,11 +59,13 @@ Run the read-only preflight before every open, and whenever anything looks off:
 uv run python scripts/verify_portal.py doctor --target dev --confirm-fictitious
 ```
 
-Require `{"status":"PASS"}`. Doctor confirms the dev target, the checkout,
-the database fingerprint, pending migrations, `DEBUG` false, stopped workers,
-and the owned-pair state, without writing anything. A non-PASS doctor is
-BLOCKED before any account is written. Confirm with the operator that the dev
-dataset is fictitious; `--confirm-fictitious` is that attestation.
+Require `{"status":"PASS"}`. Doctor confirms the private origin profile,
+the dev target, the checkout, the database fingerprint, pending migrations,
+`DEBUG` false, stopped workers, and the owned-pair state, without writing
+anything. Record the `origin` value from the JSON: it is the only target
+this round may drive. A non-PASS doctor is BLOCKED before any account is
+written. Confirm with the operator that the dev dataset is fictitious;
+`--confirm-fictitious` is that attestation.
 
 ## Drive
 

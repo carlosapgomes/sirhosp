@@ -18,8 +18,8 @@ playwright (`verify_portal.py run --feature auth`). Demonstrated: mcp
 
 ## How to get to it (user POV)
 
-- Open `https://portal-dev.verification.invalid/login/` in a fresh exclusive
-  browser context.
+- Open `<origin>/login/` (the canonical dev `origin` from `doctor`) in a
+  fresh exclusive browser context.
 - Fill `Usuário` (`#id_username`) and `Senha` (`#id_password`).
 - Choose `Entrar` (the form submit button).
 - Land on `/painel/` with the sidebar footer showing the username.
