@@ -155,7 +155,12 @@ def test_policy_blocks_cdn_origin_with_non_default_port():
 def test_policy_allows_default_and_explicit_default_port_origins():
     policy = browser.RequestPolicy(origin=ORIGIN)
     assert policy.decide(f"{ORIGIN}/painel/", "GET").allowed is True
-    assert policy.decide("https://portal-dev.verification.invalid:443/painel/", "GET").allowed is True
+    assert (
+        policy.decide(
+            "https://portal-dev.verification.invalid:443/painel/", "GET"
+        ).allowed
+        is True
+    )
     assert (
         policy.decide(
             "https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css", "GET"
@@ -218,7 +223,9 @@ def test_observations_record_js_errors_but_not_resource_load_noise():
 
 
 def test_observations_redact_credentials_from_every_channel():
-    observed = browser.Observations(browser.RequestPolicy(origin=ORIGIN), redactions=("SECRET-VALUE",))
+    observed = browser.Observations(
+        browser.RequestPolicy(origin=ORIGIN), redactions=("SECRET-VALUE",)
+    )
     observed.note_console("error", "token SECRET-VALUE rejected")
     observed.note_page_error("SECRET-VALUE")
     assert all("SECRET-VALUE" not in entry for entry in observed.js_errors)
