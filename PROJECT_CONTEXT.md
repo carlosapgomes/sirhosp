@@ -199,6 +199,22 @@ Para processamento de sumários, o padrão operacional atual utiliza:
 process_summary_runs --pipeline --loop
 ```
 
+### Verificação do portal dev
+
+A suíte de verificação do portal implantado é uma camada complementar,
+executada somente sob demanda do operador, nunca automaticamente e nunca
+exigida pelos gates oficiais de CI:
+
+- sessões efêmeras com revogação e timer (`scripts/verify_portal.py
+  doctor/open/status/close/run`);
+- smoke real por browser headless com evidências sanitizadas;
+- verificação assistida por MCP através da skill `verify-sirhosp`.
+
+Cada execução exige janela dev autorizada, dataset fictício confirmado,
+workers parados e preflight `doctor` aprovado.
+
+O runbook canônico é `docs/dev-verification.md`.
+
 Detalhes de deploy e operação pertencem a:
 
 - `deploy/README.md`;

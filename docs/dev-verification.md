@@ -8,6 +8,25 @@ The `run` command performs that same cycle around one repeatable headless
 browser session and its evidence.
 Do not use this flow on production. R8 operational proof stays BLOCKED until the operator authorizes a dev window and confirms a fictitious dataset.
 
+## When to use
+
+This suite is an explicitly requested complementary layer. It never runs
+automatically and is never required by the official gates: `check`, unit,
+integration, lint, and typecheck keep running in their isolated test
+containers without a dev portal or verification accounts.
+
+Run it when:
+
+- a slice or change has acceptance criteria that require runtime proof on
+  the deployed portal;
+- validating a portal deploy or investigating a web regression;
+- an operator wants an assisted MCP walkthrough of a feature.
+
+Each execution requires an operator-authorized dev window with a confirmed
+fictitious dataset, stopped workers, and the `doctor` preflight passing;
+`--confirm-fictitious` or `--confirm-synthetic-data` is always mandatory.
+See the skill `.pi/skills/verify-sirhosp/` for the MCP-assisted flow.
+
 ## Accounts and ownership
 
 The flow touches only `verify_user` and `verify_admin`.

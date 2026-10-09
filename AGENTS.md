@@ -852,6 +852,12 @@ features.
 
 Não construir framework genérico sem necessidade concreta.
 
+A suíte de verificação do portal implantado (sessões efêmeras + smoke por
+browser + skill MCP) é uma camada complementar sob demanda, documentada em
+`docs/dev-verification.md`: nunca roda automaticamente, nunca é exigida
+pelos gates oficiais e só executa em janela dev autorizada com dataset
+fictício confirmado e workers parados.
+
 ---
 
 ## 10. Política de slices
