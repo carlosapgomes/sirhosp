@@ -18,6 +18,7 @@ from apps.census.occupancy import (
     resolve_exact_measurement,
 )
 from apps.ingestion.patient_flow_findings import (
+    CODE_SUSPECTED_LEGACY_RESIDUAL,
     PatientFindingInput,
     build_patient_flow_findings,
 )
@@ -126,6 +127,7 @@ def bed_status_view(request):
         return render(request, "census/bed_status.html", {
             "page_title": "Leitos",
             "captured_at": None,
+            "residual_count": 0,
         })
 
     snapshots = CensusSnapshot.objects.filter(captured_at=latest_captured)
@@ -189,6 +191,13 @@ def bed_status_view(request):
         now=timezone.now(),
     )
 
+    # Residual-suspect card count (strategy A): derived from the already
+    # computed finding_map — no extra query, same census photo.
+    residual_count = sum(
+        1 for f in finding_map.values()
+        if f and f.code == CODE_SUSPECTED_LEGACY_RESIDUAL
+    )
+
     context = {
         "page_title": "Leitos",
         "captured_at": latest_captured,
@@ -198,6 +207,7 @@ def bed_status_view(request):
         "units": presentation.units,
         "measured_groups": [],
         "finding_map": finding_map,
+        "residual_count": residual_count,
     }
     if (
         measurement is not None

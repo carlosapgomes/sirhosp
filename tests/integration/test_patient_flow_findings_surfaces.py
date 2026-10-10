@@ -352,7 +352,13 @@ class TestBedStatusV5Finding:
 
         content = _render_beds(admin_client).content.decode()
         for label in ALL_LABELS:
+            if label == LABEL_RESIDUAL:
+                continue
             assert label not in content
+        # The v5 aggregate residual card links to /censo/ even at zero
+        # count; no per-patient finding badge is rendered.
+        assert "finding=residual" in content
+        assert 'role="status"' not in content
 
 
 # ── /beds: historical/physical and quality shapes (R2) ────────────────

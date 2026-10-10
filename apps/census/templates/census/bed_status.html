@@ -106,6 +106,15 @@
               </div>
             </div>
           </div>
+          <div class="col-6 col-md-4">
+            <a href="{% url 'services_portal:censo' %}?q=&unidade=&especialidade=&finding=residual&ordenar=tempo_desc" class="card border-0 shadow-sm text-decoration-none h-100 bg-warning bg-opacity-10">
+              <div class="card-body py-3 text-center">
+                <div class="fs-5 fw-bold text-warning-emphasis">{{ residual_count }}</div>
+                <div class="small text-muted">Suspeita de paciente residual</div>
+                <div class="small text-muted">Ver no censo</div>
+              </div>
+            </a>
+          </div>
         </div>
         {% if physical.v5_coverage %}
         <p class="small text-muted mb-3">
