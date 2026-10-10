@@ -1031,8 +1031,9 @@ class _FakeCDPSession:
         self.handlers: dict[str, Any] = {}
         self._fail = fail
         # Requests Chromium paused but neither continued nor failed yet. A
-        # successful ``send`` resolves its own request; ``detach`` resolves
-        # every paused request with ERR_ABORTED, like the real session.
+        # successful ``send`` resolves its own request; ``detach`` clears the
+        # remaining ids as fake-only bookkeeping. Real Chromium detach
+        # behavior is not asserted by this fake.
         self.pending: list[str] = []
         self.detached = False
         self.detach_calls = 0
@@ -1117,8 +1118,8 @@ class _FakeOwnedContext:
         if self.close_error is not None:
             raise RuntimeError(self.close_error)
         self.closed = True
-        # Closing the owned context detaches its CDP session, which resolves
-        # every paused request, like the real Chromium teardown.
+        # Fake-only bookkeeping: closing the owned context clears the fake's
+        # pending ids. Real Chromium teardown behavior is not asserted here.
         self.cdp.pending.clear()
 
 
