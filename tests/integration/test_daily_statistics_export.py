@@ -1,34 +1,37 @@
-"""DSRS-S7 integration tests: XLSX export and served-export audit.
+"""ZIP-per-sector export integration tests: archive and served-export audit.
 
-Covers the vertical slice requirements:
+Covers the statistics-export-zip-per-sector slice requirements:
 
-- R1: the export endpoint requires ``export_daily_statistics`` independently of
-  the consultation permission and serves a ``private, no-store`` response;
-- R2: the workbook has one worksheet per official grouping, valid and unique
-  sheet names with the full grouping name inside the sheet, plus the
-  conditional ``Setor não identificado`` worksheet whenever the revision
-  carries events with neither endpoint or closing patients without an
-  attributable sector, neither of which is ever omitted;
-- R3: every sheet keeps the fixed sections in order -- admissions, transfer
+- R1: the export endpoint serves a ZIP with one XLSX per rendered grouping, in
+  the order the page renders it, including the conditional ``setor_nao_``
+  ``identificado`` file whenever the revision carries events with neither
+  endpoint or closing patients without an attributable sector, neither of which
+  is ever omitted;
+- R2: the archive and its files carry the date and the revision, and each file
+  uses a unique ``snake_case`` ASCII slug of its grouping title;
+- R3: every file keeps the fixed sections in order -- admissions, transfer
   arrivals, deaths, transfer departures, hospital discharges, events with an
-  unidentified endpoint and the closing patients;
-- R4: empty sections stay present with a zero count and rows keep the fields
-  and the natural ordering of the page;
-- R5: text that starts with a formula-significant character is stored as safe
-  text;
-- R6: the workbook is built in memory, no file is persisted and the filename
-  depends only on the date and the revision;
-- R7: a served workbook records user, instant, selected date, revision and
-  aggregate counts, while a failure before the prepared response records
-  nothing;
-- R8: the audit log carries no nominal payload.
+  unidentified endpoint and the closing patients -- with counts, fields and
+  the natural ordering of the page, and formula-significant text stays text;
+- R4: the export endpoint requires ``export_daily_statistics`` independently
+  of the consultation permission and serves a ``private, no-store`` archive;
+- R5: a served archive records user, instant, selected date, revision,
+  ``file_count`` and aggregate row counts, while a failure before the prepared
+  response records nothing, and legacy audit rows read back with
+  ``file_count=1``;
+- R6: the archive is built in memory, no file is persisted and the query budget
+  does not grow with the revision;
+- R7: the page offers a single ``Exportar ZIP por setor`` action and no second
+  format or endpoint exists.
 
 Everything here uses synthetic runs, sectors, beds and patients; no real
-extraction data, no production access and no persisted workbook.
+extraction data, no production access and no persisted archive.
 """
 
 from __future__ import annotations
 
+import time
+import zipfile
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -37,7 +40,8 @@ from unittest.mock import patch
 
 import pytest
 from django.contrib.auth.models import Permission, User
-from django.db import connection
+from django.core.management import call_command
+from django.db import IntegrityError, connection
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -47,8 +51,13 @@ from openpyxl.worksheet.worksheet import Worksheet
 from apps.census.models import CapacityCatalogVersion
 from apps.patients.models import Patient
 from apps.statistics_reports.export import (
-    XLSX_CONTENT_TYPE,
-    build_export_workbook,
+    MAX_FILENAME_CHARS,
+    ZIP_CONTENT_TYPE,
+    build_sector_zip,
+    build_single_group_workbook,
+    sector_file_slugs,
+    sector_slug,
+    sector_xlsx_filename,
 )
 from apps.statistics_reports.models import DailyStatisticsReport, StatisticsExportLog
 from apps.statistics_reports.presentation import (
@@ -117,13 +126,30 @@ PATIENT_HEADERS = ["Leito", "Nome", "Prontuário", "Especialidade"]
 
 GERAL_SHEET = "Gerais"
 
+FORBIDDEN_FILENAME_CHARS = set('<>:"/\\|?*')
+
 
 def export_url() -> str:
     return reverse(EXPORT_URL_NAME)
 
 
-def _workbook(response: Any) -> Workbook:
-    return load_workbook(BytesIO(response.content))
+def _archive_files(response: Any) -> dict[str, Workbook]:
+    """Every XLSX of the served ZIP, reopened by file name."""
+    with zipfile.ZipFile(BytesIO(response.content)) as archive:
+        return {
+            name: load_workbook(BytesIO(archive.read(name)))
+            for name in archive.namelist()
+        }
+
+
+def _expected_filenames(projection: DailyReportProjection) -> list[str]:
+    """Archive file names the projection must produce, in page order."""
+    slugs = sector_file_slugs(
+        projection.report, [group.title for group in projection.groups]
+    )
+    return [
+        sector_xlsx_filename(projection.report, slug) for slug in slugs
+    ]
 
 
 def _section(worksheet: Worksheet, title: str) -> tuple[int, list[object], list[list[object]]]:
@@ -161,13 +187,27 @@ def _sheet_sections(worksheet: Worksheet) -> list[str]:
 
 
 def _data_row_count(workbook: Workbook) -> int:
-    """Aggregate data rows of one workbook, section titles excluded."""
+    """Aggregate data rows of one single-sheet XLSX, section titles excluded."""
     total = 0
     for name in workbook.sheetnames:
         worksheet = workbook[name]
         for title in EXPECTED_SECTIONS:
             total += len(_section(worksheet, title)[2])
     return total
+
+
+def _single_sheet(files: dict[str, Workbook]) -> Worksheet:
+    """The only worksheet of a one-file archive entry."""
+    assert len(files) == 1
+    workbook = next(iter(files.values()))
+    assert len(workbook.sheetnames) == 1
+    return workbook[workbook.sheetnames[0]]
+
+
+def archive_filenames(content: bytes) -> list[str]:
+    """File names of a ZIP archive built in memory."""
+    with zipfile.ZipFile(BytesIO(content)) as archive:
+        return archive.namelist()
 
 
 NO_GROUPING_SECTOR = "SETOR FORA DO CATALOGO"
@@ -279,7 +319,7 @@ def plain_client(db: None) -> Client:
 
 
 # ---------------------------------------------------------------------------
-# R1 - independent authorization and sensitive response policy
+# R4 - independent authorization and sensitive response policy
 # ---------------------------------------------------------------------------
 
 
@@ -311,30 +351,31 @@ class TestExportAuthorization:
     ) -> None:
         response = export_only_client.get(export_url(), {"date": DAY.isoformat()})
         assert response.status_code == 200
-        assert response["Content-Type"] == XLSX_CONTENT_TYPE
+        assert response["Content-Type"] == ZIP_CONTENT_TYPE
 
-    def test_served_workbook_is_private_and_not_stored(
+    def test_served_archive_is_private_and_not_stored(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         response = export_client.get(export_url(), {"date": DAY.isoformat()})
         assert response.status_code == 200
         assert response["Cache-Control"] == "private, no-store"
 
-    def test_unavailable_date_serves_no_workbook_and_logs_nothing(
+    def test_unavailable_date_serves_no_archive_and_logs_nothing(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         response = export_client.get(export_url(), {"date": (DAY + timedelta(days=2)).isoformat()})
         assert response.status_code == 404
         assert StatisticsExportLog.objects.count() == 0
 
-    def test_page_offers_the_export_link_with_the_export_permission(
+    def test_page_offers_the_zip_export_link_with_the_export_permission(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         response = export_client.get(page_url(), {"date": DAY.isoformat()})
         body = response.content.decode()
         assert response.status_code == 200
         assert f'href="{export_url()}?date={DAY.isoformat()}"' in body
-        assert "Exportar XLSX" in body
+        assert "Exportar ZIP por setor" in body
+        assert "Exportar XLSX" not in body
 
     def test_page_hides_the_export_link_without_the_export_permission(
         self, view_only_client: Client, report: DailyStatisticsReport
@@ -342,18 +383,19 @@ class TestExportAuthorization:
         response = view_only_client.get(page_url(), {"date": DAY.isoformat()})
         body = response.content.decode()
         assert response.status_code == 200
+        assert "Exportar ZIP por setor" not in body
         assert "Exportar XLSX" not in body
         assert export_url() not in body
 
 
 # ---------------------------------------------------------------------------
-# R6 - in-memory workbook and safe filename
+# R6 - in-memory archive and safe filenames (R2)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-class TestWorkbookDelivery:
-    def test_workbook_is_built_in_memory_only(
+class TestZipDelivery:
+    def test_workbooks_are_built_in_memory_only(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         saved: list[Any] = []
@@ -370,12 +412,12 @@ class TestWorkbookDelivery:
         assert saved
         assert all(isinstance(target, BytesIO) for target in saved)
 
-    def test_filename_depends_only_on_date_and_revision(
+    def test_archive_filename_depends_only_on_date_and_revision(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         response = export_client.get(export_url(), {"date": DAY.isoformat()})
         expected = (
-            f'attachment; filename="estatisticas-diarias-{DAY.isoformat()}-r{report.revision}.xlsx"'
+            f'attachment; filename="estatisticas-diarias-{DAY.isoformat()}-r{report.revision}.zip"'
         )
         assert response["Content-Disposition"] == expected
         assert MOVING_NAME not in response["Content-Disposition"]
@@ -386,102 +428,130 @@ class TestWorkbookDelivery:
         response = export_client.get(export_url(), {"date": DAY.isoformat()})
         filename = response["Content-Disposition"].split('filename="')[1][:-1]
         assert response.status_code == 200
-        assert filename.endswith(".xlsx")
+        assert filename.endswith(".zip")
         assert not (tmp_path / filename).exists()
         assert not (Path.cwd() / filename).exists()
 
-
-# ---------------------------------------------------------------------------
-# R2 - one sheet per grouping plus the conditional unknown sheet
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.django_db
-class TestWorkbookSheets:
-    def test_one_sheet_per_rendered_grouping(
+    def test_internal_filenames_carry_date_revision_and_unique_slugs(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         projection = build_daily_report_projection(report)
         response = export_client.get(export_url(), {"date": DAY.isoformat()})
-        workbook = _workbook(response)
-        assert workbook.sheetnames == [group.title for group in projection.groups]
+        with zipfile.ZipFile(BytesIO(response.content)) as archive:
+            names = archive.namelist()
+        stem = f"estatisticas-diarias-{DAY.isoformat()}-r{report.revision}"
+        assert names == _expected_filenames(projection)
+        assert len(names) == len(projection.groups)
+        assert len(set(names)) == len(names)
+        for name in names:
+            assert name.startswith(f"{stem}-")
+            assert name.endswith(".xlsx")
+            assert len(name) <= MAX_FILENAME_CHARS
+            assert name == name.encode("ascii").decode("ascii")
+            assert not name.startswith(".")
+            assert not FORBIDDEN_FILENAME_CHARS & set(name)
 
-    def test_sheet_identifies_its_full_grouping_name(
+
+# ---------------------------------------------------------------------------
+# R1 - one XLSX per grouping plus the conditional unknown file
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestZipFiles:
+    def test_one_file_per_rendered_grouping_in_page_order(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         projection = build_daily_report_projection(report)
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
-        for group in projection.groups:
-            worksheet = workbook[group.title]
+        response = export_client.get(export_url(), {"date": DAY.isoformat()})
+        files = _archive_files(response)
+        assert list(files) == _expected_filenames(projection)
+        assert len(files) == len(projection.groups)
+
+    def test_each_file_identifies_its_full_grouping_name(
+        self, export_client: Client, report: DailyStatisticsReport
+    ) -> None:
+        projection = build_daily_report_projection(report)
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
+        for group, name in zip(projection.groups, files, strict=True):
+            workbook = files[name]
+            assert len(workbook.sheetnames) == 1
+            worksheet = workbook[workbook.sheetnames[0]]
             assert worksheet.cell(row=1, column=1).value == group.title
             expected_key = group.stable_key or "sem agrupamento oficial"
             assert worksheet.cell(row=1, column=2).value == expected_key
+            assert (
+                worksheet.cell(row=2, column=1).value
+                == f"Data do relatório: {report.local_date.isoformat()}"
+            )
+            assert (
+                worksheet.cell(row=2, column=2).value
+                == f"Revisão: {report.revision}"
+            )
 
-    def test_sheet_names_are_valid_unique_and_keep_the_full_name(
+    def test_sheet_names_are_valid_and_keep_the_full_name(
         self, report: DailyStatisticsReport
     ) -> None:
         long_title = "SETOR " + "MUITO LONGO " * 4
-        projection = DailyReportProjection(
-            report=report,
-            groups=(
-                ReportGroup(
-                    key="a",
-                    stable_key="A",
-                    title="SETOR COLIDE:1",
-                    is_unknown_section=False,
-                    header_badges=(),
-                ),
-                ReportGroup(
-                    key="b",
-                    stable_key="B",
-                    title="SETOR COLIDE/1",
-                    is_unknown_section=False,
-                    header_badges=(),
-                ),
-                ReportGroup(
-                    key="c",
-                    stable_key="C",
-                    title=long_title,
-                    is_unknown_section=False,
-                    header_badges=(),
-                ),
-                ReportGroup(
-                    key="d",
-                    stable_key="D",
-                    title="SETOR [INVALIDO]?",
-                    is_unknown_section=False,
-                    header_badges=(),
-                ),
-            ),
+        titles = [
+            "SETOR COLIDE:1",
+            "SETOR COLIDE/1",
+            long_title,
+            "SETOR [INVALIDO]?",
+        ]
+        slugs = sector_file_slugs(report, titles)
+        assert len(set(slugs)) == len(titles)
+        groups = tuple(
+            ReportGroup(
+                key=key,
+                stable_key=key,
+                title=title,
+                is_unknown_section=False,
+                header_badges=(),
+            )
+            for key, title in zip(("a", "b", "c", "d"), titles, strict=True)
         )
-        workbook = load_workbook(BytesIO(build_export_workbook(projection).content))
-        names = workbook.sheetnames
-        assert len(names) == 4
-        assert len(set(names)) == 4
-        for name in names:
-            assert len(name) <= 31
-            assert not set(name) & set("[]:*?/\\")
-        assert names[0] == "SETOR COLIDE 1"
-        assert names[1] == "SETOR COLIDE 1 (2)"
-        assert workbook[names[2]].cell(row=1, column=1).value == long_title
+        # Each archived file holds a single sheet, so sheets never collide
+        # with each other: uniqueness across files lives in the slugs while
+        # each sheet only needs a valid name and the full title inside.
+        for group, slug in zip(groups, slugs, strict=True):
+            single = build_single_group_workbook(group, report, slug)
+            assert single.filename == sector_xlsx_filename(report, slug)
+            workbook = load_workbook(BytesIO(single.content))
+            assert len(workbook.sheetnames) == 1
+            sheet = workbook[workbook.sheetnames[0]]
+            assert len(sheet.title) <= 31
+            assert not set(sheet.title) & set("[]:*?/\\")
+            assert sheet.cell(row=1, column=1).value == group.title
+        assert slugs[0] == "setor_colide_1"
+        assert slugs[1] == "setor_colide_1_2"
 
-    def test_unknown_section_becomes_a_conditional_sheet(
+    def test_unknown_section_becomes_a_conditional_file(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
-        assert UNKNOWN_SECTION_TITLE in workbook.sheetnames
-        unknown = workbook[UNKNOWN_SECTION_TITLE]
+        projection = build_daily_report_projection(report)
+        assert projection.unknown_section is not None
+        unknown_name = sector_xlsx_filename(
+            report, sector_slug(UNKNOWN_SECTION_TITLE)
+        )
+        assert unknown_name == _expected_filenames(projection)[0]
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
+        unknown = _single_sheet({unknown_name: files[unknown_name]})
         values = [cell.value for row in unknown.iter_rows() for cell in row]
         assert UNATTRIBUTED_NAME in values
-        for name in workbook.sheetnames:
-            if name == UNKNOWN_SECTION_TITLE:
+        for name, workbook in files.items():
+            if name == unknown_name:
                 continue
-            other = workbook[name]
+            other = workbook[workbook.sheetnames[0]]
             assert UNATTRIBUTED_NAME not in [
                 cell.value for row in other.iter_rows() for cell in row
             ]
 
-    def test_unattributable_patient_alone_creates_the_conditional_sheet(
+    def test_unattributable_patient_alone_creates_the_conditional_file(
         self, export_client: Client, catalog: CapacityCatalogVersion
     ) -> None:
         report = _patient_only_unattributable_report(catalog)
@@ -495,23 +565,26 @@ class TestWorkbookSheets:
             patient.record for patient in projection.unknown_section.patients
         ] == [NO_GROUPING_PATIENT]
 
-        workbook = _workbook(
+        files = _archive_files(
             export_client.get(export_url(), {"date": DAY.isoformat()})
         )
-        assert workbook.sheetnames == [group.title for group in projection.groups]
-        assert workbook.sheetnames.count(UNKNOWN_SECTION_TITLE) == 1
-        unknown = workbook[UNKNOWN_SECTION_TITLE]
+        assert list(files) == _expected_filenames(projection)
+        assert len(files) == len(projection.groups)
+        unknown_name = sector_xlsx_filename(
+            report, sector_slug(UNKNOWN_SECTION_TITLE)
+        )
+        unknown = _single_sheet({unknown_name: files[unknown_name]})
         values = [cell.value for row in unknown.iter_rows() for cell in row]
         assert NO_GROUPING_NAME in values
-        for name in workbook.sheetnames:
-            if name == UNKNOWN_SECTION_TITLE:
+        for name, workbook in files.items():
+            if name == unknown_name:
                 continue
-            other = workbook[name]
+            other = workbook[workbook.sheetnames[0]]
             assert NO_GROUPING_NAME not in [
                 cell.value for row in other.iter_rows() for cell in row
             ]
 
-    def test_unknown_sheet_is_absent_without_unattributable_rows(
+    def test_unknown_file_is_absent_without_unattributable_rows(
         self, catalog: CapacityCatalogVersion
     ) -> None:
         report = _materialize_day(
@@ -526,46 +599,73 @@ class TestWorkbookSheets:
         assert not report.patients.filter(sector__isnull=True).exists()
         projection = build_daily_report_projection(report)
         assert projection.unknown_section is None
-        workbook = load_workbook(BytesIO(build_export_workbook(projection).content))
-        assert UNKNOWN_SECTION_TITLE not in workbook.sheetnames
+        archive = build_sector_zip(projection)
+        assert (
+            sector_xlsx_filename(report, sector_slug(UNKNOWN_SECTION_TITLE))
+            not in archive_filenames(archive.content)
+        )
 
     def test_event_without_any_endpoint_is_never_omitted(
         self, export_client: Client, catalog: CapacityCatalogVersion
     ) -> None:
         _death_evidence(record=DEATH_PATIENT, name=DEATH_NAME)
-        _materialize_day(
+        made = _materialize_day(
             catalog=catalog,
             local_date=DAY,
             lines=_death_lines(),
             closing_lines=_closing_lines_with_ordering(),
         )
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
-        unknown = workbook[UNKNOWN_SECTION_TITLE]
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
+        unknown_name = sector_xlsx_filename(
+            made,
+            sector_slug(UNKNOWN_SECTION_TITLE),
+        )
+        unknown = _single_sheet({unknown_name: files[unknown_name]})
         values = [cell.value for row in unknown.iter_rows() for cell in row]
         assert DEATH_NAME in values
         assert DEATH_PATIENT in values
 
 
 # ---------------------------------------------------------------------------
-# R3/R4 - fixed sections, counts, fields and natural ordering
+# R3 - fixed sections, counts, fields and natural ordering per file
 # ---------------------------------------------------------------------------
 
 
+def _geral_file(
+    files: dict[str, Workbook], projection: DailyReportProjection
+) -> Workbook:
+    """The archived XLSX of the official ``GERAL`` grouping."""
+    group = _group_of(projection, GERAL_KEY)
+    name = sector_xlsx_filename(
+        projection.report, sector_slug(group.title)
+    )
+    return files[name]
+
+
 @pytest.mark.django_db
-class TestSheetSections:
-    def test_every_sheet_keeps_the_fixed_sections_in_order(
+class TestFileSections:
+    def test_every_file_keeps_the_fixed_sections_in_order(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
-        assert workbook.sheetnames
-        for name in workbook.sheetnames:
-            assert tuple(_sheet_sections(workbook[name])) == EXPECTED_SECTIONS
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
+        assert files
+        for workbook in files.values():
+            assert len(workbook.sheetnames) == 1
+            worksheet = workbook[workbook.sheetnames[0]]
+            assert tuple(_sheet_sections(worksheet)) == EXPECTED_SECTIONS
 
     def test_empty_sections_stay_present_with_a_zero_count(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
-        worksheet = workbook[GERAL_SHEET]
+        projection = build_daily_report_projection(report)
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
+        worksheet = _geral_file(files, projection)[GERAL_SHEET]
         count, headers, rows = _section(worksheet, "Internações")
         assert count == 0
         assert rows == []
@@ -575,9 +675,11 @@ class TestSheetSections:
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         projection = build_daily_report_projection(report)
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
-        for group in projection.groups:
-            worksheet = workbook[group.title]
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
+        for group, name in zip(projection.groups, files, strict=True):
+            worksheet = files[name][files[name].sheetnames[0]]
             assert _section(worksheet, "Internações")[0] == len(group.admissions)
             assert _section(worksheet, "Transferências de entrada")[0] == len(
                 group.transfer_entries
@@ -595,8 +697,11 @@ class TestSheetSections:
     ) -> None:
         projection = build_daily_report_projection(report)
         group = _group_of(projection, GERAL_KEY)
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
-        _, headers, rows = _section(workbook[group.title], "Pacientes do fechamento")
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
+        worksheet = _geral_file(files, projection)[GERAL_SHEET]
+        _, headers, rows = _section(worksheet, "Pacientes do fechamento")
         assert headers == PATIENT_HEADERS
         assert [row[1] for row in rows] == [patient.name for patient in group.patients]
         assert [row[0] for row in rows] == [patient.bed for patient in group.patients]
@@ -608,9 +713,12 @@ class TestSheetSections:
     ) -> None:
         projection = build_daily_report_projection(report)
         group = _group_of(projection, GERAL_KEY)
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
+        worksheet = _geral_file(files, projection)[GERAL_SHEET]
         _, headers, rows = _section(
-            workbook[group.title],
+            worksheet,
             "Eventos com origem ou destino não identificado",
         )
         assert headers == EVENT_HEADERS
@@ -634,7 +742,7 @@ class TestSheetSections:
 
 
 # ---------------------------------------------------------------------------
-# R5 - formula-significant text is written as safe text
+# R3 - formula-significant text is written as safe text
 # ---------------------------------------------------------------------------
 
 
@@ -660,9 +768,14 @@ class TestFormulaSafety:
             lines=_anchor_lines() + extra,
             closing_lines=_closing_lines_with_ordering() + extra,
         )
-        workbook = _workbook(export_client.get(export_url(), {"date": DAY.isoformat()}))
+        made = DailyStatisticsReport.objects.get(local_date=DAY, status="ready")
+        projection = build_daily_report_projection(made)
+        files = _archive_files(
+            export_client.get(export_url(), {"date": DAY.isoformat()})
+        )
         found: dict[str, str] = {}
-        for row in workbook[GERAL_SHEET].iter_rows():
+        worksheet = _geral_file(files, projection)[GERAL_SHEET]
+        for row in worksheet.iter_rows():
             for cell in row:
                 if cell.value in dangerous:
                     found[cell.value] = cell.data_type
@@ -671,7 +784,7 @@ class TestFormulaSafety:
 
 
 # ---------------------------------------------------------------------------
-# R7/R8 - served-export audit log
+# R5 - served-export audit log
 # ---------------------------------------------------------------------------
 
 
@@ -680,8 +793,9 @@ class TestExportAudit:
     def test_success_logs_user_date_revision_and_aggregate_counts(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
+        projection = build_daily_report_projection(report)
         response = export_client.get(export_url(), {"date": DAY.isoformat()})
-        workbook = _workbook(response)
+        files = _archive_files(response)
         logs = list(StatisticsExportLog.objects.all())
         assert len(logs) == 1
         log = logs[0]
@@ -689,8 +803,11 @@ class TestExportAudit:
         assert log.report == report
         assert log.report.local_date == DAY
         assert log.report.revision == report.revision
-        assert log.sheet_count == len(workbook.sheetnames)
-        assert log.row_count == _data_row_count(workbook)
+        assert log.file_count == len(files) == len(projection.groups)
+        assert log.sheet_count == log.file_count
+        assert log.row_count == sum(
+            _data_row_count(workbook) for workbook in files.values()
+        )
         assert log.row_count > 0
         assert log.served_at is not None
 
@@ -698,8 +815,8 @@ class TestExportAudit:
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         with patch(
-            "apps.statistics_reports.views.build_export_workbook",
-            side_effect=RuntimeError("workbook generation failed"),
+            "apps.statistics_reports.views.build_sector_zip",
+            side_effect=RuntimeError("archive generation failed"),
         ):
             with pytest.raises(RuntimeError):
                 export_client.get(export_url(), {"date": DAY.isoformat()})
@@ -734,13 +851,55 @@ class TestExportAudit:
             "user",
             "report",
             "served_at",
+            "file_count",
             "sheet_count",
             "row_count",
         }
 
+    def test_new_rows_require_an_explicit_file_count(
+        self, export_client: Client, report: DailyStatisticsReport
+    ) -> None:
+        user = User.objects.get(username="exportador")
+        with pytest.raises(IntegrityError):
+            StatisticsExportLog.objects.create(
+                user=user,
+                report=report,
+                sheet_count=1,
+                row_count=1,
+            )
+
+    @pytest.mark.django_db(transaction=True)
+    def test_legacy_rows_are_backfilled_with_file_count_one(
+        self, catalog: CapacityCatalogVersion
+    ) -> None:
+        report = _materialize_day(
+            catalog=catalog,
+            local_date=DAY,
+            lines=_anchor_lines(),
+            closing_lines=_closing_lines_with_ordering(),
+        )
+        user = User.objects.create_user(username="legado", password="testpass123")
+        call_command(
+            "migrate", "statistics_reports", "0005", verbosity=0, interactive=False
+        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO statistics_reports_statisticsexportlog
+                    (served_at, sheet_count, row_count, report_id, user_id)
+                VALUES (NOW(), 3, 10, %s, %s)
+                """,
+                [report.pk, user.pk],
+            )
+        call_command("migrate", "statistics_reports", verbosity=0, interactive=False)
+        log = StatisticsExportLog.objects.get(report=report, user=user)
+        assert log.sheet_count == 3
+        assert log.row_count == 10
+        assert log.file_count == 1
+
 
 # ---------------------------------------------------------------------------
-# Bounded read of the same projection as the page
+# R6 - bounded read of the same projection as the page, plus load evidence
 # ---------------------------------------------------------------------------
 
 
@@ -763,44 +922,82 @@ class TestExportQueryBudget:
             big = export_client.get(export_url(), {"date": WIDE_DAY.isoformat()})
         assert small.status_code == 200
         assert big.status_code == 200
-        assert len(_workbook(big).sheetnames) > len(_workbook(small).sheetnames)
+        assert len(_archive_files(big)) > len(_archive_files(small))
         assert len(big_ctx) == len(small_ctx)
+
+    def test_amplified_wide_day_zip_reports_size_and_time(
+        self, export_client: Client, catalog: CapacityCatalogVersion
+    ) -> None:
+        wide_lines, wide_closing, payload = _wide_day_payload()
+        heavy_extra = [
+            _patient_line(
+                code=GERAL_CODE,
+                sector=GERAL_SECTOR,
+                bed=f"990-H{index}",
+                record=f"9810{index:03d}",
+                name=f"PACIENTE CARGA {index:03d}",
+            )
+            for index in range(300)
+        ]
+        _materialize_day(
+            catalog=catalog,
+            local_date=WIDE_DAY,
+            lines=wide_lines + heavy_extra,
+            closing_lines=wide_closing + heavy_extra,
+            groups=payload["groups"],
+        )
+        started = time.perf_counter()
+        response = export_client.get(export_url(), {"date": WIDE_DAY.isoformat()})
+        elapsed = time.perf_counter() - started
+        assert response.status_code == 200
+        assert response["Content-Type"] == ZIP_CONTENT_TYPE
+        files = _archive_files(response)
+        assert files
+        for workbook in files.values():
+            assert len(workbook.sheetnames) == 1
+        print(
+            f"\n[zip-load] files={len(files)} "
+            f"bytes={len(response.content)} "
+            f"seconds={elapsed:.2f}"
+        )
 
 
 # ---------------------------------------------------------------------------
-# LSPA-S1 - the workbook never carries the read-time navigation
+# LSPA-S1 - the archive never carries the read-time navigation
 # ---------------------------------------------------------------------------
 
 REGISTERED_PATIENT_PK = 908172
-"""Identifier no count, label or revision of the workbook can carry."""
+"""Identifier no count, label or revision of the archive can carry."""
 
 
-def _workbook_cell_values(
-    workbook: Workbook,
-) -> dict[tuple[str, int, int], object]:
-    """Every written cell of one workbook, keyed by sheet, row and column."""
+def _archive_cell_values(
+    files: dict[str, Workbook],
+) -> dict[tuple[str, str, int, int], object]:
+    """Every written cell of one archive, keyed by file, sheet, row, column."""
     return {
-        (name, cell.row, cell.column): cell.value
-        for name in workbook.sheetnames
-        for row in workbook[name].iter_rows()
+        (name, sheet, cell.row, cell.column): cell.value
+        for name, workbook in files.items()
+        for sheet in workbook.sheetnames
+        for row in workbook[sheet].iter_rows()
         for cell in row
     }
 
 
 @pytest.mark.django_db
-class TestWorkbookWithoutNominalNavigation:
-    def test_workbook_is_unchanged_while_the_projection_resolves_records(
+class TestArchiveWithoutNominalNavigation:
+    def test_archive_is_unchanged_while_the_projection_resolves_records(
         self, export_client: Client, report: DailyStatisticsReport
     ) -> None:
         fingerprint = report.source_fingerprint
-        without_resolution = _workbook_cell_values(
-            load_workbook(
-                BytesIO(
-                    build_export_workbook(
+        without_resolution = _archive_cell_values(
+            {
+                name: load_workbook(BytesIO(content))
+                for name, content in _raw_zip_entries(
+                    build_sector_zip(
                         build_daily_report_projection(report)
                     ).content
-                )
-            )
+                ).items()
+            }
         )
         registered = Patient.objects.create(
             pk=REGISTERED_PATIENT_PK,
@@ -817,16 +1014,17 @@ class TestWorkbookWithoutNominalNavigation:
 
         response = export_client.get(export_url(), {"date": DAY.isoformat()})
         assert response.status_code == 200
-        workbook = _workbook(response)
-        assert _workbook_cell_values(workbook) == without_resolution
+        files = _archive_files(response)
+        assert _archive_cell_values(files) == without_resolution
         assert not any(
             value == registered.pk or value == str(registered.pk)
             for value in without_resolution.values()
         )
-        count, headers, rows = _section(
-            workbook[GERAL_SHEET], "Pacientes do fechamento"
-        )
         geral = _group_of(projection, GERAL_KEY)
+        worksheet = _geral_file(files, projection)[GERAL_SHEET]
+        count, headers, rows = _section(
+            worksheet, "Pacientes do fechamento"
+        )
         assert headers == PATIENT_HEADERS
         assert count == len(geral.patients)
         assert [row[1] for row in rows] == [
@@ -838,3 +1036,48 @@ class TestWorkbookWithoutNominalNavigation:
             ).source_fingerprint
             == fingerprint
         )
+
+
+def _raw_zip_entries(content: bytes) -> dict[str, bytes]:
+    """Raw bytes of every entry of a ZIP archive built in memory."""
+    with zipfile.ZipFile(BytesIO(content)) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
+# ---------------------------------------------------------------------------
+# R7 - single export path: no parallel endpoint or format
+# ---------------------------------------------------------------------------
+
+
+def test_no_parallel_export_endpoint_or_format() -> None:
+    """The ZIP replaces the single-workbook download; nothing runs beside it."""
+    from django.urls import URLPattern, URLResolver, get_resolver
+
+    from apps.statistics_reports import export as export_module
+    from apps.statistics_reports import views as views_module
+
+    seen: list[str] = []
+
+    def collect(patterns: list[URLPattern | URLResolver]) -> None:
+        for entry in patterns:
+            if isinstance(entry, URLResolver):
+                collect(entry.url_patterns)
+            else:
+                seen.append(str(entry.pattern))
+
+    collect(get_resolver().url_patterns)
+    statistics_routes = [route for route in seen if "statistics" in route]
+    assert statistics_routes == [
+        "statistics/",
+        "statistics/export/",
+    ]
+    assert not hasattr(export_module, "build_export_workbook")
+    assert not hasattr(export_module, "export_filename")
+    assert not hasattr(export_module, "XLSX_CONTENT_TYPE")
+    assert not hasattr(views_module, "build_export_workbook")
+    template = open(
+        "apps/statistics_reports/templates/statistics_reports/daily_report.html"
+    ).read()
+    assert "Exportar ZIP por setor" in template
+    assert "Exportar XLSX" not in template
+    assert "?format" not in template

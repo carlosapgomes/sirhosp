@@ -1,12 +1,13 @@
-"""In-memory XLSX export of one daily statistics revision (DSRS-S7).
+"""In-memory ZIP export of one daily statistics revision (DSRS-S7).
 
 The exporter reads exactly the projection the authorized page renders, so the
-workbook can never disagree with the screen it mirrors:
+archive can never disagree with the screen it mirrors:
 
-- every rendered group becomes one worksheet, in the order the page renders it,
-  and the conditional report-level group becomes the ``Setor não identificado``
-  worksheet without pretending to be an official grouping;
-- every worksheet keeps the fixed sections in the required order -- admissions,
+- every rendered group becomes one single-sheet XLSX file, in the order the
+  page renders it, and the conditional report-level group becomes the
+  ``setor_nao_identificado`` file without pretending to be an official
+  grouping;
+- every file keeps the fixed sections in the required order -- admissions,
   transfer arrivals, deaths, transfer departures, hospital discharges, events
   with an unidentified endpoint and the closing patients -- including the empty
   ones, each showing its own count beside the title;
@@ -14,20 +15,24 @@ workbook can never disagree with the screen it mirrors:
   already computed for the page, and a missing value stays missing instead of
   being filled in;
 - a value that starts with a formula-significant character is stored as text,
-  and a sheet label that Excel would reject or collide with is normalized,
+  a sheet label that Excel would reject or collide with is normalized,
   truncated and de-duplicated deterministically while the full grouping name
-  stays inside the sheet;
-- the workbook is built in memory and handed over as bytes: no path is opened,
+  stays inside the sheet, and each file name carries the date, the revision
+  and a unique ``snake_case`` ASCII slug of the grouping title;
+- the archive is built in memory and handed over as bytes: no path is opened,
   no file is persisted and the download name carries only the date and the
   revision.
 
 This module is read-only with respect to the database: it never writes, never
 materializes and never audits. The served-export audit row is committed by the
-view only after the workbook exists.
+view only after the archive exists.
 """
 
 from __future__ import annotations
 
+import re
+import unicodedata
+import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from io import BytesIO
@@ -46,10 +51,20 @@ from apps.statistics_reports.presentation import (
     ReportGroup,
 )
 
-XLSX_CONTENT_TYPE = (
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-"""Media type of the workbook served by the export endpoint."""
+ZIP_CONTENT_TYPE = "application/zip"
+"""Media type of the archive served by the export endpoint."""
+
+ZIP_FILENAME_SUFFIX = ".zip"
+"""Extension of the served archive."""
+
+XLSX_FILENAME_SUFFIX = ".xlsx"
+"""Extension of each sector file inside the archive."""
+
+MAX_FILENAME_CHARS = 120
+"""Maximum file name length, archive and sector files alike."""
+
+SECTOR_SLUG_FALLBACK = "setor"
+"""Slug used when a grouping title keeps no usable ASCII character."""
 
 SHEET_TITLE_LIMIT = 31
 """Maximum worksheet name length Excel accepts."""
@@ -112,7 +127,7 @@ SECTIONS: tuple[SheetSection, ...] = (
 
 @dataclass(frozen=True)
 class ExportWorkbook:
-    """One workbook built in memory and ready to be served."""
+    """One single-group workbook built in memory and ready to be archived."""
 
     filename: str
     content: bytes
@@ -120,47 +135,132 @@ class ExportWorkbook:
     row_count: int
 
 
-def build_export_workbook(
+@dataclass(frozen=True)
+class SectorExportZip:
+    """One archive with a single-sheet XLSX per rendered group."""
+
+    filename: str
+    content: bytes
+    file_count: int
+    row_count: int
+
+
+def build_sector_zip(
     projection: DailyReportProjection,
-) -> ExportWorkbook:
-    """Build the workbook of one rendered revision, entirely in memory.
+) -> SectorExportZip:
+    """Build the archive of one rendered revision, entirely in memory.
 
-    Every rendered group becomes one worksheet in the order the page renders
-    it; the conditional report-level group becomes the ``Setor não identificado``
-    worksheet that mirrors the page section. No filesystem path is ever used
-    and the returned bytes are the whole, finalized workbook.
+    Every rendered group becomes one XLSX file in the order the page renders
+    it; the conditional report-level group becomes the ``setor_nao_identificado``
+    file that mirrors the page section. Each file holds a single worksheet
+    written by ``_write_group_sheet``. No filesystem path is ever used and the
+    returned bytes are the whole, finalized archive.
     """
-    workbook = Workbook()
-    titles = sheet_titles([group.title for group in projection.groups])
-    worksheets: list[Worksheet] = []
-    for title in titles:
-        if worksheets:
-            worksheets.append(workbook.create_sheet(title=title))
-        else:
-            first = workbook.active
-            first.title = title
-            worksheets.append(first)
-
+    slugs = sector_file_slugs(
+        projection.report, [group.title for group in projection.groups]
+    )
+    zip_buffer = BytesIO()
     row_count = 0
-    for worksheet, group in zip(worksheets, projection.groups, strict=True):
-        row_count += _write_group_sheet(
-            worksheet=worksheet, group=group, report=projection.report
-        )
-
-    buffer = BytesIO()
-    workbook.save(buffer)
-    return ExportWorkbook(
-        filename=export_filename(projection.report),
-        content=buffer.getvalue(),
-        sheet_count=len(workbook.sheetnames),
+    with zipfile.ZipFile(
+        zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED
+    ) as archive:
+        for group, slug in zip(projection.groups, slugs, strict=True):
+            single = build_single_group_workbook(group, projection.report, slug)
+            archive.writestr(single.filename, single.content)
+            row_count += single.row_count
+    return SectorExportZip(
+        filename=export_zip_filename(projection.report),
+        content=zip_buffer.getvalue(),
+        file_count=len(slugs),
         row_count=row_count,
     )
 
 
-def export_filename(report: DailyStatisticsReport) -> str:
-    """Safe download name built only from the date and the revision."""
+def build_single_group_workbook(
+    group: ReportGroup, report: DailyStatisticsReport, slug: str
+) -> ExportWorkbook:
+    """Build the single-sheet workbook of one rendered group, in memory.
+
+    ``slug`` is the archive-unique slug of the group (see ``sector_file_slugs``)
+    so the standalone file name already matches the archived one. No
+    filesystem path is ever used.
+    """
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = sheet_titles([group.title])[0]
+    row_count = _write_group_sheet(
+        worksheet=sheet, group=group, report=report
+    )
+    buffer = BytesIO()
+    workbook.save(buffer)
+    return ExportWorkbook(
+        filename=sector_xlsx_filename(report, slug),
+        content=buffer.getvalue(),
+        sheet_count=1,
+        row_count=row_count,
+    )
+
+
+def export_zip_filename(report: DailyStatisticsReport) -> str:
+    """Safe archive name built only from the date and the revision."""
+    return f"{_export_stem(report)}{ZIP_FILENAME_SUFFIX}"
+
+
+def sector_xlsx_filename(report: DailyStatisticsReport, slug: str) -> str:
+    """Safe sector file name: date, revision and the archive-unique slug."""
+    return f"{_export_stem(report)}-{slug}{XLSX_FILENAME_SUFFIX}"
+
+
+def sector_file_slugs(
+    report: DailyStatisticsReport, titles: Sequence[str]
+) -> tuple[str, ...]:
+    """Archive-unique slugs of the given grouping titles, in order.
+
+    Each slug is truncated so its full file name fits the file name limit, and
+    a collision -- including one the normalization itself created -- is resolved
+    with a stable numeric suffix while the full name stays inside the sheet.
+    """
+    max_slug = _max_sector_slug_length(report)
+    used: set[str] = set()
+    resolved: list[str] = []
+    for title in titles:
+        base = sector_slug(title)[:max_slug] or SECTOR_SLUG_FALLBACK[:max_slug]
+        candidate = base
+        index = 2
+        while candidate.casefold() in used:
+            suffix = f"_{index}"
+            candidate = f"{base[: max_slug - len(suffix)]}{suffix}"
+            index += 1
+        used.add(candidate.casefold())
+        resolved.append(candidate)
+    return tuple(resolved)
+
+
+def sector_slug(title: str) -> str:
+    """One grouping title reduced to a ``snake_case`` ASCII slug.
+
+    The title is decomposed, stripped of diacritics, lowercased, and every run
+    of characters outside ``[a-z0-9]`` becomes one underscore; a title that
+    keeps no usable character falls back to ``setor``.
+    """
+    decomposed = unicodedata.normalize("NFKD", title)
+    ascii_text = decomposed.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "_", ascii_text.lower()).strip("_")
+    return slug or SECTOR_SLUG_FALLBACK
+
+
+def _export_stem(report: DailyStatisticsReport) -> str:
+    """Shared stem of the archive and its files: date and revision only."""
     return (
-        f"{FILENAME_PREFIX}-{report.local_date.isoformat()}-r{report.revision}.xlsx"
+        f"{FILENAME_PREFIX}-{report.local_date.isoformat()}-r{report.revision}"
+    )
+
+
+def _max_sector_slug_length(report: DailyStatisticsReport) -> int:
+    """Longest slug whose full file name still fits the file name limit."""
+    return max(
+        1,
+        MAX_FILENAME_CHARS - len(_export_stem(report)) - 1 - len(XLSX_FILENAME_SUFFIX),
     )
 
 

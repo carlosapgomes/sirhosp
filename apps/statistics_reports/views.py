@@ -4,9 +4,9 @@ The page renders one materialized revision and nothing else: the projection
 service owns every wording and every grouping, this view only authorizes the
 request, resolves the selected date, denies the sensitive response to shared
 caches and hands the projection to the template. The export endpoint requires
-its own permission, builds the workbook of that same projection in memory and
-only then records the served-export audit row. No report is materialized,
-corrected or recalculated here and no workbook is ever persisted.
+its own permission, builds the ZIP archive of that same projection in memory
+and only then records the served-export audit row. No report is materialized,
+corrected or recalculated here and no archive is ever persisted.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from django.http import Http404, HttpRequest, HttpResponse
 from django.shortcuts import render
 
 from apps.statistics_reports.export import (
-    XLSX_CONTENT_TYPE,
-    build_export_workbook,
+    ZIP_CONTENT_TYPE,
+    build_sector_zip,
 )
 from apps.statistics_reports.models import StatisticsExportLog
 from apps.statistics_reports.presentation import (
@@ -71,13 +71,13 @@ def daily_report_view(request: HttpRequest) -> HttpResponse:
 
 @login_required
 def daily_report_export_view(request: HttpRequest) -> HttpResponse:
-    """Serve the XLSX workbook of the selected date's current revision.
+    """Serve the ZIP archive of the selected date's current revision.
 
-    The export permission is required on its own. The workbook reproduces the
-    same projection the page renders, is built in memory and is never stored;
-    a date without a ready revision has nothing to export and is answered as
-    not found, and the audit row is created only after the response is fully
-    built and configured and ready to be served.
+    The export permission is required on its own. The archive holds one XLSX
+    per rendered group of the same projection the page renders, is built in
+    memory and is never stored; a date without a ready revision has nothing to
+    export and is answered as not found, and the audit row is created only
+    after the response is fully built and configured and ready to be served.
     """
     if not request.user.has_perm(EXPORT_PERMISSION):
         raise PermissionDenied
@@ -90,26 +90,28 @@ def daily_report_export_view(request: HttpRequest) -> HttpResponse:
     if projection is None:
         raise Http404("No materialized daily statistics report for this date")
 
-    workbook = build_export_workbook(projection)
+    archive = build_sector_zip(projection)
 
-    response = HttpResponse(workbook.content, content_type=XLSX_CONTENT_TYPE)
+    response = HttpResponse(archive.content, content_type=ZIP_CONTENT_TYPE)
     response["Content-Disposition"] = (
-        f'attachment; filename="{workbook.filename}"'
+        f'attachment; filename="{archive.filename}"'
     )
-    # The workbook is nominal content too: it stays private to the user and
+    # The archive is nominal content too: it stays private to the user and
     # shared caches may not store it.
     response["Cache-Control"] = "private, no-store"
-    # The audit row means "workbook generated and ready to be served": it is
+    # The audit row means "archive generated and ready to be served": it is
     # committed only after the response is fully built and configured, so a
-    # failure while generating the workbook or while preparing the response
+    # failure while generating the archive or while preparing the response
     # never records a success. It carries aggregate counts and the exact
-    # revision, no nominal payload.
+    # revision, no nominal payload. Every archived XLSX holds a single sheet,
+    # so the sheet count matches the file count.
     StatisticsExportLog.objects.create(
         # request.user is guaranteed authenticated by @login_required.
         user=request.user,  # type: ignore[misc]
         report=projection.report,
-        sheet_count=workbook.sheet_count,
-        row_count=workbook.row_count,
+        file_count=archive.file_count,
+        sheet_count=archive.file_count,
+        row_count=archive.row_count,
     )
     return response
 

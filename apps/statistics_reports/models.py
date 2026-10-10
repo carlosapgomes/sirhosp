@@ -522,13 +522,13 @@ class DailyStatisticsEvent(models.Model):
 
 
 class StatisticsExportLog(models.Model):
-    """One audit row of a daily statistics workbook served to a user.
+    """One audit row of a daily statistics archive served to a user.
 
     The log answers who received which reproducible revision and how much was
     served, and nothing else: it keeps aggregate counts and references only,
-    never a patient name, record or row content, and the workbook it describes
+    never a patient name, record or row content, and the archive it describes
     is generated in memory and never persisted. A row is created only after the
-    workbook exists and the response is ready to be served, so a failed
+    archive exists and the response is ready to be served, so a failed
     generation leaves no success behind.
     """
 
@@ -536,17 +536,20 @@ class StatisticsExportLog(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="daily_statistics_exports",
-        help_text="Authenticated user the workbook was served to",
+        help_text="Authenticated user the archive was served to",
     )
     report = models.ForeignKey(
         DailyStatisticsReport,
         on_delete=models.PROTECT,
         related_name="export_logs",
-        help_text="Exact revision the served workbook reproduced",
+        help_text="Exact revision the served archive reproduced",
     )
     served_at = models.DateTimeField(
         auto_now_add=True,
-        help_text="Instant the workbook was generated and ready to be served",
+        help_text="Instant the archive was generated and ready to be served",
+    )
+    file_count = models.PositiveIntegerField(
+        help_text="Aggregate number of XLSX files served inside the archive",
     )
     sheet_count = models.PositiveIntegerField(
         help_text="Aggregate number of worksheets served",
