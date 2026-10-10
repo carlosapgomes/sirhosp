@@ -40,6 +40,7 @@ from typing import Protocol
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from apps.statistics_reports.models import DailyStatisticsReport
@@ -71,6 +72,15 @@ SHEET_TITLE_LIMIT = 31
 
 FALLBACK_SHEET_TITLE = "Setor"
 """Worksheet name used when a grouping label keeps no usable character."""
+
+COLUMN_WIDTH_PADDING = 2
+"""Extra width units added to the longest content of a sized column."""
+
+MAX_COLUMN_WIDTH = 60
+"""Ceiling of any autosized column, so long text stays readable."""
+
+DEFAULT_COLUMN_WIDTH = 8.43
+"""Excel default column width; fitting content keeps it untouched."""
 
 UNKNOWN_SHEET_MARKER = "sem agrupamento oficial"
 """Cell that identifies the conditional worksheet of a non-official group."""
@@ -191,6 +201,7 @@ def build_single_group_workbook(
     row_count = _write_group_sheet(
         worksheet=sheet, group=group, report=report
     )
+    autosize_columns(sheet)
     buffer = BytesIO()
     workbook.save(buffer)
     return ExportWorkbook(
@@ -297,6 +308,31 @@ def _sanitize_sheet_title(title: str) -> str:
     if not cleaned:
         return FALLBACK_SHEET_TITLE
     return cleaned[:SHEET_TITLE_LIMIT]
+
+
+def autosize_columns(worksheet: Worksheet) -> None:
+    """Set an explicit width on every column whose content exceeds the default.
+
+    The width follows ``min(MAX_COLUMN_WIDTH, max(DEFAULT_COLUMN_WIDTH,
+    max_len + COLUMN_WIDTH_PADDING))`` where ``max_len`` is the longest
+    ``len(str(value))`` of the column, headers included and empty cells
+    counting 0. Columns that fit the default keep no recorded width, and the
+    sizing is deterministic: the same content always yields the same widths.
+    Pure over the worksheet: no database, no clock, no randomness.
+    """
+    for column in range(1, (worksheet.max_column or 0) + 1):
+        longest = 0
+        for row in range(1, (worksheet.max_row or 0) + 1):
+            value = worksheet.cell(row=row, column=column).value
+            if value is None or value == "":
+                continue
+            longest = max(longest, len(str(value)))
+        width = min(
+            MAX_COLUMN_WIDTH,
+            max(DEFAULT_COLUMN_WIDTH, longest + COLUMN_WIDTH_PADDING),
+        )
+        if width > DEFAULT_COLUMN_WIDTH:
+            worksheet.column_dimensions[get_column_letter(column)].width = width
 
 
 def _write_group_sheet(
