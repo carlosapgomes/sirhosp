@@ -73,9 +73,9 @@ class TestNormalizeOccupancyAgeBand:
 
     @pytest.mark.parametrize(
         "raw",
-        ["0", "1", "7", "11", " 7 ", "11 "],
+        ["0", "1", "2", " 2 ", "2 "],
     )
-    def test_integer_below_twelve_is_child(self, raw):
+    def test_integer_two_or_below_is_child(self, raw):
         assert (
             normalize_occupancy_age_band(raw)
             == OccupancyAgeBand.UNDER_12
@@ -83,9 +83,9 @@ class TestNormalizeOccupancyAgeBand:
 
     @pytest.mark.parametrize(
         "raw",
-        ["12", "13", "45", "120", " 12 ", "12 "],
+        ["3", "7", "11", "12", "13", "45", "120", " 3 ", "12 "],
     )
-    def test_integer_twelve_or_over_is_adult(self, raw):
+    def test_integer_three_or_over_is_adult(self, raw):
         assert (
             normalize_occupancy_age_band(raw)
             == OccupancyAgeBand.AGE_12_OR_OVER
@@ -93,7 +93,18 @@ class TestNormalizeOccupancyAgeBand:
 
     @pytest.mark.parametrize(
         "raw",
-        ["1m", "1 M", "1m3d", "1m 3d", "12m", "11m", "143m", "142m60d"],
+        [
+            "1m",
+            "1 M",
+            "1m3d",
+            "1m 3d",
+            "12m",
+            "11m",
+            "23m",
+            "24m",
+            "24m0d",
+            "23m30d",
+        ],
     )
     def test_month_day_formats_below_limit(self, raw):
         assert (
@@ -103,9 +114,9 @@ class TestNormalizeOccupancyAgeBand:
 
     @pytest.mark.parametrize(
         "raw",
-        ["144m", "144m0d", "142m61d"],
+        ["25m", "24m1d", "26m", "144m", "144m0d", "142m61d", "143m"],
     )
-    def test_month_day_formats_at_or_above_limit(self, raw):
+    def test_month_day_formats_above_limit(self, raw):
         assert (
             normalize_occupancy_age_band(raw)
             == OccupancyAgeBand.AGE_12_OR_OVER
@@ -161,8 +172,12 @@ class TestClassifyOccupancyAgeBand:
 
     def test_occupied_row_uses_own_age_value(self):
         assert (
-            classify_occupancy_age_band("3", BedStatus.OCCUPIED)
+            classify_occupancy_age_band("2", BedStatus.OCCUPIED)
             == OccupancyAgeBand.UNDER_12
+        )
+        assert (
+            classify_occupancy_age_band("3", BedStatus.OCCUPIED)
+            == OccupancyAgeBand.AGE_12_OR_OVER
         )
         assert (
             classify_occupancy_age_band("45", BedStatus.OCCUPIED)
@@ -188,7 +203,7 @@ class TestParseCensusCsvAgeBand:
     def test_csv_with_idade_column_classifies_bands(self):
         content = (
             "setor_codigo,setor,qrt_leito,prontuario,nome,esp,idade\n"
-            "640,UTI A,UG01A,P0001,PACIENTE A,NEF,3\n"
+            "640,UTI A,UG01A,P0001,PACIENTE A,NEF,2\n"
             "654,ENF 3A,E01A,P0002,PACIENTE B,OB,45\n"
             "654,ENF 3A,E02B,P0003,PACIENTE C,OB,1m3d\n"
             "654,ENF 3A,E03D,P0004,PACIENTE D,OB,\n"
@@ -247,7 +262,7 @@ class TestParseCensusCsvAgeBand:
         content = (
             "setor_codigo,setor,qrt_leito,prontuario,nome,esp,idade,"
             "dt_int,tempo,dt_mvt,alta,origem\n"
-            "640,UTI A,UG01A,P0001,PACIENTE A,NEF,3,01/01/2026,5,"
+            "640,UTI A,UG01A,P0001,PACIENTE A,NEF,2,01/01/2026,5,"
             "02/01/2026,,\n"
         )
         path = _write_csv(content)
@@ -277,7 +292,7 @@ def _synthetic_census_csv_with_age() -> str:
     ]
     for i in range(1, 41):
         sector = f"SETOR {i:03d}"
-        age = "3" if i % 2 else "45"
+        age = "2" if i % 2 else "45"
         lines.append(
             f"{i},{sector},L{i:03d}A,P{i:05d},PACIENTE {i},CLI,{age},,,,,"
         )
@@ -330,7 +345,7 @@ class TestExtractCensusCommandAgeBand:
             assert occupied.count() == 40
             assert empty.count() == 40
 
-            # Odd sectors (age 3) → under_12; even sectors (age 45) → adult
+            # Odd sectors (age 2) → under_12; even sectors (age 45) → adult
             assert (
                 occupied.filter(
                     setor="SETOR 001",

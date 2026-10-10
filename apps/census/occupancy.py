@@ -3004,8 +3004,8 @@ def _physical_position_row(
 # ---------------------------------------------------------------------------
 
 _AGE_BAND_LABELS: dict[str, str] = {
-    OccupancyAgeBand.UNDER_12: "Menor de 12 anos",
-    OccupancyAgeBand.AGE_12_OR_OVER: "12 anos ou mais",
+    OccupancyAgeBand.UNDER_12: "Menor ou igual a 2 anos",
+    OccupancyAgeBand.AGE_12_OR_OVER: "Maior de 2 anos",
     OccupancyAgeBand.UNKNOWN: "Desconhecida",
     OccupancyAgeBand.NOT_APPLICABLE: "Não se aplica",
 }

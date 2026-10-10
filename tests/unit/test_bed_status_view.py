@@ -2751,8 +2751,8 @@ class TestBedStatusV4ActionablePresentation:
         assert "não atribuída a grupo etário" in content
         assert "Synthetic Patient ADULT-X" in content
         assert "Synthetic Patient CHILD-X" in content
-        assert "12 anos ou mais" in content
-        assert "Menor de 12 anos" in content
+        assert "Maior de 2 anos" in content
+        assert "Menor ou igual a 2 anos" in content
 
     def test_occupied_without_bed_actionable_not_position(self, admin_client):
         today = timezone.localdate()

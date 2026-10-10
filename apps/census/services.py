@@ -194,8 +194,12 @@ def classify_bed_status(prontuario: str, nome: str) -> str:
 
 _MONTHS_PER_YEAR = 12
 _DAYS_PER_YEAR = 365
-# 12 years in days, scaled by 12 to keep month/day arithmetic integer-exact.
-_ADULT_AGE_SCALED_DAYS = 12 * _DAYS_PER_YEAR * _MONTHS_PER_YEAR
+# NOTE (Opção A): the ``OccupancyAgeBand`` member names ``under_12`` /
+# ``age_12_or_over`` are kept intentionally (no migration), but since the
+# 3A cutoff change they mean “≤ 2 years” (Infantil) / “> 2 years” (Adulto)
+# for Enfermaria 3A. Display labels live in ``occupancy._AGE_BAND_LABELS``.
+# 2 years in days, scaled by 12 to keep month/day arithmetic integer-exact.
+_ADULT_AGE_SCALED_DAYS = 2 * _DAYS_PER_YEAR * _MONTHS_PER_YEAR
 
 # Legacy formats: ``Nm`` (months) or ``NmDd`` (months + days), case- and
 # space-insensitive. Bare ``Nd``, other units or any other structure are
@@ -209,11 +213,14 @@ def normalize_occupancy_age_band(idade_raw: str | None) -> str:
     """Normalize a raw legacy ``Idade`` value into an occupancy age band.
 
     Only occupied rows reach this function. An integer is interpreted as
-    years or birth day: 0-11 is ``under_12``, 12 or greater is
-    ``age_12_or_over``. ``Nm`` and ``NmDd`` are converted to months/days
-    and compared against the strict 12-year threshold. Blank, negative,
-    decimal, unsupported-unit or structurally invalid values become
-    ``unknown``; no inference is ever performed.
+    years or birth day: 0-2 is ``under_12`` (Infantil, ≤ 2 years), 3 or
+    greater is ``age_12_or_over`` (Adulto, > 2 years). ``Nm`` and ``NmDd``
+    are converted to months/days and compared against the inclusive
+    2-year threshold: exactly 24 months (``24m`` / ``24m0d``) is still
+    ``under_12``; anything above (e.g. ``24m1d``, ``25m``) is
+    ``age_12_or_over``. Blank, negative, decimal, unsupported-unit or
+    structurally invalid values become ``unknown``; no inference is ever
+    performed.
 
     Args:
         idade_raw: Raw legacy age value (may be ``None`` or blank).
@@ -228,11 +235,11 @@ def normalize_occupancy_age_band(idade_raw: str | None) -> str:
         return OccupancyAgeBand.UNKNOWN
 
     # Integer: legacy uses it for years or for the birth day; the
-    # ambiguity never changes the band below 12.
+    # ambiguity never changes the band below 3.
     if re.fullmatch(r"\d+", value):
         return (
             OccupancyAgeBand.UNDER_12
-            if int(value) < 12
+            if int(value) <= 2
             else OccupancyAgeBand.AGE_12_OR_OVER
         )
 
@@ -243,10 +250,12 @@ def normalize_occupancy_age_band(idade_raw: str | None) -> str:
 
     months = int(match.group(1))
     days = int(match.group(2) or 0)
-    # 1 month = 365/12 days; compare against 12 years (12*365 days).
+    # 1 month = 365/12 days; compare against 2 years (2*365 days).
     # Scaling by 12 keeps the comparison exact in integer arithmetic.
+    # The threshold is inclusive: exactly 24 months stays Infantil, so
+    # only a strictly greater value is Adulto.
     scaled_days = months * _DAYS_PER_YEAR + days * _MONTHS_PER_YEAR
-    if scaled_days >= _ADULT_AGE_SCALED_DAYS:
+    if scaled_days > _ADULT_AGE_SCALED_DAYS:
         return OccupancyAgeBand.AGE_12_OR_OVER
     return OccupancyAgeBand.UNDER_12
 
