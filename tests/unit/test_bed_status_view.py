@@ -4888,3 +4888,61 @@ class TestBedStatusV5PatientPresentation:
             f"(delta {queries_b - queries_a} > 8); the catalog "
             "groups/memberships graph is being fetched once per group"
         )
+
+    def test_v5_labeled_partition_badge_is_red_when_exceeded(
+        self, admin_client
+    ):
+        """Labeled v5 header badges turn red on over-capacity partitions."""
+        today = timezone.localdate()
+        self._catalog(
+            today, self._partitioned_3a(), algorithm_version="occupancy-v5"
+        )
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(34):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="654",
+                sector="3A Source",
+                status=BedStatus.OCCUPIED,
+                index=index,
+                patient_marker=f"REC-RED-AD-{index}",
+                record=f"178{index:02d}",
+                age_band="age_12_or_over",
+                bed=f"BED-RED-AD-{index}",
+            )
+        self._snapshot(
+            run,
+            captured_at=captured_at,
+            code="654",
+            sector="3A Source",
+            status=BedStatus.OCCUPIED,
+            index=34,
+            patient_marker="REC-RED-CH",
+            record="17899",
+            age_band="under_12",
+            bed="BED-RED-CH",
+        )
+        self._materialize(run.pk)
+        content = self._render(admin_client).content.decode()
+        header = self._v5_card_header(content, 1)
+        assert "Adulto: 34/32" in header
+        assert "acima da capacidade" in header
+        assert "Infantil: 1/16" in header
+        adult_badge = re.search(
+            r"<span[^>]*bg-danger[^>]*>Adulto:.*?acima da capacidade",
+            header,
+            re.DOTALL,
+        )
+        assert adult_badge is not None, (
+            "labeled over-capacity badge must render with bg-danger"
+        )
+        child_badge = re.search(
+            r"<span[^>]*bg-light[^>]*>Infantil:",
+            header,
+            re.DOTALL,
+        )
+        assert child_badge is not None, (
+            "labeled within-capacity badge must keep bg-light"
+        )

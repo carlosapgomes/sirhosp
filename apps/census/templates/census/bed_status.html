@@ -668,7 +668,7 @@
               <div class="d-flex flex-wrap gap-1 align-items-center">
                 {% for metric in unit.header_metrics %}
                   {% if metric.label %}
-                  <span class="badge bg-light text-dark border">{{ metric.label }}: {{ metric.occupied_count }}/{{ metric.official_capacity }} · {{ metric.occupancy_percentage|floatformat:2 }}%{% if metric.exceeded_by %} · acima da capacidade · excedente {{ metric.exceeded_by }}{% else %} · saldo {{ metric.official_availability }}{% endif %}</span>
+                  <span class="badge {% if metric.exceeded_by %}bg-danger{% else %}bg-light text-dark border{% endif %}">{{ metric.label }}: {{ metric.occupied_count }}/{{ metric.official_capacity }} · {{ metric.occupancy_percentage|floatformat:2 }}%{% if metric.exceeded_by %} · acima da capacidade · excedente {{ metric.exceeded_by }}{% else %} · saldo {{ metric.official_availability }}{% endif %}</span>
                   {% else %}
                   <span class="badge bg-primary">{{ metric.occupied_count }} paciente{{ metric.occupied_count|pluralize }}</span>
                   {% if metric.regime == "unrated" %}
