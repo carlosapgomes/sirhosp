@@ -3004,8 +3004,11 @@ def _physical_position_row(
 # ---------------------------------------------------------------------------
 
 _AGE_BAND_LABELS: dict[str, str] = {
-    OccupancyAgeBand.UNDER_12: "Menor ou igual a 2 anos",
-    OccupancyAgeBand.AGE_12_OR_OVER: "Maior de 2 anos",
+    # Aligned with the catalog partition display names ("… – Adulto" /
+    # "… – Infantil") by operator decision; used only in age-conflict
+    # diagnostics, not in product-facing partition badges.
+    OccupancyAgeBand.UNDER_12: "Infantil",
+    OccupancyAgeBand.AGE_12_OR_OVER: "Adulto",
     OccupancyAgeBand.UNKNOWN: "Desconhecida",
     OccupancyAgeBand.NOT_APPLICABLE: "Não se aplica",
 }
