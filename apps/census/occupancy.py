@@ -1630,13 +1630,17 @@ def _v4_quality_warning(
 # operational state; only identified patients are counted, deduplicated by
 # normalized textual record within each official group. The 3A partition
 # deduplicates before choosing Adulto/Infantil with a literal ``RN`` prefix
-# fallback. Reconciliation schema 3 is closed, aggregate and private.
+# fallback. Reconciliation schema 4 is closed, aggregate and private:
+# operational states collapse per bed while the row-based key is kept for
+# audit and the line bridge closes by construction.
 # ---------------------------------------------------------------------------
 
 # Operational markers maintained by the census parser: a normalized name
 # that contains one of these is an operational state, never a patient
 # identity. Substring matching mirrors ``classify_bed_status`` so variants
-# such as ``RESERVA INTERNA`` stay operational.
+# such as ``RESERVA INTERNA`` stay operational. The per-bed collapse below
+# reuses these markers for the v5 effective-state projection so variants
+# of one state (e.g. ``DESOCUPADO`` and ``VAZIO``) agree.
 _OPERATIONAL_MARKERS: tuple[tuple[str, str], ...] = (
     ("DESOCUPADO", BedStatus.EMPTY),
     ("VAZIO", BedStatus.EMPTY),
@@ -1679,6 +1683,87 @@ class _V5Patient:
 
 
 @dataclass(frozen=True)
+class _V5OperationalPositions:
+    """Aggregate per-bed outcome of the v5 operational-state projection.
+
+    Only aggregate integers; no bed, name, record or signature survives.
+    """
+
+    positions_by_status: dict[str, int]
+    duplicate_extra_rows: int
+    conflict_positions: int
+    conflict_rows: int
+    rows_without_bed: int
+
+
+def _v5_operational_positions(
+    rows: tuple[_ObservedRow, ...],
+) -> _V5OperationalPositions:
+    """Collapse operational lines by physical bed key.
+
+    Each row is first projected to its v5 effective state: a non-occupied
+    row keeps its status, an occupied row whose normalized name contains a
+    marker projects to that marker state. Identified-patient and
+    incomplete-identity rows are never operational lines, but their
+    presence on a key diverges any operational line of that key. Keys reuse
+    the v3/v4 physical identity (normalized source, normalized bed).
+    Unanimous keys count one position; divergent keys count nothing and
+    surface both counters; bedless operational lines stay out of badges.
+    """
+    positions_by_status = {status: 0 for status in _STATUS_KEYS}
+    duplicate_extra_rows = 0
+    conflict_positions = 0
+    conflict_rows = 0
+    rows_without_bed = 0
+
+    operational_by_key: dict[tuple[str, str], list[str]] = defaultdict(list)
+    diverged_keys: set[tuple[str, str]] = set()
+    for row in rows:
+        if row.status == BedStatus.OCCUPIED:
+            effective = _operational_status(
+                _normalize_patient_name(row.patient_name)
+            )
+            if effective is None:
+                bed = _normalize_identity(row.bed)
+                if bed:
+                    source = (
+                        _normalize_identity(row.code)
+                        if row.code
+                        else _normalize_identity(row.name)
+                    )
+                    diverged_keys.add((source, bed))
+                continue
+        else:
+            effective = row.status
+        bed = _normalize_identity(row.bed)
+        if not bed:
+            rows_without_bed += 1
+            continue
+        source = (
+            _normalize_identity(row.code)
+            if row.code
+            else _normalize_identity(row.name)
+        )
+        operational_by_key[(source, bed)].append(effective)
+
+    for key, states in operational_by_key.items():
+        if key in diverged_keys or len(set(states)) > 1:
+            conflict_positions += 1
+            conflict_rows += len(states)
+        else:
+            positions_by_status[states[0]] += 1
+            duplicate_extra_rows += len(states) - 1
+
+    return _V5OperationalPositions(
+        positions_by_status=positions_by_status,
+        duplicate_extra_rows=duplicate_extra_rows,
+        conflict_positions=conflict_positions,
+        conflict_rows=conflict_rows,
+        rows_without_bed=rows_without_bed,
+    )
+
+
+@dataclass(frozen=True)
 class _V5GroupTotals:
     """Aggregate integer diagnostics of one v5 patient-counting pass."""
 
@@ -1696,6 +1781,11 @@ class _V5GroupTotals:
     age_conflict_fallback_patient_count: int
     patients_without_bed_count: int
     operational_rows_by_status: dict[str, int]
+    operational_positions_by_status: dict[str, int]
+    operational_duplicate_extra_rows: int
+    operational_conflict_positions: int
+    operational_conflict_rows: int
+    operational_rows_without_bed: int
 
 
 # Allowlisted keys of the persisted v5 aggregate reconciliation. Only
@@ -1719,6 +1809,11 @@ _V5_RECONCILIATION_ALLOWLIST = frozenset(
         "age_conflict_fallback_patient_count",
         "patients_without_bed_count",
         "operational_rows_by_status",
+        "operational_positions_by_status",
+        "operational_duplicate_extra_rows",
+        "operational_conflict_positions",
+        "operational_conflict_rows",
+        "operational_rows_without_bed",
     }
 )
 
@@ -2167,6 +2262,7 @@ def _calculate_v5(
     )
     percentage = _percentage(occupied_for_rate, calculable_capacity)
 
+    operational_positions = _v5_operational_positions(rows)
     reconciliation = _reconciliation_v5_json(
         totals=_V5GroupTotals(
             valid_identity_rows=valid_identity_rows,
@@ -2187,6 +2283,19 @@ def _calculate_v5(
             ],
             patients_without_bed_count=patients_without_bed_count,
             operational_rows_by_status=dict(operational_rows),
+            operational_positions_by_status=dict(
+                operational_positions.positions_by_status
+            ),
+            operational_duplicate_extra_rows=(
+                operational_positions.duplicate_extra_rows
+            ),
+            operational_conflict_positions=(
+                operational_positions.conflict_positions
+            ),
+            operational_conflict_rows=operational_positions.conflict_rows,
+            operational_rows_without_bed=(
+                operational_positions.rows_without_bed
+            ),
         )
     )
     totals: dict[str, object] = {
@@ -2260,13 +2369,16 @@ def _v5_unmapped_group(
 def _reconciliation_v5_json(
     *, totals: _V5GroupTotals,
 ) -> dict[str, object]:
-    """Build the closed schema 3 reconciliation for one v5 measurement.
+    """Build the closed schema 4 reconciliation for one v5 measurement.
 
     The bridge ``valid_identity_rows == duplicate_identity_rows_within_group
     + standard + unrated + pending + unmapped patients`` holds by
     construction and is asserted here and re-checked by synthetic tests.
-    Only aggregate counts and one status map are stored; no name, record,
-    bed, exact age or row signature ever reaches the JSON.
+    The operational line bridge ``positions + duplicate extras + conflict
+    rows + bedless rows == operational rows`` holds by construction of the
+    per-bed collapse and is asserted here too. Only aggregate counts and
+    status maps are stored; no name, record, bed, exact age or row
+    signature ever reaches the JSON.
     """
     bridge = (
         totals.duplicate_identity_rows_within_group
@@ -2276,9 +2388,16 @@ def _reconciliation_v5_json(
         + totals.unmapped_patients
     )
     assert bridge == totals.valid_identity_rows
+    line_bridge = (
+        sum(totals.operational_positions_by_status.values())
+        + totals.operational_duplicate_extra_rows
+        + totals.operational_conflict_rows
+        + totals.operational_rows_without_bed
+    )
+    assert line_bridge == sum(totals.operational_rows_by_status.values())
     quality_warning = _v5_quality_warning(totals)
     reconciliation: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "quality_warning": quality_warning,
         "valid_identity_rows": totals.valid_identity_rows,
         "duplicate_identity_rows_within_group": (
@@ -2304,6 +2423,17 @@ def _reconciliation_v5_json(
         "operational_rows_by_status": dict(
             totals.operational_rows_by_status
         ),
+        "operational_positions_by_status": dict(
+            totals.operational_positions_by_status
+        ),
+        "operational_duplicate_extra_rows": (
+            totals.operational_duplicate_extra_rows
+        ),
+        "operational_conflict_positions": (
+            totals.operational_conflict_positions
+        ),
+        "operational_conflict_rows": totals.operational_conflict_rows,
+        "operational_rows_without_bed": totals.operational_rows_without_bed,
     }
     assert set(reconciliation) == _V5_RECONCILIATION_ALLOWLIST
     return reconciliation
@@ -3750,6 +3880,7 @@ class _V5RealTotals:
     outside_rate: int
     operational: dict[str, int]
     incomplete_identity_rows: int
+    operational_conflict_positions: int = 0
 
 
 def _v5_real_totals(
@@ -3757,11 +3888,14 @@ def _v5_real_totals(
 ) -> _V5RealTotals | None:
     """Derive the real-situation summary from the persisted reconciliation.
 
-    Tolerates missing keys: every canonical operational state defaults to
-    zero and absent reconciliation hides the summary entirely. The
-    identified total is the persisted patient-policy sum; ``in_rate`` is the
-    standard policy and ``outside_rate`` the remainder, so the breakdown
-    closes by construction. No template arithmetic is needed anywhere.
+    Reads the per-bed set (schema 4) or the row-based set (schema 3),
+    never a hybrid: the schema version alone decides which status map and
+    which divergent-bed count feed the card. Tolerates missing keys: every
+    canonical operational state defaults to zero and absent reconciliation
+    hides the summary entirely. The identified total is the persisted
+    patient-policy sum; ``in_rate`` is the standard policy and
+    ``outside_rate`` the remainder, so the breakdown closes by
+    construction. No template arithmetic is needed anywhere.
     """
     if not reconciliation:
         return None
@@ -3776,8 +3910,19 @@ def _v5_real_totals(
     linked_pending = count("linked_pending_identified_patients")
     unmapped = count("unmapped_identified_patients")
     identified_total = standard + unrated + linked_pending + unmapped
-    statuses = reconciliation.get("operational_rows_by_status")
-    status_map = statuses if isinstance(statuses, dict) else {}
+    schema_version = reconciliation.get("schema_version")
+    positions_map = reconciliation.get("operational_positions_by_status")
+    if (
+        isinstance(schema_version, int)
+        and schema_version >= 4
+        and isinstance(positions_map, dict)
+    ):
+        status_map = positions_map
+        conflict_positions = count("operational_conflict_positions")
+    else:
+        raw_statuses = reconciliation.get("operational_rows_by_status")
+        status_map = raw_statuses if isinstance(raw_statuses, dict) else {}
+        conflict_positions = 0
 
     def status_count(key: str) -> int:
         value = status_map.get(key)
@@ -3792,6 +3937,7 @@ def _v5_real_totals(
             for key, label in _OPERATIONAL_STATUS_LABELS
         },
         incomplete_identity_rows=count("incomplete_identity_rows"),
+        operational_conflict_positions=conflict_positions,
     )
 
 

@@ -4946,3 +4946,181 @@ class TestBedStatusV5PatientPresentation:
         assert child_badge is not None, (
             "labeled within-capacity badge must keep bg-light"
         )
+
+
+@pytest.mark.django_db
+class TestBedStatusV5OperationalCard:
+    """Slice 001 AC6-AC7: per-bed badges, divergent line, schema 3 fallback."""
+
+    @staticmethod
+    def _at(local_date, hour=12):
+        return timezone.make_aware(
+            datetime.combine(local_date, time(hour=hour)),
+            timezone.get_current_timezone(),
+        )
+
+    @staticmethod
+    def _run():
+        return IngestionRun.objects.create(
+            intent="census_extraction", status="succeeded"
+        )
+
+    @staticmethod
+    def _snapshot(
+        run,
+        *,
+        captured_at,
+        code,
+        sector,
+        status=BedStatus.EMPTY,
+        index=0,
+        bed=None,
+        nome=None,
+        record=None,
+    ):
+        return CensusSnapshot.objects.create(
+            ingestion_run=run,
+            captured_at=captured_at,
+            setor_codigo=code,
+            setor=sector,
+            leito=bed if bed is not None else f"BED-{code or 'BLANK'}-{index:03d}",
+            prontuario=record if record is not None else "",
+            nome=nome if nome is not None else status.upper(),
+            especialidade="SYN",
+            bed_status=status,
+            age_band=(
+                "not_applicable" if status != BedStatus.OCCUPIED else "unknown"
+            ),
+        )
+
+    @staticmethod
+    def _catalog(effective_from, groups):
+        catalog = CapacityCatalogVersion.objects.create(
+            effective_from=effective_from,
+            source_reference="synthetic occupancy-v5 operational card catalog",
+            source_sha256=((f"{effective_from:%Y%m%d}" + "v5card" * 64)[:64]),
+            schema_version="3.0",
+            algorithm_version="occupancy-v5",
+        )
+        for raw_group in groups:
+            group = CapacityGroupDefinition.objects.create(
+                catalog=catalog,
+                stable_key=raw_group["stable_key"],
+                display_name=raw_group.get("display_name", raw_group["stable_key"]),
+                official_capacity=raw_group.get("capacity"),
+                calculation_policy=raw_group["policy"],
+            )
+            for member in raw_group["members"]:
+                CapacitySectorMembership.objects.create(
+                    catalog=catalog,
+                    group=group,
+                    source_code=member[0],
+                    configured_source_name=member[1],
+                    age_selector="all",
+                )
+        return catalog
+
+    @staticmethod
+    def _standard_group():
+        return {
+            "stable_key": "A",
+            "display_name": "Group A",
+            "capacity": 10,
+            "policy": CalculationPolicy.STANDARD,
+            "members": (("100", "Sector A"),),
+        }
+
+    @staticmethod
+    def _materialize(run_id):
+        from apps.census.occupancy import materialize_occupancy_measurement
+
+        return materialize_occupancy_measurement(run_id=run_id)
+
+    @staticmethod
+    def _render(admin_client):
+        return admin_client.get(reverse("census:bed_status"))
+
+    def test_card_badges_count_beds_and_shows_divergent_line(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(3):
+            self._snapshot(
+                run, captured_at=captured_at, code="100", sector="Sector A",
+                status=BedStatus.EMPTY, index=index, bed="LEITO-01",
+            )
+        self._snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.EMPTY, index=3, bed="LEITO-02",
+        )
+        self._snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.RESERVED, index=4, bed="LEITO-02",
+        )
+        self._materialize(run.pk)
+
+        content = self._render(admin_client).content.decode()
+
+        assert "Vagos: 1" in content
+        assert "Reservados: 0" in content
+        assert "1 leito com estados divergentes (não contado)" in content
+        assert "(por leito)" in content
+
+    def test_card_omits_divergent_line_when_zero(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(3):
+            self._snapshot(
+                run, captured_at=captured_at, code="100", sector="Sector A",
+                status=BedStatus.EMPTY, index=index, bed="LEITO-01",
+            )
+        self._snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.EMPTY, index=3, bed="LEITO-02",
+        )
+        self._materialize(run.pk)
+
+        content = self._render(admin_client).content.decode()
+
+        assert "Vagos: 2" in content
+        assert "com estados divergentes" not in content
+
+    def test_schema3_photo_renders_rows_without_recompute(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today)
+        for index in range(3):
+            self._snapshot(
+                run, captured_at=captured_at, code="100", sector="Sector A",
+                status=BedStatus.EMPTY, index=index, bed="LEITO-01",
+            )
+        result = self._materialize(run.pk)
+        legacy_json = dict(result.measurement.physical_reconciliation_json)
+        for key in (
+            "operational_positions_by_status",
+            "operational_duplicate_extra_rows",
+            "operational_conflict_positions",
+            "operational_conflict_rows",
+            "operational_rows_without_bed",
+        ):
+            legacy_json.pop(key, None)
+        legacy_json["schema_version"] = 3
+        OccupancyMeasurement.objects.filter(
+            pk=result.measurement.pk
+        ).update(physical_reconciliation_json=legacy_json)
+
+        response = self._render(admin_client)
+        content = response.content.decode()
+        totals = response.context["physical"].v5_real
+
+        assert totals.operational["Vagos"] == 3
+        assert totals.operational_conflict_positions == 0
+        assert "Vagos: 3" in content
+        assert "com estados divergentes" not in content
+        assert "(por leito)" not in content

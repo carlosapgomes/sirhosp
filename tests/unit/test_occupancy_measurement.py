@@ -3259,7 +3259,7 @@ class TestV5Identity:
         reconciliation = measurement.physical_reconciliation_json
 
         assert measurement.algorithm_version == "occupancy-v5"
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert child_model.objects.get(
             measurement=measurement
         ).occupied_count == 2
@@ -3288,7 +3288,7 @@ class TestV5Identity:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert reconciliation["valid_identity_rows"] == 0
         assert reconciliation["incomplete_identity_rows"] == 3
         assert measurement.groups.get(stable_key="A").occupied_count == 0
@@ -3309,7 +3309,7 @@ class TestV5Identity:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert reconciliation["valid_identity_rows"] == 0
         assert reconciliation["operational_rows_by_status"] == {
             "occupied": 0,
@@ -3333,7 +3333,7 @@ class TestV5Identity:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert measurement.groups.get(stable_key="A").occupied_count == 1
         assert reconciliation["patients_without_bed_count"] == 1
         assert measurement.quality_warning is False
@@ -3357,7 +3357,7 @@ class TestV5Identity:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert measurement.groups.get(stable_key="A").occupied_count == 2
         assert reconciliation["duplicate_identity_rows_within_group"] == 0
 
@@ -3393,7 +3393,7 @@ class TestV5Identity:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         child = measurement.groups.get(stable_key="ENF-2B-CARD")
         assert child.occupied_count == 2
         assert reconciliation["valid_identity_rows"] == 3
@@ -3428,7 +3428,7 @@ class TestV5Identity:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         groups = {g.stable_key: g for g in measurement.groups.all()}
         assert groups["A"].occupied_count == 1
         assert groups["B"].occupied_count == 1
@@ -3454,7 +3454,7 @@ class TestV5Identity:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert measurement.groups.get(stable_key="A").occupied_count == 1
         assert reconciliation["name_variant_patient_count"] == 1
         assert measurement.quality_warning is True
@@ -3484,7 +3484,7 @@ class TestV5AgePartition3A:
         groups = {g.stable_key: g for g in measurement.groups.all()}
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert groups["OBST-3A-INFANTIL"].occupied_count == 1
         assert groups["OBST-3A-ADULTO"].occupied_count == 0
         assert reconciliation["rn_fallback_patient_count"] == 0
@@ -3509,7 +3509,7 @@ class TestV5AgePartition3A:
         groups = {g.stable_key: g for g in measurement.groups.all()}
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert groups["OBST-3A-ADULTO"].occupied_count == 1
         assert groups["OBST-3A-INFANTIL"].occupied_count == 0
         assert reconciliation["rn_fallback_patient_count"] == 0
@@ -3528,7 +3528,7 @@ class TestV5AgePartition3A:
         groups = {g.stable_key: g for g in measurement.groups.all()}
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert groups["OBST-3A-INFANTIL"].occupied_count == 1
         assert groups["OBST-3A-ADULTO"].occupied_count == 0
         assert reconciliation["rn_fallback_patient_count"] == 1
@@ -3548,7 +3548,7 @@ class TestV5AgePartition3A:
         groups = {g.stable_key: g for g in measurement.groups.all()}
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert groups["OBST-3A-ADULTO"].occupied_count == 1
         assert groups["OBST-3A-INFANTIL"].occupied_count == 0
         assert reconciliation["rn_fallback_patient_count"] == 0
@@ -3587,7 +3587,7 @@ class TestV5AgePartition3A:
         groups = {g.stable_key: g for g in measurement.groups.all()}
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert groups["OBST-3A-INFANTIL"].occupied_count == 1
         assert groups["OBST-3A-ADULTO"].occupied_count == 1
         assert reconciliation["age_conflict_fallback_patient_count"] == 2
@@ -3608,7 +3608,7 @@ class TestV5AgePartition3A:
         groups = {g.stable_key: g for g in measurement.groups.all()}
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert groups["OBST-3A-ADULTO"].occupied_count == 1
         assert groups["OBST-3A-INFANTIL"].occupied_count == 0
         assert reconciliation["non_rn_fallback_patient_count"] == 1
@@ -3634,7 +3634,7 @@ class TestV5AgePartition3A:
         groups = {g.stable_key: g for g in measurement.groups.all()}
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert groups["OBST-3A-INFANTIL"].occupied_count == 1
         assert groups["OBST-3A-ADULTO"].occupied_count == 0
         assert reconciliation["valid_identity_rows"] == 3
@@ -3683,7 +3683,7 @@ class TestV5PolicyAndArithmetic:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         co = measurement.groups.get(stable_key="CO")
         assert co.calculation_policy == "unrated"
         assert co.calculation_status == "unrated"
@@ -3768,7 +3768,7 @@ class TestV5PolicyAndArithmetic:
         reconciliation = measurement.physical_reconciliation_json
         child = measurement.groups.get(stable_key="A")
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         assert child.occupied_count == 2
         assert child.occupancy_percentage == Decimal("20.00")
         assert child.official_availability == 8
@@ -3855,7 +3855,7 @@ class TestV5ReconciliationAndPrivacy:
         measurement = result.measurement
         reconciliation = measurement.physical_reconciliation_json
 
-        assert reconciliation["schema_version"] == 3
+        assert reconciliation["schema_version"] == 4
         valid = reconciliation["valid_identity_rows"]
         bridge = (
             reconciliation["duplicate_identity_rows_within_group"]
@@ -4096,3 +4096,305 @@ class TestV5RegressionAndClinicalFlow:
         next_result = _materialize(second.pk)
         assert next_result.status == "created"
         assert next_result.measurement.occupied_for_rate == 1
+
+
+# ---------------------------------------------------------------------------
+# COBD-S1: occupancy-v5 operational states counted per bed (schema 4).
+#
+# Operational states collapse by physical key (normalized source, normalized
+# bed) over the v5 effective-state projection: unanimous keys count one
+# position, divergent keys (including occupied + marker) count nothing and
+# surface both counters, bedless lines stay out of the badges. The row-based
+# key is preserved for audit and the line bridge closes by construction.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestV5OperationalPositions:
+    """Slice 001 AC1-AC6: per-bed operational counting in schema 4."""
+
+    def test_repeated_bed_counts_once_with_duplicate_extra(self):
+        _v5_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        for index in range(3):
+            _raw_snapshot(
+                run, code="100", sector="Sector A", status=BedStatus.EMPTY,
+                bed="LEITO-01", index=index, captured_at=captured_at,
+            )
+
+        result = _materialize(run.pk)
+        reconciliation = result.measurement.physical_reconciliation_json
+
+        assert reconciliation["schema_version"] == 4
+        assert reconciliation["operational_positions_by_status"]["empty"] == 1
+        assert reconciliation["operational_duplicate_extra_rows"] == 2
+        assert reconciliation["operational_conflict_positions"] == 0
+        assert reconciliation["operational_conflict_rows"] == 0
+        assert reconciliation["operational_rows_without_bed"] == 0
+        # The legacy row key keeps the per-line semantics for audit.
+        assert reconciliation["operational_rows_by_status"]["empty"] == 3
+
+    def test_marker_variants_of_same_state_agree(self):
+        _v5_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _raw_snapshot(
+            run, code="100", sector="Sector A", record="91001",
+            nome="DESOCUPADO", bed="LEITO-02", captured_at=captured_at,
+        )
+        _raw_snapshot(
+            run, code="100", sector="Sector A", record="91002",
+            nome="VAZIO", bed="LEITO-02", captured_at=captured_at,
+        )
+
+        result = _materialize(run.pk)
+        reconciliation = result.measurement.physical_reconciliation_json
+
+        assert reconciliation["schema_version"] == 4
+        assert reconciliation["operational_positions_by_status"]["empty"] == 1
+        assert reconciliation["operational_duplicate_extra_rows"] == 1
+        assert reconciliation["operational_conflict_positions"] == 0
+        assert reconciliation["operational_conflict_rows"] == 0
+
+    def test_divergent_bed_excluded_and_surfaces_both_counters(self):
+        _v5_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _raw_snapshot(
+            run, code="100", sector="Sector A", status=BedStatus.EMPTY,
+            bed="LEITO-03", captured_at=captured_at,
+        )
+        _raw_snapshot(
+            run, code="100", sector="Sector A", status=BedStatus.RESERVED,
+            bed="LEITO-03", index=1, captured_at=captured_at,
+        )
+
+        result = _materialize(run.pk)
+        reconciliation = result.measurement.physical_reconciliation_json
+
+        assert reconciliation["schema_version"] == 4
+        assert reconciliation["operational_positions_by_status"]["empty"] == 0
+        assert reconciliation["operational_positions_by_status"]["reserved"] == 0
+        assert reconciliation["operational_conflict_positions"] == 1
+        assert reconciliation["operational_conflict_rows"] == 2
+        assert reconciliation["operational_duplicate_extra_rows"] == 0
+
+    def test_occupied_plus_marker_diverges_without_touching_patients(self):
+        _v5_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, patient_marker="92001",
+            age_band="age_12_or_over", bed="LEITO-04",
+        )
+        _raw_snapshot(
+            run, code="100", sector="Sector A", record="92002",
+            nome="LIMPEZA", bed="LEITO-04", index=1,
+            captured_at=captured_at,
+        )
+
+        result = _materialize(run.pk)
+        measurement = result.measurement
+        reconciliation = measurement.physical_reconciliation_json
+
+        assert reconciliation["schema_version"] == 4
+        assert (
+            reconciliation["operational_positions_by_status"]["maintenance"]
+            == 0
+        )
+        assert reconciliation["operational_conflict_positions"] == 1
+        assert reconciliation["operational_conflict_rows"] == 1
+        # Patient semantics are unchanged: the identified patient still counts.
+        assert measurement.groups.get(stable_key="A").occupied_count == 1
+        assert measurement.occupied_for_rate == 1
+
+    def test_bedless_operational_lines_stay_out_of_badges(self):
+        _v5_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        _raw_snapshot(
+            run, code="100", sector="Sector A", status=BedStatus.EMPTY,
+            bed="", captured_at=captured_at,
+        )
+        _raw_snapshot(
+            run, code="100", sector="Sector A", status=BedStatus.MAINTENANCE,
+            bed="   ", index=1, captured_at=captured_at,
+        )
+
+        result = _materialize(run.pk)
+        reconciliation = result.measurement.physical_reconciliation_json
+
+        assert reconciliation["schema_version"] == 4
+        assert reconciliation["operational_positions_by_status"]["empty"] == 0
+        assert (
+            reconciliation["operational_positions_by_status"]["maintenance"]
+            == 0
+        )
+        assert reconciliation["operational_rows_without_bed"] == 2
+        assert reconciliation["operational_conflict_positions"] == 0
+
+    def test_line_closure_with_all_cases(self):
+        _v5_catalog()
+        run = _run()
+        captured_at = _at(timezone.localdate())
+        # Repeated bed: 3 empty lines on LEITO-10.
+        for index in range(3):
+            _raw_snapshot(
+                run, code="100", sector="Sector A", status=BedStatus.EMPTY,
+                bed="LEITO-10", index=index, captured_at=captured_at,
+            )
+        # Variant bed: DESOCUPADO + VAZIO agree on LEITO-11.
+        _raw_snapshot(
+            run, code="100", sector="Sector A", record="93011",
+            nome="DESOCUPADO", bed="LEITO-11", index=3,
+            captured_at=captured_at,
+        )
+        _raw_snapshot(
+            run, code="100", sector="Sector A", record="93012",
+            nome="VAZIO", bed="LEITO-11", index=4,
+            captured_at=captured_at,
+        )
+        # Divergent bed in two states on LEITO-12.
+        _raw_snapshot(
+            run, code="100", sector="Sector A", status=BedStatus.EMPTY,
+            bed="LEITO-12", index=5, captured_at=captured_at,
+        )
+        _raw_snapshot(
+            run, code="100", sector="Sector A", status=BedStatus.RESERVED,
+            bed="LEITO-12", index=6, captured_at=captured_at,
+        )
+        # Occupied + marker on LEITO-13.
+        _snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=7, patient_marker="93013",
+            age_band="age_12_or_over", bed="LEITO-13",
+        )
+        _raw_snapshot(
+            run, code="100", sector="Sector A", record="93014",
+            nome="RESERVA", bed="LEITO-13", index=8,
+            captured_at=captured_at,
+        )
+        # Bedless operational line.
+        _raw_snapshot(
+            run, code="100", sector="Sector A",
+            status=BedStatus.MAINTENANCE, bed="", index=9,
+            captured_at=captured_at,
+        )
+
+        result = _materialize(run.pk)
+        reconciliation = result.measurement.physical_reconciliation_json
+
+        assert reconciliation["schema_version"] == 4
+        positions = reconciliation["operational_positions_by_status"]
+        assert positions == {
+            "occupied": 0,
+            "empty": 2,
+            "reserved": 0,
+            "maintenance": 0,
+            "isolation": 0,
+        }
+        assert reconciliation["operational_duplicate_extra_rows"] == 3
+        assert reconciliation["operational_conflict_positions"] == 2
+        assert reconciliation["operational_conflict_rows"] == 3
+        assert reconciliation["operational_rows_without_bed"] == 1
+        rows = reconciliation["operational_rows_by_status"]
+        assert rows == {
+            "occupied": 0,
+            "empty": 6,
+            "reserved": 2,
+            "maintenance": 1,
+            "isolation": 0,
+        }
+        assert (
+            sum(positions.values())
+            + reconciliation["operational_duplicate_extra_rows"]
+            + reconciliation["operational_conflict_rows"]
+            + reconciliation["operational_rows_without_bed"]
+            == sum(rows.values())
+        )
+
+    def test_allowlist_is_exact_schema4_set(self):
+        _v5_catalog()
+        run = _run()
+        _raw_snapshot(
+            run, code="100", sector="Sector A", status=BedStatus.EMPTY,
+            bed="LEITO-20",
+        )
+
+        result = _materialize(run.pk)
+        reconciliation = result.measurement.physical_reconciliation_json
+
+        expected = {
+            "schema_version",
+            "quality_warning",
+            "valid_identity_rows",
+            "duplicate_identity_rows_within_group",
+            "standard_identified_patients",
+            "unrated_identified_patients",
+            "linked_pending_identified_patients",
+            "unmapped_identified_patients",
+            "incomplete_identity_rows",
+            "cross_group_record_count",
+            "name_variant_patient_count",
+            "rn_fallback_patient_count",
+            "non_rn_fallback_patient_count",
+            "age_conflict_fallback_patient_count",
+            "patients_without_bed_count",
+            "operational_rows_by_status",
+            "operational_positions_by_status",
+            "operational_duplicate_extra_rows",
+            "operational_conflict_positions",
+            "operational_conflict_rows",
+            "operational_rows_without_bed",
+        }
+        assert set(reconciliation) == expected
+        assert set(_domain()._V5_RECONCILIATION_ALLOWLIST) == expected
+
+    def test_v5_real_totals_never_mixes_schemas(self):
+        totals = _domain()._v5_real_totals(None)
+        assert totals is None
+
+        schema3 = {
+            "schema_version": 3,
+            "standard_identified_patients": 2,
+            "unrated_identified_patients": 1,
+            "linked_pending_identified_patients": 0,
+            "unmapped_identified_patients": 0,
+            "incomplete_identity_rows": 0,
+            "operational_rows_by_status": {"empty": 3, "reserved": 1},
+            # Adversarial: a positions key on a schema 3 photo must be ignored.
+            "operational_positions_by_status": {"empty": 1, "reserved": 0},
+            "operational_conflict_positions": 9,
+        }
+        legacy = _domain()._v5_real_totals(schema3)
+        assert legacy is not None
+        assert legacy.operational == {
+            "Vagos": 3,
+            "Reservados": 1,
+            "Em manutenção": 0,
+            "Isolamento": 0,
+        }
+        assert legacy.operational_conflict_positions == 0
+
+        schema4 = {
+            "schema_version": 4,
+            "standard_identified_patients": 2,
+            "unrated_identified_patients": 1,
+            "linked_pending_identified_patients": 0,
+            "unmapped_identified_patients": 0,
+            "incomplete_identity_rows": 0,
+            "operational_rows_by_status": {"empty": 3, "reserved": 1},
+            "operational_positions_by_status": {"empty": 1, "reserved": 0},
+            "operational_conflict_positions": 1,
+        }
+        current = _domain()._v5_real_totals(schema4)
+        assert current is not None
+        assert current.operational == {
+            "Vagos": 1,
+            "Reservados": 0,
+            "Em manutenção": 0,
+            "Isolamento": 0,
+        }
+        assert current.operational_conflict_positions == 1
