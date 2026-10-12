@@ -5124,3 +5124,353 @@ class TestBedStatusV5OperationalCard:
         assert "Vagos: 3" in content
         assert "com estados divergentes" not in content
         assert "(por leito)" not in content
+
+
+@pytest.mark.django_db
+class TestBedOperationalDetailPage:
+    """Slice 002 AC1-AC9: operational-states detail page pinned to one measurement."""
+
+    @staticmethod
+    def _at(local_date, hour=12):
+        return timezone.make_aware(
+            datetime.combine(local_date, time(hour=hour)),
+            timezone.get_current_timezone(),
+        )
+
+    @staticmethod
+    def _run():
+        return IngestionRun.objects.create(
+            intent="census_extraction", status="succeeded"
+        )
+
+    @staticmethod
+    def _snapshot(
+        run,
+        *,
+        captured_at,
+        code,
+        sector,
+        status=BedStatus.EMPTY,
+        index=0,
+        bed=None,
+        nome=None,
+        record=None,
+    ):
+        return CensusSnapshot.objects.create(
+            ingestion_run=run,
+            captured_at=captured_at,
+            setor_codigo=code,
+            setor=sector,
+            leito=bed if bed is not None else f"BED-{code or 'BLANK'}-{index:03d}",
+            prontuario=record if record is not None else "",
+            nome=nome if nome is not None else status.upper(),
+            especialidade="SYN",
+            bed_status=status,
+            age_band=(
+                "not_applicable" if status != BedStatus.OCCUPIED else "unknown"
+            ),
+        )
+
+    @staticmethod
+    def _catalog(effective_from, groups, algorithm_version="occupancy-v5"):
+        catalog = CapacityCatalogVersion.objects.create(
+            effective_from=effective_from,
+            source_reference="synthetic operational detail test catalog",
+            source_sha256=((f"{effective_from:%Y%m%d}" + "v5det" * 64)[:64]),
+            schema_version="3.0",
+            algorithm_version=algorithm_version,
+        )
+        for raw_group in groups:
+            group = CapacityGroupDefinition.objects.create(
+                catalog=catalog,
+                stable_key=raw_group["stable_key"],
+                display_name=raw_group.get("display_name", raw_group["stable_key"]),
+                official_capacity=raw_group.get("capacity"),
+                calculation_policy=raw_group["policy"],
+            )
+            for member in raw_group["members"]:
+                CapacitySectorMembership.objects.create(
+                    catalog=catalog,
+                    group=group,
+                    source_code=member[0],
+                    configured_source_name=member[1],
+                    age_selector="all",
+                )
+        return catalog
+
+    @staticmethod
+    def _standard_group():
+        return {
+            "stable_key": "A",
+            "display_name": "Group A",
+            "capacity": 10,
+            "policy": CalculationPolicy.STANDARD,
+            "members": (("100", "Sector A"), ("200", "Sector B")),
+        }
+
+    @staticmethod
+    def _materialize(run_id):
+        from apps.census.occupancy import materialize_occupancy_measurement
+
+        return materialize_occupancy_measurement(run_id=run_id)
+
+    @staticmethod
+    def _detail_url(measurement_id):
+        return reverse("census:bed_operational_detail") + f"?measurement={measurement_id}"
+
+    def _photo_with_all_cases(self, run, captured_at):
+        """Synthetic photo covering every detail case (no real data)."""
+        # Sector 100: unambiguous repeated bed (3 lines -> 1 bed) ...
+        for index in range(3):
+            self._snapshot(
+                run, captured_at=captured_at, code="100", sector="Sector A",
+                status=BedStatus.EMPTY, index=index, bed="LEITO-01",
+            )
+        # ... unambiguous single bed ...
+        self._snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.RESERVED, index=10, bed="LEITO-02",
+        )
+        # ... divergent bed (two distinct states) ...
+        self._snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.EMPTY, index=11, bed="LEITO-03",
+        )
+        self._snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.RESERVED, index=12, bed="LEITO-03",
+        )
+        # ... occupied-plus-state bed (patient + marker share one bed) ...
+        self._snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=13, bed="LEITO-04",
+            record="482516", nome="PACIENTE SINTETICO ALFA",
+        )
+        self._snapshot(
+            run, captured_at=captured_at, code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=14, bed="LEITO-04",
+            record="", nome="RESERVA INTERNA",
+        )
+        # Sector 200: unambiguous bed + bedless operational line.
+        self._snapshot(
+            run, captured_at=captured_at, code="200", sector="Sector B",
+            status=BedStatus.MAINTENANCE, index=20, bed="LEITO-10",
+        )
+        self._snapshot(
+            run, captured_at=captured_at, code="200", sector="Sector B",
+            status=BedStatus.ISOLATION, index=21, bed="",
+        )
+
+    def test_anonymous_redirected(self, client):
+        response = client.get(self._detail_url(1))
+        assert response.status_code == 302
+        assert "/login/" in response.url
+
+    def test_unknown_measurement_is_404_without_evidence(self, admin_client):
+        response = admin_client.get(self._detail_url(999999))
+        assert response.status_code == 404
+        content = response.content.decode()
+        assert "LEITO" not in content
+        assert "Vagos" not in content
+
+    def test_non_v5_measurement_is_404_without_evidence(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()], algorithm_version=None)
+        run = self._run()
+        self._snapshot(
+            run, captured_at=self._at(today), code="100", sector="Sector A",
+            status=BedStatus.OCCUPIED, index=0, record="482517",
+            nome="PACIENTE SINTETICO BETA",
+        )
+        result = self._materialize(run.pk)
+        assert result.measurement.algorithm_version != "occupancy-v5"
+
+        response = admin_client.get(self._detail_url(result.measurement.pk))
+        assert response.status_code == 404
+        assert "Sector A" not in response.content.decode()
+
+    def test_page_is_pinned_to_requested_photo(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        captured_at = self._at(today, 8)
+        self._photo_with_all_cases(run, captured_at)
+        result = self._materialize(run.pk)
+
+        response = admin_client.get(self._detail_url(result.measurement.pk))
+        content = response.content.decode()
+
+        assert response.status_code == 200
+        assert "08:00" in content
+        assert "Sector A" in content
+        assert "Sector B" in content
+        assert "censo mais recente" not in content
+
+    def test_stale_photo_is_flagged_but_kept(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        old_run = self._run()
+        self._photo_with_all_cases(old_run, self._at(today, 8))
+        result = self._materialize(old_run.pk)
+        new_run = self._run()
+        self._snapshot(
+            new_run, captured_at=self._at(today, 20), code="100",
+            sector="Sector A", status=BedStatus.EMPTY, index=0,
+            bed="LEITO-NOVO",
+        )
+
+        response = admin_client.get(self._detail_url(result.measurement.pk))
+        content = response.content.decode()
+
+        assert response.status_code == 200
+        assert "08:00" in content
+        assert "mais recente" in content
+        assert "LEITO-01" in content
+        assert "LEITO-NOVO" not in content
+
+    def test_sector_breakdown_is_complete(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        self._photo_with_all_cases(run, self._at(today))
+        result = self._materialize(run.pk)
+
+        response = admin_client.get(self._detail_url(result.measurement.pk))
+        content = response.content.decode()
+        assert response.status_code == 200
+
+        # Unambiguous beds by state (counts; single beds need no case row).
+        assert "LEITO-01" in content
+        assert "Reservados: 1" in content
+        # Repeated lines collapsed per bed with the line count.
+        assert "3 linha" in content
+        # Divergent bed with its distinct informed states.
+        assert "LEITO-03" in content
+        assert "Vago" in content
+        assert "Reservado" in content
+        # Occupied-plus-state case is surfaced explicitly.
+        assert "LEITO-04" in content
+        assert "ocupado" in content.lower()
+        # Bedless operational line count in Sector B.
+        assert "sem leito" in content.lower()
+        # Sectors without cases show unambiguous counts only (Sector B).
+        assert "Em manuten\u00e7\u00e3o: 1" in content
+
+    def test_arithmetic_closes_with_summary_card(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        self._photo_with_all_cases(run, self._at(today))
+        result = self._materialize(run.pk)
+
+        card = admin_client.get(reverse("census:bed_status")).content.decode()
+        assert "Vagos: 1" in card
+        assert "Reservados: 1" in card
+        assert "Em manutenção: 1" in card
+        assert "Isolamento: 0" in card
+        assert "2 leitos com estados divergentes (não contados)" in card
+
+        response = admin_client.get(self._detail_url(result.measurement.pk))
+        detail = response.context["detail"]
+        content = response.content.decode()
+
+        assert detail.detail_positions == detail.card_positions
+        assert (
+            detail.detail_conflict_positions == detail.card_conflict_positions == 2
+        )
+        assert detail.closes is True
+        assert "conferem com o card" in content
+
+    def test_schema3_photo_is_labeled_historical_with_audit_cases(
+        self, admin_client
+    ):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        self._photo_with_all_cases(run, self._at(today))
+        result = self._materialize(run.pk)
+        legacy_json = dict(result.measurement.physical_reconciliation_json)
+        for key in (
+            "operational_positions_by_status",
+            "operational_duplicate_extra_rows",
+            "operational_conflict_positions",
+            "operational_conflict_rows",
+            "operational_rows_without_bed",
+        ):
+            legacy_json.pop(key, None)
+        legacy_json["schema_version"] = 3
+        OccupancyMeasurement.objects.filter(
+            pk=result.measurement.pk
+        ).update(physical_reconciliation_json=legacy_json)
+
+        response = admin_client.get(self._detail_url(result.measurement.pk))
+        content = response.content.decode()
+        detail = response.context["detail"]
+
+        assert response.status_code == 200
+        assert detail.is_historical is True
+        assert "contaram linhas" in content
+        # The audit cases behind the line-based number stay listed.
+        assert "LEITO-03" in content
+        assert "LEITO-01" in content
+        assert "sem leito" in content.lower()
+
+    def test_no_nominal_data_in_html(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        self._photo_with_all_cases(run, self._at(today))
+        result = self._materialize(run.pk)
+
+        content = admin_client.get(
+            self._detail_url(result.measurement.pk)
+        ).content.decode()
+
+        assert "PACIENTE SINTETICO ALFA" not in content
+        assert "482516" not in content
+        assert "LEITO-04" in content
+
+    def test_card_link_loads_current_measurement(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        self._photo_with_all_cases(run, self._at(today))
+        result = self._materialize(run.pk)
+
+        card = admin_client.get(reverse("census:bed_status")).content.decode()
+        expected = f"estados-operacionais/?measurement={result.measurement.pk}"
+        assert expected in card
+
+        response = admin_client.get(self._detail_url(result.measurement.pk))
+        assert response.status_code == 200
+        assert "Sector A" in response.content.decode()
+
+    def test_snapshots_load_in_constant_queries(self, admin_client):
+        import re
+
+        today = timezone.localdate()
+        self._catalog(today, [self._standard_group()])
+        run = self._run()
+        self._photo_with_all_cases(run, self._at(today))
+        result = self._materialize(run.pk)
+
+        with CaptureQueriesContext(connection) as ctx:
+            response = admin_client.get(
+                self._detail_url(result.measurement.pk)
+            )
+        assert response.status_code == 200
+        snapshot_queries = [
+            query
+            for query in ctx.captured_queries
+            if re.search(r"FROM\s+\"?census_censussnapshot\"?", query["sql"])
+        ]
+        run_scoped = [
+            query
+            for query in snapshot_queries
+            if "ingestion_run_id" in query["sql"]
+        ]
+        # The run's snapshots load in exactly one query; remaining hits are
+        # constant global latest-capture aggregates (view stale check plus
+        # the topbar freshness context processor) — no per-row query.
+        assert len(run_scoped) == 1
+        assert len(snapshot_queries) <= 3

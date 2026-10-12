@@ -6,14 +6,17 @@ from datetime import date, timedelta
 
 from django.contrib.auth.decorators import login_required
 from django.db.models import Count, Max
-from django.shortcuts import render
+from django.http import Http404
+from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 
 from apps.census.flow_service import compute_hospital_flow, list_sectors
-from apps.census.models import CensusSnapshot
+from apps.census.models import CensusSnapshot, OccupancyMeasurement
 from apps.census.occupancy import (
     ALGORITHM_VERSION_V4,
+    ALGORITHM_VERSION_V5,
     build_official_group_rows,
+    build_operational_detail,
     build_units_presentation,
     resolve_exact_measurement,
 )
@@ -104,6 +107,59 @@ def hospital_flow_view(request):
         context["residual_quality"] = residual_quality
 
     return render(request, "census/hospital_flow.html", context)
+
+
+@login_required
+def bed_operational_detail_view(request):
+    """Detail the operational bed states of one exact v5 measurement.
+
+    Pinned to the ``measurement`` photo: only the snapshots of that
+    measurement's run are reclassified in memory with the shared v5
+    classifier, in a single run-scoped query. Unknown ids and non-v5
+    measurements answer 404 without rendering operational evidence, so no
+    newer census is ever silently substituted; a newer global photo only
+    raises a stale-photo notice.
+    """
+    try:
+        measurement_id = int(request.GET.get("measurement", ""))
+    except (TypeError, ValueError):
+        raise Http404("Medição informada é inválida.") from None
+    measurement = get_object_or_404(
+        OccupancyMeasurement.objects.select_related("catalog"),
+        pk=measurement_id,
+    )
+    if measurement.algorithm_version != ALGORITHM_VERSION_V5:
+        raise Http404("Detalhe disponível apenas para medições occupancy-v5.")
+
+    snapshots = list(
+        CensusSnapshot.objects.filter(ingestion_run=measurement.census_run_id)
+        .order_by("captured_at", "pk")
+        .only(
+            "setor_codigo",
+            "setor",
+            "leito",
+            "prontuario",
+            "nome",
+            "bed_status",
+            "age_band",
+        )
+    )
+    detail = build_operational_detail(
+        measurement=measurement, snapshots=snapshots
+    )
+    latest_captured = CensusSnapshot.objects.aggregate(
+        latest=Max("captured_at")
+    )["latest"]
+    context = {
+        "page_title": "Estados operacionais",
+        "measurement": measurement,
+        "detail": detail,
+        "is_stale": (
+            latest_captured is not None
+            and latest_captured > measurement.captured_at
+        ),
+    }
+    return render(request, "census/bed_operational_detail.html", context)
 
 
 @login_required

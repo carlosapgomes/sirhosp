@@ -10,5 +10,10 @@ app_name = "census"
 
 urlpatterns = [
     path("beds/", views.bed_status_view, name="bed_status"),
+    path(
+        "beds/estados-operacionais/",
+        views.bed_operational_detail_view,
+        name="bed_operational_detail",
+    ),
     path("fluxo/", views.hospital_flow_view, name="hospital_flow"),
 ]

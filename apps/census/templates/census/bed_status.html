@@ -407,6 +407,11 @@
               {% if physical.v5_real.operational_conflict_positions %}
               <div class="small text-muted mt-2">{{ physical.v5_real.operational_conflict_positions }} leito{{ physical.v5_real.operational_conflict_positions|pluralize:"s" }} com estados divergentes (não contado{{ physical.v5_real.operational_conflict_positions|pluralize:"s" }})</div>
               {% endif %}
+              {% if measurement %}
+              <div class="mt-2">
+                <a href="{% url 'census:bed_operational_detail' %}?measurement={{ measurement.pk }}" class="small">Ver detalhe por setor</a>
+              </div>
+              {% endif %}
             </div>
           </div>
         </div>

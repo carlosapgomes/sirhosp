@@ -1,0 +1,144 @@
+{% extends "base_sidebar.html" %}
+{% block page_title %}Estados operacionais{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'services_portal:dashboard' %}">Dashboard</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'census:bed_status' %}">Leitos</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Estados operacionais</li>
+  </ol>
+</nav>
+<div class="container-fluid py-3">
+  <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Estados operacionais informados — detalhe por setor</h2>
+  <p class="text-muted mb-3 small">
+    Foto do censo capturada em: {{ measurement.captured_at|date:"d/m/Y H:i" }}
+    (medição {{ measurement.pk }}).
+    Somente contagens agregadas e rótulos de leito — nenhum dado nominal é
+    exibido aqui.
+  </p>
+
+  {% if is_stale %}
+  <div class="alert alert-warning small" role="alert">
+    <i class="bi bi-exclamation-triangle-fill me-1"></i>
+    Existe um censo mais recente — esta página mantém a foto pedida e não a
+    substitui silenciosamente.
+  </div>
+  {% endif %}
+
+  {% if detail.is_historical %}
+  <div class="alert alert-info small" role="note">
+    Foto histórica: os badges desta foto contaram linhas do censo, não
+    leitos. Os casos divergentes, repetidos e sem leito listados abaixo
+    explicam a diferença.
+  </div>
+  {% endif %}
+
+  <section aria-labelledby="closure-heading" class="mb-4">
+    <h3 id="closure-heading" class="h6 fw-bold mb-2" style="color: var(--sirhosp-sidebar-bg);">
+      Fechamento com o card da mesma foto
+    </h3>
+    <div class="card border-0 shadow-sm">
+      <div class="card-body py-3 small">
+        <div class="mb-2">
+          <span class="text-muted fw-bold">Badges do card:</span>
+          {% for label, count in detail.card_badges %}
+          <span class="badge bg-light text-dark border">{{ label }}: {{ count }}</span>
+          {% endfor %}
+          {% if detail.card_conflict_positions %}
+          <span class="badge bg-light text-dark border">{{ detail.card_conflict_positions }} divergente{{ detail.card_conflict_positions|pluralize:"s" }} (não contado{{ detail.card_conflict_positions|pluralize:"s" }})</span>
+          {% endif %}
+        </div>
+        <div class="mb-2">
+          <span class="text-muted fw-bold">Leitos inequívocos do detalhe:</span>
+          {% for label, count in detail.detail_badges %}
+          <span class="badge bg-light text-dark border">{{ label }}: {{ count }}</span>
+          {% endfor %}
+          {% if detail.detail_conflict_positions %}
+          <span class="badge bg-light text-dark border">{{ detail.detail_conflict_positions }} divergente{{ detail.detail_conflict_positions|pluralize:"s" }} (não contado{{ detail.detail_conflict_positions|pluralize:"s" }})</span>
+          {% endif %}
+        </div>
+        {% if detail.closes %}
+        <p class="mb-0 text-success fw-bold">
+          Os leitos inequívocos somados por estado conferem com o card, e os
+          leitos divergentes conferem com a linha do card.
+        </p>
+        {% elif detail.is_historical %}
+        <p class="mb-0 text-muted">
+          Nesta foto histórica os badges contaram linhas; o detalhe acima
+          classifica por leito para auditoria.
+        </p>
+        {% endif %}
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="sectors-heading">
+    <h3 id="sectors-heading" class="h6 fw-bold mb-2" style="color: var(--sirhosp-sidebar-bg);">
+      Evidência por setor
+    </h3>
+    {% for sector in detail.sectors %}
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-white">
+        <h4 class="h6 fw-bold mb-0" style="color: var(--sirhosp-sidebar-bg);">
+          {{ sector.source_name }}
+          {% if sector.source_code %}
+          <span class="badge bg-light text-dark border ms-1">código {{ sector.source_code }}</span>
+          {% endif %}
+        </h4>
+      </div>
+      <div class="card-body py-3 small">
+        <div class="mb-2">
+          <span class="text-muted fw-bold">Leitos inequívocos por estado:</span>
+          {% for label, count in sector.unambiguous_badges %}
+          <span class="badge bg-light text-dark border">{{ label }}: {{ count }}</span>
+          {% endfor %}
+        </div>
+
+        {% if sector.repeated %}
+        <div class="mb-2">
+          <span class="text-muted fw-bold">Linhas repetidas colapsadas:</span>
+          <ul class="list-unstyled mb-0 mt-1">
+            {% for case in sector.repeated %}
+            <li class="mb-1">
+              <code>{{ case.bed }}</code> — {{ case.status_label }} —
+              {{ case.line_count }} linhas informadas contam 1 leito
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+
+        {% if sector.divergent %}
+        <div class="mb-2">
+          <span class="text-muted fw-bold">Leitos divergentes (não contados):</span>
+          <ul class="list-unstyled mb-0 mt-1">
+            {% for case in sector.divergent %}
+            <li class="mb-1">
+              <code>{{ case.bed }}</code> — estados informados:
+              {{ case.state_labels|join:", " }} ({{ case.line_count }} linha{{ case.line_count|pluralize:"s" }})
+              {% if case.occupied_plus_state %}
+              <span class="badge bg-warning text-dark ms-1">caso ocupado + estado</span>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+
+        {% if sector.bedless_badges %}
+        <div class="mb-0">
+          <span class="text-muted fw-bold">Linhas sem leito informado (fora dos badges):</span>
+          {% for label, count in sector.bedless_badges %}
+          <span class="badge bg-light text-dark border">{{ label }}: {{ count }}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+    </div>
+    {% empty %}
+    <div class="alert alert-info small">Nenhuma linha operacional nesta foto.</div>
+    {% endfor %}
+  </section>
+</div>
+{% endblock %}

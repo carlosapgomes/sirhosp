@@ -1683,41 +1683,51 @@ class _V5Patient:
 
 
 @dataclass(frozen=True)
-class _V5OperationalPositions:
-    """Aggregate per-bed outcome of the v5 operational-state projection.
+class _V5OperationalKeyDetail:
+    """One physical bed key with its effective operational states.
 
-    Only aggregate integers; no bed, name, record or signature survives.
+    Shared per-key evidence of the v5 operational projection: ``states``
+    holds one effective state per operational line of the key, ``diverged``
+    marks a patient or incomplete-identity line sharing the key, and the
+    sector display comes from the first row of the key. Materialization
+    aggregates it; the detail page groups it by sector.
     """
 
-    positions_by_status: dict[str, int]
-    duplicate_extra_rows: int
-    conflict_positions: int
-    conflict_rows: int
-    rows_without_bed: int
+    source: str
+    sector_code: str
+    sector_name: str
+    bed: str
+    states: tuple[str, ...]
+    diverged: bool
 
 
-def _v5_operational_positions(
+@dataclass(frozen=True)
+class _V5BedlessOperationalLine:
+    """One operational line without a usable bed, kept only in memory."""
+
+    source: str
+    sector_code: str
+    sector_name: str
+    status: str
+
+
+def _classify_v5_operational_keys(
     rows: tuple[_ObservedRow, ...],
-) -> _V5OperationalPositions:
-    """Collapse operational lines by physical bed key.
+) -> tuple[list[_V5OperationalKeyDetail], list[_V5BedlessOperationalLine]]:
+    """Project every row to its v5 effective state and group by bed key.
 
-    Each row is first projected to its v5 effective state: a non-occupied
-    row keeps its status, an occupied row whose normalized name contains a
+    The single source of truth of the D2 projection: a non-occupied row
+    keeps its status, an occupied row whose normalized name contains a
     marker projects to that marker state. Identified-patient and
     incomplete-identity rows are never operational lines, but their
     presence on a key diverges any operational line of that key. Keys reuse
-    the v3/v4 physical identity (normalized source, normalized bed).
-    Unanimous keys count one position; divergent keys count nothing and
-    surface both counters; bedless operational lines stay out of badges.
+    the v3/v4 physical identity (normalized source, normalized bed);
+    bedless operational lines stay out of every key.
     """
-    positions_by_status = {status: 0 for status in _STATUS_KEYS}
-    duplicate_extra_rows = 0
-    conflict_positions = 0
-    conflict_rows = 0
-    rows_without_bed = 0
-
     operational_by_key: dict[tuple[str, str], list[str]] = defaultdict(list)
+    key_sector: dict[tuple[str, str], tuple[str, str]] = {}
     diverged_keys: set[tuple[str, str]] = set()
+    bedless: list[_V5BedlessOperationalLine] = []
     for row in rows:
         if row.status == BedStatus.OCCUPIED:
             effective = _operational_status(
@@ -1737,29 +1747,86 @@ def _v5_operational_positions(
             effective = row.status
         bed = _normalize_identity(row.bed)
         if not bed:
-            rows_without_bed += 1
+            source = (
+                _normalize_identity(row.code)
+                if row.code
+                else _normalize_identity(row.name)
+            )
+            bedless.append(
+                _V5BedlessOperationalLine(
+                    source=source,
+                    sector_code=(row.code or "").strip(),
+                    sector_name=(row.name or "").strip(),
+                    status=effective,
+                )
+            )
             continue
         source = (
             _normalize_identity(row.code)
             if row.code
             else _normalize_identity(row.name)
         )
-        operational_by_key[(source, bed)].append(effective)
+        key = (source, bed)
+        key_sector.setdefault(key, ((row.code or "").strip(), (row.name or "").strip()))
+        operational_by_key[key].append(effective)
 
-    for key, states in operational_by_key.items():
-        if key in diverged_keys or len(set(states)) > 1:
+    details = [
+        _V5OperationalKeyDetail(
+            source=key[0],
+            sector_code=key_sector[key][0],
+            sector_name=key_sector[key][1],
+            bed=key[1],
+            states=tuple(states),
+            diverged=key in diverged_keys,
+        )
+        for key, states in operational_by_key.items()
+    ]
+    return details, bedless
+
+
+@dataclass(frozen=True)
+class _V5OperationalPositions:
+    """Aggregate per-bed outcome of the v5 operational-state projection.
+
+    Only aggregate integers; no bed, name, record or signature survives.
+    """
+
+    positions_by_status: dict[str, int]
+    duplicate_extra_rows: int
+    conflict_positions: int
+    conflict_rows: int
+    rows_without_bed: int
+
+
+def _v5_operational_positions(
+    rows: tuple[_ObservedRow, ...],
+) -> _V5OperationalPositions:
+    """Collapse operational lines by physical bed key.
+
+    Aggregates the shared per-key classification (:func:`_classify_v5_operational_keys`):
+    unanimous keys count one position; divergent keys count nothing and
+    surface both counters; bedless operational lines stay out of badges.
+    """
+    details, bedless = _classify_v5_operational_keys(rows)
+    positions_by_status = {status: 0 for status in _STATUS_KEYS}
+    duplicate_extra_rows = 0
+    conflict_positions = 0
+    conflict_rows = 0
+
+    for detail in details:
+        if detail.diverged or len(set(detail.states)) > 1:
             conflict_positions += 1
-            conflict_rows += len(states)
+            conflict_rows += len(detail.states)
         else:
-            positions_by_status[states[0]] += 1
-            duplicate_extra_rows += len(states) - 1
+            positions_by_status[detail.states[0]] += 1
+            duplicate_extra_rows += len(detail.states) - 1
 
     return _V5OperationalPositions(
         positions_by_status=positions_by_status,
         duplicate_extra_rows=duplicate_extra_rows,
         conflict_positions=conflict_positions,
         conflict_rows=conflict_rows,
-        rows_without_bed=rows_without_bed,
+        rows_without_bed=len(bedless),
     )
 
 
@@ -3883,6 +3950,47 @@ class _V5RealTotals:
     operational_conflict_positions: int = 0
 
 
+def _v5_card_operational(
+    reconciliation: dict[str, object] | None,
+) -> tuple[dict[str, int], int, int | None]:
+    """Badge source of the v5 real-situation card, keyed by status.
+
+    Reads the per-bed set (schema 4) or the row-based set (schema 3),
+    never a hybrid: the schema version alone decides which status map and
+    which divergent-bed count feed the card. Tolerates missing keys: every
+    canonical operational state defaults to zero. Shared by the card
+    (:func:`_v5_real_totals`) and the detail page so both read one rule.
+    """
+    if not reconciliation:
+        return {status: 0 for status in _STATUS_KEYS}, 0, None
+
+    def count(key: str) -> int:
+        """Read one persisted aggregate integer, defaulting to zero."""
+        value = reconciliation.get(key)
+        return value if isinstance(value, int) else 0
+
+    schema_version = reconciliation.get("schema_version")
+    schema = schema_version if isinstance(schema_version, int) else None
+    positions_map = reconciliation.get("operational_positions_by_status")
+    if schema is not None and schema >= 4 and isinstance(positions_map, dict):
+        status_map = positions_map
+        conflict_positions = count("operational_conflict_positions")
+    else:
+        raw_statuses = reconciliation.get("operational_rows_by_status")
+        status_map = raw_statuses if isinstance(raw_statuses, dict) else {}
+        conflict_positions = 0
+
+    def status_count(key: str) -> int:
+        value = status_map.get(key)
+        return value if isinstance(value, int) else 0
+
+    return (
+        {status: status_count(status) for status in _STATUS_KEYS},
+        conflict_positions,
+        schema,
+    )
+
+
 def _v5_real_totals(
     reconciliation: dict[str, object] | None,
 ) -> _V5RealTotals | None:
@@ -3910,23 +4018,10 @@ def _v5_real_totals(
     linked_pending = count("linked_pending_identified_patients")
     unmapped = count("unmapped_identified_patients")
     identified_total = standard + unrated + linked_pending + unmapped
-    schema_version = reconciliation.get("schema_version")
-    positions_map = reconciliation.get("operational_positions_by_status")
-    if (
-        isinstance(schema_version, int)
-        and schema_version >= 4
-        and isinstance(positions_map, dict)
-    ):
-        status_map = positions_map
-        conflict_positions = count("operational_conflict_positions")
-    else:
-        raw_statuses = reconciliation.get("operational_rows_by_status")
-        status_map = raw_statuses if isinstance(raw_statuses, dict) else {}
-        conflict_positions = 0
+    by_status, conflict_positions, _ = _v5_card_operational(reconciliation)
 
     def status_count(key: str) -> int:
-        value = status_map.get(key)
-        return value if isinstance(value, int) else 0
+        return by_status[key]
 
     return _V5RealTotals(
         identified_total=identified_total,
@@ -3938,6 +4033,236 @@ def _v5_real_totals(
         },
         incomplete_identity_rows=count("incomplete_identity_rows"),
         operational_conflict_positions=conflict_positions,
+    )
+
+
+def _v5_operational_label(status: str) -> str:
+    """Card label of one canonical operational state for the detail page."""
+    for key, label in _OPERATIONAL_STATUS_LABELS:
+        if key == status:
+            return label
+    return BedStatus(status).label
+
+
+def _v5_labeled_badges(
+    counts: dict[str, int], *, hide_zero: bool
+) -> list[tuple[str, int]]:
+    """Template-ready ``(label, count)`` badges in canonical card order."""
+    badges = [
+        (label, counts.get(key, 0)) for key, label in _OPERATIONAL_STATUS_LABELS
+    ]
+    if hide_zero:
+        return [(label, count) for label, count in badges if count]
+    return badges
+
+
+@dataclass(frozen=True)
+class OperationalBedCase:
+    """One unambiguous bed: a single effective state, possibly repeated."""
+
+    bed: str
+    status: str
+    status_label: str
+    line_count: int
+
+
+@dataclass(frozen=True)
+class OperationalDivergentCase:
+    """One divergent bed: distinct informed states, never counted.
+
+    ``occupied_plus_state`` marks a patient or incomplete-identity line
+    sharing the bed with operational lines.
+    """
+
+    bed: str
+    state_labels: list[str]
+    line_count: int
+    occupied_plus_state: bool
+
+
+@dataclass(frozen=True)
+class OperationalSectorDetail:
+    """Operational evidence of one source sector ``(setor_codigo, setor)``.
+
+    Only sector identity, bed labels, state classification and integer
+    counts; no patient name or record ever reaches this structure.
+    """
+
+    source_code: str
+    source_name: str
+    unambiguous_counts: dict[str, int]
+    repeated: list[OperationalBedCase]
+    divergent: list[OperationalDivergentCase]
+    bedless_counts: dict[str, int]
+
+    @property
+    def unambiguous_total(self) -> int:
+        return sum(self.unambiguous_counts.values())
+
+    @property
+    def divergent_total(self) -> int:
+        return len(self.divergent)
+
+    @property
+    def occupied_plus_total(self) -> int:
+        return sum(1 for case in self.divergent if case.occupied_plus_state)
+
+    @property
+    def bedless_total(self) -> int:
+        return sum(self.bedless_counts.values())
+
+    @property
+    def unambiguous_badges(self) -> list[tuple[str, int]]:
+        """Unambiguous beds by state as template-ready badges."""
+        return _v5_labeled_badges(self.unambiguous_counts, hide_zero=False)
+
+    @property
+    def bedless_badges(self) -> list[tuple[str, int]]:
+        """Bedless operational lines by state as template-ready badges."""
+        return _v5_labeled_badges(self.bedless_counts, hide_zero=True)
+
+
+@dataclass(frozen=True)
+class OperationalDetail:
+    """Pinned-photo detail of one v5 measurement's operational states.
+
+    Groups the shared per-key classification by sector and carries the
+    persisted card badges of the same photo, so the template exposes the
+    arithmetic closure without any user arithmetic. Historical photos
+    (schema < 4) keep the same evidence with the line-count semantics
+    labeled explicitly.
+    """
+
+    sectors: list[OperationalSectorDetail]
+    schema_version: int | None
+    is_historical: bool
+    card_positions: dict[str, int]
+    card_conflict_positions: int
+    detail_positions: dict[str, int]
+    detail_conflict_positions: int
+    detail_conflict_rows: int
+    detail_duplicate_extra_rows: int
+    detail_rows_without_bed: int
+    closes: bool
+
+    @property
+    def card_badges(self) -> list[tuple[str, int]]:
+        """Persisted card badges as template-ready ``(label, count)``."""
+        return _v5_labeled_badges(self.card_positions, hide_zero=False)
+
+    @property
+    def detail_badges(self) -> list[tuple[str, int]]:
+        """Detail unambiguous beds as template-ready ``(label, count)``."""
+        return _v5_labeled_badges(self.detail_positions, hide_zero=False)
+
+
+def build_operational_detail(
+    *,
+    measurement: OccupancyMeasurement,
+    snapshots: Iterable[CensusSnapshot],
+) -> OperationalDetail:
+    """Group one exact photo's operational states by source sector.
+
+    Reclassifies the run's snapshots in memory with the shared D2
+    classifier (:func:`_classify_v5_operational_keys`), so the detail
+    reconciles with the card by construction. A single snapshot query must
+    feed this builder; no related row is ever followed per item.
+    """
+    rows = tuple(_observed_row_from_snapshot(bed) for bed in snapshots)
+    details, bedless = _classify_v5_operational_keys(rows)
+
+    order = {status: index for index, status in enumerate(_STATUS_KEYS)}
+    by_source: dict[str, list[_V5OperationalKeyDetail]] = defaultdict(list)
+    sector_display: dict[str, tuple[str, str]] = {}
+    for detail in details:
+        by_source[detail.source].append(detail)
+        sector_display.setdefault(
+            detail.source, (detail.sector_code, detail.sector_name)
+        )
+    bedless_by_source: dict[str, Counter[str]] = defaultdict(Counter)
+    for line in bedless:
+        bedless_by_source[line.source][line.status] += 1
+        sector_display.setdefault(
+            line.source, (line.sector_code, line.sector_name)
+        )
+
+    sectors: list[OperationalSectorDetail] = []
+    detail_positions = {status: 0 for status in _STATUS_KEYS}
+    detail_conflicts = 0
+    detail_conflict_rows = 0
+    detail_duplicates = 0
+    for source in sorted(
+        set(by_source) | set(bedless_by_source),
+        key=lambda item: (sector_display[item][0], sector_display[item][1]),
+    ):
+        code, name = sector_display[source]
+        unambiguous = {status: 0 for status in _STATUS_KEYS}
+        repeated: list[OperationalBedCase] = []
+        divergent: list[OperationalDivergentCase] = []
+        for detail in sorted(by_source.get(source, []), key=lambda item: item.bed):
+            distinct = sorted(set(detail.states), key=lambda item: order[item])
+            if detail.diverged or len(distinct) > 1:
+                divergent.append(
+                    OperationalDivergentCase(
+                        bed=detail.bed,
+                        state_labels=[
+                            _v5_operational_label(status) for status in distinct
+                        ],
+                        line_count=len(detail.states),
+                        occupied_plus_state=detail.diverged,
+                    )
+                )
+                detail_conflicts += 1
+                detail_conflict_rows += len(detail.states)
+            else:
+                unambiguous[detail.states[0]] += 1
+                detail_positions[detail.states[0]] += 1
+                if len(detail.states) > 1:
+                    repeated.append(
+                        OperationalBedCase(
+                            bed=detail.bed,
+                            status=detail.states[0],
+                            status_label=_v5_operational_label(detail.states[0]),
+                            line_count=len(detail.states),
+                        )
+                    )
+                    detail_duplicates += len(detail.states) - 1
+        sectors.append(
+            OperationalSectorDetail(
+                source_code=code,
+                source_name=name,
+                unambiguous_counts={
+                    status: count
+                    for status, count in unambiguous.items()
+                    if count
+                },
+                repeated=repeated,
+                divergent=divergent,
+                bedless_counts=dict(bedless_by_source.get(source, {})),
+            )
+        )
+
+    card_positions, card_conflicts, schema = _v5_card_operational(
+        measurement.physical_reconciliation_json
+    )
+    is_historical = schema is None or schema < 4
+    closes = (
+        not is_historical
+        and detail_positions == card_positions
+        and detail_conflicts == card_conflicts
+    )
+    return OperationalDetail(
+        sectors=sectors,
+        schema_version=schema,
+        is_historical=is_historical,
+        card_positions=card_positions,
+        card_conflict_positions=card_conflicts,
+        detail_positions=detail_positions,
+        detail_conflict_positions=detail_conflicts,
+        detail_conflict_rows=detail_conflict_rows,
+        detail_duplicate_extra_rows=detail_duplicates,
+        detail_rows_without_bed=len(bedless),
+        closes=closes,
     )
 
 
