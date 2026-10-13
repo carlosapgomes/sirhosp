@@ -1,6 +1,6 @@
 ---
 name: verify-sirhosp
-description: Drive the SIRHOSP dev portal (Django + HTMX) the way a user does with Chrome DevTools MCP and ephemeral accounts: doctor, open, login journeys on prismadev, evidence, close. Use for assisted browser verification of the dev portal when the scripted Playwright run is not the right tool.
+description: "Drive the SIRHOSP dev portal (Django + HTMX) the way a user does with Chrome DevTools MCP and ephemeral accounts: doctor, open, login journeys on prismadev, evidence, close. Use for assisted browser verification of the dev portal when the scripted Playwright run is not the right tool."
 ---
 
 # Skill: verify-sirhosp
