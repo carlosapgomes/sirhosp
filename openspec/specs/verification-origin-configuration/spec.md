@@ -1,6 +1,7 @@
 # verification-origin-configuration Specification
 
 ## Purpose
+
 Configurar privadamente as origens operacionais da verificação, manter CLI e
 MCP no mesmo alvo autorizado e impedir que a ausência dessa configuração
 comprometa a revogação de sessões ou publique FQDNs na árvore atual.
