@@ -8,7 +8,7 @@
     <li class="breadcrumb-item active" aria-current="page">Estatísticas</li>
   </ol>
 </nav>
-<div class="container-fluid py-3">
+<div class="container-fluid py-3 sirhosp-statistics">
   <h2 class="h5 fw-bold mb-1" style="color: var(--sirhosp-sidebar-bg);">Relatório estatístico diário</h2>
   <p class="text-muted small mb-3">
     Relatório nominal por setor, materializado a partir dos censos de abertura e
@@ -67,7 +67,7 @@
   {% for group in projection.groups %}
   <div class="card border-0 shadow-sm mb-3{% if group.is_unknown_section %} border border-warning{% endif %}" id="statistics-group-{{ group.key }}">
     <button type="button"
-            class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2 w-100 text-start border-0"
+            class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2 w-100 text-start border-0 sirhosp-stats-toggle"
             data-bs-toggle="collapse"
             data-bs-target="#statistics-sector-{{ group.key }}"
             aria-expanded="false"
@@ -90,12 +90,15 @@
         {% for section in group.lists %}
         <div class="mb-2">
           <button type="button"
-                  class="btn btn-sm btn-light w-100 d-flex justify-content-between align-items-center collapsed"
+                  class="btn btn-sm btn-light w-100 d-flex justify-content-between align-items-center collapsed sirhosp-stats-toggle sirhosp-stats-category"
                   data-bs-toggle="collapse"
                   data-bs-target="#statistics-list-{{ group.key }}-{{ section.key }}"
                   aria-expanded="false"
                   aria-controls="statistics-list-{{ group.key }}-{{ section.key }}">
-            <span>{{ section.title }}</span>
+            <span class="d-flex align-items-center flex-grow-1 sirhosp-stats-lead">
+              <i class="bi bi-chevron-right collapse-icon me-2" aria-hidden="true"></i>
+              <span class="sirhosp-stats-title">{{ section.title }}</span>
+            </span>
             <span class="badge bg-secondary">{{ section.badge_count }}</span>
           </button>
           <div class="collapse" id="statistics-list-{{ group.key }}-{{ section.key }}">

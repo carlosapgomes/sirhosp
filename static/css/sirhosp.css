@@ -354,6 +354,74 @@
 }
 
 /* --------------------------------------------------------------------------
+   Statistics collapsibles affordance (SCAF-S1)
+   Scoped to the statistics page marker so the sidebar and other pages keep
+   their own indicators. Orientation derives from each toggle's own
+   aria-expanded, updated by Bootstrap Collapse: no second controller.
+   -------------------------------------------------------------------------- */
+.sirhosp-statistics .sirhosp-stats-toggle {
+  min-height: 44px;
+}
+
+.sirhosp-statistics .sirhosp-stats-toggle .collapse-icon {
+  display: inline-block;
+  flex-shrink: 0;
+  transform: rotate(0deg);
+  transition: transform 0.15s ease;
+}
+
+.sirhosp-statistics .sirhosp-stats-toggle[aria-expanded="true"] .collapse-icon {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sirhosp-statistics .sirhosp-stats-toggle .collapse-icon {
+    transition: none;
+  }
+}
+
+.sirhosp-statistics .sirhosp-stats-toggle:focus-visible {
+  outline: 2px solid var(--bs-primary);
+  outline-offset: 2px;
+}
+
+/* Inner-list toggles: neutral, recognizable without hover. */
+.sirhosp-statistics .sirhosp-stats-category {
+  background-color: var(--bs-gray-100);
+  border: 1px solid var(--bs-border-color);
+  color: var(--bs-body-color);
+  text-align: left;
+}
+
+.sirhosp-statistics .sirhosp-stats-category:hover {
+  background-color: var(--bs-gray-200);
+}
+
+.sirhosp-statistics .sirhosp-stats-category[aria-expanded="true"] {
+  background-color: var(--bs-gray-200);
+}
+
+.sirhosp-statistics .sirhosp-stats-category[aria-expanded="true"]:hover {
+  background-color: var(--bs-gray-300);
+}
+
+.sirhosp-statistics .sirhosp-stats-lead {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sirhosp-statistics .sirhosp-stats-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+}
+
+.sirhosp-statistics .sirhosp-stats-category > .badge {
+  flex-shrink: 0;
+  margin-left: 0.5rem;
+}
+
+/* --------------------------------------------------------------------------
    Buttons
    -------------------------------------------------------------------------- */
 .btn-primary {

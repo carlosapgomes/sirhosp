@@ -31,6 +31,7 @@ extraction data, no production access and no backfill.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -170,6 +171,42 @@ def _list_block(block: str, key: str) -> str:
     parts = block.split(f'id="statistics-list-{key}"')
     assert len(parts) == 2, f"list {key} not found exactly once"
     return parts[1].split("</ul>")[0]
+
+
+@dataclass(frozen=True)
+class _StatisticsToggle:
+    """One rendered sector or inner-list toggle of the statistics page."""
+
+    target: str
+    attrs: str
+    body: str
+    title: str
+
+
+_STATISTICS_TOGGLE_RE = re.compile(
+    r'<button(?P<attrs>[^>]*data-bs-target="#(?P<target>statistics-(?:sector|list)-[^"]+)"[^>]*)>'
+    r"(?P<body>.*?)</button>",
+    re.DOTALL,
+)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _statistics_toggles(html: str) -> list[_StatisticsToggle]:
+    """Every statistics collapse toggle in document order with its title."""
+    toggles = []
+    for match in _STATISTICS_TOGGLE_RE.finditer(html):
+        body = match.group("body")
+        title = _TAG_RE.sub("", body).strip().split("\n")[0].strip()
+        toggles.append(
+            _StatisticsToggle(
+                target=match.group("target"),
+                attrs=match.group("attrs"),
+                body=body,
+                title=title,
+            )
+        )
+    return toggles
 
 # ---------------------------------------------------------------------------
 # Synthetic census helpers
@@ -918,6 +955,78 @@ class TestCollapseAccessibility:
         assert targets
         for target in targets:
             assert f'id="{target}"' in html
+
+    def test_every_statistics_control_shows_a_decorative_chevron_before_its_title(
+        self, viewer_client: Client, report: DailyStatisticsReport
+    ) -> None:
+        """SCAF-S1 R1: each sector and inner-list toggle carries its own
+        decorative chevron before the title, including empty lists and the
+        report-level unknown section."""
+        response = viewer_client.get(page_url(), {"date": DAY.isoformat()})
+        html = response.content.decode()
+        toggles = _statistics_toggles(html)
+        assert toggles
+        projection = _projection(response)
+        expected = len(projection.groups) + sum(
+            len(group.lists) for group in projection.groups
+        )
+        assert len(toggles) == expected
+        for toggle in toggles:
+            icon = re.search(
+                r'<i[^>]*bi-chevron-right[^>]*>', toggle.body
+            )
+            assert icon is not None, (
+                f"statistics control without chevron: {toggle.target}"
+            )
+            assert 'aria-hidden="true"' in icon.group(0)
+            assert icon.start() < len(toggle.body.strip())
+            title_pos = toggle.body.find(toggle.title)
+            assert title_pos > icon.start(), (
+                f"chevron is not before the title: {toggle.target}"
+            )
+
+    def test_inner_list_controls_keep_label_target_and_state(
+        self, viewer_client: Client, report: DailyStatisticsReport
+    ) -> None:
+        """SCAF-S1 R1/R3: inner lists keep their title, count badge,
+        collapse target and initial collapsed state."""
+        response = viewer_client.get(page_url(), {"date": DAY.isoformat()})
+        html = response.content.decode()
+        toggles = [
+            toggle
+            for toggle in _statistics_toggles(html)
+            if toggle.target.startswith("statistics-list-")
+        ]
+        assert toggles
+        for toggle in toggles:
+            assert f'aria-controls="{toggle.target}"' in toggle.attrs
+            assert 'aria-expanded="false"' in toggle.attrs
+            assert toggle.title in toggle.body
+            assert re.search(
+                r'<span class="badge bg-secondary">\d+</span>',
+                toggle.body,
+            ) is not None
+            assert f'id="{toggle.target}"' in html
+
+    def test_unknown_section_controls_use_the_same_indicators(
+        self, viewer_client: Client, report: DailyStatisticsReport
+    ) -> None:
+        """SCAF-S1 R1: the report-level unknown section exposes the same
+        toggle indicators as the official groupings."""
+        response = viewer_client.get(page_url(), {"date": DAY.isoformat()})
+        html = response.content.decode()
+        unknown = [
+            toggle
+            for toggle in _statistics_toggles(html)
+            if "-unknown" in toggle.target
+        ]
+        assert unknown, "unknown section toggles missing"
+        assert any(
+            toggle.target == "statistics-sector-unknown" for toggle in unknown
+        )
+        for toggle in unknown:
+            assert "bi-chevron-right" in toggle.body
+            assert 'aria-hidden="true"' in toggle.body
 
 
 # ---------------------------------------------------------------------------
