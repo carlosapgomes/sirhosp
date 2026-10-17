@@ -10,6 +10,11 @@
 # atual de execução, não ao local deste arquivo, o que causa divergência quando
 # a validação é chamada a partir de subdiretórios.
 
+# Entradas temporárias do operador não são documentação versionada do projeto.
+# O markdownlint-cli2 não utiliza o arquivo .markdownlintignore.
+ignores:
+  - "tmp/**"
+
 config:
   # Ativar todas as regras default.
   default: true
