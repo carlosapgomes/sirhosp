@@ -2,7 +2,7 @@
 
 from django.urls import path
 
-from . import views, views_aggregate
+from . import views, views_aggregate, views_export
 
 app_name = "pending_items"
 
@@ -31,6 +31,11 @@ urlpatterns = [
         "pendencias/",
         views_aggregate.aggregate,
         name="aggregate",
+    ),
+    path(
+        "pendencias/export.xlsx",
+        views_export.aggregate_export,
+        name="aggregate_export",
     ),
     path(
         "pendencias/<int:item_id>/history/",

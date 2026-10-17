@@ -49,6 +49,9 @@
   <a href="{{ view_urls.patients }}" class="btn btn-outline-primary btn-sm {% if view == 'patients' %}active{% endif %}" data-testid="view-patients" aria-pressed="{% if view == 'patients' %}true{% else %}false{% endif %}">Por paciente</a>
   <a href="{{ view_urls.items }}" class="btn btn-outline-primary btn-sm {% if view == 'items' %}active{% endif %}" data-testid="view-items" aria-pressed="{% if view == 'items' %}true{% else %}false{% endif %}">Por pendência</a>
 </div>
+<a href="{% url 'pending_items:aggregate_export' %}?{{ request.GET.urlencode }}" class="btn btn-success btn-sm mb-3 ms-2" data-testid="aggregate-export">
+  <i class="bi bi-file-earmark-excel me-1"></i>Exportar XLSX
+</a>
 
 <div class="card border-0 shadow-sm mb-3">
   <div class="card-body">

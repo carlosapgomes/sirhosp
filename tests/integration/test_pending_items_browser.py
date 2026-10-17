@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import openpyxl
 import pytest
 from django.contrib.auth.models import Group, User
 from django.utils import timezone
@@ -146,10 +147,13 @@ def routed_browser_page():
 
             def _new_page(
                 viewport: ViewportSize | None = None,
+                accept_downloads: bool = False,
             ) -> Page:
                 if viewport is None:
                     viewport = {"width": 1280, "height": 800}
-                page = browser.new_page(viewport=viewport)
+                page = browser.new_page(
+                    viewport=viewport, accept_downloads=accept_downloads
+                )
                 # Abort-all first: later specific routes take precedence,
                 # so anything not pinned fails loudly instead of hitting
                 # the network. Plain http stays allowed for live_server.
@@ -612,6 +616,164 @@ class TestAggregateJourney:
         page.wait_for_selector(
             f"#history-body-{a1.pk} >> text=agg-a1-editada", timeout=15000
         )
+
+
+EXPECTED_EXPORT_HEADERS = [
+    "Registro",
+    "Nome",
+    "Unidade atual",
+    "Leito",
+    "Primeira unidade de internação",
+    "Especialidade",
+    "Tipo",
+    "Descrição/observação",
+    "Status",
+    "Criado em",
+    "Criado por",
+    "Atualizado em",
+    "Atualizado por",
+]
+
+
+def _make_export_scene() -> dict[str, list[str]]:
+    """22 patients: 23 actives (one formula-like) plus one resolved."""
+    _ensure_bootstrap()
+    outro = PendingItemType.objects.get(slug=OUTRO_SLUG)
+
+    def _admit(key: str, setor: str, leito: str) -> Admission:
+        patient = Patient.objects.create(
+            patient_source_key=key,
+            source_system="tasy",
+            name=f"PACIENTE SINTETICO {key}",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key=f"ADM_{key}",
+            admission_date=_dt("2026-06-01T08:00:00"),
+        )
+        CensusSnapshot.objects.create(
+            captured_at=_dt("2026-06-10T08:00:00"),
+            setor=setor,
+            leito=leito,
+            prontuario=key,
+            nome="PACIENTE SINTETICO",
+            bed_status=BedStatus.OCCUPIED,
+        )
+        return admission
+
+    active: list[str] = []
+    for index in range(21):
+        key = f"P_EXP_DL{index:02d}"
+        admission = _admit(key, "CLINICA MEDICA", f"L{index:02d}")
+        description = f"exp-dl-{index:02d}"
+        PendingItem.objects.create(
+            admission=admission,
+            item_type=outro,
+            description=description,
+            status=STATUS_ACTIVE,
+            version=1,
+        )
+        active.append(description)
+    uti = _admit("P_EXP_DL_U", "UTI GERAL", "U01")
+    for description in ("exp-dl-uti-a", "=1+1-sintetico"):
+        PendingItem.objects.create(
+            admission=uti,
+            item_type=outro,
+            description=description,
+            status=STATUS_ACTIVE,
+            version=1,
+        )
+        active.append(description)
+    PendingItem.objects.create(
+        admission=uti,
+        item_type=outro,
+        description="exp-dl-uti-resolvida",
+        status=STATUS_RESOLVED,
+        version=2,
+        finalized_at=_dt("2026-06-11T10:00:00"),
+    )
+    return {
+        "active": active,
+        "uti": ["exp-dl-uti-a", "=1+1-sintetico"],
+    }
+
+
+def _read_export_rows(path: Path) -> list[list]:
+    workbook = openpyxl.load_workbook(path)
+    sheet = workbook.active
+    assert sheet is not None
+    return [[cell.value for cell in row] for row in sheet.iter_rows()]
+
+
+def _assert_literal_cell(path: Path, value: str) -> None:
+    sheet = openpyxl.load_workbook(path).active
+    assert sheet is not None
+    found = [
+        cell
+        for row in sheet.iter_rows(min_row=2)
+        for cell in row
+        if cell.value == value
+    ]
+    assert found
+    for cell in found:
+        assert cell.data_type in ("s", "inlineStr")
+
+
+@pytest.mark.django_db(transaction=True)
+class TestExportJourney:
+    """PEND-S4: reader downloads the filtered cut beyond the page."""
+
+    def test_reader_filters_and_downloads_both_modes(
+        self, live_server, routed_browser_page, tmp_path
+    ) -> None:
+        new_page, _served = routed_browser_page
+        _make_reader(username="export_dl_reader")
+        expected = _make_export_scene()
+
+        page = new_page(accept_downloads=True)
+        _login(page, live_server.url, "export_dl_reader")
+        page.goto(
+            f"{live_server.url}/pendencias/",
+            wait_until="domcontentloaded",
+        )
+        assert page.locator('[data-testid="pagination"]').count() == 1
+
+        with page.expect_download() as full_info:
+            page.click('[data-testid="aggregate-export"]')
+        full = full_info.value
+        assert full.suggested_filename.startswith("pendencias-")
+        assert full.suggested_filename.endswith(".xlsx")
+        full_path = tmp_path / "full.xlsx"
+        full.save_as(str(full_path))
+        full_rows = _read_export_rows(full_path)
+        assert full_rows[0] == EXPECTED_EXPORT_HEADERS
+        assert len(full_rows) == 1 + len(expected["active"])
+        assert {row[7] for row in full_rows[1:]} == set(
+            expected["active"]
+        )
+        _assert_literal_cell(full_path, "=1+1-sintetico")
+
+        page.select_option("#f_unidade", "UTI GERAL")
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        assert "exp-dl-uti-a" in page.content()
+        assert "exp-dl-00" not in page.content()
+        with page.expect_download() as unit_info:
+            page.click('[data-testid="aggregate-export"]')
+        unit_path = tmp_path / "uti.xlsx"
+        unit_info.value.save_as(str(unit_path))
+        unit_rows = _read_export_rows(unit_path)
+        assert {row[7] for row in unit_rows[1:]} == set(expected["uti"])
+        assert all(row[2] == "UTI GERAL" for row in unit_rows[1:])
+
+        with page.expect_navigation():
+            page.click('[data-testid="view-items"]')
+        with page.expect_download() as items_info:
+            page.click('[data-testid="aggregate-export"]')
+        items_path = tmp_path / "uti-items.xlsx"
+        items_info.value.save_as(str(items_path))
+        assert _read_export_rows(items_path) == unit_rows
 
 
 @pytest.mark.django_db(transaction=True)
