@@ -652,6 +652,17 @@ def merge_admissions(
         canonical.save(
             update_fields=[*_MERGED_FIELD_NAMES, "updated_at"],
         )
+        if canonical.discharge_date is not None:
+            # PEND-S2 (D5): the resultant canonical state is closed —
+            # end from the confirmation, preexisting on the canonical,
+            # or inherited from the duplicate — so transferred and
+            # preexisting actives close in this same merge transaction.
+            # Local import: pending_items builds on patients models.
+            from apps.pending_items.services import (  # noqa: PLC0415
+                close_pending_items_for_confirmed_exit,
+            )
+
+            close_pending_items_for_confirmed_exit(admission=canonical)
 
         merged.merged_into = canonical
         merged.save(update_fields=["merged_into", "updated_at"])

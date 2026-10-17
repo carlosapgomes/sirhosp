@@ -434,6 +434,19 @@ def apply_discharge_exit(
                 locked.save(update_fields=["discharge_date", "updated_at"])
                 new = locked.discharge_date
             admission = locked
+            if (
+                final_status in _RECONCILABLE_STATUSES
+                and locked.discharge_date is not None
+            ):
+                # PEND-S2 (D5): the resultant closed state — first close,
+                # correction, or already_reconciled residual — closes
+                # still-active pending items in this same transaction.
+                # Local import: pending_items builds on patients models.
+                from apps.pending_items.services import (  # noqa: PLC0415
+                    close_pending_items_for_confirmed_exit,
+                )
+
+                close_pending_items_for_confirmed_exit(admission=locked)
             # Append-only audit of every attempted reconciliation:
             # - a same-evidence repeat (re-extraction of an already
             #   audited record) stays silent, because its own prior

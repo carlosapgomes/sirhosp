@@ -26,6 +26,7 @@ from apps.pending_items.models import (
     ACTION_UPDATED,
     FINAL_STATUSES,
     STATUS_ACTIVE,
+    STATUS_CLOSED_UNRESOLVED,
     PendingItem,
     PendingItemRevision,
     PendingItemType,
@@ -37,6 +38,12 @@ CONFLICT_MESSAGE = (
 )
 
 FINALIZED_MESSAGE = "Pendências finalizadas não podem ser alteradas."
+
+SYSTEM_AUTHOR_NAME = "Sistema"
+"""Author label recorded on system-driven revisions (PEND-S2, D5)."""
+
+CONFIRMED_EXIT_REASON = "confirmed_exit"
+"""Motivo recorded on revisions written by a confirmed exit (PEND-S2)."""
 
 
 class PendingItemsError(Exception):
@@ -236,3 +243,69 @@ def finalize_pending_item(
             is_system=False,
         )
     return locked
+
+
+def close_pending_items_for_confirmed_exit(
+    *,
+    admission: Admission,
+) -> int:
+    """Close residual actives after a trusted writer confirmed the exit.
+
+    PEND-S2 (D5): the caller establishes the trusted origin by holding
+    the canonical Admission row lock inside the writer's own
+    transaction; the locked row is the structural reference this
+    service receives. The trigger is the resultant state only: a null
+    ``discharge_date`` is a no-op, and no fresh open-to-closed
+    transition (nor an end in the payload just received) is required.
+
+    Every still-active item of this admission — in PK order, preserving
+    the Admission → PendingItem lock order — moves to
+    ``closed_unresolved`` with a system ``finalized`` revision carrying
+    motivo ``confirmed_exit`` at processing time (never backdated to
+    the effective exit). Already finalized items are preserved without
+    a new version, so repeats and corrections are idempotent.
+
+    Returns the number of items closed. Any revision failure aborts
+    the caller's transaction; this service never commits on its own.
+    """
+    if admission.discharge_date is None:
+        return 0
+    now = timezone.now()
+    actives = list(
+        PendingItem.objects.select_for_update()
+        .select_related("item_type")
+        .filter(admission_id=admission.pk, status=STATUS_ACTIVE)
+        .order_by("pk")
+    )
+    for item in actives:
+        item.status = STATUS_CLOSED_UNRESOLVED
+        item.finalized_at = now
+        item.version += 1
+        item.updated_by = None
+        item.updated_by_name = SYSTEM_AUTHOR_NAME
+        item.is_system_updated = True
+        item.save(
+            update_fields=[
+                "status",
+                "finalized_at",
+                "version",
+                "updated_by",
+                "updated_by_name",
+                "is_system_updated",
+                "updated_at",
+            ]
+        )
+        PendingItemRevision.objects.create(
+            item=item,
+            version=item.version,
+            action=ACTION_FINALIZED,
+            item_type=item.item_type,
+            type_name=item.item_type.name,
+            description=item.description,
+            status=STATUS_CLOSED_UNRESOLVED,
+            note=CONFIRMED_EXIT_REASON,
+            author=None,
+            author_name=SYSTEM_AUTHOR_NAME,
+            is_system=True,
+        )
+    return len(actives)

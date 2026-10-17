@@ -885,6 +885,75 @@ _SOURCE_SYSTEM_CONFLICT_MESSAGE = (
 )
 
 
+class StaleSnapshotIdentity(Exception):
+    """Snapshot identity changed between resolution and the row lock.
+
+    Raised when the admission resolved before the lock was merged,
+    repointed to another patient, or changed period before the lock
+    was acquired — or when re-resolution under the lock no longer
+    yields the same canonical row. The item transaction aborts and the
+    failure propagates to the caller (PEND-S2, D5).
+    """
+
+
+def _lock_and_revalidate_admission(
+    *,
+    patient: Patient,
+    source_system: str,
+    source_admission_key: str,
+    admission_start: datetime | None,
+    admission_end: datetime | None,
+    observed: Admission,
+) -> Admission:
+    """Lock one resolved admission and revalidate identity under it.
+
+    Must run inside the item transaction. Returns the locked row when
+    the pre-lock resolution still holds (same canonical row, same
+    patient, same period); otherwise raises :class:`StaleSnapshotIdentity`
+    and nothing is written through the stale object. Messages are
+    deliberately generic and carry no identifiers.
+    """
+    try:
+        locked = Admission.all_objects.select_for_update().get(
+            pk=observed.pk
+        )
+    except Admission.DoesNotExist:
+        raise StaleSnapshotIdentity(
+            "admission changed between identity resolution and lock"
+        ) from None
+    if locked.merged_into_id is not None:
+        raise StaleSnapshotIdentity(
+            "admission was merged between identity resolution and lock"
+        )
+    if locked.patient_id != patient.pk:
+        raise StaleSnapshotIdentity(
+            "admission patient changed between identity resolution and lock"
+        )
+    if (
+        locked.admission_date != observed.admission_date
+        or locked.discharge_date != observed.discharge_date
+    ):
+        raise StaleSnapshotIdentity(
+            "admission period changed between identity resolution and lock"
+        )
+    fresh = resolve_admission_identity(
+        patient=patient,
+        source_system=source_system,
+        source_admission_key=source_admission_key,
+        admission_start=admission_start,
+        admission_end=admission_end,
+    )
+    if (
+        fresh.ambiguous
+        or fresh.admission is None
+        or fresh.admission.pk != locked.pk
+    ):
+        raise StaleSnapshotIdentity(
+            "admission identity changed between resolution and lock"
+        )
+    return locked
+
+
 def upsert_admission_snapshot(
     patient: Patient,
     admissions_snapshot: list[dict[str, Any]],
@@ -930,6 +999,15 @@ def upsert_admission_snapshot(
         dict with "created" (int), "updated" (int) and "ambiguous" (int)
         counts. Ambiguous items fail closed: no admission is created or
         changed for them.
+
+    Transactional boundary (PEND-S2, D5): each item/admission persists
+    in its own transaction — resolved identity revalidated under the
+    Admission lock, then fields, alias, exit close with its revisions,
+    and that item's consolidation together. A failure undoes the whole
+    item and propagates to the caller; earlier items stay committed and
+    later items are not processed in that call. The list as a whole is
+    deliberately NOT atomic, and no reconciliation audit is written by
+    this writer.
     """
     authoritative_source = patient.source_system
 
@@ -978,61 +1056,90 @@ def upsert_admission_snapshot(
             ambiguous += 1
             continue
 
-        admission = match.admission
-
-        if admission is None:
-            admission = Admission.objects.create(
-                patient=patient,
-                source_system=authoritative_source,
-                source_admission_key=admission_key,
-                admission_date=admission_date,
-                discharge_date=discharge_date,
-                ward=ward,
-                bed=bed,
-            )
-            created += 1
-        else:
-            # Update mutable fields only when new values are non-empty
-            changed = False
-
-            if admission_date is not None and admission.admission_date != admission_date:
-                admission.admission_date = admission_date
-                changed = True
-            if discharge_date is not None and admission.discharge_date != discharge_date:
-                admission.discharge_date = discharge_date
-                changed = True
-            # ward/bed: only update with non-empty values
-            if ward and admission.ward != ward:
-                admission.ward = ward
-                changed = True
-            if bed and admission.bed != bed:
-                admission.bed = bed
-                changed = True
-
-            if changed:
-                admission.save(
-                    update_fields=[
-                        "admission_date",
-                        "discharge_date",
-                        "ward",
-                        "bed",
-                        "updated_at",
-                    ]
+        # PEND-S2 (D5): one transaction per item/admission. Any failure
+        # below undoes the whole item and propagates, preserving
+        # earlier committed items and skipping the later ones.
+        with transaction.atomic():
+            if match.admission is None:
+                admission = Admission.objects.create(
+                    patient=patient,
+                    source_system=authoritative_source,
+                    source_admission_key=admission_key,
+                    admission_date=admission_date,
+                    discharge_date=discharge_date,
+                    ward=ward,
+                    bed=bed,
                 )
-                updated += 1
+                created += 1
+            else:
+                admission = _lock_and_revalidate_admission(
+                    patient=patient,
+                    source_system=authoritative_source,
+                    source_admission_key=admission_key,
+                    admission_start=admission_date,
+                    admission_end=discharge_date,
+                    observed=match.admission,
+                )
+                # Update mutable fields only when new values are non-empty
+                changed = False
 
-        # Every observed external key is preserved as an alias of the
-        # canonical admission (idempotent for the current key).
-        ensure_admission_alias(
-            admission=admission,
-            source_system=authoritative_source,
-            alias_key=admission_key,
-        )
+                if (
+                    admission_date is not None
+                    and admission.admission_date != admission_date
+                ):
+                    admission.admission_date = admission_date
+                    changed = True
+                if (
+                    discharge_date is not None
+                    and admission.discharge_date != discharge_date
+                ):
+                    admission.discharge_date = discharge_date
+                    changed = True
+                # ward/bed: only update with non-empty values
+                if ward and admission.ward != ward:
+                    admission.ward = ward
+                    changed = True
+                if bed and admission.bed != bed:
+                    admission.bed = bed
+                    changed = True
 
-        # --- Consolidation (S2, legacy): merge duplicates for this period ---
-        _consolidate_period_duplicates(
-            patient, admission_date, discharge_date, authoritative_source
-        )
+                if changed:
+                    admission.save(
+                        update_fields=[
+                            "admission_date",
+                            "discharge_date",
+                            "ward",
+                            "bed",
+                            "updated_at",
+                        ]
+                    )
+                    updated += 1
+
+            # Every observed external key is preserved as an alias of the
+            # canonical admission (idempotent for the current key).
+            ensure_admission_alias(
+                admission=admission,
+                source_system=authoritative_source,
+                alias_key=admission_key,
+            )
+
+            # The resultant closed state ends still-active pending items
+            # in this same item transaction (PEND-S2, D5). Local import:
+            # pending_items builds on patients/ingestion models.
+            if admission.discharge_date is not None:
+                from apps.pending_items.services import (  # noqa: PLC0415
+                    close_pending_items_for_confirmed_exit,
+                )
+
+                close_pending_items_for_confirmed_exit(admission=admission)
+
+            # --- Consolidation (S2, legacy): merge duplicates for period ---
+            _consolidate_period_duplicates(
+                patient,
+                admission_date,
+                discharge_date,
+                authoritative_source,
+            )
 
     return {"created": created, "updated": updated, "ambiguous": ambiguous}
 
