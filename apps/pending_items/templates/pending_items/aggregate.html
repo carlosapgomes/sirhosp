@@ -1,0 +1,374 @@
+{% extends "base_sidebar.html" %}
+
+{% block page_title %}Pendências{% endblock %}
+
+{% block content %}
+<h1 class="h5 mb-1">Pendências dos internados atuais</h1>
+<p class="text-muted small mb-3">
+  {% if captured_at %}Foto do censo de {{ captured_at|date:"d/m/Y H:i" }}.{% endif %}
+  Recorte conservador: casos ambíguos ficam fora do agregado.
+</p>
+
+{% if messages %}
+  {% for message in messages %}
+    <div class="alert alert-success" role="status">{{ message }}</div>
+  {% endfor %}
+{% endif %}
+
+<div class="row g-2 mb-3" aria-label="Indicadores hospitalares">
+  <div class="col-12 col-md-4">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body py-2">
+        <div class="small text-muted">Pacientes com pendências ativas</div>
+        <div class="h5 mb-0" data-testid="indicators-patients">{{ indicators.patient_count }}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-4">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body py-2">
+        <div class="small text-muted">Idade média das ativas</div>
+        <div class="h5 mb-0" data-testid="indicators-mean">{% if indicators.mean_days is None %}—{% else %}{{ indicators.mean_days|floatformat:1 }} dias{% endif %}</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-4">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-body py-2">
+        <div class="small text-muted">Idade máxima das ativas</div>
+        <div class="h5 mb-0" data-testid="indicators-max">{% if indicators.max_days is None %}—{% else %}{{ indicators.max_days|floatformat:1 }} dias{% endif %}</div>
+      </div>
+    </div>
+  </div>
+</div>
+{% if indicators.patient_count == 0 %}
+  <p class="text-muted small" role="status">Nenhuma pendência ativa no momento.</p>
+{% endif %}
+
+<div class="btn-group mb-3" role="group" aria-label="Modo de visualização">
+  <a href="{{ view_urls.patients }}" class="btn btn-outline-primary btn-sm {% if view == 'patients' %}active{% endif %}" data-testid="view-patients" aria-pressed="{% if view == 'patients' %}true{% else %}false{% endif %}">Por paciente</a>
+  <a href="{{ view_urls.items }}" class="btn btn-outline-primary btn-sm {% if view == 'items' %}active{% endif %}" data-testid="view-items" aria-pressed="{% if view == 'items' %}true{% else %}false{% endif %}">Por pendência</a>
+</div>
+
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <form method="get" data-testid="aggregate-filters" class="row g-2 align-items-end">
+      <input type="hidden" name="view" value="{{ view }}">
+      <div class="col-6 col-md-3">
+        <label for="f_status" class="form-label small fw-semibold">Status</label>
+        <select name="status" id="f_status" class="form-select form-select-sm">
+          <option value="active"{% if request.GET.status == "active" or not request.GET.status %} selected{% endif %}>Ativas</option>
+          <option value="resolved"{% if request.GET.status == "resolved" %} selected{% endif %}>Resolvidas</option>
+          <option value="closed_unresolved"{% if request.GET.status == "closed_unresolved" %} selected{% endif %}>Encerradas sem resolução</option>
+          <option value="all"{% if request.GET.status == "all" %} selected{% endif %}>Todas</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_unidade" class="form-label small fw-semibold">Unidade atual</label>
+        <select name="unidade" id="f_unidade" class="form-select form-select-sm">
+          <option value="">Todas</option>
+          {% for unidade in options.unidades %}
+            <option value="{{ unidade }}"{% if request.GET.unidade == unidade %} selected{% endif %}>{{ unidade }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_leito" class="form-label small fw-semibold">Leito</label>
+        <select name="leito" id="f_leito" class="form-select form-select-sm">
+          <option value="">Todos</option>
+          {% for leito in options.leitos %}
+            <option value="{{ leito }}"{% if request.GET.leito == leito %} selected{% endif %}>{{ leito }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_especialidade" class="form-label small fw-semibold">Especialidade</label>
+        <select name="especialidade" id="f_especialidade" class="form-select form-select-sm">
+          <option value="">Todas</option>
+          {% for esp in options.especialidades %}
+            <option value="{{ esp.value }}"{% if request.GET.especialidade == esp.value %} selected{% endif %}>{{ esp.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_tipo" class="form-label small fw-semibold">Tipo</label>
+        <select name="tipo" id="f_tipo" class="form-select form-select-sm">
+          <option value="">Todos</option>
+          {% for tipo in options.tipos %}
+            <option value="{{ tipo.pk }}"{% if tipo.pk|stringformat:"s" == request.GET.tipo %} selected{% endif %}>{{ tipo.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_criador" class="form-label small fw-semibold">Criador</label>
+        <select name="criador" id="f_criador" class="form-select form-select-sm">
+          <option value="">Todos</option>
+          {% for criador in options.criadores %}
+            <option value="{{ criador.pk }}"{% if criador.pk|stringformat:"s" == request.GET.criador %} selected{% endif %}>{{ criador.username }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_atualizador" class="form-label small fw-semibold">Último atualizador</label>
+        <select name="atualizador" id="f_atualizador" class="form-select form-select-sm">
+          <option value="">Todos</option>
+          {% for atualizador in options.atualizadores %}
+            <option value="{{ atualizador.pk }}"{% if atualizador.pk|stringformat:"s" == request.GET.atualizador %} selected{% endif %}>{{ atualizador.username }}</option>
+          {% endfor %}
+          {% if options.has_system_updates %}
+            <option value="system"{% if request.GET.atualizador == "system" %} selected{% endif %}>Sistema</option>
+          {% endif %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_ordenar" class="form-label small fw-semibold">Ordenação</label>
+        <select name="ordenar" id="f_ordenar" class="form-select form-select-sm">
+          <option value=""{% if not request.GET.ordenar %} selected{% endif %}>Padrão (unidade/leito/paciente)</option>
+          <option value="tempo_asc"{% if request.GET.ordenar == "tempo_asc" %} selected{% endif %}>Tempo em aberto crescente</option>
+          <option value="tempo_desc"{% if request.GET.ordenar == "tempo_desc" %} selected{% endif %}>Tempo em aberto decrescente</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_min_dias" class="form-label small fw-semibold">Tempo mín. (dias)</label>
+        <input type="number" min="0" step="any" name="min_dias" id="f_min_dias" class="form-control form-control-sm" value="{{ request.GET.min_dias|default:"" }}">
+      </div>
+      <div class="col-6 col-md-3">
+        <label for="f_max_dias" class="form-label small fw-semibold">Tempo máx. (dias)</label>
+        <input type="number" min="0" step="any" name="max_dias" id="f_max_dias" class="form-control form-control-sm" value="{{ request.GET.max_dias|default:"" }}">
+      </div>
+      <div class="col-12 col-md-6 d-flex gap-2">
+        <button type="submit" class="btn btn-primary btn-sm" data-testid="filters-apply">Aplicar filtros</button>
+        <a href="{% url 'pending_items:aggregate' %}" class="btn btn-outline-secondary btn-sm">Limpar</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% if filter_error %}
+  <div class="alert alert-danger" role="alert">{{ filter_error }}</div>
+{% endif %}
+
+{% if not has_census %}
+  <div class="alert alert-info" role="status">Sem foto de censo atual: o agregado está vazio.</div>
+{% endif %}
+
+{% if view == "patients" %}
+  {% for group in groups %}
+    <section class="card border-0 shadow-sm mb-3" data-testid="patient-group-{{ group.admission_id }}" aria-label="Pendências de {{ group.patient_name }}">
+      <div class="card-header bg-white">
+        <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
+          <div>
+            <strong>{{ group.patient_name }}</strong>
+            <span class="text-muted small">· Registro {{ group.prontuario }}</span>
+          </div>
+          <a href="{{ group.admission_url }}" class="btn btn-outline-secondary btn-sm">Abrir episódio</a>
+        </div>
+        <div class="small text-muted mt-1">
+          Unidade atual: <strong>{{ group.setor }}</strong> · Leito <strong>{{ group.leito }}</strong>
+          · Especialidade: <strong>{{ group.esp_sigla }}{% if group.esp_nome != group.esp_sigla %} — {{ group.esp_nome }}{% endif %}</strong>
+          · Primeira unidade de internação: <strong>{{ group.first_unit }}</strong>
+          · Entrada: {{ group.entry|date:"d/m/Y H:i"|default:"—" }}
+          · {{ group.rows|length }} pendência{{ group.rows|length|pluralize:"s" }}
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Tipo</th>
+              <th scope="col">Descrição</th>
+              <th scope="col">Status</th>
+              <th scope="col">Tempo em aberto</th>
+              <th scope="col">Criada</th>
+              <th scope="col">Atualizada</th>
+              <th scope="col">Ações</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in group.rows %}
+              <tr data-testid="pending-row-{{ row.item.pk }}">
+                <td><span class="badge bg-light text-dark border">{{ row.item.item_type.name }}</span></td>
+                <td class="text-break">{{ row.item.description|linebreaksbr }}</td>
+                <td>
+                  <span class="badge {% if row.item.status == 'active' %}bg-warning-subtle text-warning-emphasis{% elif row.item.status == 'resolved' %}bg-success-subtle text-success-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %}">
+                    {{ row.item.get_status_display }}
+                  </span>
+                </td>
+                <td>{{ row.open_days|floatformat:1 }} dias</td>
+                <td class="small text-muted">{{ row.item.created_by_name|default:"—" }}<br>{{ row.item.created_at|date:"d/m/Y H:i" }}</td>
+                <td class="small text-muted">{% if row.item.is_system_updated %}Sistema{% else %}{{ row.item.updated_by_name|default:"—" }}{% endif %}<br>{{ row.item.updated_at|date:"d/m/Y H:i" }}</td>
+                <td class="text-nowrap">
+                  <button type="button" class="btn btn-outline-secondary btn-sm"
+                          data-testid="pending-history-{{ row.item.pk }}"
+                          data-bs-toggle="collapse" data-bs-target="#history-collapse-{{ row.item.pk }}"
+                          hx-get="{{ row.history_url }}" hx-target="#history-body-{{ row.item.pk }}"
+                          hx-swap="innerHTML" hx-trigger="click once">
+                    Histórico
+                  </button>
+                  {% if row.can_edit %}
+                    <button type="button" class="btn btn-outline-primary btn-sm"
+                            data-testid="pending-edit-{{ row.item.pk }}"
+                            data-bs-toggle="modal" data-bs-target="#pending-modal"
+                            hx-get="{{ row.edit_url }}?next={{ current_path|urlencode }}"
+                            hx-target="#pending-modal-body" hx-swap="innerHTML">
+                      Editar
+                    </button>
+                    <button type="button" class="btn btn-outline-success btn-sm"
+                            data-testid="pending-finalize-{{ row.item.pk }}"
+                            data-bs-toggle="modal" data-bs-target="#pending-modal"
+                            hx-get="{{ row.finalize_url }}?next={{ current_path|urlencode }}"
+                            hx-target="#pending-modal-body" hx-swap="innerHTML">
+                      Finalizar
+                    </button>
+                  {% endif %}
+                </td>
+              </tr>
+              <tr>
+                <td colspan="7" class="p-0 border-0">
+                  <div class="collapse" id="history-collapse-{{ row.item.pk }}">
+                    <div id="history-body-{{ row.item.pk }}" class="p-3 border-top">
+                      <span class="text-muted small">Carregando histórico…</span>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% empty %}
+    <div class="card border-0 shadow-sm">
+      <div class="card-body text-center py-5">
+        <p class="text-muted mb-0">Nenhuma pendência corresponde aos filtros.</p>
+      </div>
+    </div>
+  {% endfor %}
+{% else %}
+  {% if rows %}
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="table-responsive">
+        <table class="table table-sm align-middle mb-0">
+          <thead>
+            <tr>
+              <th scope="col">Paciente</th>
+              <th scope="col">Unidade/Leito</th>
+              <th scope="col">Especialidade</th>
+              <th scope="col">Primeira unidade</th>
+              <th scope="col">Tipo</th>
+              <th scope="col">Descrição</th>
+              <th scope="col">Status</th>
+              <th scope="col">Tempo em aberto</th>
+              <th scope="col">Criada</th>
+              <th scope="col">Atualizada</th>
+              <th scope="col">Ações</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr data-testid="pending-row-{{ row.item.pk }}">
+                <td>
+                  <strong>{{ row.patient_name }}</strong><br>
+                  <span class="small text-muted">Registro {{ row.prontuario }}</span><br>
+                  <a href="{{ row.admission_url }}" class="small">Abrir episódio</a>
+                </td>
+                <td>{{ row.setor }} / {{ row.leito }}</td>
+                <td>{{ row.esp_sigla }}{% if row.esp_nome != row.esp_sigla %}<br><span class="small text-muted">{{ row.esp_nome }}</span>{% endif %}</td>
+                <td>{{ row.first_unit }}</td>
+                <td><span class="badge bg-light text-dark border">{{ row.item.item_type.name }}</span></td>
+                <td class="text-break">{{ row.item.description|linebreaksbr }}</td>
+                <td>
+                  <span class="badge {% if row.item.status == 'active' %}bg-warning-subtle text-warning-emphasis{% elif row.item.status == 'resolved' %}bg-success-subtle text-success-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %}">
+                    {{ row.item.get_status_display }}
+                  </span>
+                </td>
+                <td>{{ row.open_days|floatformat:1 }} dias</td>
+                <td class="small text-muted">{{ row.item.created_by_name|default:"—" }}<br>{{ row.item.created_at|date:"d/m/Y H:i" }}</td>
+                <td class="small text-muted">{% if row.item.is_system_updated %}Sistema{% else %}{{ row.item.updated_by_name|default:"—" }}{% endif %}<br>{{ row.item.updated_at|date:"d/m/Y H:i" }}</td>
+                <td class="text-nowrap">
+                  <button type="button" class="btn btn-outline-secondary btn-sm"
+                          data-testid="pending-history-{{ row.item.pk }}"
+                          data-bs-toggle="collapse" data-bs-target="#history-collapse-{{ row.item.pk }}"
+                          hx-get="{{ row.history_url }}" hx-target="#history-body-{{ row.item.pk }}"
+                          hx-swap="innerHTML" hx-trigger="click once">
+                    Histórico
+                  </button>
+                  {% if row.can_edit %}
+                    <button type="button" class="btn btn-outline-primary btn-sm"
+                            data-testid="pending-edit-{{ row.item.pk }}"
+                            data-bs-toggle="modal" data-bs-target="#pending-modal"
+                            hx-get="{{ row.edit_url }}?next={{ current_path|urlencode }}"
+                            hx-target="#pending-modal-body" hx-swap="innerHTML">
+                      Editar
+                    </button>
+                    <button type="button" class="btn btn-outline-success btn-sm"
+                            data-testid="pending-finalize-{{ row.item.pk }}"
+                            data-bs-toggle="modal" data-bs-target="#pending-modal"
+                            hx-get="{{ row.finalize_url }}?next={{ current_path|urlencode }}"
+                            hx-target="#pending-modal-body" hx-swap="innerHTML">
+                      Finalizar
+                    </button>
+                  {% endif %}
+                </td>
+              </tr>
+              <tr>
+                <td colspan="11" class="p-0 border-0">
+                  <div class="collapse" id="history-collapse-{{ row.item.pk }}">
+                    <div id="history-body-{{ row.item.pk }}" class="p-3 border-top">
+                      <span class="text-muted small">Carregando histórico…</span>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% else %}
+    <div class="card border-0 shadow-sm">
+      <div class="card-body text-center py-5">
+        <p class="text-muted mb-0">Nenhuma pendência corresponde aos filtros.</p>
+      </div>
+    </div>
+  {% endif %}
+{% endif %}
+
+{% if page_obj.paginator.num_pages > 1 %}
+  <nav aria-label="Paginação" data-testid="pagination">
+    <ul class="pagination pagination-sm flex-wrap">
+      {% if page_obj.has_previous %}
+        <li class="page-item"><a class="page-link" href="{{ pagination_base }}page={{ page_obj.previous_page_number }}">Anterior</a></li>
+      {% else %}
+        <li class="page-item disabled"><span class="page-link">Anterior</span></li>
+      {% endif %}
+      {% for number in page_obj.paginator.page_range %}
+        {% if number == page_obj.number %}
+          <li class="page-item active" aria-current="page"><span class="page-link">{{ number }}</span></li>
+        {% else %}
+          <li class="page-item"><a class="page-link" href="{{ pagination_base }}page={{ number }}">{{ number }}</a></li>
+        {% endif %}
+      {% endfor %}
+      {% if page_obj.has_next %}
+        <li class="page-item"><a class="page-link" href="{{ pagination_base }}page={{ page_obj.next_page_number }}">Próxima</a></li>
+      {% else %}
+        <li class="page-item disabled"><span class="page-link">Próxima</span></li>
+      {% endif %}
+    </ul>
+  </nav>
+{% endif %}
+
+<div class="modal fade" id="pending-modal" tabindex="-1" aria-labelledby="pending-modal-label" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title h6" id="pending-modal-label">Pendência</h2>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body" id="pending-modal-body">
+        <p class="text-muted">Carregando…</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

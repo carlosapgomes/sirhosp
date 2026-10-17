@@ -1,0 +1,31 @@
+{% extends "base_sidebar.html" %}
+
+{% block page_title %}Histórico da pendência — {{ patient.name }}{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'pending_items:aggregate' %}">Pendências</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Histórico</li>
+  </ol>
+</nav>
+
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <div class="small text-muted mb-2">
+      {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
+    </div>
+    <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+  </div>
+</div>
+
+<h2 class="h6 text-muted mb-3">Versões ({{ revisions|length }})</h2>
+
+<div class="card border-0 shadow-sm">
+  <div class="card-body">
+    {% include "pending_items/_aggregate_history_table.html" %}
+  </div>
+</div>
+
+<a href="{% url 'pending_items:aggregate' %}" class="btn btn-outline-secondary mt-3">Voltar</a>
+{% endblock %}

@@ -1,0 +1,56 @@
+<div class="small text-muted mb-2">
+  {{ patient.name }} · Registro {{ patient.patient_source_key }} ·
+  Entrada {{ admission.admission_date|date:"d/m/Y H:i"|default:"—" }}
+</div>
+<div class="small text-muted mb-2">
+  {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
+</div>
+<p class="text-break">{{ item.description|linebreaksbr }}</p>
+
+{% if error %}
+  <div class="alert alert-danger" role="alert">{{ error }}</div>
+{% endif %}
+
+{% if show_attempted %}
+  <div class="alert alert-warning" role="note">
+    <div class="small fw-semibold mb-1">Anotação digitada (não salva):</div>
+    <div class="text-break">{{ attempted|linebreaksbr }}</div>
+  </div>
+{% endif %}
+
+{% if form %}
+  <form method="post" action="{{ post_url }}"{% if modal %} hx-post="{{ post_url }}" hx-target="#pending-modal-body" hx-swap="innerHTML"{% endif %} novalidate>
+    {% csrf_token %}
+    <input type="hidden" name="next" value="{{ next_url }}">
+    {{ form.expected_version }}
+    {% if form.non_field_errors %}
+      <div class="alert alert-danger small" role="alert">{{ form.non_field_errors }}</div>
+    {% endif %}
+    <div class="mb-3">
+      <label for="id_target_status" class="form-label small fw-semibold">Destino</label>
+      {{ form.target_status.errors }}
+      <select name="target_status" id="id_target_status" class="form-select" required>
+        {% for choice_value, choice_label in form.target_status.field.choices %}
+          <option value="{{ choice_value }}"{% if form.target_status.value|stringformat:"s" == choice_value|stringformat:"s" %} selected{% endif %}>{{ choice_label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="mb-3">
+      <label for="id_note" class="form-label small fw-semibold">Anotação (opcional)</label>
+      {{ form.note.errors }}
+      <textarea name="note" id="id_note" rows="3" class="form-control">{{ form.note.value|default:"" }}</textarea>
+    </div>
+    <div class="d-flex gap-2">
+      <button type="submit" class="btn btn-success" data-testid="pending-finalize-confirm">
+        <i class="bi bi-check-circle me-1"></i> Confirmar finalização
+      </button>
+      {% if modal %}
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+      {% else %}
+        <a href="{{ next_url }}" class="btn btn-outline-secondary">Voltar</a>
+      {% endif %}
+    </div>
+  </form>
+{% elif not modal %}
+  <a href="{{ next_url }}" class="btn btn-outline-secondary">Voltar</a>
+{% endif %}

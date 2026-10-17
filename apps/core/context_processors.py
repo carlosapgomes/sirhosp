@@ -26,6 +26,7 @@ OUTDATED_CLASS = "is-outdated"
 MENU_PATH_MAP = [
     ("/painel/", "dashboard"),
     ("/censo/", "censo"),
+    ("/pendencias/", "pendencias"),
     ("/monitor/", "monitor"),
     ("/setores/", "setores"),
 ]
@@ -61,6 +62,8 @@ def _default_title(path: str) -> str:
         return "Dashboard"
     if clean == "censo":
         return "Censo Hospitalar"
+    if clean == "pendencias":
+        return "Pendências"
     if clean == "monitor":
         return "Monitor de Risco"
     if clean == "beds":

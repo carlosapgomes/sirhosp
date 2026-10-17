@@ -10,14 +10,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from django.db.models import Max
-
-from apps.census.models import BedStatus, CensusSnapshot
 from apps.patients.models import Admission, Patient
 from apps.pending_items.models import (
     CLOSED_EPISODE_MESSAGE,
     INELIGIBLE_MESSAGE,
     NOT_CURRENT_MESSAGE,
+)
+from apps.pending_items.queries import (
+    CUT_ABSENT,
+    CUT_AMBIGUOUS_IDENTITY,
+    CUT_AMBIGUOUS_OCCUPATION,
+    CUT_MULTIPLE_OPEN,
+    CUT_OK,
+    classify_patient,
+    resolve_patient_detail,
 )
 
 REASON_OK = "ok"
@@ -51,7 +57,12 @@ def reason_message(reason: str) -> str:
 
 
 def check_write_eligibility(admission: Admission) -> WriteEligibility:
-    """Decide whether an admission accepts pending-item writes."""
+    """Decide whether an admission accepts pending-item writes.
+
+    Consumes the same conservative classification core as the aggregate
+    cut and indicators (design D3); this wrapper only adds the
+    admission-specific reasons and keeps the exact PI-03 notices.
+    """
     if admission.merged_into_id is not None:
         return WriteEligibility(False, REASON_MERGED, None)
     if admission.discharge_date is not None:
@@ -62,35 +73,26 @@ def check_write_eligibility(admission: Admission) -> WriteEligibility:
     ).first()
     if source_key is None:
         return WriteEligibility(False, REASON_ABSENT, None)
-    if (
-        Patient.objects.filter(patient_source_key=source_key).count() > 1
-    ):
-        return WriteEligibility(False, REASON_AMBIGUOUS, None)
 
-    latest = CensusSnapshot.objects.aggregate(latest=Max("captured_at"))["latest"]
-    if latest is None:
-        return WriteEligibility(False, REASON_ABSENT, None)
-    occupations = set(
-        CensusSnapshot.objects.filter(
-            captured_at=latest,
-            bed_status=BedStatus.OCCUPIED,
-            prontuario=source_key,
-        ).values_list("setor", "leito")
-    )
-    if not occupations:
-        return WriteEligibility(False, REASON_ABSENT, None)
-    if len(occupations) > 1:
+    detail = resolve_patient_detail(source_key)
+    # Same precedence as the original rule: an ambiguous identity wins
+    # over photo absence or occupation checks.
+    if len(detail.identity_rows) > 1:
         return WriteEligibility(False, REASON_AMBIGUOUS, None)
+    if not detail.has_photo:
+        return WriteEligibility(False, REASON_ABSENT, None)
 
-    open_ids = list(
-        Admission.objects.filter(
-            patient_id=admission.patient_id,
-            discharge_date__isnull=True,
-        ).values_list("pk", flat=True)
+    outcome = classify_patient(
+        cells=detail.cells,
+        identity_rows=detail.identity_rows,
+        open_ids=detail.open_ids,
     )
-    if len(open_ids) > 1:
+    if outcome.status in (CUT_ABSENT, CUT_AMBIGUOUS_IDENTITY):
+        return WriteEligibility(False, REASON_ABSENT, None)
+    if outcome.status in (CUT_AMBIGUOUS_OCCUPATION, CUT_MULTIPLE_OPEN):
         return WriteEligibility(False, REASON_AMBIGUOUS, None)
-    if open_ids != [admission.pk]:
+    assert outcome.status == CUT_OK
+    if outcome.open_admission_id != admission.pk:
         return WriteEligibility(False, REASON_NOT_CURRENT, None)
     return WriteEligibility(True, REASON_OK, admission.pk)
 

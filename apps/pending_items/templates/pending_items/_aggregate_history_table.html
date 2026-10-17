@@ -1,0 +1,36 @@
+<div class="small text-muted mb-2">
+  {{ patient.name }} · Registro {{ patient.patient_source_key }} ·
+  {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
+</div>
+<div class="table-responsive">
+  <table class="table table-sm align-middle mb-0">
+    <thead>
+      <tr>
+        <th scope="col">Versão</th>
+        <th scope="col">Ação</th>
+        <th scope="col">Data/hora</th>
+        <th scope="col">Autor</th>
+        <th scope="col">Tipo</th>
+        <th scope="col">Descrição</th>
+        <th scope="col">Status</th>
+        <th scope="col">Anotação</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for revision in revisions %}
+        <tr>
+          <td>v{{ revision.version }}</td>
+          <td>{{ revision.get_action_display }}</td>
+          <td>{{ revision.created_at|date:"d/m/Y H:i" }}</td>
+          <td>{% if revision.is_system %}Sistema{% else %}{{ revision.author_name|default:"—" }}{% endif %}</td>
+          <td>{{ revision.type_name }}</td>
+          <td class="text-break">{{ revision.description|linebreaksbr }}</td>
+          <td>{{ revision.get_status_display }}</td>
+          <td class="text-break">{{ revision.note|linebreaksbr|default:"—" }}</td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="8" class="text-muted">Sem versões registradas.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

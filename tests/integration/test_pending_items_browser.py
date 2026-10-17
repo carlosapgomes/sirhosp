@@ -17,19 +17,30 @@ All fixtures are synthetic; no production source is ever contacted.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 from django.contrib.auth.models import Group, User
+from django.utils import timezone
 from playwright.sync_api import Browser, Page, ViewportSize, sync_playwright
 
-from apps.census.models import BedStatus, CensusSnapshot
+from apps.census.models import (
+    BedStatus,
+    CensusSnapshot,
+    PatientMovement,
+    Specialty,
+)
 from apps.patients.models import Admission, Patient
 from apps.pending_items.models import (
     GROUP_NAME,
     OUTRO_SLUG,
+    STATUS_ACTIVE,
+    STATUS_CLOSED_UNRESOLVED,
+    STATUS_RESOLVED,
+    PendingItem,
+    PendingItemRevision,
     PendingItemType,
 )
 
@@ -225,6 +236,135 @@ def _login(page: Page, base_url: str, username: str) -> None:
     page.wait_for_url("**/painel/**", timeout=15000)
 
 
+def _make_agg_movement(
+    patient: Patient, sector: str, movement_date: str, sequence: int = 0
+) -> PatientMovement:
+    day = datetime.strptime(movement_date, "%Y-%m-%d").date()
+    return PatientMovement.objects.create(
+        patient=patient,
+        admission=None,
+        movement_date=day,
+        sector=sector,
+        sequence=sequence,
+        first_seen_at=_dt("2026-06-01T08:00:00"),
+        last_seen_at=_dt("2026-06-01T08:00:00"),
+    )
+
+
+def _make_agg_item(
+    admission: Admission,
+    description: str,
+    *,
+    age_days: int,
+    status: str = STATUS_ACTIVE,
+    finalized_days_ago: int | None = None,
+) -> PendingItem:
+    outro = PendingItemType.objects.get(slug=OUTRO_SLUG)
+    finalized_at = None
+    version = 1
+    if status != STATUS_ACTIVE:
+        assert finalized_days_ago is not None
+        finalized_at = timezone.now() - timedelta(days=finalized_days_ago)
+        version = 2
+    item = PendingItem.objects.create(
+        admission=admission,
+        item_type=outro,
+        description=description,
+        status=status,
+        version=version,
+        finalized_at=finalized_at,
+    )
+    PendingItem.objects.filter(pk=item.pk).update(
+        created_at=timezone.now() - timedelta(days=age_days)
+    )
+    item.refresh_from_db()
+    PendingItemRevision.objects.create(
+        item=item,
+        version=1,
+        action="created",
+        item_type=outro,
+        type_name=outro.name,
+        description=description,
+        status=STATUS_ACTIVE,
+    )
+    if version == 2:
+        assert finalized_at is not None
+        PendingItemRevision.objects.create(
+            item=item,
+            version=2,
+            action="finalized",
+            item_type=outro,
+            type_name=outro.name,
+            description=description,
+            status=status,
+        )
+    return item
+
+
+def _make_aggregate_scene() -> dict[str, Admission | PendingItem]:
+    """Two-patient scene: PS pathway, ages 2/8/5 plus one resolved."""
+    _ensure_bootstrap()
+    Specialty.objects.get_or_create(
+        code="CIV", defaults={"name": "CIRURGIA VASCULAR"}
+    )
+    patient_a = Patient.objects.create(
+        patient_source_key="P_AGG_A",
+        source_system="tasy",
+        name="PACIENTE SINTETICO P_AGG_A",
+    )
+    admission_a = Admission.objects.create(
+        patient=patient_a,
+        source_system="tasy",
+        source_admission_key="ADM_P_AGG_A",
+        admission_date=_dt("2026-06-01T08:00:00"),
+    )
+    CensusSnapshot.objects.create(
+        captured_at=_dt("2026-06-10T08:00:00"),
+        setor="CLINICA MEDICA",
+        leito="L01",
+        prontuario="P_AGG_A",
+        nome="PACIENTE SINTETICO P_AGG_A",
+        especialidade="CIV",
+        bed_status=BedStatus.OCCUPIED,
+    )
+    _make_agg_movement(patient_a, "PRONTO SOCORRO", "2026-06-01")
+    _make_agg_movement(patient_a, "UTI GERAL", "2026-06-03")
+    _make_agg_movement(patient_a, "ENFERMARIA 1", "2026-06-05")
+    patient_b = Patient.objects.create(
+        patient_source_key="P_AGG_B",
+        source_system="tasy",
+        name="PACIENTE SINTETICO P_AGG_B",
+    )
+    admission_b = Admission.objects.create(
+        patient=patient_b,
+        source_system="tasy",
+        source_admission_key="ADM_P_AGG_B",
+        admission_date=_dt("2026-06-02T08:00:00"),
+    )
+    CensusSnapshot.objects.create(
+        captured_at=_dt("2026-06-10T08:00:00"),
+        setor="UTI GERAL",
+        leito="U02",
+        prontuario="P_AGG_B",
+        nome="PACIENTE SINTETICO P_AGG_B",
+        bed_status=BedStatus.OCCUPIED,
+    )
+    return {
+        "admission_a": admission_a,
+        "admission_b": admission_b,
+        "a1": _make_agg_item(admission_a, "agg-a1-sintetica", age_days=2),
+        "a2": _make_agg_item(admission_a, "agg-a2-sintetica", age_days=8),
+        "a0": _make_agg_item(
+            admission_a,
+            "agg-a0-resolvida",
+            age_days=10,
+            status=STATUS_RESOLVED,
+            finalized_days_ago=3,
+        ),
+        "b1": _make_agg_item(admission_b, "agg-b1-sintetica", age_days=5),
+    }
+
+
 @pytest.mark.django_db(transaction=True)
 class TestBrowserHarnessMinimum:
     def test_live_server_assets_and_login_on_existing_page(
@@ -328,6 +468,199 @@ class TestContextualJourney:
         page.click('[data-testid="pending-create"]')
         page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
         assert "pendencia movel sintetica" in page.content()
+        overflow = page.evaluate(
+            "document.scrollingElement.scrollWidth - window.innerWidth"
+        )
+        assert overflow <= 1
+
+
+@pytest.mark.django_db(transaction=True)
+class TestAggregateJourney:
+    """PEND-S3 desktop: menu, views, filters, history, modal, reader."""
+
+    def test_panel_views_filters_history_modal_and_reader(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, served = routed_browser_page
+        _make_writer()
+        _make_reader()
+        scene = _make_aggregate_scene()
+        admission_a = scene["admission_a"]
+        admission_b = scene["admission_b"]
+        assert isinstance(admission_a, Admission)
+        assert isinstance(admission_b, Admission)
+        a1 = scene["a1"]
+        b1 = scene["b1"]
+        assert isinstance(a1, PendingItem)
+        assert isinstance(b1, PendingItem)
+
+        page = new_page()
+        _login(page, live_server.url, "browser_writer")
+        menu = page.locator('[data-testid="nav-pendencias"]')
+        assert menu.count() == 1
+        with page.expect_navigation():
+            menu.click()
+        assert "/pendencias/" in page.url
+        content = page.content()
+        assert "5,0 dias" in content
+        assert "8,0 dias" in content
+        assert "P_AGG_A" in content
+        assert "P_AGG_B" in content
+        assert "PRONTO SOCORRO" in content
+        assert "CIRURGIA VASCULAR" in content
+        assert "Primeira unidade não identificada" in content
+
+        with page.expect_navigation():
+            page.click('[data-testid="view-items"]')
+        assert "view=items" in page.url
+        assert "agg-a1-sintetica" in page.content()
+        with page.expect_navigation():
+            page.click('[data-testid="view-patients"]')
+        assert "agg-b1-sintetica" in page.content()
+
+        page.select_option("#f_status", "resolved")
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        filtered = page.content()
+        assert "agg-a0-resolvida" in filtered
+        assert "agg-a1-sintetica" not in filtered
+        assert "5,0 dias" in filtered
+        assert "8,0 dias" in filtered
+        page.select_option("#f_status", "active")
+        page.fill("#f_min_dias", "6")
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        aged = page.content()
+        assert "agg-a2-sintetica" in aged
+        assert "agg-a1-sintetica" not in aged
+        assert "agg-b1-sintetica" not in aged
+        with page.expect_navigation():
+            page.click('[data-testid="nav-pendencias"]')
+
+        page.click(f'[data-testid="pending-history-{a1.pk}"]')
+        page.wait_for_selector(
+            f"#history-body-{a1.pk} >> text=agg-a1-sintetica", timeout=15000
+        )
+        assert "P_AGG_A" in page.content()
+
+        page.click(f'[data-testid="pending-edit-{a1.pk}"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_description",
+            state="visible",
+            timeout=15000,
+        )
+        page.fill("#pending-modal-body #id_description", "agg-a1-editada")
+        with page.expect_navigation():
+            page.click('[data-testid="pending-save"]')
+        edited = page.content()
+        assert "agg-a1-editada" in edited
+        assert "atualizada com sucesso" in edited
+        page.click(f'[data-testid="pending-history-{a1.pk}"]')
+        page.wait_for_selector(
+            f"#history-body-{a1.pk} >> text=agg-a1-editada", timeout=15000
+        )
+        assert "agg-a1-sintetica" in page.content()
+
+        page.click(f'[data-testid="pending-finalize-{b1.pk}"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_target_status",
+            state="visible",
+            timeout=15000,
+        )
+        page.select_option(
+            "#pending-modal-body #id_target_status",
+            STATUS_CLOSED_UNRESOLVED,
+        )
+        with page.expect_navigation():
+            page.click('[data-testid="pending-finalize-confirm"]')
+        finalized = page.content()
+        assert "agg-b1-sintetica" not in finalized
+        assert (
+            page.locator(
+                f'[data-testid="patient-group-{admission_b.pk}"]'
+            ).count()
+            == 0
+        )
+        assert (
+            page.locator(
+                f'[data-testid="patient-group-{admission_a.pk}"]'
+            ).count()
+            == 1
+        )
+        assert (
+            page.locator('[data-testid="indicators-patients"]').inner_text()
+            == "1"
+        )
+
+        for url, _, _ in PINNED_ROUTES:
+            if url.startswith("**"):
+                continue
+            assert url in served
+
+        page.context.clear_cookies()
+        _login(page, live_server.url, "browser_reader")
+        page.goto(
+            f"{live_server.url}/pendencias/",
+            wait_until="domcontentloaded",
+        )
+        assert "agg-a1-editada" in page.content()
+        assert page.locator('[data-testid^="pending-edit-"]').count() == 0
+        assert (
+            page.locator('[data-testid^="pending-finalize-"]').count() == 0
+        )
+        page.click(f'[data-testid="pending-history-{a1.pk}"]')
+        page.wait_for_selector(
+            f"#history-body-{a1.pk} >> text=agg-a1-editada", timeout=15000
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestAggregateMobileJourney:
+    """PEND-S3 mobile: sidebar menu, views, history, modal, no overflow."""
+
+    def test_mobile_panel_parity(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _served = routed_browser_page
+        _make_writer(username="browser_agg_mobile_writer")
+        scene = _make_aggregate_scene()
+        a1 = scene["a1"]
+        assert isinstance(a1, PendingItem)
+
+        page = new_page(viewport={"width": 390, "height": 844})
+        _login(page, live_server.url, "browser_agg_mobile_writer")
+        page.click("#sidebarToggle")
+        page.locator('[data-testid="nav-pendencias"]').wait_for(
+            state="visible", timeout=15000
+        )
+        with page.expect_navigation():
+            page.locator('[data-testid="nav-pendencias"]').click()
+        assert "agg-a1-sintetica" in page.content()
+        assert "PRONTO SOCORRO" in page.content()
+
+        with page.expect_navigation():
+            page.click('[data-testid="view-items"]')
+        assert "agg-b1-sintetica" in page.content()
+        with page.expect_navigation():
+            page.click('[data-testid="view-patients"]')
+
+        page.click(f'[data-testid="pending-history-{a1.pk}"]')
+        page.wait_for_selector(
+            f"#history-body-{a1.pk} >> text=agg-a1-sintetica", timeout=15000
+        )
+        assert "P_AGG_A" in page.content()
+
+        page.click(f'[data-testid="pending-edit-{a1.pk}"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_description",
+            state="visible",
+            timeout=15000,
+        )
+        page.click('#pending-modal-body button[data-bs-dismiss="modal"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_description", state="hidden", timeout=15000
+        )
+
         overflow = page.evaluate(
             "document.scrollingElement.scrollWidth - window.innerWidth"
         )

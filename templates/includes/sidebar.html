@@ -17,6 +17,10 @@
       <i class="bi bi-hospital"></i>
       Censo
     </a>
+    <a href="{% url 'pending_items:aggregate' %}" class="sirhosp-sidebar-link {% if active_menu == 'pendencias' %}active{% endif %}" data-testid="nav-pendencias">
+      <i class="bi bi-clipboard-check"></i>
+      Pendências
+    </a>
     <a href="{% url 'census:bed_status' %}" class="sirhosp-sidebar-link {% if active_menu == 'leitos' %}active{% endif %}">
       <i class="bi bi-door-open"></i>
       Leitos
