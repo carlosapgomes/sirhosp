@@ -45,6 +45,7 @@ INSTALLED_APPS = [
     "apps.discharges.DischargesConfig",
     "apps.deaths.DeathsConfig",
     "apps.admissions.AdmissionsConfig",
+    "apps.pending_items.apps.PendingItemsConfig",
 ]
 
 MIDDLEWARE = [

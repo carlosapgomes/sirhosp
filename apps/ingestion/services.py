@@ -784,6 +784,19 @@ def ingest_evolution(
 # ---------------------------------------------------------------------------
 
 
+def _period_set_has_pending_items(admission_ids: list[int]) -> bool:
+    """Return True when any candidate admission carries pending items.
+
+    Local import: ``apps.pending_items`` depends on patients/ingestion
+    models, so a module-level import would cycle.
+    """
+    from apps.pending_items.models import PendingItem
+
+    return PendingItem.objects.filter(
+        admission_id__in=admission_ids
+    ).exists()
+
+
 def _consolidate_period_duplicates(
     patient: Patient,
     admission_date: datetime | None,
@@ -835,6 +848,14 @@ def _consolidate_period_duplicates(
         return
 
     with transaction.atomic():
+        # PEND-S1 guard (D6): a candidate set carrying pending items is
+        # never consolidated by this legacy path; the canonical
+        # confirmation/merge flow owns the resolution instead.
+        if _period_set_has_pending_items(
+            [canonical.id, *non_canonical_ids]
+        ):
+            return
+
         # Re-point events from non-canonical to canonical
         ClinicalEvent.objects.filter(
             admission_id__in=non_canonical_ids

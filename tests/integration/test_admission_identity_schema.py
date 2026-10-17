@@ -24,6 +24,8 @@ from django.db import IntegrityError, connection
 # call-site classification remains the RPSA-S4 merge gate.
 # RPSA-S5 (controller-authorized fixture update): the per-admission
 # stale-admission case FK (``stale_cases``) joins the same inventory.
+# PEND-S1 (controller-authorized fixture update): the pending-items FK
+# (``pending_items``) joins the inventory with its own merge disposition.
 EXPECTED_REVERSE_RELATION_ACCESSORS = frozenset(
     {
         "events",
@@ -39,6 +41,7 @@ EXPECTED_REVERSE_RELATION_ACCESSORS = frozenset(
         "death_evidence",
         "reconciliation_events",
         "stale_cases",
+        "pending_items",
     }
 )
 

@@ -1,0 +1,114 @@
+{% extends "base_sidebar.html" %}
+
+{% block page_title %}Pendências — {{ patient.name }}{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'patients:patient_list' %}">Pacientes</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'patients:admission_list' patient.pk %}?admission_id={{ admission.pk }}">{{ patient.name }}</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Pendências</li>
+  </ol>
+</nav>
+
+<div class="sirhosp-patient-banner">
+  <div class="patient-name">{{ patient.name }}</div>
+  <div class="patient-meta">
+    Registro: <strong>{{ patient.patient_source_key }}</strong>
+    &middot; Entrada: {{ admission.admission_date|date:"d/m/Y H:i"|default:"—" }}
+    {% if admission.discharge_date %}
+      &middot; Alta: {{ admission.discharge_date|date:"d/m/Y H:i" }}
+    {% else %}
+      &middot; <em>em andamento</em>
+    {% endif %}
+  </div>
+</div>
+
+{% if error %}
+  <div class="alert alert-danger" role="alert">{{ error }}</div>
+{% endif %}
+
+{% if block_message %}
+  <div class="alert alert-warning" role="alert">{{ block_message }}</div>
+{% endif %}
+
+{% if can_write %}
+  <div class="card border-0 shadow-sm mb-3">
+    <div class="card-body">
+      <h2 class="h6 mb-3">Nova pendência</h2>
+      <form method="post" novalidate>
+        {% csrf_token %}
+        {% if form.non_field_errors %}
+          <div class="alert alert-danger small" role="alert">{{ form.non_field_errors }}</div>
+        {% endif %}
+        <div class="mb-3">
+          <label for="id_item_type" class="form-label small fw-semibold">Tipo</label>
+          {{ form.item_type.errors }}
+          <select name="item_type" id="id_item_type" class="form-select" required>
+            <option value="">Selecione…</option>
+            {% for choice_value, choice_label in form.item_type.field.choices %}
+              {% if choice_value %}
+                <option value="{{ choice_value }}"{% if form.item_type.value|stringformat:"s" == choice_value|stringformat:"s" %} selected{% endif %}>{{ choice_label }}</option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label for="id_description" class="form-label small fw-semibold">Descrição/observação</label>
+          {{ form.description.errors }}
+          <textarea name="description" id="id_description" rows="3" class="form-control" required>{{ form.description.value|default:"" }}</textarea>
+        </div>
+        <button type="submit" class="btn btn-primary" data-testid="pending-create">
+          <i class="bi bi-plus-circle me-1"></i> Cadastrar pendência
+        </button>
+      </form>
+    </div>
+  </div>
+{% endif %}
+
+<h2 class="h6 text-muted mb-3">Pendências deste episódio ({{ items|length }})</h2>
+
+{% for item in items %}
+  <div class="card mb-3 border-0 shadow-sm">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-2">
+        <span class="badge bg-light text-dark border">{{ item.item_type.name }}</span>
+        <span class="badge {% if item.status == 'active' %}bg-warning-subtle text-warning-emphasis{% elif item.status == 'resolved' %}bg-success-subtle text-success-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %}">
+          {{ item.get_status_display }}
+        </span>
+      </div>
+      <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+      <div class="small text-muted mb-2">
+        v{{ item.version }}
+        &middot; criada por {{ item.created_by_name|default:"—" }} em {{ item.created_at|date:"d/m/Y H:i" }}
+        {% if item.updated_by_name %}
+          &middot; atualizada por {% if item.is_system_updated %}Sistema{% else %}{{ item.updated_by_name }}{% endif %} em {{ item.updated_at|date:"d/m/Y H:i" }}
+        {% endif %}
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a href="{% url 'pending_items:item_history' admission.pk item.pk %}"
+           class="btn btn-outline-secondary btn-sm" data-testid="pending-history-{{ item.pk }}">
+          <i class="bi bi-clock-history me-1"></i> Histórico
+        </a>
+        {% if can_write and item.status == 'active' %}
+          <a href="{% url 'pending_items:item_edit' admission.pk item.pk %}"
+             class="btn btn-outline-primary btn-sm" data-testid="pending-edit-{{ item.pk }}">
+            <i class="bi bi-pencil me-1"></i> Editar
+          </a>
+          <a href="{% url 'pending_items:item_finalize' admission.pk item.pk %}"
+             class="btn btn-outline-success btn-sm" data-testid="pending-finalize-{{ item.pk }}">
+            <i class="bi bi-check-circle me-1"></i> Finalizar
+          </a>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+{% empty %}
+  <div class="card border-0 shadow-sm">
+    <div class="card-body text-center py-5">
+      <i class="bi bi-inbox text-muted" style="font-size: 2rem;"></i>
+      <p class="text-muted mt-2 mb-0">Nenhuma pendência neste episódio.</p>
+    </div>
+  </div>
+{% endfor %}
+{% endblock %}

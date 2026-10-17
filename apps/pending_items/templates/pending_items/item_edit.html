@@ -1,0 +1,65 @@
+{% extends "base_sidebar.html" %}
+
+{% block page_title %}Editar pendência — {{ patient.name }}{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'patients:admission_list' patient.pk %}?admission_id={{ admission.pk }}">{{ patient.name }}</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'pending_items:admission_items' admission.pk %}">Pendências</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Editar</li>
+  </ol>
+</nav>
+
+{% if error %}
+  <div class="alert alert-danger" role="alert">{{ error }}</div>
+{% endif %}
+
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <div class="small text-muted mb-2">
+      {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
+    </div>
+    <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+  </div>
+</div>
+
+{% if form %}
+  <div class="card border-0 shadow-sm">
+    <div class="card-body">
+      <h2 class="h6 mb-3">Editar pendência</h2>
+      <form method="post" novalidate>
+        {% csrf_token %}
+        {{ form.expected_version }}
+        {% if form.non_field_errors %}
+          <div class="alert alert-danger small" role="alert">{{ form.non_field_errors }}</div>
+        {% endif %}
+        <div class="mb-3">
+          <label for="id_item_type" class="form-label small fw-semibold">Tipo</label>
+          {{ form.item_type.errors }}
+          <select name="item_type" id="id_item_type" class="form-select" required>
+            {% for choice_value, choice_label in form.item_type.field.choices %}
+              {% if choice_value %}
+                <option value="{{ choice_value }}"{% if form.item_type.value|stringformat:"s" == choice_value|stringformat:"s" %} selected{% endif %}>{{ choice_label }}</option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </div>
+        <div class="mb-3">
+          <label for="id_description" class="form-label small fw-semibold">Descrição/observação</label>
+          {{ form.description.errors }}
+          <textarea name="description" id="id_description" rows="3" class="form-control" required>{{ form.description.value|default:"" }}</textarea>
+        </div>
+        <div class="d-flex gap-2">
+          <button type="submit" class="btn btn-primary" data-testid="pending-save">
+            <i class="bi bi-check-lg me-1"></i> Salvar alterações
+          </button>
+          <a href="{% url 'pending_items:admission_items' admission.pk %}" class="btn btn-outline-secondary">Voltar</a>
+        </div>
+      </form>
+    </div>
+  </div>
+{% else %}
+  <a href="{% url 'pending_items:admission_items' admission.pk %}" class="btn btn-outline-secondary">Voltar</a>
+{% endif %}
+{% endblock %}

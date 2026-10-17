@@ -71,6 +71,7 @@ REPOINTED_ACCESSORS = (
     "source_aliases",
     "discharge_evidence",
     "death_evidence",
+    "pending_items",
 )
 
 ALL_ACCESSORS = REPOINTED_ACCESSORS + (
@@ -317,6 +318,16 @@ def _attach_relation(accessor: str, duplicate: Admission, patient: Patient) -> N
         DischargeRecord.objects.create(admission=duplicate, prontuario="")
     elif accessor == "death_evidence":
         DeathRecord.objects.create(admission=duplicate, date=day, prontuario="")
+    elif accessor == "pending_items":
+        from apps.pending_items.models import PendingItem, PendingItemType
+
+        PendingItem.objects.create(
+            admission=duplicate,
+            item_type=PendingItemType.objects.get(slug="outro"),
+            description="pendencia sintetica de merge",
+            status="active",
+            version=1,
+        )
     elif accessor == "reconciliation_events":
         ReconciliationEvent.objects.create(
             admission=duplicate,

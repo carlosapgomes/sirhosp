@@ -1,0 +1,57 @@
+{% extends "base_sidebar.html" %}
+
+{% block page_title %}Histórico da pendência — {{ patient.name }}{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb" class="mb-3">
+  <ol class="breadcrumb small">
+    <li class="breadcrumb-item"><a href="{% url 'patients:admission_list' patient.pk %}?admission_id={{ admission.pk }}">{{ patient.name }}</a></li>
+    <li class="breadcrumb-item"><a href="{% url 'pending_items:admission_items' admission.pk %}">Pendências</a></li>
+    <li class="breadcrumb-item active" aria-current="page">Histórico</li>
+  </ol>
+</nav>
+
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body">
+    <div class="small text-muted mb-2">
+      {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
+    </div>
+    <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+  </div>
+</div>
+
+<h2 class="h6 text-muted mb-3">Versões ({{ revisions|length }})</h2>
+
+<div class="table-responsive">
+  <table class="table table-sm align-middle">
+    <thead>
+      <tr>
+        <th scope="col">Versão</th>
+        <th scope="col">Ação</th>
+        <th scope="col">Data/hora</th>
+        <th scope="col">Autor</th>
+        <th scope="col">Tipo</th>
+        <th scope="col">Descrição</th>
+        <th scope="col">Status</th>
+        <th scope="col">Anotação</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for revision in revisions %}
+        <tr>
+          <td>v{{ revision.version }}</td>
+          <td>{{ revision.get_action_display }}</td>
+          <td>{{ revision.created_at|date:"d/m/Y H:i" }}</td>
+          <td>{% if revision.is_system %}Sistema{% else %}{{ revision.author_name|default:"—" }}{% endif %}</td>
+          <td>{{ revision.type_name }}</td>
+          <td class="text-break">{{ revision.description|linebreaksbr }}</td>
+          <td>{{ revision.get_status_display }}</td>
+          <td class="text-break">{{ revision.note|linebreaksbr|default:"—" }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<a href="{% url 'pending_items:admission_items' admission.pk %}" class="btn btn-outline-secondary">Voltar</a>
+{% endblock %}

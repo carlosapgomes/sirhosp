@@ -212,6 +212,11 @@ _RELATION_DISPOSITIONS: dict[str, tuple[str, str]] = {
         RELATION_DISPOSITION_REPOINT,
         "Death evidence must link the canonical episode.",
     ),
+    "pending_items": (
+        RELATION_DISPOSITION_REPOINT,
+        "Pending items follow the canonical episode; their revisions stay "
+        "attached to the same item and finals are never reopened.",
+    ),
     "merged_from": (
         RELATION_DISPOSITION_KEEP,
         "Merge-chain bookkeeping: rows merged into the duplicate keep "
