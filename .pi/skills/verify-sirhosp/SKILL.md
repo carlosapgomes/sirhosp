@@ -85,12 +85,21 @@ browser context per run and role:
 2. Confirm `list_pages` before and after: only pages created by this run may
    be closed by this run.
 3. Navigate only dev-portal reads: `/`, `/login/`, `/painel/`, `/censo/`,
-   `/perfil/`, `/atualizacao-censo/`, `/static/`. POST only on `/login/` and
-   `/logout/`.
-4. Never visit mutating routes, even as GET: `/ingestao/*`, `/censo/exportar/`,
-   `/statistics/export/`, `/reconciliacao/exportar/`, password change, CRUD,
-   or summary runs. Workers stay stopped; never start ingestion to make a
-   badge green.
+   `/perfil/`, `/atualizacao-censo/`, `/static/`, `/pendencias/`,
+   `/pendencias/<id>/history/`,
+   `/admissions/<admission_id>/pending-items/` and
+   `/admissions/<admission_id>/pending-items/<item_id>/history/`.
+   POST only on `/login/` and `/logout/`.
+4. Never visit mutating routes, even as GET: `/ingestao/*`, the exports
+   (`/censo/exportar/`, `/statistics/export/`, `/reconciliacao/exportar/`,
+   `/pendencias/export.xlsx`), password change, CRUD, summary runs, and
+   the pending-items write surfaces (`/pendencias/<id>/edit/`,
+   `/pendencias/<id>/finalize/`,
+   `/admissions/<admission_id>/pending-items/<item_id>/edit/`,
+   `/admissions/<admission_id>/pending-items/<item_id>/finalize/`);
+   submitting the contextual create form on
+   `/admissions/<admission_id>/pending-items/` is likewise forbidden.
+   Workers stay stopped; never start ingestion to make a badge green.
 5. Log in through the real form (`#id_username`, `#id_password`, button
    `Entrar`), never `force_login`, mocks, or internal setters. Take the empty
    form screenshot before filling.

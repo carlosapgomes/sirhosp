@@ -29,10 +29,20 @@ the matching feature file as the recipe.
   `#especialidade`.
 - Treat every command as literal. Keep quoted names and flags unchanged.
 - Read-only routes only: `/`, `/login/`, `/painel/`, `/censo/`, `/perfil/`,
-  `/atualizacao-censo/`, `/static/`. POST only on `/login/` and `/logout/`.
-- Mutating routes are forbidden even as GET: `/ingestao/*`, exports
-  (`/censo/exportar/`, `/statistics/export/`, `/reconciliacao/exportar/`),
-  password change, CRUD, summary runs.
+  `/atualizacao-censo/`, `/static/`, `/pendencias/`,
+  `/pendencias/<id>/history/`,
+  `/admissions/<admission_id>/pending-items/` and
+  `/admissions/<admission_id>/pending-items/<item_id>/history/`.
+  POST only on `/login/` and `/logout/`.
+- Mutating routes are forbidden even as GET: `/ingestao/*`, the exports
+  (`/censo/exportar/`, `/statistics/export/`, `/reconciliacao/exportar/`,
+  `/pendencias/export.xlsx`), password change, CRUD, summary runs, and the
+  pending-items write surfaces (`/pendencias/<id>/edit/`,
+  `/pendencias/<id>/finalize/`,
+  `/admissions/<admission_id>/pending-items/<item_id>/edit/`,
+  `/admissions/<admission_id>/pending-items/<item_id>/finalize/`);
+  submitting the contextual create form on
+  `/admissions/<admission_id>/pending-items/` is likewise forbidden.
 - This skill is not a firewall and does not apply the S2 Playwright request
   interceptor to MCP tools; route discipline is operator behavior. Supervise
   every navigation and compare effects at close.
@@ -82,3 +92,9 @@ handles, required state, commands, and observable proof.
 - [HTMX](./htmx.md) covers the periodic sync badge and the mobile menu.
   Proven: playwright (two real 60 s polls, mobile open/close). Demonstrated:
   mcp (badge read). Timed poll observation: future for MCP.
+- [Pending items](./pending-items.md) covers the read-only Pendências
+  journeys: sidebar entry, indicators, both views, GET filters, history
+  fragment and the contextual episode page as a reader. No scripted or MCP
+  round yet: future for MCP. Functional logic is held by the isolated
+  integration suite; this map is release-surface verification. Export and
+  write surfaces are forbidden.

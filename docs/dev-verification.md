@@ -335,7 +335,8 @@ The project-local skill `.pi/skills/verify-sirhosp/` teaches a
 zero-context executor to drive the same dev session through Chrome DevTools
 MCP instead of the scripted Playwright driver: `SKILL.md` (launch, doctor,
 drive, evidence, cleanup, helpers) plus the feature map under `features/`
-(`README.md`, `authentication.md`, `navigation.md`, `census.md`, `htmx.md`).
+(`README.md`, `authentication.md`, `navigation.md`, `census.md`, `htmx.md`,
+`pending-items.md`).
 The skill reuses this runbook's doctor/open/status/close commands and
 exclusive contexts per run and role (`new_page` with `isolatedContext`).
 MCP evidence lives under `/tmp/sirhosp-verification-mcp/<run-id>/` with
@@ -357,12 +358,14 @@ Honesty rules for MCP rounds:
 - A route or template change (`templates/registration/login.html`,
   `templates/includes/sidebar.html`, `templates/includes/topbar*.html`,
   `templates/base_sidebar.html`,
-  `apps/services_portal/templates/services_portal/censo.html`) requires
+  `apps/services_portal/templates/services_portal/censo.html`,
+  `apps/pending_items/templates/pending_items/`) requires
   updating the affected feature file and re-proving it (MCP round or S2
   `run`); a stale map is a mapping bug.
 - Expanding to mutating operations (ingestion, exports, CRUD, summaries)
   is another scope, not a skill edit by habit.
-- Next candidates, in order: MCP positive census filter with the
+- Next candidates, in order: the pending-items read-only MCP round
+  (`features/pending-items.md`), MCP positive census filter with the
   operator-supplied synthetic descriptor, MCP timed HTMX poll observation
   on the real 60 s interval, MCP mobile toggle round-trip, admin-role MCP
   pass for `Estatísticas` visibility.
