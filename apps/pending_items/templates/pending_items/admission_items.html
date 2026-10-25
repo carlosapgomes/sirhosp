@@ -17,7 +17,11 @@
     Registro: <strong>{{ patient.patient_source_key }}</strong>
     &middot; Entrada: {{ admission.admission_date|date:"d/m/Y H:i"|default:"—" }}
     {% if admission.discharge_date %}
-      &middot; Alta: {{ admission.discharge_date|date:"d/m/Y H:i" }}
+      {% if discharge_date_only %}
+        &middot; Alta: {{ admission.discharge_date|date:"d/m/Y" }}
+      {% else %}
+        &middot; Alta: {{ admission.discharge_date|date:"d/m/Y H:i" }}
+      {% endif %}
     {% else %}
       &middot; <em>em andamento</em>
     {% endif %}

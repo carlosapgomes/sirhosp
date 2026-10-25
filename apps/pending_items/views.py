@@ -17,6 +17,7 @@ from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 
 from apps.patients.models import Admission
+from apps.patients.reconciliation import admission_has_date_only_closure
 from apps.pending_items import policy
 from apps.pending_items.eligibility import (
     IneligibleAdmissionError,
@@ -79,6 +80,9 @@ def admission_pending_items(
     block_message = (
         None if eligibility.eligible else reason_message(eligibility.reason)
     )
+    # Date-only death closures (D2) render the exit date alone — the
+    # D 00:00 carrier hour is never displayed.
+    discharge_date_only = admission_has_date_only_closure(admission)
 
     if request.method == "POST":
         if not member:
@@ -94,6 +98,7 @@ def admission_pending_items(
                     "block_message": block_message,
                     "error": policy.WRITE_DENIED_MESSAGE,
                     "page_title": "Pendências",
+                    "discharge_date_only": discharge_date_only,
                 },
                 status=403,
             )
@@ -112,6 +117,7 @@ def admission_pending_items(
                     "block_message": str(exc),
                     "error": str(exc),
                     "page_title": "Pendências",
+                    "discharge_date_only": discharge_date_only,
                 },
                 status=403,
             )
@@ -137,6 +143,7 @@ def admission_pending_items(
                         "block_message": None,
                         "error": _first_message(exc),
                         "page_title": "Pendências",
+                        "discharge_date_only": discharge_date_only,
                     },
                 )
             except PermissionDenied as exc:
@@ -152,6 +159,7 @@ def admission_pending_items(
                         "block_message": block_message,
                         "error": str(exc),
                         "page_title": "Pendências",
+                        "discharge_date_only": discharge_date_only,
                     },
                     status=403,
                 )
@@ -170,6 +178,7 @@ def admission_pending_items(
                 "block_message": None,
                 "error": None,
                 "page_title": "Pendências",
+                "discharge_date_only": discharge_date_only,
             },
         )
 
@@ -185,6 +194,7 @@ def admission_pending_items(
             "block_message": block_message,
             "error": None,
             "page_title": "Pendências",
+            "discharge_date_only": discharge_date_only,
         },
     )
 

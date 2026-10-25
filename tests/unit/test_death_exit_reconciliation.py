@@ -7,7 +7,10 @@ the ``death`` exit application with append-only audit, the
 ``data_obito`` parse layer (date-only never synthesizes an hour), the
 stable-key ``process_deaths`` upsert (evidence PK/link/status survive
 repeated extraction; snapshot-absent rows are detached, never deleted),
-and the bounded/deduplicated source-synchronization requests.
+the date-only death apply at date precision with an explicit marker
+(reconcile-date-only-deaths DD-S2: D 00:00 ``America/Bahia`` carrier,
+``obito_em`` stays null, rollback and idempotency preserved), and the
+bounded/deduplicated source-synchronization requests.
 
 All fixtures are synthetic.
 """
@@ -534,27 +537,34 @@ class TestReconcileDeathRecord:
         # Deaths never touch the discharge aggregate (integration proves
         # the full extraction flow; here the evidence path is pinned).
 
-    def test_date_only_stays_pending_without_synthesized_hour(self):
+    def test_date_only_unique_match_reconciles_without_synthesized_hour(
+        self,
+    ):
+        """DD-S2: date-only evidence with a unique admission reconciles
+        at date precision — the carrier bears the date on the episode
+        while the evidence keeps ``obito_em`` null (no midnight, noon
+        or end of day is ever synthesized into the evidence)."""
         patient = _make_patient("555")
         admission = _make_admission(patient, "ADM-1", "2026-05-20T08:00:00")
         record = _make_death_record(data_obito="01/06/2026")
 
         status = reconcile_death_record(record=record)
 
-        assert status == RECONCILIATION_STATUS_PENDING
+        assert status == RECONCILIATION_STATUS_RECONCILED
         admission.refresh_from_db()
-        assert admission.discharge_date is None
+        assert admission.discharge_date == datetime(
+            2026, 6, 1, 0, 0, tzinfo=TZ_LOCAL
+        )
         record.refresh_from_db()
-        assert record.obito_em is None  # no midnight, noon or end of day
-        assert record.reconciliation_status == RECONCILIATION_STATUS_PENDING
-        assert record.admission_id is None
-        assert ReconciliationEvent.objects.count() == 0
-        assert (
-            IngestionRun.objects.filter(intent="admissions_only").count() == 1
-        )
-        assert (
-            IngestionRun.objects.filter(intent="demographics_only").count() == 0
-        )
+        assert record.obito_em is None
+        assert record.reconciliation_status == RECONCILIATION_STATUS_RECONCILED
+        assert record.admission_id == admission.pk
+        event = ReconciliationEvent.objects.get()
+        assert event.details_json["death_exit"] == {
+            "precision": "date",
+            "local_date": "2026-06-01",
+        }
+        assert IngestionRun.objects.count() == 0
 
     def test_unparseable_death_date_stays_pending(self):
         patient = _make_patient("555")
@@ -812,3 +822,157 @@ class TestDeathUpsertPersistence:
         assert IngestionRun.objects.filter(
             intent="admissions_only", status="queued"
         ).count() == 1
+
+
+# =========================================================================
+# Date-only death apply at date precision (reconcile-date-only-deaths DD-S2)
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestDateOnlyDeathApply:
+    """Unique date-only evidence closes at D 00:00 Bahia with a marker.
+
+    The midnight carrier bears the local date only (D2): the event
+    carries ``details_json["death_exit"]`` with date precision, the
+    evidence ``obito_em`` stays null (no hour is ever synthesized into
+    the evidence), re-application is idempotent and unresolved evidence
+    still fails closed without touching any admission.
+    """
+
+    def test_unique_match_closes_at_local_midnight_with_marker(self):
+        patient = _make_patient("555")
+        admission = _make_admission(patient, "ADM-1", "2026-05-20T08:00:00")
+        record = _make_death_record(data_obito="01/06/2026")
+
+        status = reconcile_death_record(record=record)
+
+        carrier = datetime(2026, 6, 1, 0, 0, tzinfo=TZ_LOCAL)
+        assert status == RECONCILIATION_STATUS_RECONCILED
+        admission.refresh_from_db()
+        assert admission.discharge_date == carrier
+        record.refresh_from_db()
+        assert record.admission_id == admission.pk
+        assert record.obito_em is None
+        assert record.reconciliation_status == RECONCILIATION_STATUS_RECONCILED
+        assert record.reconciled_at is not None
+        event = ReconciliationEvent.objects.get()
+        assert event.status == RECONCILIATION_STATUS_RECONCILED
+        assert event.exit_type == EXIT_DEATH
+        assert event.prior_discharge_date is None
+        assert event.new_discharge_date == carrier
+        assert event.details_json["death_exit"] == {
+            "precision": "date",
+            "local_date": "2026-06-01",
+        }
+        assert IngestionRun.objects.count() == 0
+
+    def test_same_day_admission_closes_despite_carrier_before_start(self):
+        """Admitted D 08:00, died D: the date-precision apply closes even
+        though the D 00:00 carrier is earlier than the admission start
+        as an instant — comparisons run at local-date granularity."""
+        patient = _make_patient("555")
+        admission = _make_admission(patient, "ADM-1", "2026-06-01T08:00:00")
+        record = _make_death_record(data_obito="01/06/2026")
+
+        status = reconcile_death_record(record=record)
+
+        assert status == RECONCILIATION_STATUS_RECONCILED
+        admission.refresh_from_db()
+        assert admission.discharge_date == datetime(
+            2026, 6, 1, 0, 0, tzinfo=TZ_LOCAL
+        )
+        record.refresh_from_db()
+        assert record.obito_em is None
+
+    def test_reapply_is_idempotent_and_keeps_single_event(self):
+        patient = _make_patient("555")
+        admission = _make_admission(patient, "ADM-1", "2026-05-20T08:00:00")
+        record = _make_death_record(data_obito="01/06/2026")
+
+        first = reconcile_death_record(record=record)
+        second = reconcile_death_record(record=record)
+
+        assert first == RECONCILIATION_STATUS_RECONCILED
+        assert second == RECONCILIATION_STATUS_ALREADY_RECONCILED
+        admission.refresh_from_db()
+        assert admission.discharge_date == datetime(
+            2026, 6, 1, 0, 0, tzinfo=TZ_LOCAL
+        )
+        assert ReconciliationEvent.objects.count() == 1
+        assert record.admission_id == admission.pk
+
+    def test_evidence_on_already_closed_day_is_already_reconciled(self):
+        """Date-only evidence consistent with a datetime close on D changes
+        nothing: the recorded exit stands and the carrier never rewrites
+        a real exit time."""
+        patient = _make_patient("555")
+        admission = _make_admission(
+            patient,
+            "ADM-1",
+            "2026-05-20T08:00:00",
+            end="2026-06-01T15:00:00",
+        )
+        record = _make_death_record(data_obito="01/06/2026")
+
+        status = reconcile_death_record(record=record)
+
+        assert status == RECONCILIATION_STATUS_ALREADY_RECONCILED
+        admission.refresh_from_db()
+        assert admission.discharge_date == datetime(
+            2026, 6, 1, 15, 0, tzinfo=TZ_LOCAL
+        )
+        record.refresh_from_db()
+        assert record.obito_em is None
+        assert record.admission_id == admission.pk
+
+    def test_ambiguous_date_only_stays_pending_without_closure(self):
+        patient = _make_patient("555")
+        first = _make_admission(patient, "ADM-A", "2026-05-01T08:00:00")
+        second = _make_admission(patient, "ADM-B", "2026-05-15T08:00:00")
+        record = _make_death_record(data_obito="01/06/2026")
+
+        status = reconcile_death_record(record=record)
+
+        assert status == RECONCILIATION_STATUS_AMBIGUOUS
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert first.discharge_date is None
+        assert second.discharge_date is None
+        record.refresh_from_db()
+        assert record.obito_em is None
+        assert record.admission_id is None
+        assert (
+            IngestionRun.objects.filter(intent="admissions_only").count() == 1
+        )
+        assert (
+            IngestionRun.objects.filter(intent="demographics_only").count() == 0
+        )
+
+    def test_missing_patient_stays_unresolved_without_closure(self):
+        record = _make_death_record(
+            prontuario="404", data_obito="01/06/2026"
+        )
+
+        status = reconcile_death_record(record=record)
+
+        assert status == RECONCILIATION_STATUS_PATIENT_NOT_FOUND
+        assert Patient.objects.filter(patient_source_key="404").count() == 0
+        assert Admission.objects.count() == 0
+        record.refresh_from_db()
+        assert record.obito_em is None
+        assert record.admission_id is None
+
+    def test_complete_datetime_close_carries_no_date_marker(self):
+        """Regression: a full datetime close writes no ``death_exit``
+        precision marker — the marker exists only for date-only
+        closures."""
+        patient = _make_patient("555")
+        _make_admission(patient, "ADM-1", "2026-05-20T08:00:00")
+        record = _make_death_record()
+
+        status = reconcile_death_record(record=record)
+
+        assert status == RECONCILIATION_STATUS_RECONCILED
+        event = ReconciliationEvent.objects.get()
+        assert "death_exit" not in event.details_json

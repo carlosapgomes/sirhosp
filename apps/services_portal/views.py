@@ -93,6 +93,9 @@ from apps.patients.models import (
 from apps.patients.reconciliation import (
     EVIDENCE_SOURCE_DEATH_RECORD,
     EVIDENCE_SOURCE_DISCHARGE_RECORD,
+    admission_has_date_only_closure,
+    event_is_date_only_exit,
+    event_undoes_date_only_exit,
 )
 
 logger = logging.getLogger(__name__)
@@ -2941,6 +2944,14 @@ def _format_review_dt(value: datetime | None) -> str:
     return timezone.localtime(value).strftime("%d/%m/%Y %H:%M")
 
 
+def _format_review_date(value: datetime | None) -> str:
+    """Date-only rendering for date-only death closures (D2): the D
+    00:00 carrier hour is never displayed as source information."""
+    if value is None:
+        return "-"
+    return timezone.localtime(value).strftime("%d/%m/%Y")
+
+
 def _merged_state(admission: Admission | None) -> dict[str, object] | None:
     """Merged/canonical maintenance labels for the linked admission.
 
@@ -2960,14 +2971,27 @@ def _merged_state(admission: Admission | None) -> dict[str, object] | None:
 
 
 def _event_view(event: ReconciliationEvent) -> dict[str, str]:
-    """Structural audit display — never clinical text."""
+    """Structural audit display — never clinical text.
+
+    A date-only death closure (D2) renders its new exit at date
+    precision, and a rollback of such a closure renders the undone
+    carrier the same way; every other value keeps date and hour.
+    """
+    if event_is_date_only_exit(event):
+        new_label = _format_review_date(event.new_discharge_date)
+    else:
+        new_label = _format_review_dt(event.new_discharge_date)
+    if event_undoes_date_only_exit(event):
+        prior_label = _format_review_date(event.prior_discharge_date)
+    else:
+        prior_label = _format_review_dt(event.prior_discharge_date)
     return {
         "when": _format_review_dt(event.created_at),
         "status_label": event.get_status_display(),
         "exit_type_label": event.get_exit_type_display(),
         "reason_code": event.reason_code or "-",
-        "prior": _format_review_dt(event.prior_discharge_date),
-        "new": _format_review_dt(event.new_discharge_date),
+        "prior": prior_label,
+        "new": new_label,
         "source_label": f"{event.source_kind}#{event.source_id}",
         "operation_uuid": str(event.operation_uuid),
     }
@@ -3021,6 +3045,10 @@ def reconciliation_case_detail(request: HttpRequest, pk: int) -> HttpResponse:
     )
     admission = case.admission
     status_code = case.resolution_reason or "open"
+    if admission_has_date_only_closure(admission):
+        recorded_exit = _format_review_date(admission.discharge_date)
+    else:
+        recorded_exit = _format_review_dt(admission.discharge_date)
     context = {
         "page_title": "Reconciliação — caso de ausência",
         "kind_label": _QUEUE_TIPO_LABELS["case"],
@@ -3031,7 +3059,7 @@ def reconciliation_case_detail(request: HttpRequest, pk: int) -> HttpResponse:
             ("Chave da internação", admission.source_admission_key),
             ("Sistema de origem", admission.source_system),
             ("Internação", _format_review_dt(admission.admission_date)),
-            ("Saída registrada", _format_review_dt(admission.discharge_date)),
+            ("Saída registrada", recorded_exit),
             ("Setor / leito", admission.ward or "-"),
             ("Leito", admission.bed or "-"),
             ("Primeira ausência", _format_review_dt(case.first_absence_at)),

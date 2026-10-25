@@ -6,8 +6,10 @@ plus synthetic death JSON), that:
 - a persisted death row with a complete datetime is reconciled through
   the canonical service and closes the unique containing admission as
   ``death`` with per-status metrics;
-- date-only death rows stay pending, never synthesize an hour and
-  enqueue deduplicated ``admissions_only`` confirmation;
+- a date-only death row with a unique admission reconciles at date
+  precision (D 00:00 carrier with a marker, ``obito_em`` stays null),
+  while unresolved date-only rows stay pending and enqueue
+  deduplicated ``admissions_only`` confirmation;
 - repeated extraction preserves the evidence PK/link/status and does not
   duplicate audit or synchronization runs;
 - death persistence never touches ``DailyDischargeCount`` and never
@@ -243,9 +245,11 @@ class TestDeathExtractionReconciliationFlow:
         assert result.success is True
         assert DailyDischargeCount.objects.count() == 0
 
-    def test_date_only_death_stays_pending_and_enqueues_admissions_only(
+    def test_date_only_death_reconciles_at_date_precision(
         self, mock_credentials, mock_subprocess_success,
     ):
+        """DD-S2: a unique date-only death closes at D 00:00 with the
+        precision marker while the evidence keeps ``obito_em`` null."""
         patient = _make_patient("600004")
         admission = _make_admission(patient, "ADM-600004", "2026-05-20T08:00:00")
         records = [_record("600004", DATE_ONLY)]
@@ -256,15 +260,47 @@ class TestDeathExtractionReconciliationFlow:
             )
 
         assert result.success is True
-        assert result.metrics.get("reconciliation_pending") == 1
+        assert result.metrics.get("reconciliation_reconciled") == 1
         admission.refresh_from_db()
-        assert admission.discharge_date is None  # no synthesized hour
+        assert admission.discharge_date == datetime(
+            2026, 6, 1, 0, 0, tzinfo=TZ_LOCAL
+        )
+        record = DeathRecord.objects.get()
+        assert record.obito_em is None  # no synthesized hour in evidence
+        assert record.reconciliation_status == RECONCILIATION_STATUS_RECONCILED
+        assert record.admission_id == admission.pk
+        event = ReconciliationEvent.objects.get()
+        assert event.exit_type == "death"
+        assert event.details_json["death_exit"] == {
+            "precision": "date",
+            "local_date": "2026-06-01",
+        }
+        assert IngestionRun.objects.count() == 1  # the extraction run itself
+
+    def test_ambiguous_date_only_death_stays_pending_and_enqueues_sync(
+        self, mock_credentials, mock_subprocess_success,
+    ):
+        """Fail-closed is preserved: ambiguous date-only evidence never
+        closes an admission and still requests bounded confirmation."""
+        patient = _make_patient("600009")
+        _make_admission(patient, "ADM-600009-A", "2026-05-01T08:00:00")
+        _make_admission(patient, "ADM-600009-B", "2026-05-15T08:00:00")
+        records = [_record("600009", DATE_ONLY)]
+
+        with _mock_tempdir_and_json(records):
+            result = run_death_extraction(
+                start_date="01/06/2026", end_date="01/06/2026",
+            )
+
+        assert result.success is True
+        assert result.metrics.get("reconciliation_ambiguous") == 1
+        assert Admission.objects.filter(discharge_date__isnull=False).count() == 0
         record = DeathRecord.objects.get()
         assert record.obito_em is None
-        assert record.reconciliation_status == RECONCILIATION_STATUS_PENDING
+        assert record.admission_id is None
         run = IngestionRun.objects.filter(intent="admissions_only").get()
         assert run.status == "queued"
-        assert run.parameters_json["patient_record"] == "600004"
+        assert run.parameters_json["patient_record"] == "600009"
         assert (
             IngestionRun.objects.filter(intent="demographics_only").count() == 0
         )

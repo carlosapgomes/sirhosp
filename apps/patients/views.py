@@ -17,6 +17,7 @@ from apps.ingestion.patient_flow_findings import (
 )
 from apps.patients import services
 from apps.patients.models import Admission, Patient
+from apps.patients.reconciliation import admission_has_date_only_closure
 
 
 @login_required
@@ -151,6 +152,13 @@ def admission_list_view(
         "idade": idade,
         "admissions": admissions,
         "selected_admission": selected_admission,
+        # Date-only death closures (D2) render the exit date alone —
+        # the D 00:00 carrier hour is never displayed.
+        "discharge_date_only": (
+            admission_has_date_only_closure(selected_admission)
+            if selected_admission is not None
+            else False
+        ),
         "ward": ward,
         "bed": bed,
         "events": events,
@@ -226,5 +234,8 @@ def timeline_view(
         "profession_types": profession_types,
         "active_filter": profession_filter or "",
         "page_title": f"Timeline — {admission.patient.name}",
+        # Date-only death closures (D2) render the exit date alone —
+        # the D 00:00 carrier hour is never displayed.
+        "discharge_date_only": admission_has_date_only_closure(admission),
     }
     return render(request, "patients/timeline.html", context)

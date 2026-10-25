@@ -24,7 +24,11 @@
       &middot;
       Entrada: {{ admission.admission_date|date:"d/m/Y H:i"|default:"—" }}
       {% if admission.discharge_date %}
-        &mdash; Alta: {{ admission.discharge_date|date:"d/m/Y H:i" }}
+        {% if discharge_date_only %}
+          &mdash; Alta: {{ admission.discharge_date|date:"d/m/Y" }}
+        {% else %}
+          &mdash; Alta: {{ admission.discharge_date|date:"d/m/Y H:i" }}
+        {% endif %}
       {% endif %}
     </p>
   </div>

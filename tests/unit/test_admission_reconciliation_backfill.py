@@ -22,7 +22,10 @@ from django.core.management import CommandError, call_command
 from apps.deaths.models import DeathRecord
 from apps.discharges.models import DischargeRecord
 from apps.patients.models import (
+    RECONCILIATION_STATUS_ALREADY_RECONCILED,
+    RECONCILIATION_STATUS_AMBIGUOUS,
     RECONCILIATION_STATUS_PENDING,
+    RECONCILIATION_STATUS_RECONCILED,
     Admission,
     AdmissionMergeOperation,
     Patient,
@@ -656,3 +659,365 @@ class TestRollbackCommandNamespaces:
         output = out.getvalue()
         assert "PACIENTE SIGILOSO" not in output
         assert "PRONT-" not in output
+
+
+# ---------------------------------------------------------------------------
+# Date-only death apply/rollback through the backfill API (DD-S2 R1/R3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestDateOnlyDeathBackfillApplyRollback:
+    """A planned date-only death item applies at D 00:00 Bahia with the
+    precision marker, and both rollback scopes restore the admission."""
+
+    def _planned_death(self, prontuario: str = "RB-DO-1"):
+        from apps.patients.backfill import build_backfill_plan
+
+        patient = _make_patient(prontuario)
+        admission = _make_admission(
+            patient, f"{prontuario}-ADM", "2026-05-20T08:00:00"
+        )
+        _make_death(prontuario, data_obito="28/05/2026")
+        plan = build_backfill_plan(limit=10)
+        assert plan.deaths.total == 1
+        return plan, admission
+
+    def test_apply_closes_at_carrier_with_marker(self):
+        from apps.patients.backfill import apply_backfill_plan
+
+        plan, admission = self._planned_death()
+
+        result = apply_backfill_plan(plan=plan)
+
+        assert result.applied["deaths"] == 1
+        admission.refresh_from_db()
+        assert admission.discharge_date == _dt("2026-05-28T00:00:00")
+        event = ReconciliationEvent.objects.get(
+            details_json__backfill__batch_uuid=str(result.batch_uuid)
+        )
+        assert event.exit_type == "death"
+        assert event.new_discharge_date == _dt("2026-05-28T00:00:00")
+        assert event.details_json["death_exit"] == {
+            "precision": "date",
+            "local_date": "2026-05-28",
+        }
+        assert event.details_json["backfill"]["batch_uuid"] == str(
+            result.batch_uuid
+        )
+
+    def test_batch_rollback_restores_open_admission(self):
+        from apps.patients.backfill import (
+            apply_backfill_plan,
+            rollback_backfill_batch,
+        )
+
+        plan, admission = self._planned_death()
+        result = apply_backfill_plan(plan=plan)
+        admission.refresh_from_db()
+        assert admission.discharge_date == _dt("2026-05-28T00:00:00")
+        record = DeathRecord.objects.get()
+        assert record.reconciliation_status == RECONCILIATION_STATUS_RECONCILED
+        assert record.admission_id == admission.pk
+        assert record.reconciled_at is not None
+
+        rollback = rollback_backfill_batch(batch_uuid=result.batch_uuid)
+
+        assert rollback.reversed_items == 1
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        record.refresh_from_db()
+        assert record.admission_id is None
+        assert record.reconciliation_status == RECONCILIATION_STATUS_PENDING
+        assert record.reconciled_at is None
+        assert record.obito_em is None
+
+    def test_single_operation_rollback_restores_open_admission(self):
+        from apps.patients.backfill import (
+            apply_backfill_plan,
+            rollback_single_operation,
+        )
+
+        plan, admission = self._planned_death(prontuario="RB-DO-2")
+        apply_backfill_plan(plan=plan)
+        event = ReconciliationEvent.objects.get()
+        admission.refresh_from_db()
+        assert admission.discharge_date == _dt("2026-05-28T00:00:00")
+        record = DeathRecord.objects.get()
+        assert record.reconciliation_status == RECONCILIATION_STATUS_RECONCILED
+        assert record.admission_id == admission.pk
+        assert record.reconciled_at is not None
+
+        result = rollback_single_operation(
+            operation_uuid=event.operation_uuid
+        )
+
+        assert result.kind == "reconciliation_event"
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        record.refresh_from_db()
+        assert record.admission_id is None
+        assert record.reconciliation_status == RECONCILIATION_STATUS_PENDING
+        assert record.reconciled_at is None
+        assert record.obito_em is None
+
+
+@pytest.mark.django_db
+class TestDeathRollbackRestoresPriorEvidenceStatus:
+    """Rollback restores the exact pre-apply death-evidence status (D6).
+
+    A death row triaged as ``ambiguous`` by an earlier attempt is still
+    planned (the planner only excludes reconciled rows); when a later
+    apply closes it, the rollback must restore ``ambiguous`` — not
+    normalize to ``pending``. Events written before the recording carry
+    no prior-status key and fall back to ``pending`` (legacy).
+    """
+
+    def _ambiguous_death(self, prontuario: str, *, data_obito: str):
+        from apps.deaths.services import reconcile_death_record
+
+        patient = _make_patient(prontuario)
+        admission = _make_admission(
+            patient, f"{prontuario}-ADM", "2026-05-20T08:00:00"
+        )
+        rival = _make_admission(
+            patient, f"{prontuario}-RIVAL", "2026-05-21T08:00:00"
+        )
+        record = _make_death(prontuario, data_obito=data_obito)
+        assert reconcile_death_record(record=record) == (
+            RECONCILIATION_STATUS_AMBIGUOUS
+        )
+        record.refresh_from_db()
+        assert record.reconciliation_status == RECONCILIATION_STATUS_AMBIGUOUS
+        # An earlier hospital exit closes the rival before the death:
+        # the match becomes unique without touching the triaged row.
+        rival.discharge_date = _dt("2026-05-27T18:00:00")
+        rival.save(update_fields=["discharge_date", "updated_at"])
+        return admission, record
+
+    def test_operation_rollback_restores_ambiguous(self):
+        from apps.patients.backfill import (
+            apply_backfill_plan,
+            build_backfill_plan,
+            rollback_single_operation,
+        )
+
+        admission, record = self._ambiguous_death(
+            "RB-PA-1", data_obito="28/05/2026"
+        )
+        plan = build_backfill_plan(limit=10)
+        assert plan.deaths.total == 1
+        apply_backfill_plan(plan=plan)
+        event = ReconciliationEvent.objects.get(
+            source_kind="death_record",
+            status=RECONCILIATION_STATUS_RECONCILED,
+        )
+        assert event.details_json["evidence_prior_status"] == (
+            RECONCILIATION_STATUS_AMBIGUOUS
+        )
+        record.refresh_from_db()
+        assert record.reconciliation_status == RECONCILIATION_STATUS_RECONCILED
+
+        result = rollback_single_operation(
+            operation_uuid=event.operation_uuid
+        )
+
+        assert result.kind == "reconciliation_event"
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        record.refresh_from_db()
+        assert record.admission_id is None
+        assert record.reconciliation_status == RECONCILIATION_STATUS_AMBIGUOUS
+        assert record.reconciled_at is None
+        assert record.obito_em is None
+
+    def test_batch_rollback_restores_ambiguous(self):
+        from apps.patients.backfill import (
+            apply_backfill_plan,
+            build_backfill_plan,
+            rollback_backfill_batch,
+        )
+
+        admission, record = self._ambiguous_death(
+            "RB-PA-2", data_obito="28/05/2026"
+        )
+        plan = build_backfill_plan(limit=10)
+        assert plan.deaths.total == 1
+        result = apply_backfill_plan(plan=plan)
+
+        rollback = rollback_backfill_batch(batch_uuid=result.batch_uuid)
+
+        assert rollback.reversed_items == 1
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        record.refresh_from_db()
+        assert record.admission_id is None
+        assert record.reconciliation_status == RECONCILIATION_STATUS_AMBIGUOUS
+        assert record.reconciled_at is None
+        assert record.obito_em is None
+
+    def test_operation_rollback_restores_ambiguous_for_datetime_evidence(self):
+        from apps.patients.backfill import (
+            apply_backfill_plan,
+            build_backfill_plan,
+            rollback_single_operation,
+        )
+
+        admission, record = self._ambiguous_death(
+            "RB-PA-3", data_obito="28/05/2026 14:00"
+        )
+        plan = build_backfill_plan(limit=10)
+        assert plan.deaths.total == 1
+        apply_backfill_plan(plan=plan)
+        event = ReconciliationEvent.objects.get(
+            source_kind="death_record",
+            status=RECONCILIATION_STATUS_RECONCILED,
+        )
+        assert "death_exit" not in event.details_json
+        assert event.details_json["evidence_prior_status"] == (
+            RECONCILIATION_STATUS_AMBIGUOUS
+        )
+        record.refresh_from_db()
+        assert record.reconciliation_status == RECONCILIATION_STATUS_RECONCILED
+        assert record.obito_em == _dt("2026-05-28T14:00:00")
+
+        result = rollback_single_operation(
+            operation_uuid=event.operation_uuid
+        )
+
+        assert result.kind == "reconciliation_event"
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        record.refresh_from_db()
+        assert record.admission_id is None
+        assert record.reconciliation_status == RECONCILIATION_STATUS_AMBIGUOUS
+        assert record.reconciled_at is None
+        assert record.obito_em == _dt("2026-05-28T14:00:00")
+
+    def test_rollback_without_prior_status_key_falls_back_to_pending(self):
+        from apps.patients.backfill import (
+            apply_backfill_plan,
+            build_backfill_plan,
+            rollback_single_operation,
+        )
+
+        patient = _make_patient("RB-LG-1")
+        admission = _make_admission(patient, "RB-LG-1-ADM", "2026-05-20T08:00:00")
+        _make_death("RB-LG-1", data_obito="28/05/2026")
+        plan = build_backfill_plan(limit=10)
+        assert plan.deaths.total == 1
+        apply_backfill_plan(plan=plan)
+        event = ReconciliationEvent.objects.get(
+            status=RECONCILIATION_STATUS_RECONCILED
+        )
+        # Simulate a pre-change event: strip the recording. Application
+        # code never updates audit rows; only this fixture rewrites
+        # history. Passes pre-fix by construction (the key never
+        # existed); pins the legacy fallback afterwards.
+        details = dict(event.details_json)
+        details.pop("evidence_prior_status", None)
+        ReconciliationEvent.objects.filter(pk=event.pk).update(
+            details_json=details
+        )
+
+        result = rollback_single_operation(
+            operation_uuid=event.operation_uuid
+        )
+
+        assert result.kind == "reconciliation_event"
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        record = DeathRecord.objects.get()
+        assert record.admission_id is None
+        assert record.reconciliation_status == RECONCILIATION_STATUS_PENDING
+        assert record.reconciled_at is None
+
+
+@pytest.mark.django_db
+class TestAlreadyReconciledDeathIsNotReversible:
+    """``already_reconciled`` structural linkages are never reversed.
+
+    An ``ambiguous``-triaged death row re-reconciled against an admission
+    already closed on the death's local date yields ``already_reconciled``
+    with a first-time structural event. That event records no
+    ``evidence_prior_status``: the outcome is not a close, and
+    ``reverse_reconciliation`` only reverses ``reconciled`` events —
+    both rollback scopes abort on anything else — so there is no
+    sanctioned rollback path this metadata could serve. Batch scope is
+    not exercised: the planner never plans ``already_reconciled`` deaths
+    (``_death_candidates`` and ``_execute_item`` gate on ``reconciled``),
+    so no sanctioned batch contains such an item — operation scope is
+    the honest one.
+    """
+
+    def _ambiguous_death_vs_closed(self, prontuario: str):
+        from apps.deaths.services import reconcile_death_record
+
+        patient = _make_patient(prontuario)
+        admission = _make_admission(
+            patient, f"{prontuario}-ADM", "2026-05-20T08:00:00"
+        )
+        rival = _make_admission(
+            patient, f"{prontuario}-RIVAL", "2026-05-21T08:00:00"
+        )
+        record = _make_death(prontuario, data_obito="28/05/2026")
+        assert reconcile_death_record(record=record) == (
+            RECONCILIATION_STATUS_AMBIGUOUS
+        )
+        record.refresh_from_db()
+        assert record.reconciliation_status == RECONCILIATION_STATUS_AMBIGUOUS
+        # Another writer closes the matched admission on D; the rival is
+        # closed before D so the re-attempt matches uniquely.
+        admission.discharge_date = _dt("2026-05-28T15:00:00")
+        admission.save(update_fields=["discharge_date", "updated_at"])
+        rival.discharge_date = _dt("2026-05-27T18:00:00")
+        rival.save(update_fields=["discharge_date", "updated_at"])
+        return admission, record
+
+    def test_already_reconciled_event_carries_no_prior_status(self):
+        from apps.deaths.services import reconcile_death_record
+
+        admission, record = self._ambiguous_death_vs_closed("RB-AR-1")
+        assert reconcile_death_record(record=record) == (
+            RECONCILIATION_STATUS_ALREADY_RECONCILED
+        )
+        event = ReconciliationEvent.objects.get(
+            source_kind="death_record",
+            status=RECONCILIATION_STATUS_ALREADY_RECONCILED,
+        )
+        assert "evidence_prior_status" not in event.details_json
+        record.refresh_from_db()
+        assert record.reconciliation_status == (
+            RECONCILIATION_STATUS_ALREADY_RECONCILED
+        )
+        assert record.admission_id == admission.pk
+
+    def test_operation_rollback_of_already_reconciled_is_blocked(self):
+        from apps.deaths.services import reconcile_death_record
+        from apps.patients.backfill import rollback_single_operation
+        from apps.patients.reconciliation import ReconciliationRollbackBlocked
+
+        admission, record = self._ambiguous_death_vs_closed("RB-AR-2")
+        assert reconcile_death_record(record=record) == (
+            RECONCILIATION_STATUS_ALREADY_RECONCILED
+        )
+        event = ReconciliationEvent.objects.get(
+            source_kind="death_record",
+            status=RECONCILIATION_STATUS_ALREADY_RECONCILED,
+        )
+
+        with pytest.raises(ReconciliationRollbackBlocked):
+            rollback_single_operation(
+                operation_uuid=event.operation_uuid
+            )
+
+        # Zero writes: the structural linkage and the linked evidence
+        # stay exactly as the apply left them.
+        admission.refresh_from_db()
+        assert admission.discharge_date == _dt("2026-05-28T15:00:00")
+        record.refresh_from_db()
+        assert record.admission_id == admission.pk
+        assert record.reconciliation_status == (
+            RECONCILIATION_STATUS_ALREADY_RECONCILED
+        )
+        assert record.reconciled_at is not None

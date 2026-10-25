@@ -154,6 +154,37 @@ class TestCanonicalExitClassification:
 
         assert DailyDischargeCount.objects.get(date=day).count == 2
 
+    def test_date_only_death_exit_is_excluded_from_hospital_counts(self):
+        """A date-only death close (D 00:00 carrier, DD-S2) never feeds
+        the hospital-discharge indicator, exactly like a datetime death."""
+        from apps.deaths.models import DeathRecord
+        from apps.deaths.services import reconcile_death_record
+
+        patient = Patient.objects.create(
+            patient_source_key="DD1", source_system="tasy", name="Patient DD1"
+        )
+        Admission.objects.create(
+            patient=patient,
+            source_admission_key="ADM-DD1",
+            source_system="tasy",
+            admission_date=_bahia(2026, 3, 1, 8, 0),
+        )
+        record = DeathRecord.objects.create(
+            date=date(2026, 3, 10),
+            prontuario="DD1",
+            data_obito="10/03/2026",
+            nome="Patient DD1",
+        )
+
+        assert (
+            reconcile_death_record(record=record)
+            == RECONCILIATION_STATUS_RECONCILED
+        )
+
+        call_command("refresh_daily_discharge_counts")
+
+        assert DailyDischargeCount.objects.count() == 0
+
     def test_latest_reconciled_event_decides_classification(self):
         """The latest reconciled event's exit_type wins, not the first."""
         # hospital_discharge first, death latest → excluded
@@ -232,6 +263,18 @@ class TestBahiaMidnightGrouping:
         assert DailyDischargeCount.objects.get(date=date(2026, 3, 7)).count == 1
         assert not DailyDischargeCount.objects.filter(
             date=date(2026, 3, 8)
+        ).exists()
+
+    def test_midnight_carrier_belongs_to_its_local_date(self):
+        """A 00:00 Bahia exit (the DD-S2 date carrier shape) groups on D
+        itself — the carrier can never leak into the previous day."""
+        _seed_exit("MID", _bahia(2026, 3, 10, 0, 0))
+
+        call_command("refresh_daily_discharge_counts")
+
+        assert DailyDischargeCount.objects.get(date=date(2026, 3, 10)).count == 1
+        assert not DailyDischargeCount.objects.filter(
+            date=date(2026, 3, 9)
         ).exists()
 
     def test_exit_at_0005_moves_to_next_date(self):

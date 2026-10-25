@@ -8,7 +8,10 @@ decision 10 — audit is retained indefinitely and never mutated).
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from django.contrib import admin, messages
+from django.utils import timezone
 
 from apps.patients.models import (
     Admission,
@@ -17,7 +20,27 @@ from apps.patients.models import (
     ReconciliationEvent,
     StaleAdmissionCase,
 )
+from apps.patients.reconciliation import (
+    admission_has_date_only_closure,
+    event_is_date_only_exit,
+    event_undoes_date_only_exit,
+)
 from apps.patients.services import merge_patients
+
+
+def _format_admin_exit(value: datetime | None, *, date_only: bool) -> str:
+    """Render a staff-admin exit value at its true precision (D2).
+
+    A date-only death closure shows the local date with a precision
+    marker — the D 00:00 carrier hour is never displayed as source
+    information. Complete datetime exits keep date and hour.
+    """
+    if value is None:
+        return "-"
+    local = timezone.localtime(value)
+    if date_only:
+        return local.strftime("%d/%m/%Y (data)")
+    return local.strftime("%d/%m/%Y %H:%M")
 
 
 @admin.register(Admission)
@@ -36,7 +59,7 @@ class AdmissionAdmin(admin.ModelAdmin):
         "patient",
         "source_admission_key",
         "admission_date",
-        "discharge_date",
+        "display_discharge_date",
         "ward",
         "bed",
         "merged_into",
@@ -51,6 +74,16 @@ class AdmissionAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         return Admission.all_objects.get_queryset().select_related(
             "patient", "merged_into"
+        )
+
+    @admin.display(
+        description="Discharge date", ordering="discharge_date"
+    )
+    def display_discharge_date(self, obj: Admission) -> str:
+        """Exit at its true precision: date-only closures hide the hour."""
+        return _format_admin_exit(
+            obj.discharge_date,
+            date_only=admission_has_date_only_closure(obj),
         )
 
 
@@ -100,12 +133,34 @@ class ReconciliationEventAdmin(admin.ModelAdmin):
         "status",
         "exit_type",
         "reason_code",
-        "prior_discharge_date",
-        "new_discharge_date",
+        "display_prior_discharge_date",
+        "display_new_discharge_date",
         "created_at",
     ]
     list_filter = ["status", "exit_type", "source_kind"]
     search_fields = ["operation_uuid", "source_id"]
+
+    @admin.display(
+        description="Prior discharge date", ordering="prior_discharge_date"
+    )
+    def display_prior_discharge_date(
+        self, obj: ReconciliationEvent
+    ) -> str:
+        """Undone carrier of a date-only rollback renders at date precision."""
+        return _format_admin_exit(
+            obj.prior_discharge_date,
+            date_only=event_undoes_date_only_exit(obj),
+        )
+
+    @admin.display(
+        description="New discharge date", ordering="new_discharge_date"
+    )
+    def display_new_discharge_date(self, obj: ReconciliationEvent) -> str:
+        """Date-only closures render the new exit without the carrier hour."""
+        return _format_admin_exit(
+            obj.new_discharge_date,
+            date_only=event_is_date_only_exit(obj),
+        )
 
     def has_add_permission(self, request) -> bool:
         return False

@@ -341,3 +341,48 @@ class TestOperationRollback:
         assert duplicate.merged_into_id is None
         merge_op.refresh_from_db()
         assert merge_op.rolled_back_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Date-only death canary through the real commands (DD-S2 R1/R3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestDateOnlyDeathCommandCanary:
+    """Small ``--apply`` canary with a date-only death item: the episode
+    closes at D 00:00 Bahia with the precision marker, and the batch
+    rollback restores the open episode."""
+
+    def test_apply_then_batch_rollback(self):
+        patient = _make_patient("DO-CMD-1")
+        admission = _make_admission(
+            patient, "DO-CMD-1-ADM", "2026-05-20T08:00:00"
+        )
+        DeathRecord.objects.create(
+            date=date(2026, 6, 1),
+            prontuario="DO-CMD-1",
+            data_obito="28/05/2026",
+            nome="PACIENTE SIGILOSO DO-CMD-1",
+        )
+
+        batch_uuid = _apply(limit="10")
+
+        admission.refresh_from_db()
+        assert admission.discharge_date == _dt("2026-05-28T00:00:00")
+        event = ReconciliationEvent.objects.get(
+            details_json__backfill__batch_uuid=batch_uuid
+        )
+        assert event.exit_type == "death"
+        assert event.details_json["death_exit"] == {
+            "precision": "date",
+            "local_date": "2026-05-28",
+        }
+
+        call_command(
+            "rollback_admission_reconciliation", "--batch", batch_uuid,
+            stdout=StringIO(),
+        )
+
+        admission.refresh_from_db()
+        assert admission.discharge_date is None

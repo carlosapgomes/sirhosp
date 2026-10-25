@@ -70,6 +70,24 @@ MATCH_CONTAINING_PERIOD = "containing_period"
 canonical admission whose known period contains the exit — a complete
 datetime or, at date precision, the death's local date."""
 
+DEATH_EXIT_DETAILS_KEY = "death_exit"
+"""``details_json`` key of the date-only death closure marker (D2)."""
+
+DEATH_EXIT_PRECISION_DATE = "date"
+"""Precision tag of a date-only death closure: D 00:00 ``America/Bahia``
+bears the local date only and no surface may display or use its hour."""
+
+EVIDENCE_PRIOR_STATUS_DETAILS_KEY = "evidence_prior_status"
+"""``details_json`` key of the evidence status before the apply (D6).
+
+Death-evidence close events (``reconciled``) record the row's
+``reconciliation_status`` as it stood before the apply overwrote it,
+so rollback restores the exact prior state instead of normalizing to
+``pending``. Structural ``already_reconciled`` linkages carry no such
+key: they are never reversed (``reverse_reconciliation`` only reverses
+``reconciled`` events). Absent on events written before the recording
+(legacy fallback: ``pending``)."""
+
 REASON_NULL_ADMISSION_START = "null_admission_start"
 """Key/alias matched but the admission start is null: cannot validate time."""
 REASON_CONTRADICTORY_STRONG_IDS = "contradictory_strong_ids"
@@ -496,6 +514,16 @@ def _resolve_by_unique_local_date(
     return same_day[0], MATCH_UNIQUE_LOCAL_DATE
 
 
+def date_only_death_exit_details(local_date: date) -> dict:
+    """Build the D2 precision marker of a date-only death closure."""
+    return {
+        DEATH_EXIT_DETAILS_KEY: {
+            "precision": DEATH_EXIT_PRECISION_DATE,
+            "local_date": local_date.isoformat(),
+        }
+    }
+
+
 def apply_discharge_exit(
     *,
     decision: DischargeMatchDecision,
@@ -503,6 +531,8 @@ def apply_discharge_exit(
     exit_type: str,
     source_kind: str,
     source_id: int,
+    exit_local_date: Optional[date] = None,
+    evidence_prior_status: Optional[str] = None,
 ) -> str:
     """Apply a match decision transactionally under a row lock.
 
@@ -513,6 +543,17 @@ def apply_discharge_exit(
     :class:`~apps.patients.models.ReconciliationEvent` with structural
     before/after state (never patient identity). Returns the final
     reconciliation status.
+
+    When ``exit_local_date`` is set, the apply runs at date precision
+    (reconcile-date-only-deaths D2): ``exit_datetime`` is the D 00:00
+    ``America/Bahia`` carrier bearing the local date, the locked-row
+    comparisons run at local-date granularity, and a close performed
+    here is stamped with the ``death_exit`` precision marker.
+
+    When ``evidence_prior_status`` is given, a reconciled close recorded
+    here also records the evidence row's pre-apply status (D6) so
+    rollback restores that exact state; callers that omit it keep the
+    previous payload shape unchanged.
     """
     final_status = decision.status
     reason_code = decision.reason_code
@@ -525,7 +566,9 @@ def apply_discharge_exit(
             locked = Admission.objects.select_for_update().get(pk=admission.pk)
             prior = locked.discharge_date
             final_status, reason_code = _apply_locked(
-                locked, exit_datetime=exit_datetime
+                locked,
+                exit_datetime=exit_datetime,
+                exit_local_date=exit_local_date,
             )
             if final_status == RECONCILIATION_STATUS_RECONCILED:
                 # First close (open admission) or unambiguous correction;
@@ -570,6 +613,33 @@ def apply_discharge_exit(
             else:
                 has_own_event = False
             if not has_own_event:
+                # The marker is stamped exactly when this event performs
+                # a date-precision close: idempotent repeats and
+                # first-time structural linkages carry no marker of their
+                # own — the closure precision belongs to the close event.
+                # The evidence prior status rides on closes only
+                # (reconciled; D6). Structural ``already_reconciled``
+                # linkages carry none: ``reverse_reconciliation`` never
+                # reverses non-reconciled events (both rollback scopes
+                # abort on them), so there is no sanctioned rollback
+                # this metadata could serve. Legacy events simply lack
+                # the key (rollback falls back to pending).
+                details_extra = (
+                    date_only_death_exit_details(exit_local_date)
+                    if exit_local_date is not None
+                    and final_status == RECONCILIATION_STATUS_RECONCILED
+                    else None
+                )
+                if (
+                    evidence_prior_status is not None
+                    and final_status == RECONCILIATION_STATUS_RECONCILED
+                ):
+                    details_extra = {
+                        **(details_extra or {}),
+                        EVIDENCE_PRIOR_STATUS_DETAILS_KEY: (
+                            evidence_prior_status
+                        ),
+                    }
                 _write_audit(
                     decision=decision,
                     admission=admission,
@@ -580,6 +650,7 @@ def apply_discharge_exit(
                     new=new,
                     source_kind=source_kind,
                     source_id=source_id,
+                    details_extra=details_extra,
                 )
     else:
         _write_audit(
@@ -607,10 +678,34 @@ def _apply_locked(
     locked: Admission,
     *,
     exit_datetime: datetime,
+    exit_local_date: Optional[date] = None,
 ) -> tuple[str, str]:
-    """Derive the final status from the locked row without mutating it."""
+    """Derive the final status from the locked row without mutating it.
+
+    At date precision (``exit_local_date`` set) every comparison runs
+    at ``America/Bahia`` local-date granularity — mirroring the decide
+    layer — so a same-day admission still closes and a local discharge
+    on D is the already-reconciled tripwire.
+    """
     if locked.admission_date is None:
         return RECONCILIATION_STATUS_CONFLICT, REASON_NULL_ADMISSION_START
+    if exit_local_date is not None:
+        admitted = locked.admission_date.astimezone(
+            TZ_ADMISSION_IDENTITY
+        ).date()
+        if admitted > exit_local_date:
+            return (
+                RECONCILIATION_STATUS_INVALID_EXIT_DATETIME,
+                REASON_EXIT_BEFORE_ADMISSION,
+            )
+        discharged = locked.discharge_date
+        if (
+            discharged is not None
+            and discharged.astimezone(TZ_ADMISSION_IDENTITY).date()
+            == exit_local_date
+        ):
+            return RECONCILIATION_STATUS_ALREADY_RECONCILED, ""
+        return RECONCILIATION_STATUS_RECONCILED, ""
     if exit_datetime < locked.admission_date:
         return (
             RECONCILIATION_STATUS_INVALID_EXIT_DATETIME,
@@ -619,6 +714,58 @@ def _apply_locked(
     if locked.discharge_date == exit_datetime:
         return RECONCILIATION_STATUS_ALREADY_RECONCILED, ""
     return RECONCILIATION_STATUS_RECONCILED, ""
+
+
+def event_is_date_only_exit(event: ReconciliationEvent) -> bool:
+    """True when the event performed a date-only death closure (D2).
+
+    The ``death_exit`` marker is the source of truth of the closure
+    precision: its presence means the recorded ``new_discharge_date``
+    is a D 00:00 carrier bearing the local date only.
+    """
+    marker = event.details_json.get(DEATH_EXIT_DETAILS_KEY)
+    return (
+        isinstance(marker, dict)
+        and marker.get("precision") == DEATH_EXIT_PRECISION_DATE
+    )
+
+
+def event_undoes_date_only_exit(event: ReconciliationEvent) -> bool:
+    """True when this rollback event's prior restores a date-only carrier.
+
+    The inverse audit keeps stored instants verbatim; this predicate
+    lets display layers render the undone carrier at date precision
+    like the original closure.
+    """
+    rollback_of = event.details_json.get("rollback_of")
+    if not rollback_of:
+        return False
+    original = ReconciliationEvent.objects.filter(
+        operation_uuid=rollback_of
+    ).first()
+    return original is not None and event_is_date_only_exit(original)
+
+
+def admission_has_date_only_closure(admission: Admission) -> bool:
+    """True when the admission's current close is a date-only death.
+
+    The latest reconciled event decides (same ordering as the exit
+    indicators): its marker must be present and its recorded
+    post-state must still match the admission's ``discharge_date``.
+    """
+    if admission.discharge_date is None:
+        return False
+    latest = (
+        ReconciliationEvent.objects.filter(
+            admission_id=admission.pk,
+            status=RECONCILIATION_STATUS_RECONCILED,
+        )
+        .order_by("-created_at", "-pk")
+        .first()
+    )
+    if latest is None or not event_is_date_only_exit(latest):
+        return False
+    return latest.new_discharge_date == admission.discharge_date
 
 
 def _write_audit(
@@ -632,6 +779,7 @@ def _write_audit(
     new: Optional[datetime],
     source_kind: str,
     source_id: int,
+    details_extra: Optional[dict] = None,
 ) -> ReconciliationEvent:
     """Append exactly one audit row; application code never updates it."""
     details: dict = {
@@ -639,6 +787,8 @@ def _write_audit(
         "candidate_count": decision.candidate_count,
         "admission_id": admission.pk if admission is not None else None,
     }
+    if details_extra:
+        details.update(details_extra)
     active = current_backfill_payload()
     if active is not None:
         # RPSA-S9 batch linkage recorded at creation time only (append-only).

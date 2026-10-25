@@ -244,7 +244,11 @@
       {% if selected_admission.discharge_date %}
         <span class="badge bg-light text-dark border">
           <i class="bi bi-calendar-x me-1"></i>
-          Alta: {{ selected_admission.discharge_date|date:"d/m/Y H:i" }}
+          {% if discharge_date_only %}
+            Alta: {{ selected_admission.discharge_date|date:"d/m/Y" }}
+          {% else %}
+            Alta: {{ selected_admission.discharge_date|date:"d/m/Y H:i" }}
+          {% endif %}
         </span>
       {% else %}
         <span class="badge" style="background: var(--bs-primary-lightest); color: var(--bs-primary-darker);">

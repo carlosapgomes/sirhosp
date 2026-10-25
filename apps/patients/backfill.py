@@ -74,6 +74,8 @@ from apps.patients.models import (
     ReconciliationEvent,
 )
 from apps.patients.reconciliation import (
+    EVIDENCE_PRIOR_STATUS_DETAILS_KEY,
+    EVIDENCE_SOURCE_DEATH_RECORD,
     EVIDENCE_SOURCE_DISCHARGE_RECORD,
     DischargeExitEvidence,
     backfill_batch_payload,
@@ -792,6 +794,40 @@ def _restore_mirror_exit_evidence(*, event: ReconciliationEvent) -> None:
     )
 
 
+def _restore_death_exit_evidence(*, event: ReconciliationEvent) -> None:
+    """Restore the death evidence inside the rollback transaction (R3).
+
+    Called right after ``reverse_reconciliation`` appended the inverse
+    event. Only death-evidence closures restore their evidence
+    (discriminated by ``source_kind="death_record"``); the death row is
+    resolved by ``source_id`` and returned to its pre-apply shape (the
+    exact recorded prior status, ``reconciled_at`` cleared, admission
+    link dropped) in the SAME transaction as the inverse event
+    (D6). Events written before the apply recorded the prior status
+    carry no key and fall back to ``pending`` (legacy).
+    ``obito_em`` is untouched: the apply only rewrites the
+    deterministic parse of the raw ``data_obito`` string, never
+    synthesized linkage state.
+    """
+    if event.source_kind != EVIDENCE_SOURCE_DEATH_RECORD:
+        return
+    record = DeathRecord.objects.filter(pk=event.source_id).first()
+    if record is None:
+        raise BackfillRollbackConflict(
+            f"Death evidence {event.source_id} no longer exists; "
+            "rollback aborted with zero writes."
+        )
+    prior_status = event.details_json.get(EVIDENCE_PRIOR_STATUS_DETAILS_KEY)
+    if not isinstance(prior_status, str) or not prior_status:
+        prior_status = RECONCILIATION_STATUS_PENDING
+    record.admission = None
+    record.reconciliation_status = prior_status
+    record.reconciled_at = None
+    record.save(
+        update_fields=["admission", "reconciliation_status", "reconciled_at"]
+    )
+
+
 def rollback_backfill_batch(*, batch_uuid: uuid.UUID) -> BatchRollbackResult:
     """Reverse a whole backfill batch atomically in reverse item order.
 
@@ -830,6 +866,7 @@ def rollback_backfill_batch(*, batch_uuid: uuid.UUID) -> BatchRollbackResult:
                         )
                     reverse_reconciliation(event=item.event)
                     _restore_mirror_exit_evidence(event=item.event)
+                    _restore_death_exit_evidence(event=item.event)
             reversed_counts[item.kind] += 1
     return BatchRollbackResult(
         batch_uuid=batch_uuid,
@@ -846,9 +883,10 @@ def rollback_single_operation(
     The operation namespace (reconciliation events and merge operations)
     is disjoint from the batch namespace (backfill payload linkage), so a
     selector can never be mistaken for a batch. A reconciliation-event
-    rollback runs its inverse event and the mirror-evidence restore inside
-    ONE transaction (P1-1): a failure after the inverse event aborts with
-    zero writes instead of leaving a stuck half-rollback.
+    rollback runs its inverse event and the evidence restores
+    (mirror-exit or death) inside ONE transaction (P1-1): a failure after
+    the inverse event aborts with zero writes instead of leaving a stuck
+    half-rollback.
     """
     event = ReconciliationEvent.objects.filter(operation_uuid=operation_uuid).first()
     merge_operation = AdmissionMergeOperation.objects.filter(
@@ -867,6 +905,7 @@ def rollback_single_operation(
         with transaction.atomic():
             reverse_reconciliation(event=event)
             _restore_mirror_exit_evidence(event=event)
+            _restore_death_exit_evidence(event=event)
         return OperationRollbackResult(kind=KIND_RECONCILIATION_EVENT)
     if merge_operation is not None:
         rollback_admission_merge(operation=merge_operation)

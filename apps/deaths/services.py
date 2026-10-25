@@ -9,7 +9,7 @@ import sys
 import tempfile
 from collections import Counter
 from datetime import date as Date
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -542,9 +542,13 @@ def reconcile_death_record(
     Death evidence carries no admission key, no exact admission start and
     no local admission date: the only matching layer available is the
     unique canonical admission whose known period contains a complete
-    death datetime (``match_by_period``). A date-only or unparseable
-    ``data_obito`` never synthesizes an hour: the row stays pending and a
-    deduplicated ``admissions_only`` source synchronization is requested.
+    death datetime (``match_by_period``), or — at date precision — the
+    death's ``America/Bahia`` local date (reconcile-date-only-deaths D1).
+    A date-only close writes D 00:00 as the carrier of the local date
+    with an explicit ``death_exit`` precision marker on the event (D2);
+    ``obito_em`` stays null because no hour is ever synthesized into
+    the evidence. Unparseable ``data_obito`` stays pending and requests
+    a deduplicated ``admissions_only`` source synchronization.
 
     Evidence linkage/status is written in the same transaction as the
     admission mutation and the append-only audit. Logs carry
@@ -572,10 +576,13 @@ def reconcile_death_record(
     exit_datetime = _parse_death_datetime(record.data_obito)
     record.obito_em = exit_datetime
 
+    exit_local_date: Date | None = None
     if exit_datetime is None:
-        # Date-only (or unparseable) evidence: no source hour exists, so
-        # none is synthesized. The row stays pending; the requested
-        # admissions sync may restore a complete datetime on the source.
+        exit_local_date = _parse_death_date(record.data_obito)
+    if exit_datetime is None and exit_local_date is None:
+        # Unparseable evidence: no usable date exists at all. The row
+        # stays pending; the requested admissions sync may restore a
+        # usable value on the source.
         record.reconciliation_status = RECONCILIATION_STATUS_PENDING
         record.save(update_fields=["obito_em", "reconciliation_status"])
         queued = _enqueue_missing_mirror_sync(
@@ -583,7 +590,7 @@ def reconcile_death_record(
             include_demographics=False,
         )
         logger.info(
-            "death reconciliation pending (date-only evidence): "
+            "death reconciliation pending (unparseable evidence): "
             "record_id=%s status=%s admissions_sync_queued=%d",
             record.pk,
             RECONCILIATION_STATUS_PENDING,
@@ -591,24 +598,50 @@ def reconcile_death_record(
         )
         return RECONCILIATION_STATUS_PENDING
 
-    evidence = DischargeExitEvidence(
-        patient_record=record.prontuario,
-        exit_datetime=exit_datetime,
-        admission_key=None,
-        admission_start=None,
-        admission_local_date=None,
-        source_system=source_system,
-        match_by_period=True,
-    )
+    if exit_local_date is not None:
+        # Date-only evidence with a usable local date: the D 00:00
+        # carrier bears the date through the datetime-typed close path
+        # (D2) while the evidence itself keeps obito_em null.
+        evidence = DischargeExitEvidence(
+            patient_record=record.prontuario,
+            exit_datetime=None,
+            exit_local_date=exit_local_date,
+            admission_key=None,
+            admission_start=None,
+            admission_local_date=None,
+            source_system=source_system,
+            match_by_period=True,
+        )
+        exit_for_apply = datetime.combine(
+            exit_local_date, time.min, tzinfo=_TZ_DEATH_EVIDENCE
+        )
+    else:
+        evidence = DischargeExitEvidence(
+            patient_record=record.prontuario,
+            exit_datetime=exit_datetime,
+            admission_key=None,
+            admission_start=None,
+            admission_local_date=None,
+            source_system=source_system,
+            match_by_period=True,
+        )
+        assert exit_datetime is not None  # narrowed by the guard above
+        exit_for_apply = exit_datetime
 
+    # The apply below overwrites the evidence status: capture it first so
+    # a reconciled close records the exact pre-apply state (D6) and
+    # rollback restores it instead of normalizing to pending.
+    evidence_prior_status = record.reconciliation_status
     with transaction.atomic():
         decision = decide_discharge_match(evidence=evidence)
         status = apply_discharge_exit(
             decision=decision,
-            exit_datetime=exit_datetime,
+            exit_datetime=exit_for_apply,
             exit_type=EXIT_DEATH,
             source_kind=EVIDENCE_SOURCE_DEATH_RECORD,
             source_id=record.pk,
+            exit_local_date=exit_local_date,
+            evidence_prior_status=evidence_prior_status,
         )
         # Evidence-side linkage/status joins the same atomic block so a
         # crash can never close an admission while leaving the evidence
