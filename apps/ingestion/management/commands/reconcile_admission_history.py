@@ -30,7 +30,8 @@ class Command(BaseCommand):
         "Plan (default dry-run) and, with explicit authorization flags, "
         "apply bounded historical reconciliation cohorts: source-confirmed "
         "duplicates, exact hospital discharges, mirror-confirmed exits and "
-        "complete deaths. "
+        "deaths with date-confirmed evidence (complete datetime or a "
+        "date-only death that uniquely matches one admission). "
         "Ambiguities are counted for manual review only."
     )
 

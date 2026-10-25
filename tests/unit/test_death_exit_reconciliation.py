@@ -89,6 +89,21 @@ def _death_evidence(**overrides: Any) -> DischargeExitEvidence:
     return DischargeExitEvidence(**base)
 
 
+def _date_only_evidence(local_date: date, **overrides: Any) -> DischargeExitEvidence:
+    base: dict[str, Any] = dict(
+        patient_record="555",
+        exit_datetime=None,
+        exit_local_date=local_date,
+        admission_key=None,
+        admission_start=None,
+        admission_local_date=None,
+        source_system="tasy",
+        match_by_period=True,
+    )
+    base.update(overrides)
+    return DischargeExitEvidence(**base)
+
+
 def _make_death_record(
     *,
     prontuario: str = "555",
@@ -206,6 +221,160 @@ class TestPeriodLayerDecision:
         _make_admission(patient, "ADM-1", "2026-05-20T08:00:00")
         decision = decide_discharge_match(
             evidence=_death_evidence(match_by_period=False)
+        )
+        assert decision.status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
+
+
+# =========================================================================
+# Date-only period layer (reconcile-date-only-deaths D1)
+# =========================================================================
+
+
+@pytest.mark.django_db
+class TestDateOnlyPeriodLayerDecision:
+    """Unique admission whose known period contains the death local date D.
+
+    Containment is at ``America/Bahia`` local-date granularity:
+    ``local(admission_date) <= D`` and (open or ``local(discharge_date)
+    >= D``). Zero or multiple candidates fail closed, exactly like the
+    complete-datetime layer.
+    """
+
+    def test_unique_open_admission_containing_local_date_matches(self):
+        patient = _make_patient("555")
+        admission = _make_admission(patient, "ADM-1", "2026-05-20T08:00:00")
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_RECONCILED
+        assert decision.admission is not None
+        assert decision.admission.pk == admission.pk
+        assert decision.exit_type == EXIT_DEATH
+
+    def test_admission_on_death_local_date_matches(self):
+        """Same-day boundary: admitted D 08:00, died D — date granularity
+        matches where a D-midnight datetime comparison would fail."""
+        patient = _make_patient("555")
+        admission = _make_admission(patient, "ADM-1", "2026-06-01T08:00:00")
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_RECONCILED
+        assert decision.admission is not None
+        assert decision.admission.pk == admission.pk
+
+    def test_closed_admission_with_local_discharge_on_d_is_already(self):
+        """Local discharge on D is the date-precision equality tripwire:
+        the evidence is consistent with the recorded exit."""
+        patient = _make_patient("555")
+        _make_admission(
+            patient,
+            "ADM-1",
+            "2026-05-20T08:00:00",
+            end="2026-06-01T15:00:00",
+        )
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_ALREADY_RECONCILED
+
+    def test_closed_admission_with_local_discharge_after_d_matches(self):
+        patient = _make_patient("555")
+        admission = _make_admission(
+            patient,
+            "ADM-1",
+            "2026-05-20T08:00:00",
+            end="2026-06-03T10:00:00",
+        )
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_RECONCILED
+        assert decision.admission is not None
+        assert decision.admission.pk == admission.pk
+
+    def test_closed_admission_ending_before_d_is_not_found(self):
+        patient = _make_patient("555")
+        _make_admission(
+            patient,
+            "ADM-1",
+            "2026-05-01T08:00:00",
+            end="2026-05-31T10:00:00",
+        )
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
+        assert decision.admission is None
+
+    def test_admission_starting_after_d_is_not_found(self):
+        patient = _make_patient("555")
+        _make_admission(patient, "ADM-1", "2026-06-05T08:00:00")
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
+        assert decision.admission is None
+
+    def test_multiple_containing_local_dates_are_ambiguous(self):
+        patient = _make_patient("555")
+        _make_admission(patient, "ADM-A", "2026-05-01T08:00:00")
+        _make_admission(patient, "ADM-B", "2026-05-15T08:00:00")
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_AMBIGUOUS
+        assert decision.admission is None
+        assert decision.candidate_count == 2
+
+    def test_missing_patient_is_patient_not_found(self):
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_PATIENT_NOT_FOUND
+        assert decision.admission is None
+
+    def test_null_start_admission_is_never_a_date_candidate(self):
+        patient = _make_patient("555")
+        _make_admission(patient, "ADM-NULL", None)
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 6, 1))
+        )
+        assert decision.status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
+        assert decision.admission is None
+
+    def test_containment_uses_bahia_local_date_not_utc(self):
+        """2026-06-01T01:30Z is 2026-05-31T22:30 in Bahia: it is contained
+        by D=2026-05-31 and excluded by D=2026-05-30."""
+        patient = _make_patient("555")
+        admission = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key="ADM-UTC",
+            admission_date=datetime(
+                2026, 6, 1, 1, 30, tzinfo=ZoneInfo("UTC")
+            ),
+        )
+        contained = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 5, 31))
+        )
+        assert contained.status == RECONCILIATION_STATUS_RECONCILED
+        assert contained.admission is not None
+        assert contained.admission.pk == admission.pk
+        excluded = decide_discharge_match(
+            evidence=_date_only_evidence(date(2026, 5, 30))
+        )
+        assert excluded.status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
+
+    def test_date_only_without_period_opt_in_is_not_found(self):
+        """Without ``match_by_period`` the date-only layer is never
+        evaluated, exactly like the datetime period layer."""
+        patient = _make_patient("555")
+        _make_admission(patient, "ADM-1", "2026-05-20T08:00:00")
+        decision = decide_discharge_match(
+            evidence=_date_only_evidence(
+                date(2026, 6, 1), match_by_period=False
+            )
         )
         assert decision.status == RECONCILIATION_STATUS_ADMISSION_NOT_FOUND
 

@@ -216,7 +216,8 @@ class TestBackfillPlanCohorts:
 
         assert plan.deaths.total == 1
         assert plan.deaths.items[0].payload.record_id == complete.pk
-        assert plan.manual_review["deaths:date_only"] == 1
+        assert plan.manual_review["deaths:patient_not_found"] == 1
+        assert "deaths:date_only" not in plan.manual_review
 
     def test_ambiguous_death_is_review_only(self):
         from apps.patients.backfill import build_backfill_plan
@@ -254,6 +255,137 @@ class TestBackfillPlanCohorts:
         assert len(plan.discharges.items) == 2
         assert plan.discharges.truncated is True
         assert len(plan.items) == 2
+
+
+# ---------------------------------------------------------------------------
+# Date-only death cohort (reconcile-date-only-deaths D1/D3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestDateOnlyDeathCohort:
+    """Date-only deaths are eligible when exactly one admission contains D."""
+
+    def test_date_only_unique_match_is_eligible(self):
+        from apps.patients.backfill import build_backfill_plan
+
+        patient = _make_patient("DO-1")
+        _make_admission(patient, "DO-1-ADM", "2026-05-20T08:00:00")
+        record = _make_death("DO-1", data_obito="28/05/2026")
+
+        plan = build_backfill_plan()
+
+        assert plan.deaths.total == 1
+        assert plan.deaths.items[0].payload.record_id == record.pk
+        assert "deaths:date_only" not in plan.manual_review
+
+    def test_date_only_same_day_admission_is_eligible(self):
+        from apps.patients.backfill import build_backfill_plan
+
+        patient = _make_patient("DO-2")
+        _make_admission(patient, "DO-2-ADM", "2026-05-28T08:00:00")
+        record = _make_death("DO-2", data_obito="28/05/2026")
+
+        plan = build_backfill_plan()
+
+        assert plan.deaths.total == 1
+        assert plan.deaths.items[0].payload.record_id == record.pk
+
+    def test_date_only_ambiguous_is_review_only(self):
+        from apps.patients.backfill import build_backfill_plan
+
+        patient = _make_patient("DO-3")
+        _make_admission(patient, "DO-3-A", "2026-05-20T08:00:00")
+        _make_admission(patient, "DO-3-B", "2026-05-22T08:00:00")
+        _make_death("DO-3", data_obito="28/05/2026")
+
+        plan = build_backfill_plan()
+
+        assert plan.deaths.total == 0
+        assert plan.manual_review["deaths:ambiguous"] == 1
+
+    def test_date_only_missing_patient_is_review_only(self):
+        from apps.patients.backfill import build_backfill_plan
+
+        _make_death("DO-404", data_obito="28/05/2026")
+
+        plan = build_backfill_plan()
+
+        assert plan.deaths.total == 0
+        assert plan.manual_review["deaths:patient_not_found"] == 1
+
+    def test_date_only_without_compatible_admission_is_review_only(self):
+        from apps.patients.backfill import build_backfill_plan
+
+        patient = _make_patient("DO-5")
+        _make_admission(patient, "DO-5-ADM", "2026-05-29T08:00:00")
+        _make_death("DO-5", data_obito="28/05/2026")
+
+        plan = build_backfill_plan()
+
+        assert plan.deaths.total == 0
+        assert plan.manual_review["deaths:admission_not_found"] == 1
+
+    def test_unparseable_death_date_stays_pending_review(self):
+        from apps.patients.backfill import build_backfill_plan
+
+        patient = _make_patient("DO-6")
+        _make_admission(patient, "DO-6-ADM", "2026-05-20T08:00:00")
+        _make_death("DO-6", data_obito="sem data")
+
+        plan = build_backfill_plan()
+
+        assert plan.deaths.total == 0
+        assert plan.manual_review["deaths:pending"] == 1
+        assert "deaths:date_only" not in plan.manual_review
+
+    def test_merged_order_stays_deterministic_with_date_only(self):
+        from apps.patients.backfill import build_backfill_plan
+
+        patient = _make_patient("DO-7")
+        _make_admission(patient, "DO-7-ADM", "2026-05-20T08:00:00")
+        _make_discharge(
+            "DO-7", saida="2026-06-01T12:00:00", internacao="20/05/2026"
+        )
+        dying_a = _make_patient("DO-8")
+        _make_admission(dying_a, "DO-8-ADM", "2026-05-21T08:00:00")
+        first = _make_death("DO-8", data_obito="28/05/2026")
+        dying_b = _make_patient("DO-9")
+        _make_admission(dying_b, "DO-9-ADM", "2026-05-22T08:00:00")
+        second = _make_death("DO-9", data_obito="29/05/2026")
+
+        plan = build_backfill_plan()
+
+        assert [item.cohort for item in plan.items] == [
+            "discharges",
+            "deaths",
+            "deaths",
+        ]
+        assert [item.order for item in plan.items] == [1, 2, 3]
+        death_ids = [
+            item.payload.record_id
+            for item in plan.items
+            if item.cohort == "deaths"
+        ]
+        assert death_ids == sorted(death_ids)
+        assert death_ids == [first.pk, second.pk]
+
+    def test_dry_run_prints_deaths_cohort_with_date_only_eligibility(self):
+        patient = _make_patient("DO-10")
+        _make_admission(patient, "DO-10-ADM", "2026-05-20T08:00:00")
+        _make_death("DO-10", data_obito="28/05/2026")
+        ambiguous = _make_patient("DO-11")
+        _make_admission(ambiguous, "DO-11-A", "2026-05-20T08:00:00")
+        _make_admission(ambiguous, "DO-11-B", "2026-05-22T08:00:00")
+        _make_death("DO-11", data_obito="28/05/2026")
+
+        out = StringIO()
+        call_command("reconcile_admission_history", stdout=out)
+
+        output = out.getvalue()
+        assert "cohort=deaths eligible=1 bounded=1" in output
+        assert "manual_review reason=deaths:ambiguous count=1" in output
+        assert "deaths:date_only" not in output
 
 
 # ---------------------------------------------------------------------------

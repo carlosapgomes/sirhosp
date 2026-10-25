@@ -19,8 +19,9 @@ mutate exclusively through the online services:
   single operation) restores the evidence to ``pending`` inside the same
   transaction after ``reverse_reconciliation`` appends the inverse event
   (design D5 — the admission stays counted in the canonical series);
-- complete deaths: evidence with a complete datetime and exactly one
-  compatible admission, replayed via
+- deaths with date-confirmed evidence: a complete datetime plus one
+  compatible admission, or a date-only death that uniquely matches one
+  admission at date granularity, replayed via
   :func:`apps.deaths.services.reconcile_death_record`.
 
 Everything else (temporal-only matches, absent evidence, ambiguity) is
@@ -47,7 +48,11 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.deaths.models import DeathRecord
-from apps.deaths.services import _parse_death_datetime, reconcile_death_record
+from apps.deaths.services import (
+    _parse_death_date,
+    _parse_death_datetime,
+    reconcile_death_record,
+)
 from apps.discharges.models import DischargeRecord
 from apps.discharges.services import _parse_admission_date, reconcile_discharge_record
 from apps.patients.admission_merge import (
@@ -104,7 +109,6 @@ LATER_APPLY_CAP = 100
 REVIEW_MULTIPLE_EPISODES = "multiple_episodes"
 REVIEW_PAIR_SHAPE = "pair_shape"
 REVIEW_STALE_CONFIRMATION = "stale_confirmation"
-REVIEW_DATE_ONLY = "date_only"
 REVIEW_MISSING_SAIDA_EM = "missing_saida_em"
 REVIEW_MIRROR_AMBIGUOUS = "mirror_ambiguous"
 REVIEW_MIRROR_PATIENT_NOT_FOUND = "mirror_patient_not_found"
@@ -382,8 +386,11 @@ def _discharge_candidates() -> tuple[list[DischargeItem], dict[str, int]]:
 
 
 def _death_candidates() -> tuple[list[DeathItem], dict[str, int]]:
-    """Complete deaths: complete datetime plus exactly one compatible
-    admission. Date-only evidence is review-only and never synthesized."""
+    """Deaths with date-confirmed evidence: a complete datetime plus
+    exactly one compatible admission, or a date-only death that uniquely
+    matches one admission at ``America/Bahia`` local-date granularity
+    (D1). Unparseable evidence stays pending; no hour is ever
+    synthesized."""
     review: dict[str, int] = defaultdict(int)
     items: list[DeathItem] = []
     candidates = DeathRecord.objects.exclude(
@@ -391,16 +398,20 @@ def _death_candidates() -> tuple[list[DeathItem], dict[str, int]]:
     ).order_by("pk")
     for record in candidates:
         exit_datetime = _parse_death_datetime(record.data_obito)
-        if exit_datetime is None:
-            review[f"{COHORT_DEATHS}:{REVIEW_DATE_ONLY}"] += 1
-            continue
-        decision = decide_discharge_match(
-            evidence=DischargeExitEvidence(
+        if exit_datetime is not None:
+            evidence = DischargeExitEvidence(
                 patient_record=record.prontuario,
                 exit_datetime=exit_datetime,
                 match_by_period=True,
             )
-        )
+        else:
+            evidence = DischargeExitEvidence(
+                patient_record=record.prontuario,
+                exit_datetime=None,
+                exit_local_date=_parse_death_date(record.data_obito),
+                match_by_period=True,
+            )
+        decision = decide_discharge_match(evidence=evidence)
         if decision.status == RECONCILIATION_STATUS_RECONCILED:
             items.append(DeathItem(record_id=record.pk))
         else:
@@ -475,10 +486,10 @@ def build_backfill_plan(*, limit: Optional[int] = None) -> BackfillPlan:
     """Build the pure deterministic plan (no ORM writes).
 
     Cohorts execute in the mandated order — duplicates, exact hospital
-    discharges, mirror exits, complete deaths — each in stable primary-key
-    order; the limit applies to the merged plan before any write. Dry-run
-    bounds the preview by the current canary cap when no explicit limit
-    is given.
+    discharges, mirror exits, deaths with date-confirmed evidence — each
+    in stable primary-key order; the limit applies to the merged plan
+    before any write. Dry-run bounds the preview by the current canary
+    cap when no explicit limit is given.
     """
     cap = current_apply_cap()
     bound = limit if limit is not None else cap

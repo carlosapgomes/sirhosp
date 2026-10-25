@@ -67,7 +67,8 @@ EVIDENCE_SOURCE_DEATH_RECORD = "death_record"
 
 MATCH_CONTAINING_PERIOD = "containing_period"
 """Match reason of the death-evidence period layer (RPSA-S3): the unique
-canonical admission whose known period contains the exit datetime."""
+canonical admission whose known period contains the exit — a complete
+datetime or, at date precision, the death's local date."""
 
 REASON_NULL_ADMISSION_START = "null_admission_start"
 """Key/alias matched but the admission start is null: cannot validate time."""
@@ -131,6 +132,14 @@ class DischargeExitEvidence:
 
     patient_record: str
     exit_datetime: Optional[datetime]
+    exit_local_date: Optional[date] = None
+    """Death local date (``America/Bahia``) when the source carries no hour.
+
+    Set ONLY for date-only death evidence matched at date precision
+    (reconcile-date-only-deaths D1); a complete datetime always wins when
+    both are present. ``None`` means the evidence has no usable date at
+    all (unparseable) and the decision stays pending.
+    """
     admission_key: Optional[str] = None
     admission_start: Optional[datetime] = None
     admission_local_date: Optional[date] = None
@@ -190,8 +199,11 @@ def decide_discharge_match(
     once a stronger unique match succeeds. A key/alias match whose
     admission start is null, or whose episode period contradicts a
     supplied exact start, is ``conflict`` — never a heuristic choice.
+    Death evidence with no source hour matches at date precision on
+    ``exit_local_date`` (reconcile-date-only-deaths D1); evidence with
+    neither a datetime nor a local date stays pending.
     """
-    if evidence.exit_datetime is None:
+    if evidence.exit_datetime is None and evidence.exit_local_date is None:
         return _decision(RECONCILIATION_STATUS_PENDING, candidate_count=0)
 
     patient = Patient.objects.filter(
@@ -216,11 +228,17 @@ def decide_discharge_match(
     elif evidence.match_by_period:
         # Death evidence carries no admission key, no exact start and no
         # local admission date: the only layer it may use is the unique
-        # canonical admission whose known period contains the complete
-        # death datetime (design decision 3).
-        candidate, match_reason = _resolve_by_unique_containing_period(
-            evidence, patient
-        )
+        # canonical admission whose known period contains the exit — the
+        # complete death datetime (design decision 3) or, at date
+        # precision, the death's America/Bahia local date (D1).
+        if evidence.exit_datetime is not None:
+            candidate, match_reason = _resolve_by_unique_containing_period(
+                evidence, patient
+            )
+        else:
+            candidate, match_reason = _resolve_by_unique_containing_local_date(
+                evidence, patient
+            )
         if isinstance(candidate, DischargeMatchDecision):
             return candidate
     else:
@@ -235,20 +253,49 @@ def decide_discharge_match(
             match_reason=match_reason,
             reason_code=REASON_NULL_ADMISSION_START,
         )
-    if evidence.exit_datetime < candidate.admission_date:
-        return _decision(
-            RECONCILIATION_STATUS_INVALID_EXIT_DATETIME,
-            admission=candidate,
-            match_reason=match_reason,
-            reason_code=REASON_EXIT_BEFORE_ADMISSION,
-        )
-    if candidate.discharge_date == evidence.exit_datetime:
-        return _decision(
-            RECONCILIATION_STATUS_ALREADY_RECONCILED,
-            admission=candidate,
-            match_reason=match_reason,
-            exit_type=_evidence_exit_type(evidence),
-        )
+    if evidence.exit_datetime is not None:
+        if evidence.exit_datetime < candidate.admission_date:
+            return _decision(
+                RECONCILIATION_STATUS_INVALID_EXIT_DATETIME,
+                admission=candidate,
+                match_reason=match_reason,
+                reason_code=REASON_EXIT_BEFORE_ADMISSION,
+            )
+        if candidate.discharge_date == evidence.exit_datetime:
+            return _decision(
+                RECONCILIATION_STATUS_ALREADY_RECONCILED,
+                admission=candidate,
+                match_reason=match_reason,
+                exit_type=_evidence_exit_type(evidence),
+            )
+    elif evidence.exit_local_date is not None:
+        # Date-only death evidence: every comparison runs at America/Bahia
+        # local-date granularity — a local admission after D is invalid, a
+        # local discharge on D is the already-reconciled tripwire, and no
+        # hour is ever synthesized for the comparison.
+        death_date = evidence.exit_local_date
+        admitted = candidate.admission_date.astimezone(
+            TZ_ADMISSION_IDENTITY
+        ).date()
+        if admitted > death_date:
+            return _decision(
+                RECONCILIATION_STATUS_INVALID_EXIT_DATETIME,
+                admission=candidate,
+                match_reason=match_reason,
+                reason_code=REASON_EXIT_BEFORE_ADMISSION,
+            )
+        discharged = candidate.discharge_date
+        if (
+            discharged is not None
+            and discharged.astimezone(TZ_ADMISSION_IDENTITY).date()
+            == death_date
+        ):
+            return _decision(
+                RECONCILIATION_STATUS_ALREADY_RECONCILED,
+                admission=candidate,
+                match_reason=match_reason,
+                exit_type=_evidence_exit_type(evidence),
+            )
     # Open admission (first close) or an unambiguous authoritative
     # correction of a prior exit value: both are `reconciled`, with the
     # prior value preserved in the append-only audit.
@@ -336,6 +383,59 @@ def _resolve_by_unique_containing_period(
             admission_date__lte=exit_at,
         )
         .filter(Q(discharge_date__isnull=True) | Q(discharge_date__gte=exit_at))
+        .order_by("admission_date", "pk")
+    )
+    if not candidates:
+        return (
+            _decision(RECONCILIATION_STATUS_ADMISSION_NOT_FOUND, candidate_count=0),
+            "",
+        )
+    if len(candidates) > 1:
+        return (
+            _decision(
+                RECONCILIATION_STATUS_AMBIGUOUS,
+                match_reason=MATCH_CONTAINING_PERIOD,
+                candidate_count=len(candidates),
+                exit_type=EXIT_DEATH,
+            ),
+            MATCH_CONTAINING_PERIOD,
+        )
+    return candidates[0], MATCH_CONTAINING_PERIOD
+
+
+def _resolve_by_unique_containing_local_date(
+    evidence: DischargeExitEvidence,
+    patient: Patient,
+) -> tuple[Admission | DischargeMatchDecision, str]:
+    """Unique canonical admission whose known period contains local date D.
+
+    Date-precision containment in ``America/Bahia``
+    (reconcile-date-only-deaths D1): ``local(admission_date) <= D`` and
+    (``discharge_date`` null or ``local(discharge_date) >= D``), expressed
+    as inclusive day bounds so the database compares instants while the
+    predicate stays a local-date one. An admission with a null start has
+    no known period and can never contain D; zero or multiple candidates
+    fail closed — no latest/open fallback is ever taken.
+    """
+    local_date = evidence.exit_local_date
+    if local_date is None:
+        # Defensive fail-closed: callers only route date-only evidence here.
+        return (
+            _decision(RECONCILIATION_STATUS_ADMISSION_NOT_FOUND, candidate_count=0),
+            "",
+        )
+    day_start, day_end = _bahia_day_bounds(
+        datetime.combine(local_date, time.min, tzinfo=TZ_ADMISSION_IDENTITY)
+    )
+    candidates = list(
+        Admission.objects.filter(
+            patient=patient,
+            source_system=evidence.source_system,
+            admission_date__lt=day_end,
+        )
+        .filter(
+            Q(discharge_date__isnull=True) | Q(discharge_date__gte=day_start)
+        )
         .order_by("admission_date", "pk")
     )
     if not candidates:

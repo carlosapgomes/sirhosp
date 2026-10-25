@@ -513,6 +513,25 @@ def _parse_death_datetime(raw: str) -> datetime | None:
     return None
 
 
+def _parse_death_date(raw: str) -> Date | None:
+    """Parse the clinical local date of ``data_obito`` at date precision.
+
+    Returns the ``America/Bahia`` local date exactly as written by the
+    source for both complete datetimes and date-only values; unparseable
+    evidence yields ``None`` (reconciliation stays pending). The caller
+    decides the matching precision: a complete datetime keeps datetime
+    matching, a date-only value matches at date granularity (D1) — no
+    hour is ever synthesized here.
+    """
+    text = (raw or "").strip()
+    for fmt, _has_time in _DEATH_DATETIME_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 def reconcile_death_record(
     *,
     record: DeathRecord,
