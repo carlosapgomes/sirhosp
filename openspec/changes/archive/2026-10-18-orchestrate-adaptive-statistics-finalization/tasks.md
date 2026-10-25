@@ -40,4 +40,10 @@
 - [x] 6.3 Publicar a RC32 imutável somente após o gate verde e confirmar imagem, digest, Compose, preflight, units e runbook na mesma release.
 - [x] 6.4 Implantar a RC dormente, manter timers hourly/D-1/estatístico desabilitados, configurar a fronteira permitida, executar preflight `PASS` e obter aceite humano explícito antes de recriar somente `census_orchestrator`.
 - [x] 6.5 Observar execuções naturais hourly e D-1 → drenagem → materialização, confirmar ausência de relatório anterior à fronteira e, após 05:00, verificar que ausência de revisão aciona uma única recuperação `d1_recovery_not_confirmed`; às 07:30, alertar e exigir decisão humana se ainda não houver revisão `ready`, registrando somente evidência agregada.
-- [ ] 6.6 Sincronizar e arquivar `orchestrate-d1-exit-recovery` e `orchestrate-intraday-discharge-recovery` antes de arquivar OASF; em falha operacional, executar o rollback documentado sem apagar revisões.
+- [x] 6.6 Sincronizar e arquivar `orchestrate-d1-exit-recovery` e
+      `orchestrate-intraday-discharge-recovery` antes de arquivar OASF;
+      em falha operacional, executar o rollback documentado sem apagar
+      revisões.
+      (gate satisfeito 2026-10-18: d1 e intraday arquivados com specs
+      sincronizadas — `47fed2f`, `cbbf458`; nenhuma falha operacional,
+      rollback não acionado)
