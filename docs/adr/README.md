@@ -4,20 +4,21 @@ Registros de decisoes arquiteturais importantes do projeto.
 
 ## ADRs Ativas
 
-| Numero                                                                                            | Titulo                                                                    | Status   | Data       |
-| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | -------- | ---------- |
-| [ADR-0001](ADR-0001-monolito-django-postgresql-e-jobs-agendados.md)                               | ADR-0001-monolito-django-postgresql-e-jobs-agendados                      | Accepted | 2026-05-24 |
-| [ADR-0002](ADR-0002-modelagem-canonica-eventos-clinicos-e-reconciliacao.md)                       | ADR-0002-modelagem-canonica-eventos-clinicos-e-reconciliacao              | Accepted | 2026-05-24 |
-| [ADR-0003](ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel.md)                      | ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel             | Accepted | 2026-08-17 |
-| [ADR-0004](ADR-0004-correcao-co-e-particionamento-etario-3a.md)                                   | ADR-0004-correcao-co-e-particionamento-etario-3a                          | Accepted | 2026-08-20 |
-| [ADR-0005](ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado.md)                      | ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado             | Accepted | 2026-08-21 |
-| [ADR-0006](ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica.md)                     | ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica            | Accepted | 2026-09-01 |
-| [ADR-0007](ADR-0007-ocupacao-v5-pacientes-identificados.md)                                       | ADR-0007-ocupacao-v5-pacientes-identificados                              | Accepted | 2026-08-25 |
-| [ADR-0008](ADR-0008-fullsync-failure-characterization-decision.md)                                | ADR-0008-fullsync-failure-characterization-decision                       | Accepted | 2026-09-01 |
-| [ADR-0009](ADR-0009-reconciliacao-canonica-de-saidas-e-identidade-longitudinal-de-internacoes.md) | Reconciliação canônica de saídas e identidade longitudinal de internações | Proposed | 2026-09-03 |
-| [ADR-0010](ADR-0010-recuperacao-d1-orquestrada-pelo-ciclo-adaptativo.md)                          | Recuperação D-1 orquestrada pelo ciclo adaptativo de censo                | Proposed | 2026-09-06 |
-| [ADR-0011](ADR-0011-projecao-diaria-materializada-e-versionada-para-relatorios-estatisticos.md)   | Projeção diária materializada e versionada para relatórios estatísticos   | Accepted | 2026-09-24 |
-| [ADR-0012](ADR-0012-finalizacao-estatistica-orquestrada-pela-drenagem-adaptativa.md)              | Finalização estatística orquestrada pela drenagem adaptativa              | Proposed | 2026-09-27 |
+| Numero                                                                                                          | Titulo                                                                                  | Status                 | Data       |
+| --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------- | ---------- |
+| [ADR-0001](ADR-0001-monolito-django-postgresql-e-jobs-agendados.md)                                             | ADR-0001-monolito-django-postgresql-e-jobs-agendados                                    | Accepted               | 2026-05-24 |
+| [ADR-0002](ADR-0002-modelagem-canonica-eventos-clinicos-e-reconciliacao.md)                                     | ADR-0002-modelagem-canonica-eventos-clinicos-e-reconciliacao                            | Accepted               | 2026-05-24 |
+| [ADR-0003](ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel.md)                                    | ADR-0003-catalogo-temporal-capacidade-materializacao-imutavel                           | Accepted               | 2026-08-17 |
+| [ADR-0004](ADR-0004-correcao-co-e-particionamento-etario-3a.md)                                                 | ADR-0004-correcao-co-e-particionamento-etario-3a                                        | Accepted               | 2026-08-20 |
+| [ADR-0005](ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado.md)                                    | ADR-0005-duas-realidades-capacidade-oficial-e-posicoes-legado                           | Accepted               | 2026-08-21 |
+| [ADR-0006](ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica.md)                                   | ADR-0006-ocupacao-v4-acionavel-conflitos-tipados-e-lista-unica                          | Accepted               | 2026-10-18 |
+| [ADR-0007](ADR-0007-ocupacao-v5-pacientes-identificados.md)                                                     | ADR-0007-ocupacao-v5-pacientes-identificados                                            | Accepted               | 2026-08-25 |
+| [ADR-0008](ADR-0008-fullsync-failure-characterization-decision.md)                                              | ADR-0008-fullsync-failure-characterization-decision                                     | Accepted               | 2026-10-18 |
+| [ADR-0009](ADR-0009-reconciliacao-canonica-de-saidas-e-identidade-longitudinal-de-internacoes.md)               | Reconciliação canônica de saídas e identidade longitudinal de internações               | Unknown                | 2026-09-09 |
+| [ADR-0010](ADR-0010-recuperacao-d1-orquestrada-pelo-ciclo-adaptativo.md)                                        | Recuperação D-1 orquestrada pelo ciclo adaptativo de censo                              | Unknown                | 2026-09-07 |
+| [ADR-0011](ADR-0011-projecao-diaria-materializada-e-versionada-para-relatorios-estatisticos.md)                 | Projeção diária materializada e versionada para relatórios estatísticos                 | Accepted — 2026-09-24. | 2026-09-24 |
+| [ADR-0012](ADR-0012-finalizacao-estatistica-orquestrada-pela-drenagem-adaptativa.md)                            | Finalização estatística orquestrada pela drenagem adaptativa                            | Proposed — 2026-09-27. | 2026-09-27 |
+| [ADR-0013](ADR-0013-pendencias-de-reconciliacao-de-abril-e-agosto-de-2026-declaradas-ruido-do-sistema-fonte.md) | Pendencias de reconciliacao de abril e agosto de 2026 declaradas ruido do sistema fonte | Accepted               | 2026-10-25 |
 
 ## ADRs Deprecated/Superseded
 
