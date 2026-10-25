@@ -33,6 +33,7 @@ from apps.ingestion.models import IngestionRun
 
 if TYPE_CHECKING:
     from apps.deaths.models import DeathRecord  # noqa: F401
+    from apps.patients.reconciliation import DischargeExitEvidence  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -532,6 +533,54 @@ def _parse_death_date(raw: str) -> Date | None:
     return None
 
 
+def build_death_exit_evidence(
+    *,
+    record: DeathRecord,
+    source_system: str = "tasy",
+) -> DischargeExitEvidence | None:
+    """Build the read-only match evidence for one ``DeathRecord``.
+
+    Same normalization the online :func:`reconcile_death_record` path
+    applies: a complete ``data_obito`` datetime keeps datetime
+    precision, a date-only value falls back to ``exit_local_date``
+    (date granularity, D1) — no hour is ever synthesized. Returns
+    ``None`` when ``data_obito`` carries no usable date at all
+    (unparseable).
+
+    Pure: never mutates or saves the record, so callers can classify an
+    outcome with ``decide_discharge_match`` before deciding whether any
+    write is warranted.
+    """
+    from apps.patients.reconciliation import DischargeExitEvidence  # noqa: PLC0415
+
+    exit_datetime = _parse_death_datetime(record.data_obito)
+    exit_local_date: Date | None = None
+    if exit_datetime is None:
+        exit_local_date = _parse_death_date(record.data_obito)
+    if exit_datetime is None and exit_local_date is None:
+        return None
+    if exit_local_date is not None:
+        return DischargeExitEvidence(
+            patient_record=record.prontuario,
+            exit_datetime=None,
+            exit_local_date=exit_local_date,
+            admission_key=None,
+            admission_start=None,
+            admission_local_date=None,
+            source_system=source_system,
+            match_by_period=True,
+        )
+    return DischargeExitEvidence(
+        patient_record=record.prontuario,
+        exit_datetime=exit_datetime,
+        admission_key=None,
+        admission_start=None,
+        admission_local_date=None,
+        source_system=source_system,
+        match_by_period=True,
+    )
+
+
 def reconcile_death_record(
     *,
     record: DeathRecord,
@@ -568,7 +617,6 @@ def reconcile_death_record(
     )
     from apps.patients.reconciliation import (  # noqa: PLC0415
         EVIDENCE_SOURCE_DEATH_RECORD,
-        DischargeExitEvidence,
         apply_discharge_exit,
         decide_discharge_match,
     )
@@ -576,10 +624,10 @@ def reconcile_death_record(
     exit_datetime = _parse_death_datetime(record.data_obito)
     record.obito_em = exit_datetime
 
-    exit_local_date: Date | None = None
-    if exit_datetime is None:
-        exit_local_date = _parse_death_date(record.data_obito)
-    if exit_datetime is None and exit_local_date is None:
+    evidence = build_death_exit_evidence(
+        record=record, source_system=source_system
+    )
+    if evidence is None:
         # Unparseable evidence: no usable date exists at all. The row
         # stays pending; the requested admissions sync may restore a
         # usable value on the source.
@@ -598,35 +646,17 @@ def reconcile_death_record(
         )
         return RECONCILIATION_STATUS_PENDING
 
+    exit_local_date = evidence.exit_local_date
     if exit_local_date is not None:
         # Date-only evidence with a usable local date: the D 00:00
         # carrier bears the date through the datetime-typed close path
         # (D2) while the evidence itself keeps obito_em null.
-        evidence = DischargeExitEvidence(
-            patient_record=record.prontuario,
-            exit_datetime=None,
-            exit_local_date=exit_local_date,
-            admission_key=None,
-            admission_start=None,
-            admission_local_date=None,
-            source_system=source_system,
-            match_by_period=True,
-        )
         exit_for_apply = datetime.combine(
             exit_local_date, time.min, tzinfo=_TZ_DEATH_EVIDENCE
         )
     else:
-        evidence = DischargeExitEvidence(
-            patient_record=record.prontuario,
-            exit_datetime=exit_datetime,
-            admission_key=None,
-            admission_start=None,
-            admission_local_date=None,
-            source_system=source_system,
-            match_by_period=True,
-        )
-        assert exit_datetime is not None  # narrowed by the guard above
-        exit_for_apply = exit_datetime
+        assert evidence.exit_datetime is not None  # narrowed by the guard above
+        exit_for_apply = evidence.exit_datetime
 
     # The apply below overwrites the evidence status: capture it first so
     # a reconciled close records the exact pre-apply state (D6) and

@@ -136,6 +136,36 @@ def backfill_batch_payload(payload: dict):
         _active_backfill_payload.reset(token)
 
 
+RUNTIME_PROVENANCE_DETAILS_KEY = "runtime"
+"""``details_json`` key of the runtime provenance stamp (ODR-S1 D3)."""
+
+_active_runtime_payload: ContextVar[Optional[dict]] = ContextVar(
+    "sirhosp_active_runtime_payload", default=None
+)
+
+
+def current_runtime_payload() -> Optional[dict]:
+    """Return the active runtime provenance payload, when one is scoped."""
+    return _active_runtime_payload.get()
+
+
+@contextmanager
+def runtime_provenance_payload(payload: dict):
+    """Scope the lightweight provenance stamp (e.g. ``{"mode": "d1"}``)
+    recorded at creation time into ``details_json`` of reconciliation
+    events created for the duration of the block.
+
+    Same ambient-hook spirit as :func:`backfill_batch_payload`: the online
+    services keep their signatures and the append-only audit is never
+    updated. Outside the scope the payload shape is unchanged.
+    """
+    token = _active_runtime_payload.set(dict(payload))
+    try:
+        yield
+    finally:
+        _active_runtime_payload.reset(token)
+
+
 @dataclass(frozen=True)
 class DischargeExitEvidence:
     """Normalized exit evidence with only the precision it really has.
@@ -789,6 +819,12 @@ def _write_audit(
     }
     if details_extra:
         details.update(details_extra)
+    active_runtime = current_runtime_payload()
+    if active_runtime is not None:
+        # ODR-S1 runtime provenance recorded at creation time only
+        # (append-only); every event created by the scoped runtime step
+        # carries it, closable or not.
+        details[RUNTIME_PROVENANCE_DETAILS_KEY] = dict(active_runtime)
     active = current_backfill_payload()
     if active is not None:
         # RPSA-S9 batch linkage recorded at creation time only (append-only).

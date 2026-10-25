@@ -66,6 +66,16 @@ D1_RECOVERY_SUCCESS_MARKER = (
 HOURLY_DISCHARGES_SUCCESS_MARKER = (
     "mode=hourly-discharges result=success source=adaptive-orchestrator"
 )
+D1_DEATHS_SUCCESS_MARKER = (
+    "mode=d1-deaths result=success source=adaptive-orchestrator"
+)
+"""Canonical success marker of the D-1 post-extraction death step (ODR-S1).
+
+Emitted by ``run_exit_reconciliation_runtime --mode d1`` itself — not by
+the orchestrator loop — only after the date-only death step completes,
+with aggregate counts. It complements ``D1_RECOVERY_SUCCESS_MARKER``
+(it never replaces the discharge evidence); the statistics activation
+preflight does not read it."""
 
 # Operational quality codes the adaptive loop may attach to a degraded
 # revision. They belong to the closed allowlist enforced by the materializer.

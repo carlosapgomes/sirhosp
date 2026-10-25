@@ -7,7 +7,12 @@ profile). Thin orchestration over the existing recovery pipeline
 
 - ``--mode hourly``: current America/Bahia date, ``discharges`` only.
 - ``--mode d1``: previous America/Bahia date with all four extractors in
-  canonical order (``discharges, admissions, deaths, official_census``).
+  canonical order (``discharges, admissions, deaths, official_census``),
+  followed by the post-extraction date-only death step (ODR-S1): every
+  ``DeathRecord`` of the recovered date is classified read-only first
+  and only a closable match reaches the online death path,
+  fail-closed per record, with an aggregate summary and a success
+  marker.
 - ``--mode catchup``: explicit operator multi-date catch-up. Plans
   missing/failed discharge-extraction dates from the durable RPSA-S7/S10
   coverage metadata (identical keying to pipeline health), capped at
@@ -39,6 +44,7 @@ reasons only.
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections import defaultdict
 from datetime import date, timedelta
@@ -50,7 +56,12 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
 from django.utils import timezone
 
-from apps.census.orchestration import compute_orchestrator_state
+from apps.census.orchestration import (
+    D1_DEATHS_SUCCESS_MARKER,
+    compute_orchestrator_state,
+)
+from apps.deaths.models import DeathRecord
+from apps.deaths.services import build_death_exit_evidence, reconcile_death_record
 from apps.ingestion.historical_recovery import (
     DEFAULT_EXTRACTOR_ORDER,
     _date_to_str,
@@ -62,6 +73,13 @@ from apps.ingestion.pipeline_health import (
     _extraction_date,
     _stage_confirms_complete,
 )
+from apps.patients.models import (
+    RECONCILIATION_STATUS_ALREADY_RECONCILED,
+    RECONCILIATION_STATUS_RECONCILED,
+)
+from apps.patients.reconciliation import decide_discharge_match, runtime_provenance_payload
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Contract constants
@@ -193,6 +211,79 @@ def _materialize_gap_dates() -> list[date]:
 
 
 # ---------------------------------------------------------------------------
+# D-1 post-extraction death step (ODR-S1)
+# ---------------------------------------------------------------------------
+
+
+def reconcile_d1_deaths(*, day: date) -> dict[str, int]:
+    """Reconcile every ``DeathRecord`` of one recovered local date.
+
+    Each record is first classified with the read-only
+    ``decide_discharge_match`` decision over the same evidence the
+    online path would use (date-only matching since rc.41). Only a
+    ``reconciled`` decision reaches the online ``reconcile_death_record``
+    writer, which closes the episode; any other outcome — ambiguous,
+    patient/admission not found, already reconciled, pending or
+    unparseable — performs no write at all (no evidence save, no audit
+    event, no mirror-sync enqueue) and is only counted. Events created
+    here carry the lightweight runtime provenance stamp
+    (``{"mode": "d1"}``) recorded at creation time.
+
+    Scope is strictly the given date — no history scan. An unexpected
+    exception in one record is logged with the record primary key only
+    and counted as failed; the remaining records still run. Only a
+    total step failure (e.g. the date query itself) propagates, so the
+    caller can contain it without aborting the recovery.
+
+    Returns aggregate counts keyed by ``reconciled``,
+    ``already_reconciled``, ``pending`` and ``failed``.
+    """
+    summary = {
+        "reconciled": 0,
+        "already_reconciled": 0,
+        "pending": 0,
+        "failed": 0,
+    }
+    records = list(DeathRecord.objects.filter(date=day).order_by("pk"))
+    with runtime_provenance_payload({"mode": MODE_D1}):
+        for record in records:
+            try:
+                evidence = build_death_exit_evidence(record=record)
+                if evidence is None:
+                    # Unparseable data_obito: no usable date exists at
+                    # all. Count only — never touch the writer path.
+                    summary["pending"] += 1
+                    continue
+                decision = decide_discharge_match(evidence=evidence)
+                if decision.status == RECONCILIATION_STATUS_ALREADY_RECONCILED:
+                    summary["already_reconciled"] += 1
+                    continue
+                if decision.status != RECONCILIATION_STATUS_RECONCILED:
+                    # Ambiguous, patient/admission not found, or any
+                    # other non-closable outcome: count only, without
+                    # the evidence save, audit event or mirror-sync
+                    # enqueue the online path would perform.
+                    summary["pending"] += 1
+                    continue
+                status = reconcile_death_record(record=record)
+            except Exception as exc:
+                logger.error(
+                    "d1 death step record failed: record_id=%s error=%s",
+                    record.pk,
+                    type(exc).__name__,
+                )
+                summary["failed"] += 1
+                continue
+            if status == RECONCILIATION_STATUS_RECONCILED:
+                summary["reconciled"] += 1
+            elif status == RECONCILIATION_STATUS_ALREADY_RECONCILED:
+                summary["already_reconciled"] += 1
+            else:
+                summary["pending"] += 1
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Command
 # ---------------------------------------------------------------------------
 
@@ -245,9 +336,11 @@ class Command(BaseCommand):
                     mode, _today_bahia(), ["discharges"]
                 )
             elif mode == MODE_D1:
+                day = _previous_day(_today_bahia())
                 self._dispatch_single_day(
-                    mode, _previous_day(_today_bahia()), _CANONICAL_EXTRACTORS
+                    mode, day, _CANONICAL_EXTRACTORS
                 )
+                self._reconcile_d1_deaths(day)
             else:
                 self._handle_catchup()
         finally:
@@ -279,6 +372,41 @@ class Command(BaseCommand):
             extractors=list(extractors),
             stdout=self.stdout,
             stderr=self.stderr,
+        )
+
+    # ------------------------------------------------------------------
+    # D-1 post-extraction death step (ODR-S1; d1 mode only)
+    # ------------------------------------------------------------------
+
+    def _reconcile_d1_deaths(self, day: date) -> None:
+        """Run the date-only death step without ever aborting the recovery.
+
+        A total step failure is reported as one aggregate failed line and
+        never raises; the success marker is emitted only when the step
+        completes, with aggregate counts.
+        """
+        label = _date_to_str(day)
+        try:
+            summary = reconcile_d1_deaths(day=day)
+        except Exception as exc:
+            logger.error(
+                "d1 death step failed: date=%s error=%s",
+                label,
+                type(exc).__name__,
+            )
+            self.stdout.write(
+                "exit_reconciliation_runtime: "
+                f"mode=d1-deaths result=failed reason={type(exc).__name__} "
+                f"date={label}"
+            )
+            return
+        self.stdout.write(
+            "exit_reconciliation_runtime: "
+            f"{D1_DEATHS_SUCCESS_MARKER} date={label} "
+            f"reconciled={summary['reconciled']} "
+            f"already_reconciled={summary['already_reconciled']} "
+            f"pending={summary['pending']} "
+            f"failed={summary['failed']}"
         )
 
     # ------------------------------------------------------------------

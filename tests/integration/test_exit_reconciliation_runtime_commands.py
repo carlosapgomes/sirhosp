@@ -722,3 +722,134 @@ class TestD1ModeUsesPreviousBahiaDay:
         utc_moment = datetime(2026, 3, 2, 2, 30, tzinfo=ZoneInfo("UTC"))
         local = utc_moment.astimezone(BAHIA)
         assert local.date() == date(2026, 3, 1)
+
+
+# ---------------------------------------------------------------------------
+# D-1 death step (ODR-S1): post-extraction date-only death reconciliation
+# ---------------------------------------------------------------------------
+
+
+class TestD1DeathStep:
+    @staticmethod
+    def _make_closable_death(day: date, prontuario: str, nome: str | None = None):
+        from apps.deaths.models import DeathRecord
+        from apps.patients.models import Admission, Patient
+
+        patient = Patient.objects.create(
+            patient_source_key=prontuario,
+            source_system="tasy",
+            name=nome or f"PACIENTE {prontuario}",
+        )
+        admission = Admission.objects.create(
+            patient=patient,
+            source_system="tasy",
+            source_admission_key=f"ADM-{prontuario}",
+            admission_date=datetime(2026, 6, 1, 8, 0, tzinfo=BAHIA),
+            discharge_date=None,
+        )
+        record = DeathRecord.objects.create(
+            date=day,
+            prontuario=prontuario,
+            nome=nome or f"PACIENTE {prontuario}",
+            data_obito=day.strftime("%d/%m/%Y"),
+        )
+        return admission, record
+
+    def test_d1_runs_death_step_after_successful_extraction(self):
+        from apps.census.orchestration import D1_DEATHS_SUCCESS_MARKER
+
+        day = date(2026, 6, 14)
+        admission, _record = self._make_closable_death(
+            day, SENTINEL_RECORD, SENTINEL_NAME
+        )
+        with mock.patch(f"{_RUNTIME_MODULE}._today_bahia") as today:
+            today.return_value = FIXED_BAHIA_TODAY
+            captured: dict = {}
+
+            def _fake_exec(plan, **kwargs):
+                captured["plan"] = plan
+                return _ok_result(plan.dates[0])
+
+            with mock.patch(_RECOVER_EXEC, side_effect=_fake_exec):
+                out = _call(RUNTIME_COMMAND, "--mode", "d1")
+        assert captured["plan"].dates == [day]
+        assert captured["plan"].extractors == DEFAULT_EXTRACTOR_ORDER
+        assert D1_DEATHS_SUCCESS_MARKER in out
+        assert "reconciled=1" in out
+        admission.refresh_from_db()
+        assert admission.discharge_date is not None
+        assert SENTINEL_RECORD not in out
+        assert SENTINEL_NAME not in out
+
+    def test_d1_skips_death_step_when_extraction_fails(self):
+        from apps.census.orchestration import D1_DEATHS_SUCCESS_MARKER
+
+        day = date(2026, 6, 14)
+        admission, _record = self._make_closable_death(day, "ODR-S1-INT-201")
+        out = StringIO()
+        with mock.patch(f"{_RUNTIME_MODULE}._today_bahia") as today:
+            today.return_value = FIXED_BAHIA_TODAY
+            with mock.patch(_RECOVER_EXEC) as mock_exec:
+                mock_exec.return_value = _failure_result(day)
+                with pytest.raises(SystemExit) as exc:
+                    call_command(
+                        RUNTIME_COMMAND, "--mode", "d1",
+                        stdout=out, stderr=StringIO(),
+                    )
+        assert exc.value.code != 0
+        assert exc.value.code != 75
+        text = out.getvalue()
+        assert D1_DEATHS_SUCCESS_MARKER not in text
+        assert "mode=d1-deaths" not in text
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+
+    def test_d1_death_step_total_failure_does_not_abort_recovery(self):
+        from apps.census.orchestration import D1_DEATHS_SUCCESS_MARKER
+
+        with mock.patch(f"{_RUNTIME_MODULE}._today_bahia") as today:
+            today.return_value = FIXED_BAHIA_TODAY
+
+            def _fake_exec(plan, **kwargs):
+                return _ok_result(plan.dates[0])
+
+            with (
+                mock.patch(_RECOVER_EXEC, side_effect=_fake_exec),
+                mock.patch(
+                    f"{_RUNTIME_MODULE}.reconcile_d1_deaths",
+                    side_effect=RuntimeError("synthetic total failure"),
+                ),
+            ):
+                out = _call(RUNTIME_COMMAND, "--mode", "d1")
+        assert D1_DEATHS_SUCCESS_MARKER not in out
+        assert "mode=d1-deaths result=failed" in out
+
+    def test_hourly_leaves_death_records_untouched(self):
+        from apps.census.orchestration import D1_DEATHS_SUCCESS_MARKER
+        from apps.patients.models import RECONCILIATION_STATUS_PENDING
+
+        admission, record = self._make_closable_death(
+            FIXED_BAHIA_TODAY, "ODR-S1-INT-202"
+        )
+        with mock.patch(f"{_RUNTIME_MODULE}._today_bahia") as today:
+            today.return_value = FIXED_BAHIA_TODAY
+
+            def _fake_exec(plan, **kwargs):
+                return _ok_result(plan.dates[0])
+
+            with mock.patch(_RECOVER_EXEC, side_effect=_fake_exec):
+                out = _call(RUNTIME_COMMAND, "--mode", "hourly")
+        assert D1_DEATHS_SUCCESS_MARKER not in out
+        assert "mode=d1-deaths" not in out
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        record.refresh_from_db()
+        assert record.reconciliation_status == RECONCILIATION_STATUS_PENDING
+
+    def test_catchup_emits_no_death_marker(self):
+        from apps.census.orchestration import D1_DEATHS_SUCCESS_MARKER
+
+        out = _call(RUNTIME_COMMAND, "--mode", "catchup")
+        assert "result=noop" in out
+        assert D1_DEATHS_SUCCESS_MARKER not in out
+        assert "mode=d1-deaths" not in out
