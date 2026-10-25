@@ -33,8 +33,9 @@ applied batch.
 ### Requirement: Automatic backfill uses only approved cohorts
 
 The backfill SHALL automatically process only source-confirmed duplicate pairs,
-exit records with matching admission date and valid `saida_em`, and deaths with
-complete datetime plus one compatible admission.
+exit records with matching admission date and valid `saida_em`,
+mirror-confirmed exits, and deaths with complete datetime plus one
+compatible admission.
 
 #### Scenario: Exact discharge cohort is eligible
 
@@ -46,6 +47,23 @@ complete datetime plus one compatible admission.
 
 - **WHEN** an open/closed pair has fresh source confirmation of one episode
 - **THEN** it is eligible for automatic merge before discharge replay
+
+#### Scenario: Mirror-exit cohort is eligible
+
+- **WHEN** a discharge record is still `pending` and is not eligible for the
+  exact discharge cohort
+- **AND** its patient resolves uniquely and exactly one canonical
+  admission of that patient is already closed with a `discharge_date`
+  whose interval contains the record's `alta_em`
+- **THEN** it is eligible for automatic mirror-exit reconciliation that
+  emits the provenance event without mutating the admission
+
+#### Scenario: Mirror ambiguity is excluded
+
+- **WHEN** a pending discharge record has more than one closed candidate
+  admission in the mirrored interval, or its patient does not resolve
+- **THEN** it is excluded from automatic apply and counted for manual
+  review with an explicit mirror reason
 
 #### Scenario: Complete death cohort is eligible
 
@@ -67,13 +85,14 @@ complete datetime plus one compatible admission.
 ### Requirement: Backfill order is deterministic
 
 The operational order MUST be source-confirmed duplicate resolution, exact
-hospital discharges, complete deaths and finally manual review of ambiguous
-cases.
+hospital discharges, mirror-confirmed exits, complete deaths and finally
+manual review of ambiguous cases.
 
 #### Scenario: Multiple cohorts are selected
 
 - **WHEN** one plan contains candidates from more than one cohort
 - **THEN** duplicate resolution completes before exit reconciliation
+- **AND** mirror-exit reconciliation runs after exact discharge replay
 - **AND** ambiguous cases are never pulled into automatic cohorts by fallback
 
 ### Requirement: Every applied change is reversible
@@ -102,6 +121,16 @@ command-level rollback MUST use the batch UUID atomically.
 - **WHEN** an authorized operator targets one online operation UUID
 - **THEN** only that operation is validated and reversed
 - **AND** it cannot be mistaken for a whole backfill batch
+
+#### Scenario: Mirror-exit rollback restores the evidence
+
+- **WHEN** a mirror-exit item is rolled back by batch or operation
+- **THEN** the linked discharge record returns to its prior status in the same
+  transaction as the reversal event
+- **AND** the admission keeps its mirrored `discharge_date` untouched
+- **AND** the canonical series keeps counting the admission while its latest
+  reconciled exit event remains `hospital_discharge` (documented asymmetry:
+  reverting the provenance registration does not revert the mirrored exit)
 
 #### Scenario: Rollback precondition fails
 
