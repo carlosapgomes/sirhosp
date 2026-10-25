@@ -7,7 +7,9 @@
 set -euo pipefail
 
 COMPOSE_ARGS=(-p "${SIRHOSP_TEST_PROJECT:-sirhosp-test}" -f compose.yml -f compose.test.yml)
-TEST_DB_PORT="${SIRHOSP_TEST_DB_PORT:-55433}"
+# 55433 pertence a outro projeto local (s1-pg-test) e 55434 expõe o banco do
+# portal dev; 55435 e o padrao dos gates. Override: SIRHOSP_TEST_DB_PORT.
+TEST_DB_PORT="${SIRHOSP_TEST_DB_PORT:-55435}"
 
 log() {
     printf '[test-in-container] %s\n' "$1"

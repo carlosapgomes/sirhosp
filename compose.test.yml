@@ -9,7 +9,7 @@ services:
   db:
     container_name: sirhosp-test-db
     ports:
-      - "${POSTGRES_PORT:-55433}:5432"
+      - "${POSTGRES_PORT:-55435}:5432"
 
   test-runner:
     build:

@@ -11,8 +11,8 @@ fi
 
 mapfile -t staged_md < <(
   git diff --cached --name-only --diff-filter=ACMR \
-    | grep -E '\\.md$' \
-    | grep -vE '^(\\.pi/|\\.codex/)' \
+    | grep -E '\.md$' \
+    | grep -vE '^(\.pi/|\.codex/)' \
     || true
 )
 
@@ -20,10 +20,16 @@ if [ ${#staged_md[@]} -eq 0 ]; then
   exit 0
 fi
 
-echo "[pre-commit] Formatando e validando markdown staged..."
+echo "[pre-commit] Formatando e validando markdown staged (${#staged_md[@]} arquivo(s))..."
 npx --yes prettier --write "${staged_md[@]}"
-npx --yes markdownlint-cli --fix "${staged_md[@]}"
-npx --yes markdownlint-cli "${staged_md[@]}"
+
+MARKDOWNLINT_CLI2_CONFIG="${MARKDOWNLINT_CLI2_CONFIG:-.markdownlint-cli2.yaml}"
+if [ -f "$MARKDOWNLINT_CLI2_CONFIG" ]; then
+  npx --yes markdownlint-cli2 --config "$MARKDOWNLINT_CLI2_CONFIG" "${staged_md[@]}"
+else
+  npx --yes markdownlint-cli2 "${staged_md[@]}"
+fi
+
 git add "${staged_md[@]}"
 
 echo "[pre-commit] Markdown OK."

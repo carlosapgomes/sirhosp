@@ -102,13 +102,12 @@ Inicie o Docker Desktop/daemon antes de rodar os gates.
 
 #### 2) Porta PostgreSQL ocupada
 
-O script usa `SIRHOSP_TEST_DB_PORT=55432` por padrão para evitar conflito com
-stacks locais.
-
-Se ainda houver conflito, execute com outra porta:
+O script usa `55435` por padrão. As portas `55433` (outro projeto local) e
+`55434` (banco do portal dev em execução) costumam estar ocupadas nesta
+máquina; se `55435` também conflitar, execute com outra porta:
 
 ```bash
-SIRHOSP_TEST_DB_PORT=55433 ./scripts/test-in-container.sh quality-gate
+SIRHOSP_TEST_DB_PORT=55436 ./scripts/test-in-container.sh quality-gate
 ```
 
 #### 3) Timeout de healthcheck do banco

@@ -274,10 +274,19 @@ reviewer.
 uv sync
 ```
 
-- Markdown autofix:
+- Markdown autofix (todos os arquivos — pode reformatar arquivos não
+  relacionados; prefira `--changed`):
 
 ```bash
 ./scripts/markdown-format.sh
+```
+
+- Markdown autofix apenas em arquivos alterados (staged + unstaged +
+  untracked) ou listados explicitamente:
+
+```bash
+./scripts/markdown-format.sh --changed
+./scripts/markdown-format.sh docs/foo.md
 ```
 
 - Markdown lint:
@@ -330,7 +339,9 @@ Usar:
 ./scripts/markdown-format.sh
 ```
 
-para autofix quando aplicável.
+para autofix quando aplicável; em trabalho dirigido, preferir
+`./scripts/markdown-format.sh --changed` (ou listar arquivos) para não
+reformatar arquivos não relacionados.
 
 ---
 
@@ -857,6 +868,14 @@ browser + skill MCP) é uma camada complementar sob demanda, documentada em
 `docs/dev-verification.md`: nunca roda automaticamente, nunca é exigida
 pelos gates oficiais e só executa em janela dev autorizada com dataset
 fictício confirmado e workers parados.
+
+### Escopo honesto de conferência pós-deploy em produção
+
+Checklists de conferência pós-deploy de features clínicas não devem exigir
+criação de dados de teste em produção. O escopo verificável em produção é
+leitura, autorização e renderização; fluxos de escrita são observados no
+primeiro uso assistido com a equipe, com o escopo efetivamente verificado
+registrado no evidence pack — nunca presumido.
 
 ---
 
