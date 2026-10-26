@@ -193,11 +193,15 @@ be preserved as raw evidence without speculative normalization.
 - **THEN** normalized exit type is `unknown`
 - **AND** the source value remains available in protected evidence
 
-### Requirement: Date-only death evidence does not synthesize time
+### Requirement: Date-only death evidence reconciles at date precision
 
 A `DeathRecord` with a complete source datetime and a unique admission SHALL
-close that admission as `death`; date-only death evidence SHALL trigger
-`admissions_only` and MUST NOT synthesize an hour.
+close that admission as `death` at that datetime. Death evidence with only a
+date SHALL reconcile at date precision: the uniquely matching admission
+closes on the death's local date with an explicit date-only precision marker
+on the reconciliation event, and no surface MAY display or consume an hour
+for that closure as if it were source information. Ambiguous or unresolved
+date-only evidence SHALL stay pending and MUST NOT close any admission.
 
 #### Scenario: Death datetime uniquely matches
 
@@ -208,10 +212,21 @@ close that admission as `death`; date-only death evidence SHALL trigger
 
 #### Scenario: Death has only a date
 
-- **WHEN** death evidence has no source hour
-- **THEN** the system keeps reconciliation pending
-- **AND** enqueues `admissions_only`
-- **AND** does not use midnight, noon or end of day
+- **WHEN** death evidence has no source hour and exactly one admission's
+  known period contains the death's `America/Bahia` local date
+- **THEN** that admission closes on that local date with exit type `death`
+- **AND** the reconciliation event carries an explicit date-only precision
+  marker
+- **AND** no surface displays an hour for that closure
+- **AND** midnight, noon or end of day is never presented as the source hour
+
+#### Scenario: Death date is ambiguous
+
+- **WHEN** death evidence has no source hour and more than one admission's
+  known period contains the death's local date
+- **THEN** reconciliation stays pending
+- **AND** no admission closes
+- **AND** the case is counted for manual review
 
 #### Scenario: Death admission is unresolved
 

@@ -34,8 +34,9 @@ applied batch.
 
 The backfill SHALL automatically process only source-confirmed duplicate pairs,
 exit records with matching admission date and valid `saida_em`,
-mirror-confirmed exits, and deaths with complete datetime plus one
-compatible admission.
+mirror-confirmed exits, and deaths with date-confirmed evidence — a complete
+datetime plus one compatible admission, or a date-only death that uniquely
+matches one admission at date granularity.
 
 #### Scenario: Exact discharge cohort is eligible
 
@@ -71,6 +72,20 @@ compatible admission.
   admission
 - **THEN** it is eligible for automatic reconciliation as `death`
 
+#### Scenario: Date-only death cohort is eligible
+
+- **WHEN** death evidence has no source hour and exactly one admission's
+  known period contains the death's local date
+- **THEN** it is eligible for automatic reconciliation as `death` at date
+  precision
+- **AND** the applied event carries the date-only precision marker
+
+#### Scenario: Ambiguous date-only death stays manual
+
+- **WHEN** death evidence has no source hour and more than one admission's
+  known period contains the death's local date
+- **THEN** it is counted for manual review and never applied automatically
+
 #### Scenario: Non-exact temporal match is excluded
 
 - **WHEN** evidence is only temporally compatible but admission date differs
@@ -85,8 +100,8 @@ compatible admission.
 ### Requirement: Backfill order is deterministic
 
 The operational order MUST be source-confirmed duplicate resolution, exact
-hospital discharges, mirror-confirmed exits, complete deaths and finally
-manual review of ambiguous cases.
+hospital discharges, mirror-confirmed exits, deaths with date-confirmed
+evidence and finally manual review of ambiguous cases.
 
 #### Scenario: Multiple cohorts are selected
 
