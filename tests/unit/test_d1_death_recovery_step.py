@@ -408,11 +408,11 @@ class TestD1DeathStepCommandOutput:
 
         monkeypatch.setattr(runtime, "reconcile_d1_deaths", _boom)
 
-        cmd = Command()
-        cmd.stdout = StringIO()
+        buf = StringIO()
+        cmd = Command(stdout=buf)
         cmd._reconcile_d1_deaths(RECOVERED_DATE)
 
-        out = cmd.stdout.getvalue()
+        out = buf.getvalue()
         assert D1_DEATHS_SUCCESS_MARKER not in out
         assert "mode=d1-deaths result=failed" in out
         assert "RuntimeError" in out
