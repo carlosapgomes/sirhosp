@@ -11,7 +11,9 @@ from datetime import date as Date
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
@@ -52,6 +54,129 @@ logger = logging.getLogger(__name__)
 
 MINIMUM_CENSUS_SECTORS: int = 40
 """Minimum distinct non-empty sectors required for a valid census extraction."""
+
+CENSUS_EXTRACTION_SUMMARY_FILENAME = "censo-extraction-summary.json"
+CENSUS_EXTRACTION_SUMMARY_VERSION = 1
+
+_CENSUS_SUMMARY_INT_FIELDS = (
+    "summary_version",
+    "sectors_discovered",
+    "sectors_selected",
+    "sectors_processed",
+    "sectors_empty",
+    "sectors_failed",
+    "rows_read",
+    "rows_omitted",
+    "rows_emitted",
+    "pages_processed",
+)
+_CENSUS_SUMMARY_BOOL_FIELDS = ("scope_limited", "scope_complete")
+CENSUS_SUMMARY_FIELDS = frozenset(
+    _CENSUS_SUMMARY_INT_FIELDS + _CENSUS_SUMMARY_BOOL_FIELDS
+)
+
+
+class CensusTransportError(ValueError):
+    """Invalid census transport rejected with a fixed, sanitized message."""
+
+
+class CensusExtractionSummaryError(ValueError):
+    """Rejection of the producer/consumer completeness summary.
+
+    The exception message is a fixed machine-readable reason. It never
+    contains delivered row values, raw producer output or browser text.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _validate_extraction_summary_schema(summary: object) -> dict:
+    if not isinstance(summary, dict):
+        raise CensusExtractionSummaryError("summary_not_object")
+    if set(summary) != CENSUS_SUMMARY_FIELDS:
+        raise CensusExtractionSummaryError("summary_unexpected_fields")
+    for field in _CENSUS_SUMMARY_INT_FIELDS:
+        value = summary[field]
+        if type(value) is not int or value < 0:
+            raise CensusExtractionSummaryError("summary_invalid_counter")
+    for field in _CENSUS_SUMMARY_BOOL_FIELDS:
+        if type(summary[field]) is not bool:
+            raise CensusExtractionSummaryError("summary_invalid_flag")
+    if summary["summary_version"] != CENSUS_EXTRACTION_SUMMARY_VERSION:
+        raise CensusExtractionSummaryError("summary_unsupported_version")
+    return summary
+
+
+def load_census_extraction_summary(path: Path) -> dict:
+    """Load the versioned extraction summary and validate its exact schema."""
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise CensusExtractionSummaryError("summary_unreadable") from None
+    return _validate_extraction_summary_schema(summary)
+
+
+def validate_census_extraction_summary(
+    summary: dict,
+    parsed_rows: list[dict],
+) -> dict:
+    """Validate summary counters against the delivered CSV rows.
+
+    This is the consumer side of design D5. It checks the exact schema,
+    counter equations, full scope, terminal completion, zero unresolved
+    sector failures and delivery coherence. The existing threshold of 40
+    distinct non-empty sectors is applied separately by
+    :func:`validate_census_completeness`.
+    """
+    summary = _validate_extraction_summary_schema(summary)
+
+    discovered = summary["sectors_discovered"]
+    selected = summary["sectors_selected"]
+    processed = summary["sectors_processed"]
+    empty = summary["sectors_empty"]
+    failed = summary["sectors_failed"]
+    rows_read = summary["rows_read"]
+    omitted = summary["rows_omitted"]
+    emitted = summary["rows_emitted"]
+
+    if selected > discovered:
+        raise CensusExtractionSummaryError("summary_counter_equation")
+    if processed > selected:
+        raise CensusExtractionSummaryError("summary_counter_equation")
+    if empty + failed > processed:
+        raise CensusExtractionSummaryError("summary_counter_equation")
+    if rows_read != emitted + omitted:
+        raise CensusExtractionSummaryError("summary_counter_equation")
+
+    expected_complete = processed == selected and failed == 0
+    if summary["scope_complete"] != expected_complete:
+        raise CensusExtractionSummaryError("summary_incomplete_scope")
+    if summary["scope_limited"] != (selected < discovered):
+        raise CensusExtractionSummaryError("summary_limited_scope")
+
+    if not summary["scope_complete"] or processed != selected:
+        raise CensusExtractionSummaryError("summary_incomplete_scope")
+    if failed:
+        raise CensusExtractionSummaryError("summary_failed_sectors")
+    if summary["scope_limited"]:
+        raise CensusExtractionSummaryError("summary_limited_scope")
+
+    if emitted != len(parsed_rows):
+        raise CensusExtractionSummaryError("summary_row_count_mismatch")
+
+    delivered_sectors = {
+        (row.get("setor") or "").strip()
+        for row in parsed_rows
+        if (row.get("setor") or "").strip()
+    }
+    expected_sectors = selected - empty
+    if len(delivered_sectors) != expected_sectors:
+        raise CensusExtractionSummaryError("summary_sector_count_mismatch")
+
+    return summary
+
 
 
 def validate_census_completeness(
@@ -366,6 +491,60 @@ def _parse_dt_int(raw: str) -> str:
     return parsed.strftime("%d/%m/%Y")
 
 
+_SOURCE_TIMESTAMP_RE = re.compile(
+    r"^(?P<day>\d{2})/(?P<month>\d{2})/(?P<year>\d{4}) "
+    r"(?P<hour>\d{2}):(?P<minute>\d{2})$"
+)
+_SOURCE_TIMESTAMP_FORMAT_ERROR = (
+    "Invalid {label} in census transport: expected DD/MM/AAAA HH:MM."
+)
+
+
+def _parse_source_timestamp(raw: str, label: str) -> datetime | None:
+    """Return the aware local datetime of a full source timestamp.
+
+    The census transport may now carry ``DD/MM/AAAA HH:MM``. That extra
+    precision is interpreted in the configured hospital timezone, never in
+    the host timezone nor as capture time. Legacy date-only and empty values
+    return ``None`` so the established date-only processing stays intact.
+
+    A value carrying a time component is validated strictly. An invalid full
+    timestamp is rejected instead of being downgraded to a legacy date or an
+    empty value; the diagnostic never includes the raw value or row data.
+    """
+    value = (raw or "").strip()
+    if ":" not in value:
+        return None
+
+    match = _SOURCE_TIMESTAMP_RE.fullmatch(value)
+    if match is None:
+        raise CensusTransportError(
+            _SOURCE_TIMESTAMP_FORMAT_ERROR.format(label=label)
+        )
+
+    try:
+        naive = datetime(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+            int(match.group("hour")),
+            int(match.group("minute")),
+        )
+    except ValueError:
+        raise CensusTransportError(
+            _SOURCE_TIMESTAMP_FORMAT_ERROR.format(label=label)
+        ) from None
+
+    return timezone.make_aware(naive, ZoneInfo(settings.TIME_ZONE))
+
+
+def _project_local_date(moment: datetime) -> str:
+    """Project an aware source timestamp onto its local calendar date."""
+    return timezone.localtime(
+        moment, ZoneInfo(settings.TIME_ZONE)
+    ).strftime("%d/%m/%Y")
+
+
 def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
     """Parse a census CSV file and classify bed status for each row.
 
@@ -378,7 +557,9 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
         List of dicts with keys:
             setor, leito, prontuario, nome, especialidade, bed_status,
             data_internacao (str DD/MM/AAAA), tempo_internacao (int or None),
-            age_band (normalized occupancy age band)
+            data_movimentacao (legacy date text or DD/MM/AAAA projection),
+            age_band (normalized occupancy age band), and the optional aware
+            source_admission_at/source_movement_at timestamps.
 
     Raises:
         FileNotFoundError: If csv_path does not exist.
@@ -396,9 +577,8 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
         actual = set(reader.fieldnames or [])
         if not expected.issubset(actual):
             missing = expected - actual
-            raise ValueError(
-                f"CSV missing required columns: {missing}. "
-                f"Found: {actual}"
+            raise CensusTransportError(
+                f"CSV missing required columns: {sorted(missing)}."
             )
 
         has_setor_codigo = "setor_codigo" in actual
@@ -417,7 +597,13 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
             idade_raw = row.get("idade") if has_idade else None
 
             dt_int_raw = (row.get("dt_int") or "").strip() if has_dt_int else ""
-            data_internacao = _parse_dt_int(dt_int_raw)
+            source_admission_at = _parse_source_timestamp(
+                dt_int_raw, "source admission timestamp"
+            )
+            if source_admission_at is None:
+                data_internacao = _parse_dt_int(dt_int_raw)
+            else:
+                data_internacao = _project_local_date(source_admission_at)
 
             tempo_raw = (row.get("tempo") or "").strip() if has_tempo else ""
             tempo_internacao = None
@@ -426,6 +612,18 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
                     tempo_internacao = int(float(tempo_raw))
                 except (ValueError, TypeError):
                     pass
+
+            dt_mvt_raw = (
+                (row.get("dt_mvt") or "").strip() if has_dt_mvt else ""
+            )
+            source_movement_at = _parse_source_timestamp(
+                dt_mvt_raw, "source movement timestamp"
+            )
+            data_movimentacao = (
+                _project_local_date(source_movement_at)
+                if source_movement_at is not None
+                else dt_mvt_raw
+            )
 
             rows.append(
                 {
@@ -439,12 +637,10 @@ def parse_census_csv(csv_path: Path) -> list[dict[str, Any]]:
                     "especialidade": (row.get("esp") or "").strip(),
                     "data_internacao": data_internacao,
                     "tempo_internacao": tempo_internacao,
+                    "source_admission_at": source_admission_at,
+                    "source_movement_at": source_movement_at,
                     "bed_status": bed_status,
-                    "data_movimentacao": (
-                        (row.get("dt_mvt") or "").strip()
-                        if has_dt_mvt
-                        else ""
-                    ),
+                    "data_movimentacao": data_movimentacao,
                     "tipo_alta": (
                         (row.get("alta") or "").strip()
                         if has_alta

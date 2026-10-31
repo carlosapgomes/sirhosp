@@ -17,6 +17,19 @@ from django.core.management import call_command
 
 from apps.ingestion.extractors.subprocess_utils import SubprocessTimeoutError
 from apps.ingestion.models import IngestionRun
+from tests.census_artifacts import build_summary, write_summary
+
+
+def _summary_for_rows(rows: list[dict]) -> dict:
+    sectors = {
+        (row.get("setor") or "").strip()
+        for row in rows
+        if (row.get("setor") or "").strip()
+    }
+    return build_summary(
+        discovered=len(sectors),
+        rows_emitted=len(rows),
+    )
 
 
 def _synthetic_csv_rows() -> list[dict]:
@@ -60,8 +73,7 @@ class TestExtractCensusLifecycleMetrics:
             # Create a CSV inside the temp dir (simulating subprocess output)
             csv_path = tmp_path / "censo-20260426.csv"
             csv_path.write_text("setor_codigo,setor,qrt_leito,prontuario,nome,esp,dt_mvt,alta,origem\n")
-
-            # Mock subprocess.run to return success
+            write_summary(tmp_path, _summary_for_rows(csv_rows))
             fake_result = MagicMock()
             fake_result.returncode = 0
 
@@ -250,6 +262,7 @@ class TestExtractCensusLifecycleMetrics:
             tmp_path = Path(real_tmp)
             csv_path = tmp_path / "censo-20260426.csv"
             csv_path.write_text("setor_codigo,setor,qrt_leito,prontuario,nome,esp,dt_mvt,alta,origem\n")
+            write_summary(tmp_path, _summary_for_rows(csv_rows))
 
             fake_result = MagicMock()
             fake_result.returncode = 0
@@ -351,6 +364,7 @@ class TestExtractCensusCompletenessGate:
             csv_path.write_text(
                 "setor_codigo,setor,qrt_leito,prontuario,nome,esp,dt_mvt,alta,origem\n"
             )
+            write_summary(tmp_path, _summary_for_rows(csv_rows))
 
             fake_result = MagicMock()
             fake_result.returncode = 0

@@ -5,18 +5,50 @@ import tempfile
 from pathlib import Path
 
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.utils import timezone
 
 from apps.census.models import CensusSnapshot, OccupancyAgeBand
 from apps.census.services import (
+    CENSUS_EXTRACTION_SUMMARY_FILENAME,
+    CensusExtractionSummaryError,
+    CensusTransportError,
+    load_census_extraction_summary,
     parse_census_csv,
     validate_census_completeness,
+    validate_census_extraction_summary,
 )
 from apps.ingestion.extractors.subprocess_utils import (
     SubprocessTimeoutError,
     run_subprocess,
 )
 from apps.ingestion.models import IngestionRun, IngestionRunStageMetric
+
+
+class CensusArtifactError(ValueError):
+    """Canonical handoff artifact is missing or ambiguous."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def _select_single_artifact(
+    directory: Path,
+    pattern: str,
+    *,
+    missing_reason: str,
+    ambiguous_reason: str,
+) -> Path:
+    candidates = sorted(
+        path for path in directory.glob(pattern) if path.is_file()
+    )
+    if not candidates:
+        raise CensusArtifactError(missing_reason)
+    if len(candidates) > 1:
+        raise CensusArtifactError(ambiguous_reason)
+    return candidates[0]
+
 
 
 class Command(BaseCommand):
@@ -69,6 +101,7 @@ class Command(BaseCommand):
                 str(script_path),
                 "--output-dir",
                 str(tmpdir_path),
+                "--csv-only",
             ]
             if headless:
                 cmd.append("--headless")
@@ -103,8 +136,6 @@ class Command(BaseCommand):
                 )
                 self._mark_run_failed(run, exc)
                 self.stderr.write(f"Census extraction timed out: {exc}")
-                if exc.stderr:
-                    self.stderr.write(f"  Script stderr: {exc.stderr[:2000]}")
                 sys.exit(1)
             except Exception as exc:
                 self._record_stage(
@@ -117,15 +148,10 @@ class Command(BaseCommand):
                 )
                 self._mark_run_failed(run, exc)
                 self.stderr.write(f"Census extraction failed: {exc}")
-                script_stderr = getattr(exc, 'stderr', None)
-                if script_stderr:
-                    self.stderr.write(f"  Script stderr: {script_stderr[:2000]}")
                 sys.exit(1)
 
             if result.returncode != 0:
-                err_msg = (
-                    f"Exit code {result.returncode}: {result.stderr[:500]}"
-                )
+                err_msg = f"Exit code {result.returncode}."
                 self._record_stage(
                     run=run,
                     stage_name="census_extraction",
@@ -139,7 +165,7 @@ class Command(BaseCommand):
                 run.failure_reason = "source_unavailable"
                 run.timed_out = False
                 run.save()
-                self.stderr.write(result.stderr)
+                self.stderr.write(err_msg)
                 sys.exit(1)
 
             self._record_stage(
@@ -149,39 +175,32 @@ class Command(BaseCommand):
                 started_at=ext_stage_start,
             )
 
-            # -- Stage: census_persistence (CSV parse + snapshot) ----------
+            # -- Stage: census_persistence (artifacts + snapshot) ----------
             persist_stage_start = timezone.now()
 
-            # Find the CSV file in output dir
-            csv_files = list(tmpdir_path.glob("censo-*.csv"))
-            if not csv_files:
-                # Try to find any CSV
-                csv_files = list(tmpdir_path.glob("*.csv"))
-
-            if not csv_files:
-                self._record_stage(
-                    run=run,
-                    stage_name="census_persistence",
-                    status="failed",
-                    started_at=persist_stage_start,
-                    details_json={"error": "No CSV output found"},
-                )
-                run.status = "failed"
-                run.error_message = "No CSV output found after extraction."
-                run.finished_at = timezone.now()
-                run.failure_reason = "source_unavailable"
-                run.timed_out = False
-                run.save()
-                self.stderr.write("No CSV output found.")
-                sys.exit(1)
-
-            csv_path = csv_files[0]
-            self.stdout.write(f"  CSV output: {csv_path}")
-
             try:
+                csv_path = _select_single_artifact(
+                    tmpdir_path,
+                    "censo-*.csv",
+                    missing_reason="csv_missing",
+                    ambiguous_reason="csv_ambiguous",
+                )
+                self.stdout.write(f"  CSV output: {csv_path.name}")
+                summary_path = _select_single_artifact(
+                    tmpdir_path,
+                    CENSUS_EXTRACTION_SUMMARY_FILENAME,
+                    missing_reason="summary_missing",
+                    ambiguous_reason="summary_ambiguous",
+                )
+                summary = load_census_extraction_summary(summary_path)
+
                 # Parse CSV and classify bed status
                 parsed_rows = parse_census_csv(csv_path)
                 self.stdout.write(f"  Rows parsed: {len(parsed_rows)}")
+
+                validated_summary = validate_census_extraction_summary(
+                    summary, parsed_rows
+                )
 
                 # -- Completeness gate (GCEC-S1) -----------------------
                 completeness = validate_census_completeness(parsed_rows)
@@ -224,6 +243,8 @@ class Command(BaseCommand):
                         data_internacao=row.get("data_internacao", ""),
                         tempo_internacao=row.get("tempo_internacao"),
                         data_movimentacao=row.get("data_movimentacao", ""),
+                        source_admission_at=row.get("source_admission_at"),
+                        source_movement_at=row.get("source_movement_at"),
                         tipo_alta=row.get("tipo_alta", ""),
                         origem=row.get("origem", ""),
                         bed_status=row["bed_status"],
@@ -234,42 +255,59 @@ class Command(BaseCommand):
                     for row in parsed_rows
                 ]
 
-                CensusSnapshot.objects.bulk_create(snapshots)
+                accepted_details = {
+                    **completeness,
+                    **validated_summary,
+                    "rows_persisted": len(snapshots),
+                }
+
+                # The new snapshot set, its accepted metrics and the run
+                # acceptance are promoted together: a failure after insertion
+                # rolls back the whole new set.
+                with transaction.atomic():
+                    CensusSnapshot.objects.bulk_create(snapshots)
+                    self._record_stage(
+                        run=run,
+                        stage_name="census_persistence",
+                        status="succeeded",
+                        started_at=persist_stage_start,
+                        details_json=accepted_details,
+                    )
+                    run.status = "succeeded"
+                    run.finished_at = timezone.now()
+                    run.failure_reason = ""
+                    run.timed_out = False
+                    run.save()
                 self.stdout.write(f"  Snapshots persisted: {len(snapshots)}")
-            except Exception as exc:
-                self._record_stage(
+            except (CensusExtractionSummaryError, CensusArtifactError) as exc:
+                self._reject_persistence(
                     run=run,
-                    stage_name="census_persistence",
-                    status="failed",
                     started_at=persist_stage_start,
-                    details_json={
-                        "error_type": exc.__class__.__name__,
-                        "error": str(exc),
-                    },
+                    reason=exc.reason,
+                    message=f"Census persistence rejected: {exc.reason}.",
                 )
-                self._mark_run_failed(run, exc)
-                self.stderr.write(f"Census persistence failed: {exc}")
                 sys.exit(1)
-
-            # Record accepted completeness metrics
-            accepted_details = {
-                **completeness,
-                "rows_persisted": len(snapshots),
-            }
-            self._record_stage(
-                run=run,
-                stage_name="census_persistence",
-                status="succeeded",
-                started_at=persist_stage_start,
-                details_json=accepted_details,
-            )
-
-            # Update run status
-            run.status = "succeeded"
-            run.finished_at = timezone.now()
-            run.failure_reason = ""
-            run.timed_out = False
-            run.save()
+            except CensusTransportError as exc:
+                self._reject_persistence(
+                    run=run,
+                    started_at=persist_stage_start,
+                    reason="transport_validation_failed",
+                    message=f"Census persistence failed: {exc}",
+                )
+                sys.exit(1)
+            except Exception as exc:
+                self._reject_persistence(
+                    run=run,
+                    started_at=persist_stage_start,
+                    reason="persistence_failed",
+                    message=(
+                        "Census persistence failed "
+                        f"({exc.__class__.__name__})."
+                    ),
+                    failure_reason="unexpected_exception",
+                    error_type=exc.__class__.__name__,
+                )
+                sys.exit(1)
 
             self.stdout.write(
                 self.style.SUCCESS(
@@ -281,6 +319,35 @@ class Command(BaseCommand):
     # ------------------------------------------------------------------
     # Internal helpers (same contract as process_ingestion_runs)
     # ------------------------------------------------------------------
+
+    def _reject_persistence(
+        self,
+        *,
+        run: IngestionRun,
+        started_at,
+        reason: str,
+        message: str,
+        failure_reason: str = "invalid_payload",
+        error_type: str | None = None,
+    ) -> None:
+        """Record a rejected handoff without persisting delivered values."""
+        details: dict[str, str] = {"error": reason}
+        if error_type:
+            details["error_type"] = error_type
+        self._record_stage(
+            run=run,
+            stage_name="census_persistence",
+            status="failed",
+            started_at=started_at,
+            details_json=details,
+        )
+        run.status = "failed"
+        run.error_message = message
+        run.finished_at = timezone.now()
+        run.failure_reason = failure_reason
+        run.timed_out = False
+        run.save()
+        self.stderr.write(message)
 
     @staticmethod
     def _classify_failure_reason(exc: Exception) -> tuple[str, bool]:

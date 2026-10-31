@@ -874,6 +874,22 @@ class CensusSnapshot(models.Model):
         default="",
         help_text="Date of last movement (DD/MM or DD/MM/AAAA)",
     )
+    source_admission_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Optional admission timestamp supplied by the source; null when "
+            "the transport only carries a date or no value"
+        ),
+    )
+    source_movement_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Optional movement timestamp supplied by the source; null when "
+            "the transport only carries a date or no value"
+        ),
+    )
     tipo_alta = models.CharField(
         max_length=50,
         blank=True,

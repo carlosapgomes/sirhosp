@@ -53,74 +53,71 @@ def test_extract_census_passes_proxy_to_chromium_launch(tmp_path: Path) -> None:
     mock_pw = MagicMock()
     mock_pw.chromium.launch = mock_launch
 
-    _fake_xlsx = tmp_path / "fake_test_setor.xlsx"
-    _fake_xlsx.touch()
+    with (
+        patch.object(ec, "sync_playwright") as mock_sync_pw,
+        patch.object(ec, "bootstrap_legacy_session"),
+        patch.object(ec, "fechar_dialogos_iniciais"),
+        patch.object(ec, "click_censo_icon"),
+        patch.object(ec, "get_censo_frame"),
+        patch.object(ec, "wait_ajax_idle"),
+        patch.object(ec, "extract_setores", return_value=["test_setor"]),
+        patch.object(ec, "select_setor", return_value=True),
+        patch.object(ec, "clear_setor"),
+        patch.object(ec, "click_pesquisar", return_value=True),
+        patch.object(
+            ec,
+            "census_result_state",
+            return_value=_census_result_state(
+                row_count=1,
+                first_row_cell_count=1,
+                content_hash=101,
+                view_state_hash=201,
+                empty_message=True,
+            ),
+        ),
+        patch.object(
+            ec,
+            "wait_for_census_result_refresh",
+            return_value=_census_result_state(
+                row_count=1,
+                first_row_cell_count=1,
+                content_hash=202,
+                view_state_hash=202,
+                empty_message=True,
+            ),
+        ),
+        patch.object(
+            ec,
+            "get_current_setor_info",
+            return_value={"codigo": "1", "nome": "test_setor"},
+        ),
+        patch.object(
+            ec,
+            "save_results",
+            return_value=(None, "/tmp/fake.csv", "/tmp/fake-summary.json"),
+        ),
+        patch.dict(
+            os.environ,
+            {"PLAYWRIGHT_PROXY_SERVER": "socks5://tailscale-app:1055"},
+            clear=True,
+        ),
+    ):
+        mock_sync_pw.return_value.__enter__.return_value = mock_pw
+        ec.run(
+            source_system_url="http://test-url",
+            username="test-user",
+            password="test-pass",
+            headless=True,
+            max_setores=0,
+            pause_ms=100,
+        )
 
-    try:
-        with (
-            patch.object(ec, "sync_playwright") as mock_sync_pw,
-            patch.object(ec, "bootstrap_legacy_session"),
-            patch.object(ec, "fechar_dialogos_iniciais"),
-            patch.object(ec, "click_censo_icon"),
-            patch.object(ec, "get_censo_frame"),
-            patch.object(ec, "wait_ajax_idle"),
-            patch.object(ec, "extract_setores", return_value=["test_setor"]),
-            patch.object(ec, "select_setor", return_value=True),
-            patch.object(ec, "clear_setor"),
-            patch.object(ec, "click_pesquisar", return_value=True),
-            patch.object(
-                ec,
-                "census_result_state",
-                return_value=_census_result_state(
-                    row_count=1,
-                    first_row_cell_count=1,
-                    content_hash=101,
-                    view_state_hash=201,
-                    empty_message=True,
-                ),
-            ),
-            patch.object(
-                ec,
-                "wait_for_census_result_refresh",
-                return_value=_census_result_state(
-                    row_count=1,
-                    first_row_cell_count=1,
-                    content_hash=202,
-                    view_state_hash=202,
-                    empty_message=True,
-                ),
-            ),
-            patch.object(ec, "get_current_setor_info", return_value={}),
-            patch.object(ec, "_click_export_button"),
-            patch.object(ec, "_click_xls_tudo"),
-            patch.object(ec, "export_setor_xlsx", return_value=_fake_xlsx),
-            patch.object(ec, "parse_setor_xlsx", return_value=[]),
-            patch.object(ec, "save_results", return_value=("/tmp/fake.json", "/tmp/fake.csv")),
-            patch.dict(
-                os.environ,
-                {"PLAYWRIGHT_PROXY_SERVER": "socks5://tailscale-app:1055"},
-                clear=True,
-            ),
-        ):
-            mock_sync_pw.return_value.__enter__.return_value = mock_pw
-            ec.run(
-                source_system_url="http://test-url",
-                username="test-user",
-                password="test-pass",
-                headless=True,
-                max_setores=0,
-                pause_ms=100,
-            )
-
-        mock_launch.assert_called_once()
-        _call_kwargs = mock_launch.call_args.kwargs
-        assert "proxy" in _call_kwargs
-        assert _call_kwargs["proxy"] == {"server": "socks5://tailscale-app:1055"}
-        # Verify --ignore-certificate-errors is preserved
-        assert "--ignore-certificate-errors" in _call_kwargs.get("args", [])
-    finally:
-        if _fake_xlsx.exists():
-            _fake_xlsx.unlink()
+    mock_launch.assert_called_once()
+    _call_kwargs = mock_launch.call_args.kwargs
+    assert "proxy" in _call_kwargs
+    assert _call_kwargs["proxy"] == {"server": "socks5://tailscale-app:1055"}
+    # Verify --ignore-certificate-errors is preserved
+    assert "--ignore-certificate-errors" in _call_kwargs.get("args", [])
 
 
 def test_extract_census_does_not_pass_proxy_when_env_absent(tmp_path: Path) -> None:
@@ -136,69 +133,66 @@ def test_extract_census_does_not_pass_proxy_when_env_absent(tmp_path: Path) -> N
     mock_pw = MagicMock()
     mock_pw.chromium.launch = mock_launch
 
-    _fake_xlsx = tmp_path / "fake_test_setor.xlsx"
-    _fake_xlsx.touch()
-
-    try:
-        with (
-            patch.object(ec, "sync_playwright") as mock_sync_pw,
-            patch.object(ec, "bootstrap_legacy_session"),
-            patch.object(ec, "fechar_dialogos_iniciais"),
-            patch.object(ec, "click_censo_icon"),
-            patch.object(ec, "get_censo_frame"),
-            patch.object(ec, "wait_ajax_idle"),
-            patch.object(ec, "extract_setores", return_value=["test_setor"]),
-            patch.object(ec, "select_setor", return_value=True),
-            patch.object(ec, "clear_setor"),
-            patch.object(ec, "click_pesquisar", return_value=True),
-            patch.object(
-                ec,
-                "census_result_state",
-                return_value=_census_result_state(
-                    row_count=1,
-                    first_row_cell_count=1,
-                    content_hash=101,
-                    view_state_hash=201,
-                    empty_message=True,
-                ),
+    with (
+        patch.object(ec, "sync_playwright") as mock_sync_pw,
+        patch.object(ec, "bootstrap_legacy_session"),
+        patch.object(ec, "fechar_dialogos_iniciais"),
+        patch.object(ec, "click_censo_icon"),
+        patch.object(ec, "get_censo_frame"),
+        patch.object(ec, "wait_ajax_idle"),
+        patch.object(ec, "extract_setores", return_value=["test_setor"]),
+        patch.object(ec, "select_setor", return_value=True),
+        patch.object(ec, "clear_setor"),
+        patch.object(ec, "click_pesquisar", return_value=True),
+        patch.object(
+            ec,
+            "census_result_state",
+            return_value=_census_result_state(
+                row_count=1,
+                first_row_cell_count=1,
+                content_hash=101,
+                view_state_hash=201,
+                empty_message=True,
             ),
-            patch.object(
-                ec,
-                "wait_for_census_result_refresh",
-                return_value=_census_result_state(
-                    row_count=1,
-                    first_row_cell_count=1,
-                    content_hash=202,
-                    view_state_hash=202,
-                    empty_message=True,
-                ),
+        ),
+        patch.object(
+            ec,
+            "wait_for_census_result_refresh",
+            return_value=_census_result_state(
+                row_count=1,
+                first_row_cell_count=1,
+                content_hash=202,
+                view_state_hash=202,
+                empty_message=True,
             ),
-            patch.object(ec, "get_current_setor_info", return_value={}),
-            patch.object(ec, "_click_export_button"),
-            patch.object(ec, "_click_xls_tudo"),
-            patch.object(ec, "export_setor_xlsx", return_value=_fake_xlsx),
-            patch.object(ec, "parse_setor_xlsx", return_value=[]),
-            patch.object(ec, "save_results", return_value=("/tmp/fake.json", "/tmp/fake.csv")),
-            patch.dict(os.environ, {}, clear=True),
-        ):
-            mock_sync_pw.return_value.__enter__.return_value = mock_pw
-            ec.run(
-                source_system_url="http://test-url",
-                username="test-user",
-                password="test-pass",
-                headless=True,
-                max_setores=0,
-                pause_ms=100,
-            )
+        ),
+        patch.object(
+            ec,
+            "get_current_setor_info",
+            return_value={"codigo": "1", "nome": "test_setor"},
+        ),
+        patch.object(
+            ec,
+            "save_results",
+            return_value=(None, "/tmp/fake.csv", "/tmp/fake-summary.json"),
+        ),
+        patch.dict(os.environ, {}, clear=True),
+    ):
+        mock_sync_pw.return_value.__enter__.return_value = mock_pw
+        ec.run(
+            source_system_url="http://test-url",
+            username="test-user",
+            password="test-pass",
+            headless=True,
+            max_setores=0,
+            pause_ms=100,
+        )
 
-        mock_launch.assert_called_once()
-        _call_kwargs = mock_launch.call_args.kwargs
-        assert "proxy" not in _call_kwargs
-        # Verify --ignore-certificate-errors is still there
-        assert "--ignore-certificate-errors" in _call_kwargs.get("args", [])
-    finally:
-        if _fake_xlsx.exists():
-            _fake_xlsx.unlink()
+    mock_launch.assert_called_once()
+    _call_kwargs = mock_launch.call_args.kwargs
+    assert "proxy" not in _call_kwargs
+    # Verify --ignore-certificate-errors is still there
+    assert "--ignore-certificate-errors" in _call_kwargs.get("args", [])
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -294,7 +288,6 @@ def test_census_run_uses_canonical_authenticated_bootstrap(
         "fechar_dialogos_iniciais",
         stop_after_authentication,
     )
-    monkeypatch.setattr(module, "save_debug", lambda _page: None)
 
     with pytest.raises(expected_exception):
         module.run(**run_kwargs)
@@ -396,10 +389,8 @@ def test_current_census_wait_ignores_stale_empty_result() -> None:
     assert page.wait_for_timeout.call_count == 2
 
 
-def test_current_census_run_uses_refreshed_result_before_export(
-    tmp_path: Path,
-) -> None:
-    """The run exports only after the post-search table state is fresh."""
+def test_current_census_run_uses_refreshed_result_before_dom_capture() -> None:
+    """The run reads the DOM only after the post-search table state is fresh."""
     from automation.source_system.current_inpatients import extract_census as ec
 
     stale_empty = _census_result_state(
@@ -416,8 +407,7 @@ def test_current_census_run_uses_refreshed_result_before_export(
         view_state_hash=203,
         has_patient_rows=True,
     )
-    fake_xlsx = tmp_path / "current-census.xlsx"
-    fake_xlsx.touch()
+    events: list[str] = []
     page = MagicMock()
     context = MagicMock()
     context.new_page.return_value = page
@@ -429,6 +419,28 @@ def test_current_census_run_uses_refreshed_result_before_export(
     manager.__enter__.return_value = playwright
     manager.__exit__.return_value = False
     frame = MagicMock()
+
+    def wait_refresh(*_args, **_kwargs):
+        events.append("refresh")
+        return refreshed
+
+    def read_dom(*_args, **_kwargs):
+        events.append("dom")
+        return {
+            "pacientes": [
+                {
+                    "setor_codigo": "123",
+                    "setor": "synthetic-sector",
+                    "qrt_leito": "A-01",
+                    "prontuario": "100001",
+                    "nome": "PATIENT SYNTHETIC",
+                }
+            ],
+            "rows_omitted": 0,
+            "pages": 1,
+            "source_total": 1,
+            "page_size": 100,
+        }
 
     with (
         patch.object(ec, "sync_playwright", return_value=manager),
@@ -444,29 +456,18 @@ def test_current_census_run_uses_refreshed_result_before_export(
         patch.object(
             ec,
             "wait_for_census_result_refresh",
-            return_value=refreshed,
-        ) as wait_refresh,
+            side_effect=wait_refresh,
+        ) as wait_refresh_mock,
         patch.object(
             ec,
             "get_current_setor_info",
             return_value={"codigo": "123", "nome": "synthetic-sector"},
         ),
-        patch.object(ec, "export_setor_xlsx", return_value=fake_xlsx) as export,
-        patch.object(
-            ec,
-            "parse_setor_xlsx",
-            return_value=[
-                {
-                    "qrt_leito": "A-01",
-                    "prontuario": "100001",
-                    "nome": "PATIENT SYNTHETIC",
-                }
-            ],
-        ),
+        patch.object(ec, "read_sector_rows", side_effect=read_dom) as read_mock,
         patch.object(
             ec,
             "save_results",
-            return_value=("/tmp/fake.json", "/tmp/fake.csv"),
+            return_value=(None, "/tmp/fake.csv", "/tmp/fake-summary.json"),
         ),
     ):
         ec.run(
@@ -478,10 +479,11 @@ def test_current_census_run_uses_refreshed_result_before_export(
             pause_ms=0,
         )
 
-    wait_refresh.assert_called_once_with(
+    wait_refresh_mock.assert_called_once_with(
         frame,
         page,
         stale_empty,
         timeout_ms=60_000,
     )
-    export.assert_called_once_with(frame, page)
+    read_mock.assert_called_once()
+    assert events == ["refresh", "dom"]

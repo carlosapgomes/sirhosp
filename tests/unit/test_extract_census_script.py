@@ -13,6 +13,7 @@ No Playwright browser is launched and no source system is contacted.
 from __future__ import annotations
 
 import sys
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 # The script mutates sys.path at import time (it inserts its project and
@@ -126,6 +127,121 @@ class TestFormatSectorSummary:
         text = ec.format_sector_summary(counters).lower()
         for forbidden in ("prontuario", "senha", "password", "credential"):
             assert forbidden not in text
+
+
+class _FakeLocator:
+    """Controlled UI edge used by the helper failure-path regressions."""
+
+    def __init__(self, *, count: int = 1) -> None:
+        self._count = count
+
+    @property
+    def first(self) -> "_FakeLocator":
+        return self
+
+    def wait_for(self, *_args, **_kwargs) -> None:
+        return None
+
+    def is_enabled(self, **_kwargs) -> bool:
+        return True
+
+    def count(self) -> int:
+        return self._count
+
+    def click(self, **_kwargs) -> None:
+        return None
+
+    def fill(self, _value: str) -> None:
+        return None
+
+    def press_sequentially(self, *_args, **_kwargs) -> None:
+        return None
+
+    def evaluate(self, *_args, **_kwargs) -> None:
+        return None
+
+    def locator(self, _selector: str) -> "_FakeLocator":
+        return self
+
+
+class _FailOnClickAndJs(_FakeLocator):
+    def __init__(self, sentinel: str) -> None:
+        super().__init__(count=1)
+        self.sentinel = sentinel
+        self.click_calls = 0
+        self.evaluate_calls = 0
+
+    def click(self, **_kwargs) -> None:
+        self.click_calls += 1
+        raise RuntimeError(self.sentinel)
+
+    def evaluate(self, *_args, **_kwargs) -> None:
+        self.evaluate_calls += 1
+        raise RuntimeError(self.sentinel)
+
+
+class _PanelLocator(_FakeLocator):
+    def __init__(self, item: _FakeLocator) -> None:
+        super().__init__(count=1)
+        self._item = item
+
+    def locator(self, _selector: str) -> "_FakeLocator":
+        return self._item
+
+
+class _FakeCensusFrame:
+    """Minimal frame surface for the select_setor failure path."""
+
+    def __init__(self, item: _FailOnClickAndJs) -> None:
+        self.input = _FakeLocator()
+        self.clear = _FakeLocator(count=0)
+        self.panel = _PanelLocator(item)
+
+    def locator(self, selector: str) -> _FakeLocator:
+        if "sgClear" in selector:
+            return self.clear
+        if "suggestion_panel" in selector:
+            return self.panel
+        return self.input
+
+    def evaluate(self, *_args, **_kwargs) -> list[dict[str, object]]:
+        return [{"text": "1 - UTI A", "index": 0}]
+
+
+class TestHelperFailureDiagnostics:
+    def test_safe_click_does_not_print_browser_exception_text(
+        self, capsys
+    ) -> None:
+        sentinel = "SENTINEL_BROWSER_TEXT_SAFE_CLICK"
+        target = _FailOnClickAndJs(sentinel)
+
+        assert ec.safe_click(target, "botão sintético") is False
+        captured = capsys.readouterr()
+
+        assert target.click_calls == 2
+        assert target.evaluate_calls == 1
+        assert sentinel not in captured.out
+        assert sentinel not in captured.err
+        assert "motivo=click_js_fallback_failed" in captured.out
+
+    def test_select_setor_does_not_print_browser_exception_text(
+        self, capsys
+    ) -> None:
+        sentinel = "SENTINEL_BROWSER_TEXT_SELECT_SETOR"
+        item = _FailOnClickAndJs(sentinel)
+        frame = _FakeCensusFrame(item)
+
+        assert (
+            ec.select_setor(cast(ec.Frame, frame), MagicMock(), "UTI A")
+            is False
+        )
+        captured = capsys.readouterr()
+
+        assert item.click_calls == 1
+        assert item.evaluate_calls == 1
+        assert sentinel not in captured.out
+        assert sentinel not in captured.err
+        assert "motivo=setor_item_click_failed" in captured.out
 
 
 class TestExtractSetoresCollection:

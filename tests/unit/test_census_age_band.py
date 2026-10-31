@@ -22,6 +22,7 @@ from apps.census.services import (
     parse_census_csv,
 )
 from apps.ingestion.models import IngestionRun
+from tests.census_artifacts import build_summary, write_summary
 
 
 class TestOccupancyAgeBandChoices:
@@ -312,6 +313,10 @@ class TestExtractCensusCommandAgeBand:
             (tmp_path / "censo-20260426.csv").write_text(
                 _synthetic_census_csv_with_age(), encoding="utf-8"
             )
+            write_summary(
+                tmp_path,
+                build_summary(discovered=40, rows_emitted=80),
+            )
             fake_result = MagicMock()
             fake_result.returncode = 0
             fake_tmp_ctx = MagicMock()
@@ -374,6 +379,10 @@ class TestExtractCensusCommandAgeBand:
             tmp_path = Path(real_tmp)
             (tmp_path / "censo-20260426.csv").write_text(
                 _synthetic_census_csv_with_age(), encoding="utf-8"
+            )
+            write_summary(
+                tmp_path,
+                build_summary(discovered=40, rows_emitted=80),
             )
             fake_result = MagicMock()
             fake_result.returncode = 0

@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Extrai pacientes de todos os setores do Censo via download XLSX.
+Extrai pacientes de todos os setores do Censo diretamente do DOM.
 
 Fluxo:
 1) login
 2) abrir Censo
 3) listar setores
-4) para cada setor: selecionar -> pesquisar -> exportar XLSX -> parse
-5) salvar CSV consolidado
+4) para cada setor: selecionar -> pesquisar -> aplicar página longa -> ler DOM
+   (datas enriquecidas pelo tooltip associado à própria célula) -> paginar
+5) salvar CSV consolidado e resumo agregado de completude
 
-Vantagens sobre o scraping HTML antigo:
-- Captura todas as 13 colunas da tabela (incluindo Dt Int e Tempo numérico)
-- Sem paginação (XLS (Tudo) exporta todas as linhas)
-- Mais rápido e estável
+A exportação XLSX e o parser de planilha permanecem apenas como referência de
+laboratório/regressão; o caminho operacional não os chama e não possui fallback.
 """
 
 from __future__ import annotations
@@ -21,9 +20,12 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
+import unicodedata
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -52,13 +54,93 @@ CENSO_FRAME_NAME = "i_frame_censo_diário_dos_pacientes"
 # Bounded number of dropdown scroll+read rounds while collecting sectors.
 MAX_SETOR_PANEL_SCROLLS = 20
 
+SUMMARY_FILENAME = "censo-extraction-summary.json"
+SUMMARY_VERSION = 1
+
+# Fixed, aggregate-safe helper diagnostics. Raw browser exception text must
+# never reach producer stdout (design D7 / extraction transport privacy).
+CLICK_JS_FALLBACK_FAILED_REASON = "click_js_fallback_failed"
+SETOR_ITEM_CLICK_FAILED_REASON = "setor_item_click_failed"
+
+# Fixed structural reasons for DOM acquisition. These are the only reason
+# strings allowed in logs, failure summaries and stage metrics.
+CENSUS_TABLE_MISSING_REASON = "census_table_missing"
+REQUIRED_COLUMN_MISSING_REASON = "required_column_missing"
+UNSUPPORTED_ROW_REASON = "unsupported_row_structure"
+HEADERS_CHANGED_REASON = "headers_changed"
+TOOLTIP_MISSING_REASON = "tooltip_not_ready"
+TOOLTIP_AMBIGUOUS_REASON = "tooltip_ambiguous"
+TOOLTIP_INVALID_REASON = "tooltip_invalid"
+TOOLTIP_DATE_MISMATCH_REASON = "tooltip_date_mismatch"
+PAGE_SIZE_UNSUPPORTED_REASON = "page_size_unsupported"
+PAGE_SIZE_NOT_APPLIED_REASON = "page_size_not_applied"
+PAGINATION_FIRST_PAGE_REASON = "pagination_not_first_page"
+PAGINATION_STATE_REASON = "pagination_state_unknown"
+PAGINATION_PROGRESS_REASON = "pagination_no_progress"
+PAGINATION_LIMIT_REASON = "pagination_limit"
+SOURCE_TOTAL_MISMATCH_REASON = "source_total_mismatch"
+SECTOR_NOT_FOUND_REASON = "sector_not_found"
+SECTOR_AMBIGUOUS_REASON = "sector_ambiguous"
+SECTOR_SELECTION_MISMATCH_REASON = "sector_selection_mismatch"
+SECTOR_IDENTITY_UNAVAILABLE_REASON = "sector_identity_unavailable"
+
+# The established parser contract: exactly the eleven table fields. Sector
+# metadata is added separately by the caller.
+PRODUCTION_FIELDS = (
+    "qrt_leito",
+    "prontuario",
+    "nome",
+    "esp",
+    "dt_int",
+    "tempo",
+    "idade",
+    "convenio",
+    "dt_mvt",
+    "alta",
+    "origem",
+)
+
+# Semantic header aliases (accent/punctuation/case insensitive). The first
+# occurrence wins, which is the export-contract variant for repeated headers.
+_FIELD_ALIASES = {
+    "qrtleito": "qrt_leito",
+    "prontuario": "prontuario",
+    "nomesituacao": "nome",
+    "nome": "nome",
+    "idade": "idade",
+    "dtint": "dt_int",
+    "esp": "esp",
+    "dtmvt": "dt_mvt",
+    "alta": "alta",
+    "origem": "origem",
+    "tempo": "tempo",
+    "convenio": "convenio",
+}
+
+NATIVE_PAGE_SIZE = 100
+MAX_SECTOR_PAGES = 50
+TOOLTIP_READY_TIMEOUT_MS = 10_000
+TOOLTIP_POLL_INTERVAL_MS = 200
+SOURCE_DATETIME_FORMAT = "%d/%m/%Y %H:%M"
+SOURCE_DATETIME_PATTERN = (
+    r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}$"
+)
+
 DOWNLOADS_DIR = _PROJECT_ROOT / "downloads"
-DEBUG_DIR = _PROJECT_ROOT / "debug"
+
+
+class CensusExtractionError(RuntimeError):
+    """Sector extraction failed with a fixed, aggregate-safe reason code."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extrai pacientes de todos os setores via XLSX."
+        description="Extrai pacientes de todos os setores diretamente do DOM."
     )
     parser.add_argument("--headless", action="store_true", help="Executa sem UI")
     parser.add_argument("--max-setores", type=int, default=0, help="Limita setores (0 = todos)")
@@ -101,8 +183,11 @@ def safe_click(locator, label: str, timeout: int = 10000) -> bool:
     try:
         target.evaluate("el => el.click()")
         return True
-    except Exception as e:
-        print(f"  [!] Clique falhou ({label}): {e}")
+    except Exception:
+        print(
+            f"  [!] Clique falhou ({label}):"
+            f" motivo={CLICK_JS_FALLBACK_FAILED_REASON}"
+        )
         return False
 
 
@@ -360,6 +445,614 @@ def _result_has_patients(state: dict[str, Any]) -> bool:
     raise RuntimeError("Tabela censitária atualizada sem resultado reconhecível.")
 
 
+_READ_HEADERS_JS = r"""
+() => {
+    const body = document.querySelector('[id$="resultList_data"]');
+    if (!body) return null;
+    const table = body.closest('table');
+    if (!table) return null;
+    const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+    return Array.from(table.querySelectorAll('thead th'), (th) =>
+        clean(th.querySelector('.ui-column-title')?.textContent || th.textContent)
+    );
+}
+"""
+
+_READ_PAGE_JS = r"""
+(options) => {
+    const body = document.querySelector('[id$="resultList_data"]');
+    if (!body) return { table_found: false };
+    const table = body.closest('table');
+    if (!table) return { table_found: false };
+    const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+    const isVisible = (element) => {
+        if (!element) return false;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        const ariaHidden = (
+            element.getAttribute('aria-hidden') || ''
+        ).toLowerCase() === 'true';
+        return (
+            !ariaHidden
+            && style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && rect.width > 0
+            && rect.height > 0
+        );
+    };
+    const datetime = /^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}$/;
+    const headers = Array.from(
+        table.querySelectorAll('thead th'),
+        (th) => clean(
+            th.querySelector('.ui-column-title')?.textContent || th.textContent
+        )
+    );
+    const headerCount = headers.length;
+    const widgets = Object.values(window.PrimeFaces?.widgets || {});
+    const tooltipWidgets = widgets.filter((widget) =>
+        window.PrimeFaces?.widget?.Tooltip
+        && widget instanceof window.PrimeFaces.widget.Tooltip
+    );
+    const candidatesFor = (cell) => {
+        if (!cell) return [];
+        const nodes = [cell, ...cell.querySelectorAll('*')];
+        const ids = new Set(nodes.map((node) => node.id).filter(Boolean));
+        const candidates = [];
+        for (const node of nodes) {
+            for (const attribute of [
+                'title',
+                'data-original-title',
+                'aria-label',
+                'data-tooltip',
+                'data-title',
+            ]) {
+                const value = clean(node.getAttribute(attribute));
+                if (datetime.test(value)) candidates.push(value);
+            }
+        }
+        for (const widget of tooltipWidgets) {
+            const target = widget.cfg?.target;
+            const targetId = typeof target === 'string'
+                ? target.replace(/^#/, '').replace(/\\/g, '')
+                : '';
+            const targetNode = widget.target?.[0];
+            if (!ids.has(targetId) && !nodes.includes(targetNode)) continue;
+            for (const element of [
+                document.getElementById(widget.cfg?.id),
+                widget.jq?.[0],
+            ]) {
+                const value = clean(element?.textContent);
+                if (datetime.test(value)) candidates.push(value);
+            }
+        }
+        return [...new Set(candidates)];
+    };
+    const textOf = (cell) => {
+        const clone = cell.cloneNode(true);
+        clone
+            .querySelectorAll('.ui-tooltip, script, style')
+            .forEach((node) => node.remove());
+        return clean(clone.textContent);
+    };
+    const rows = [];
+    let unsupportedRows = 0;
+    let emptyMessage = false;
+    for (const row of body.querySelectorAll(':scope > tr')) {
+        const cells = Array.from(row.querySelectorAll(':scope > td'));
+        if (cells.length === 1 && cells[0].colSpan > 1) {
+            if (clean(cells[0].textContent).includes('Nenhum registro')) {
+                emptyMessage = true;
+            } else {
+                unsupportedRows += 1;
+            }
+            continue;
+        }
+        if (cells.length !== headerCount) {
+            unsupportedRows += 1;
+            continue;
+        }
+        const values = {};
+        for (const field of options.fields) {
+            values[field] = textOf(cells[options.indices[field]]);
+        }
+        rows.push({
+            values,
+            dt_int_candidates: candidatesFor(cells[options.indices.dt_int]),
+            dt_mvt_candidates: candidatesFor(cells[options.indices.dt_mvt]),
+        });
+    }
+    const root = body.closest('.ui-datatable') || table.parentElement;
+    const dataTable = widgets.find((widget) => widget.tbody?.[0] === body);
+    const paginator = dataTable?.getPaginator?.();
+    const config = paginator?.cfg || dataTable?.cfg?.paginator || {};
+    const next = root.querySelector('.ui-paginator-next');
+    const active = root.querySelector('.ui-paginator-page.ui-state-active');
+    const sizeSelect = root.querySelector('.ui-paginator-rpp-options');
+    return {
+        table_found: true,
+        headers,
+        rows,
+        unsupported_rows: unsupportedRows,
+        empty_message: emptyMessage,
+        page_index: /^\d+$/.test(clean(active?.textContent))
+            ? Number(clean(active.textContent)) - 1
+            : null,
+        selected_page_size: Number(sizeSelect?.value) || null,
+        page_size_options: Array.from(
+            root.querySelectorAll('.ui-paginator-rpp-options option'),
+            (option) => Number(option.value)
+        ).filter((value) => Number.isInteger(value) && value > 0),
+        expected_rows: Number.isFinite(config.rowCount)
+            ? config.rowCount
+            : null,
+        next_present: Boolean(next),
+        next_enabled: Boolean(
+            next
+            && !next.classList.contains('ui-state-disabled')
+            && next.getAttribute('aria-disabled') !== 'true'
+        ),
+    };
+}
+"""
+
+_PAGE_STATE_JS = r"""
+() => {
+    const body = document.querySelector('[id$="resultList_data"]');
+    if (!body) return { table_found: false };
+    const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+    const root = body.closest('.ui-datatable');
+    if (!root) return { table_found: false };
+    const widgets = Object.values(window.PrimeFaces?.widgets || {});
+    const dataTable = widgets.find((widget) => widget.tbody?.[0] === body);
+    const paginator = dataTable?.getPaginator?.();
+    const config = paginator?.cfg || dataTable?.cfg?.paginator || {};
+    const next = root.querySelector('.ui-paginator-next');
+    const active = root.querySelector('.ui-paginator-page.ui-state-active');
+    const sizeSelect = root.querySelector('.ui-paginator-rpp-options');
+    return {
+        table_found: true,
+        page_index: /^\d+$/.test(clean(active?.textContent))
+            ? Number(clean(active.textContent)) - 1
+            : null,
+        selected_page_size: Number(sizeSelect?.value) || null,
+        page_size_options: Array.from(
+            root.querySelectorAll('.ui-paginator-rpp-options option'),
+            (option) => Number(option.value)
+        ).filter((value) => Number.isInteger(value) && value > 0),
+        expected_rows: Number.isFinite(config.rowCount)
+            ? config.rowCount
+            : null,
+        next_present: Boolean(next),
+        next_enabled: Boolean(
+            next
+            && !next.classList.contains('ui-state-disabled')
+            && next.getAttribute('aria-disabled') !== 'true'
+        ),
+    };
+}
+"""
+
+_SET_PAGE_SIZE_JS = r"""
+(size) => {
+    const body = document.querySelector('[id$="resultList_data"]');
+    const root = body?.closest('.ui-datatable');
+    const select = root?.querySelector('.ui-paginator-rpp-options');
+    if (!select) return false;
+    select.value = String(size);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+}
+"""
+
+_CLICK_NEXT_PAGE_JS = r"""
+() => {
+    const body = document.querySelector('[id$="resultList_data"]');
+    const root = body?.closest('.ui-datatable');
+    const next = root?.querySelector(
+        '.ui-paginator-next:not(.ui-state-disabled)'
+    );
+    if (!next) return false;
+    next.click();
+    return true;
+}
+"""
+
+_READ_SETOR_SUGGESTIONS_JS = r"""
+() => {
+    const panel = document.querySelector(
+        '[id="unidadeFuncional:unidadeFuncional:suggestion_panel"]'
+    );
+    if (!panel) return [];
+    const clean = (text) => (text || '').replace(/\s+/g, ' ').trim();
+    const isVisible = (element) => {
+        if (!element) return false;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return (
+            style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && rect.width > 0
+            && rect.height > 0
+        );
+    };
+    const nodes = Array.from(
+        panel.querySelectorAll('a, li, div[role="cell"], td')
+    );
+    nodes.forEach((node) =>
+        node.removeAttribute('data-sirhosp-suggestion')
+    );
+    const seen = new Set();
+    const result = [];
+    for (const node of nodes) {
+        const text = clean(node.textContent);
+        if (!text || !isVisible(node) || seen.has(text)) continue;
+        seen.add(text);
+        const index = String(result.length);
+        node.setAttribute('data-sirhosp-suggestion', index);
+        result.push({ text, index });
+    }
+    return result;
+}
+"""
+
+
+def _normalize_text(value: Any) -> str:
+    """Collapse HTML whitespace like the established spreadsheet parser."""
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
+def _identity_key(value: str | None) -> str:
+    """Accent/case/whitespace insensitive key for native sector identity."""
+    text = unicodedata.normalize("NFKD", value or "").casefold()
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return " ".join(text.split())
+
+
+def parse_setor_identity(label: str | None) -> dict[str, str] | None:
+    """Split a native sector label into ``code - description`` identity."""
+    text = normalize_setor_label(label)
+    if " - " not in text:
+        return None
+    code, description = text.split(" - ", 1)
+    code = code.strip()
+    description = description.strip()
+    if not code or not description:
+        return None
+    return {
+        "code": code,
+        "description": description,
+        "code_key": _identity_key(code).replace(" ", ""),
+        "description_key": _identity_key(description),
+    }
+
+
+def _confirm_selected_setor(
+    requested: str, info: dict[str, str]
+) -> None:
+    """Reject an autocomplete result that is not the requested native sector.
+
+    The identity combines the code actually selected in the input with the
+    native description label. A call made with a description-only query (used
+    by diagnostic probes) must match the selected description uniquely.
+    """
+    selected_code = normalize_setor_label(info.get("codigo"))
+    selected_name = normalize_setor_label(info.get("nome"))
+    if not selected_name:
+        raise CensusExtractionError(SECTOR_IDENTITY_UNAVAILABLE_REASON)
+
+    selected_description_key = _identity_key(selected_name)
+    requested_identity = parse_setor_identity(requested)
+
+    if requested_identity is None:
+        requested_key = _identity_key(normalize_setor_label(requested))
+        if not requested_key or requested_key not in selected_description_key:
+            raise CensusExtractionError(SECTOR_SELECTION_MISMATCH_REASON)
+        return
+
+    if _identity_key(selected_code).replace(" ", "") != (
+        requested_identity["code_key"]
+    ):
+        raise CensusExtractionError(SECTOR_SELECTION_MISMATCH_REASON)
+    if selected_description_key != requested_identity["description_key"]:
+        raise CensusExtractionError(SECTOR_SELECTION_MISMATCH_REASON)
+
+
+def _compact_header(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value or "").casefold()
+    return "".join(
+        char for char in text if not unicodedata.combining(char)
+    ).replace(" ", "").replace("/", "").replace(".", "").replace("-", "")
+
+
+def map_census_headers(headers: Iterable[str]) -> dict[str, int]:
+    """Map semantic census fields dynamically; first occurrence wins.
+
+    Repeated ``Alta``/``Origem`` headers reproduce the source variants. The
+    first occurrence is the export-contract field, even when it is hidden.
+    Visibility is never used to choose between variants.
+    """
+    mapping: dict[str, int] = {}
+    for index, header in enumerate(headers):
+        field = _FIELD_ALIASES.get(_compact_header(header))
+        if field is None or field in mapping:
+            continue
+        mapping[field] = index
+    if any(field not in mapping for field in PRODUCTION_FIELDS):
+        raise CensusExtractionError(REQUIRED_COLUMN_MISSING_REASON)
+    return mapping
+
+
+def read_census_headers(frame: Frame) -> list[str]:
+    headers = frame.evaluate(_READ_HEADERS_JS)
+    if not headers:
+        raise CensusExtractionError(CENSUS_TABLE_MISSING_REASON)
+    return [str(header) for header in headers]
+
+
+def _parse_source_datetime(value: str) -> datetime | None:
+    if not value or not re.fullmatch(SOURCE_DATETIME_PATTERN, value):
+        return None
+    try:
+        return datetime.strptime(value, SOURCE_DATETIME_FORMAT)
+    except ValueError:
+        return None
+
+
+def _display_date_matches(displayed: str, candidate: str) -> bool:
+    if displayed == candidate:
+        return True
+    if len(displayed) == 5 and displayed[2] == "/":
+        return candidate.startswith(displayed + "/")
+    if len(displayed) == 10:
+        return candidate.startswith(displayed + " ")
+    return False
+
+
+def enrich_source_timestamp(
+    displayed: str, candidates: Iterable[str]
+) -> str:
+    """Return the unique full timestamp associated with one display cell.
+
+    A genuinely empty display remains empty. A displayed date with no ready
+    associated timestamp signals :data:`TOOLTIP_MISSING_REASON` so the caller
+    can poll within its bounded interval. Multiple distinct values, invalid
+    calendar values and date disagreements reject the sector.
+    """
+    display = _normalize_text(displayed)
+    if not display:
+        return ""
+
+    distinct = sorted(
+        {
+            _normalize_text(candidate)
+            for candidate in candidates
+            if _normalize_text(candidate)
+        }
+    )
+    if len(distinct) > 1:
+        raise CensusExtractionError(TOOLTIP_AMBIGUOUS_REASON)
+    if not distinct:
+        raise CensusExtractionError(TOOLTIP_MISSING_REASON)
+
+    value = distinct[0]
+    if _parse_source_datetime(value) is None:
+        raise CensusExtractionError(TOOLTIP_INVALID_REASON)
+    if not _display_date_matches(display, value):
+        raise CensusExtractionError(TOOLTIP_DATE_MISMATCH_REASON)
+    return value
+
+
+def _normalize_prontuario(value: Any) -> str:
+    text = _normalize_text(value)
+    return text.replace(".", "").replace("/", "").strip()
+
+
+def _normalize_idade(value: Any) -> str:
+    text = _normalize_text(value)
+    if text.endswith(".0") and text[:-2].isdigit():
+        return text[:-2]
+    return text
+
+
+def _normalize_tempo(value: Any) -> int | None:
+    text = _normalize_text(value)
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_alta(value: Any) -> str:
+    text = _normalize_text(value)
+    if text in {"0", "0.0"}:
+        return ""
+    if text.endswith(".0") and text[:-2].isdigit():
+        return text[:-2]
+    return text
+
+
+def _is_eligible_dom_row(prontuario: str, nome: str) -> bool:
+    """Apply the established parser eligibility: omit only both-empty rows."""
+    return bool(prontuario or nome)
+
+
+def _build_dom_patient(
+    values: dict[str, str],
+    *,
+    setor_codigo: str,
+    setor_nome: str,
+) -> dict[str, Any]:
+    return {
+        "setor_codigo": setor_codigo,
+        "setor": setor_nome,
+        "qrt_leito": _normalize_text(values.get("qrt_leito")),
+        "prontuario": _normalize_prontuario(values.get("prontuario")),
+        "nome": _normalize_text(values.get("nome")),
+        "esp": _normalize_text(values.get("esp")),
+        "dt_int": values.get("dt_int", ""),
+        "tempo": _normalize_tempo(values.get("tempo")),
+        "idade": _normalize_idade(values.get("idade")),
+        "convenio": _normalize_text(values.get("convenio")),
+        "dt_mvt": values.get("dt_mvt", ""),
+        "alta": _normalize_alta(values.get("alta")),
+        "origem": _normalize_text(values.get("origem")),
+    }
+
+
+def read_census_page(
+    frame: Frame, mapping: dict[str, int]
+) -> dict[str, Any]:
+    payload = frame.evaluate(
+        _READ_PAGE_JS,
+        {"fields": list(PRODUCTION_FIELDS), "indices": mapping},
+    )
+    if not payload.get("table_found"):
+        raise CensusExtractionError(CENSUS_TABLE_MISSING_REASON)
+    return payload
+
+
+def _read_page_with_tooltip_readiness(
+    frame: Frame, page: Page, mapping: dict[str, int]
+) -> dict[str, Any]:
+    deadline = time.monotonic() + TOOLTIP_READY_TIMEOUT_MS / 1000
+    while True:
+        payload = read_census_page(frame, mapping)
+        if payload.get("unsupported_rows"):
+            raise CensusExtractionError(UNSUPPORTED_ROW_REASON)
+        try:
+            for row in payload["rows"]:
+                values = row["values"]
+                values["dt_int"] = enrich_source_timestamp(
+                    values.get("dt_int", ""),
+                    row.get("dt_int_candidates", []),
+                )
+                values["dt_mvt"] = enrich_source_timestamp(
+                    values.get("dt_mvt", ""),
+                    row.get("dt_mvt_candidates", []),
+                )
+        except CensusExtractionError as exc:
+            if (
+                exc.reason != TOOLTIP_MISSING_REASON
+                or time.monotonic() >= deadline
+            ):
+                raise
+            page.wait_for_timeout(TOOLTIP_POLL_INTERVAL_MS)
+            continue
+        return payload
+
+
+def census_page_state(frame: Frame) -> dict[str, Any]:
+    state = frame.evaluate(_PAGE_STATE_JS)
+    if not state.get("table_found"):
+        raise CensusExtractionError(CENSUS_TABLE_MISSING_REASON)
+    return state
+
+
+def apply_native_page_size(frame: Frame, page: Page) -> dict[str, int]:
+    """Apply and verify the native long page before reading rows."""
+    state = census_page_state(frame)
+    options = sorted(set(state.get("page_size_options") or []))
+    supported = [size for size in options if size >= NATIVE_PAGE_SIZE]
+    if not supported:
+        raise CensusExtractionError(PAGE_SIZE_UNSUPPORTED_REASON)
+    chosen = (
+        NATIVE_PAGE_SIZE
+        if NATIVE_PAGE_SIZE in supported
+        else min(supported)
+    )
+    if state.get("selected_page_size") != chosen:
+        previous = census_result_state(frame, arm=True)
+        if not frame.evaluate(_SET_PAGE_SIZE_JS, chosen):
+            raise CensusExtractionError(PAGE_SIZE_UNSUPPORTED_REASON)
+        wait_for_census_result_refresh(frame, page, previous)
+
+    verified = census_page_state(frame)
+    if verified.get("selected_page_size") != chosen:
+        raise CensusExtractionError(PAGE_SIZE_NOT_APPLIED_REASON)
+    if verified.get("page_index") not in (None, 0):
+        raise CensusExtractionError(PAGINATION_FIRST_PAGE_REASON)
+    return {"requested": NATIVE_PAGE_SIZE, "applied": chosen}
+
+
+def read_sector_rows(
+    frame: Frame,
+    page: Page,
+    *,
+    setor_codigo: str,
+    setor_nome: str,
+) -> dict[str, Any]:
+    """Read every eligible row of the current sector until explicit terminal.
+
+    The page size is applied and verified *after* the search refresh, because
+    the source can restore its default. Each page waits a bounded interval for
+    its own date tooltips. Repeated/non-advancing pages, an unknown terminal
+    state, a missing native size or an untrustworthy total reject the sector.
+    """
+    headers = read_census_headers(frame)
+    mapping = map_census_headers(headers)
+    page_size = apply_native_page_size(frame, page)
+
+    pacients: list[dict[str, Any]] = []
+    omitted = 0
+    pages = 0
+    expected_page = 0
+    source_total: int | None = None
+
+    while True:
+        payload = _read_page_with_tooltip_readiness(frame, page, mapping)
+        if payload.get("headers") != headers:
+            raise CensusExtractionError(HEADERS_CHANGED_REASON)
+        if payload.get("page_index") != expected_page:
+            raise CensusExtractionError(PAGINATION_PROGRESS_REASON)
+
+        pages += 1
+        for row in payload["rows"]:
+            values = row["values"]
+            prontuario = _normalize_prontuario(values.get("prontuario"))
+            nome = _normalize_text(values.get("nome"))
+            if not _is_eligible_dom_row(prontuario, nome):
+                omitted += 1
+                continue
+            pacients.append(
+                _build_dom_patient(
+                    values,
+                    setor_codigo=setor_codigo,
+                    setor_nome=setor_nome,
+                )
+            )
+
+        source_total = payload.get("expected_rows")
+        if not payload.get("next_present"):
+            raise CensusExtractionError(PAGINATION_STATE_REASON)
+        if not payload.get("next_enabled"):
+            if (
+                source_total is not None
+                and source_total != len(pacients) + omitted
+            ):
+                raise CensusExtractionError(SOURCE_TOTAL_MISMATCH_REASON)
+            break
+        if pages >= MAX_SECTOR_PAGES:
+            raise CensusExtractionError(PAGINATION_LIMIT_REASON)
+
+        previous = census_result_state(frame, arm=True)
+        if not frame.evaluate(_CLICK_NEXT_PAGE_JS):
+            raise CensusExtractionError(PAGINATION_STATE_REASON)
+        wait_for_census_result_refresh(frame, page, previous)
+        expected_page += 1
+
+    return {
+        "pacientes": pacients,
+        "rows_omitted": omitted,
+        "pages": pages,
+        "source_total": source_total,
+        "page_size": page_size["applied"],
+    }
+
+
 def click_censo_icon(page: Page) -> None:
     icon = page.locator('[id="_icon_img_20323"]')
     if not safe_click(icon, "ícone do Censo", timeout=15000):
@@ -437,6 +1130,57 @@ def format_sector_summary(counters: dict[str, int]) -> str:
     )
 
 
+def build_extraction_summary(
+    *,
+    discovered: int,
+    selected: int,
+    results: Iterable[dict[str, Any]],
+    rows_omitted: int,
+    scope_limited: bool,
+    pages_processed: int = 0,
+    discovery_complete: bool = True,
+) -> dict[str, int | bool]:
+    """Build the version-1 aggregate handoff summary.
+
+    Only structural counters are returned. ``pages_processed`` describes
+    navigation actually performed by the DOM acquisition for every non-empty
+    sector. An empty requested sector is a valid terminal result and counts as
+    processed; a sector error is a terminal failure. ``rows_read`` is the sum
+    of emitted and omitted rows, so an omitted row is never silently lost.
+    """
+    entries = list(results)
+    processed = len(entries)
+    failed = sum(1 for entry in entries if entry.get("erro"))
+    empty = sum(
+        1
+        for entry in entries
+        if not entry.get("erro") and not entry.get("pacientes")
+    )
+    emitted = sum(
+        len(entry.get("pacientes") or [])
+        for entry in entries
+        if not entry.get("erro")
+    )
+    complete = (
+        discovery_complete and processed == selected and failed == 0
+    )
+    return {
+        "summary_version": SUMMARY_VERSION,
+        "sectors_discovered": int(discovered),
+        "sectors_selected": int(selected),
+        "sectors_processed": processed,
+        "sectors_empty": empty,
+        "sectors_failed": failed,
+        "rows_read": emitted + int(rows_omitted),
+        "rows_omitted": int(rows_omitted),
+        "rows_emitted": emitted,
+        "pages_processed": int(pages_processed),
+        "scope_limited": bool(scope_limited),
+        "scope_complete": bool(complete),
+    }
+
+
+
 def _read_setores_from_dom(frame: Frame) -> list[str]:
     """Read sector labels currently present in the dropdown DOM."""
     setores = frame.evaluate(
@@ -506,7 +1250,20 @@ def _scroll_setor_panel(frame: Frame, page: Page) -> bool:
     return False
 
 
-def extract_setores(frame: Frame, page: Page) -> list[str]:
+def extract_setores(
+    frame: Frame,
+    page: Page,
+    status: dict[str, bool] | None = None,
+) -> list[str]:
+    """Read the native sector dropdown with bounded lazy-loading scrolls.
+
+    ``status["complete"]`` becomes true only when the scroll container reached
+    its explicit bottom. Hitting the bounded scroll limit or two stalled reads
+    leaves it false so the caller can fail closed instead of treating a partial
+    discovery as the full census scope.
+    """
+    if status is not None:
+        status["complete"] = False
     print("[i] Extraindo setores...")
     btn = frame.locator('[id="unidadeFuncional:unidadeFuncional:suggestion_button"]')
     if not safe_click(btn, "abrir dropdown de setores"):
@@ -523,8 +1280,10 @@ def extract_setores(frame: Frame, page: Page) -> list[str]:
     # Some panels render rows lazily on scroll; collect the full list by
     # scrolling in bounded steps and merging every read.
     stale_reads = 0
+    complete = False
     for _ in range(MAX_SETOR_PANEL_SCROLLS):
         if _scroll_setor_panel(frame, page):
+            complete = True
             break
         more = dedupe_setores(_read_setores_from_dom(frame))
         before = len(setores)
@@ -539,6 +1298,8 @@ def extract_setores(frame: Frame, page: Page) -> list[str]:
             stale_reads = 0
 
     _close_setor_dropdown(frame)
+    if status is not None:
+        status["complete"] = complete
     return setores
 
 
@@ -550,13 +1311,16 @@ def clear_setor(frame: Frame, page: Page) -> None:
 
 
 def select_setor(frame: Frame, page: Page, setor: str) -> bool:
-    """Seleciona um setor digitando o nome no campo de autocomplete.
+    """Select the native sector by code + normalized description.
 
-    Em vez de abrir o dropdown completo e caçar o item (que falha quando há
-    muitos setores ou o DOM está incompleto), usa o comportamento nativo do
-    PrimeFaces Autocomplete: digita o nome no campo de input, aguarda o
-    filtro AJAX reduzir o painel, e clica no primeiro item resultante.
+    The autocomplete is queried with the full native label and, if the source
+    needs it, with the description alone. Among the returned suggestions only
+    the exact native identity is accepted; an absent or ambiguous match fails
+    instead of clicking the first unrelated item.
     """
+    requested_identity = parse_setor_identity(setor)
+    requested_key = _identity_key(normalize_setor_label(setor))
+
     clear_setor(frame, page)
 
     # Localiza o input do autocomplete e garante que está visível
@@ -571,7 +1335,7 @@ def select_setor(frame: Frame, page: Page, setor: str) -> bool:
     # ou AJAX pendente), deixando o input disabled com o valor do setor
     # anterior. Nesse caso, força a habilitação e limpeza via JS.
     if not input_el.is_enabled(timeout=3000):
-        print(f"  [!] Input disabled — forçando habilitação via JS")
+        print("  [!] Input disabled — forçando habilitação via JS")
         frame.evaluate(
             """
             () => {
@@ -588,55 +1352,77 @@ def select_setor(frame: Frame, page: Page, setor: str) -> bool:
         )
         page.wait_for_timeout(500)
 
-    # Limpa e digita o nome completo do setor (press_sequentially
-    # dispara eventos keydown/keyup que o PrimeFaces precisa para o AJAX)
-    input_el.click()
-    input_el.fill("")
-    input_el.press_sequentially(setor, delay=50)
-
-    # Aguarda o painel de sugestão aparecer com os resultados filtrados
     panel = frame.locator(
         '#unidadeFuncional\\:unidadeFuncional\\:suggestion_panel'
     )
-    if not wait_visible(panel, timeout=12000):
-        # Fallback: tenta sem o prefixo "código - " (ex: "0 T - SALA LARANJA"
-        # → "SALA LARANJA"). Alguns nomes não disparam o autocomplete com o
-        # formato completo.
-        if ' - ' in setor:
-            nome_desc = setor.split(' - ', 1)[1]
+    queries: list[str] = []
+    if normalize_setor_label(setor):
+        queries.append(setor)
+    if (
+        requested_identity is not None
+        and requested_identity["description_key"] != requested_key
+    ):
+        queries.append(requested_identity["description"])
+
+    for query in queries:
+        input_el.click()
+        input_el.fill("")
+        input_el.press_sequentially(query, delay=50)
+        if not wait_visible(panel, timeout=12000):
+            continue
+        page.wait_for_timeout(500)
+
+        suggestions = frame.evaluate(_READ_SETOR_SUGGESTIONS_JS) or []
+        matches: list[int] = []
+        for suggestion in suggestions:
+            text = suggestion.get("text", "")
+            identity = parse_setor_identity(text)
+            if identity is None:
+                continue
+            if requested_identity is not None:
+                if identity["code_key"] != requested_identity["code_key"]:
+                    continue
+                if (
+                    identity["description_key"]
+                    != requested_identity["description_key"]
+                ):
+                    continue
+            elif requested_key not in identity["description_key"]:
+                # Description-only queries come from read-only diagnostic
+                # probes; ambiguity is still rejected below.
+                continue
+            matches.append(int(suggestion["index"]))
+
+        if len(matches) > 1:
             print(
-                f"  [!] Painel não apareceu com nome completo,"
-                f" tentando '{nome_desc}'"
+                "  [!] Seleção de setor ambígua:"
+                f" motivo={SECTOR_AMBIGUOUS_REASON}"
             )
-            input_el.fill("")
-            input_el.press_sequentially(nome_desc, delay=50)
-            if not wait_visible(panel, timeout=10000):
-                print(f"  [!] Painel de sugestão não apareceu para '{setor}'")
-                return False
-        else:
-            print(f"  [!] Painel de sugestão não apareceu para '{setor}'")
             return False
+        if not matches:
+            continue
 
-    page.wait_for_timeout(500)
-
-    # Clica no primeiro (e idealmente único) item do painel
-    item = panel.locator('a, li, div[role="cell"], td').first
-    if item.count() == 0:
-        print(f"  [!] Nenhum item no painel para '{setor}'")
-        return False
-
-    try:
-        item.click(timeout=5000)
-    except Exception:
-        # Último recurso: JS click
+        item = panel.locator(
+            f'[data-sirhosp-suggestion="{matches[0]}"]'
+        ).first
         try:
-            item.evaluate("el => el.click()")
-        except Exception as e:
-            print(f"  [!] Clique no item falhou para '{setor}': {e}")
-            return False
+            item.click(timeout=5000)
+        except Exception:
+            # Último recurso: JS click
+            try:
+                item.evaluate("el => el.click()")
+            except Exception:
+                print(
+                    "  [!] Clique no item falhou:"
+                    f" motivo={SETOR_ITEM_CLICK_FAILED_REASON}"
+                )
+                return False
 
-    wait_ajax_idle(frame, page, timeout_ms=15000)
-    return True
+        wait_ajax_idle(frame, page, timeout_ms=15000)
+        return True
+
+    print(f"  [!] Setor não encontrado: motivo={SECTOR_NOT_FOUND_REASON}")
+    return False
 
 
 def click_pesquisar(frame: Frame) -> bool:
@@ -660,7 +1446,7 @@ def get_current_setor_info(frame: Frame) -> dict[str, str]:
     )
 
 
-# ── XLSX export helpers ─────────────────────────────────────────────
+# ── Reference-only XLSX export/parse (not used by run) ─────────────
 
 
 def _click_export_button(frame: Frame, page: Page) -> None:
@@ -789,8 +1575,14 @@ def parse_setor_xlsx(
     xlsx_path: Path,
     setor_codigo: str,
     setor_nome: str,
+    counters: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Parseia um XLSX exportado do AGHU e retorna lista de pacientes.
+
+    ``counters`` (optional) receives ``rows_omitted`` for rows dropped by the
+    established rule where both prontuário and nome/situação are empty. The
+    caller accounts emitted rows from the returned list, so read rows are
+    always emitted plus omitted.
 
     Mapeamento de colunas do AGHU:
         Qrt/Leito → qrt_leito
@@ -870,6 +1662,10 @@ def parse_setor_xlsx(
         nome = str(row[col_map["nome"]]).strip() if col_map["nome"] < len(row) and row[col_map["nome"]] is not None else ""
 
         if not prontuario and not nome:
+            if counters is not None:
+                counters["rows_omitted"] = (
+                    counters.get("rows_omitted", 0) + 1
+                )
             continue
 
         qrt_leito = str(row[col_map["qrt_leito"]]).strip() if col_map["qrt_leito"] < len(row) and row[col_map["qrt_leito"]] is not None else ""
@@ -936,59 +1732,99 @@ def parse_setor_xlsx(
 # ── Output helpers ──────────────────────────────────────────────────
 
 
-def save_results(results: list[dict], csv_only: bool = False) -> tuple[Path | None, Path]:
-    DOWNLOADS_DIR.mkdir(exist_ok=True)
+def save_extraction_summary(
+    summary: dict[str, Any],
+    output_dir: Path | None = None,
+) -> Path:
+    """Atomically write the aggregate summary next to the temporary CSV."""
+    target_dir = DOWNLOADS_DIR if output_dir is None else output_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = target_dir / SUMMARY_FILENAME
+    tmp_path = target_dir / f".{SUMMARY_FILENAME}.tmp"
+    try:
+        tmp_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, summary_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+    return summary_path
+
+
+def save_results(
+    results: list[dict],
+    csv_only: bool = False,
+    summary: dict[str, Any] | None = None,
+) -> tuple[Path | None, Path, Path | None]:
+    """Publish the canonical success CSV and its aggregate summary atomically.
+
+    The CSV is written to a temporary sibling and only receives its canonical
+    deterministic ``censo-*.csv`` name after the complete artifact set exists.
+    Failure paths never call this function and therefore never publish a
+    canonical success CSV.
+    """
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
 
     json_path = None
-    csv_path = DOWNLOADS_DIR / f"censo-todos-pacientes-xlsx-{ts}.csv"
+    csv_path = DOWNLOADS_DIR / f"censo-todos-pacientes-{ts}.csv"
+    csv_tmp = DOWNLOADS_DIR / f".{csv_path.name}.tmp"
+    json_tmp = None
+    summary_path = None
 
-    if not csv_only:
-        json_path = DOWNLOADS_DIR / f"censo-todos-pacientes-xlsx-{ts}.json"
-        json_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        fieldnames = [
-            "setor_codigo", "setor", "qrt_leito", "prontuario", "nome", "esp",
-            "dt_int", "tempo", "idade", "convenio", "dt_mvt", "alta", "origem",
-        ]
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for entry in results:
-            setor = entry.get("setor", "")
-            for p in entry.get("pacientes", []):
-                row = {
-                    "setor_codigo": entry.get("setor_codigo", ""),
-                    "setor": setor,
-                    "qrt_leito": p.get("qrt_leito", ""),
-                    "prontuario": p.get("prontuario", ""),
-                    "nome": p.get("nome", ""),
-                    "esp": p.get("esp", ""),
-                    "dt_int": p.get("dt_int", ""),
-                    "tempo": p.get("tempo", ""),
-                    "idade": p.get("idade", ""),
-                    "convenio": p.get("convenio", ""),
-                    "dt_mvt": p.get("dt_mvt", ""),
-                    "alta": p.get("alta", ""),
-                    "origem": p.get("origem", ""),
-                }
-                w.writerow(row)
-
-    return json_path, csv_path
-
-
-def save_debug(page: Page) -> None:
-    DEBUG_DIR.mkdir(exist_ok=True)
-    ts = time.strftime("%Y%m%d-%H%M%S")
     try:
-        page.screenshot(path=str(DEBUG_DIR / f"censo-xlsx-{ts}.png"), full_page=True)
-        (DEBUG_DIR / f"censo-xlsx-{ts}.html").write_text(page.content(), encoding="utf-8")
-        frame = page.frame(name=CENSO_FRAME_NAME)
-        if frame:
-            (DEBUG_DIR / f"censo-xlsx-{ts}-iframe.html").write_text(frame.content(), encoding="utf-8")
-        print(f"[i] Debug salvo em debug/censo-xlsx-{ts}.*")
-    except Exception as e:
-        print(f"[!] Falha ao salvar debug: {e}")
+        with csv_tmp.open("w", newline="", encoding="utf-8") as f:
+            fieldnames = [
+                "setor_codigo", "setor", "qrt_leito", "prontuario", "nome",
+                "esp", "dt_int", "tempo", "idade", "convenio", "dt_mvt",
+                "alta", "origem",
+            ]
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            for entry in results:
+                setor = entry.get("setor", "")
+                for p in entry.get("pacientes", []):
+                    row = {
+                        "setor_codigo": entry.get("setor_codigo", ""),
+                        "setor": setor,
+                        "qrt_leito": p.get("qrt_leito", ""),
+                        "prontuario": p.get("prontuario", ""),
+                        "nome": p.get("nome", ""),
+                        "esp": p.get("esp", ""),
+                        "dt_int": p.get("dt_int", ""),
+                        "tempo": p.get("tempo", ""),
+                        "idade": p.get("idade", ""),
+                        "convenio": p.get("convenio", ""),
+                        "dt_mvt": p.get("dt_mvt", ""),
+                        "alta": p.get("alta", ""),
+                        "origem": p.get("origem", ""),
+                    }
+                    w.writerow(row)
+
+        if not csv_only:
+            json_path = DOWNLOADS_DIR / f"censo-todos-pacientes-{ts}.json"
+            json_tmp = DOWNLOADS_DIR / f".{json_path.name}.tmp"
+            json_tmp.write_text(
+                json.dumps(results, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        if summary is not None:
+            summary_path = save_extraction_summary(summary)
+
+        os.replace(csv_tmp, csv_path)
+        if json_tmp is not None and json_path is not None:
+            os.replace(json_tmp, json_path)
+    except Exception:
+        csv_tmp.unlink(missing_ok=True)
+        if json_tmp is not None:
+            json_tmp.unlink(missing_ok=True)
+        if summary_path is not None:
+            summary_path.unlink(missing_ok=True)
+        raise
+
+    return json_path, csv_path, summary_path
 
 
 # ── Main flow ───────────────────────────────────────────────────────
@@ -1002,7 +1838,7 @@ def run(
     max_setores: int,
     pause_ms: int,
     csv_only: bool = False,
-) -> None:
+) -> int:
     with sync_playwright() as pw:
         browser = context = page = None
         try:
@@ -1037,13 +1873,38 @@ def run(
             frame = get_censo_frame(page)
             wait_ajax_idle(frame, page, timeout_ms=15000)
 
-            setores = extract_setores(frame, page)
+            discovery_status: dict[str, bool] = {"complete": True}
+            setores = extract_setores(
+                frame, page, status=discovery_status
+            )
             if not setores:
                 raise RuntimeError("Nenhum setor encontrado.")
 
             discovered_count = len(setores)
+            discovery_complete = bool(
+                discovery_status.get("complete", True)
+            )
+            if not discovery_complete:
+                summary = build_extraction_summary(
+                    discovered=discovered_count,
+                    selected=0,
+                    results=[],
+                    rows_omitted=0,
+                    scope_limited=False,
+                    discovery_complete=False,
+                )
+                failure_summary_path = save_extraction_summary(summary)
+                print("    [ERRO] motivo=discovery_incomplete")
+                print(f"Resumo: {failure_summary_path}")
+                return 1
+
             if max_setores > 0:
                 setores = setores[:max_setores]
+
+            selected_count = len(setores)
+            scope_limited = selected_count < discovered_count
+            rows_omitted_total = 0
+            pages_processed_total = 0
 
             print(f"[i] Total de setores a processar: {len(setores)}")
 
@@ -1055,20 +1916,20 @@ def run(
                 print(f"\n[{i}/{len(setores)}] {setor}")
 
                 _max_retries = 2
-                _last_error = None
+                _last_reason = "sector_extraction_failed"
 
                 for _attempt in range(_max_retries + 1):
                     if _attempt > 0:
                         print(
                             f"    [RETRY {_attempt}/{_max_retries}]"
-                            f" após erro: {_last_error}"
+                            f" motivo={_last_reason}"
                         )
                         page.wait_for_timeout(3000)
 
                     try:
                         if not select_setor(frame, page, setor):
-                            raise RuntimeError(
-                                "não conseguiu selecionar setor"
+                            raise CensusExtractionError(
+                                "sector_selection_failed"
                             )
 
                         page.wait_for_timeout(pause_ms)
@@ -1078,7 +1939,9 @@ def run(
 
                         previous_result = census_result_state(frame, arm=True)
                         if not click_pesquisar(frame):
-                            raise RuntimeError("falha no clique de pesquisar")
+                            raise CensusExtractionError(
+                                "sector_search_failed"
+                            )
 
                         refreshed_result = wait_for_census_result_refresh(
                             frame,
@@ -1089,6 +1952,7 @@ def run(
 
                         # Extrair código e nome completo após pesquisar
                         setor_info = get_current_setor_info(frame)
+                        _confirm_selected_setor(setor, setor_info)
                         setor_codigo = setor_info.get("codigo", "")
                         setor_nome_completo = (
                             setor_info.get("nome") or setor
@@ -1098,7 +1962,7 @@ def run(
                             refreshed_result
                         )
                         if not tem_pacientes:
-                            print(f"    setor vazio — pulando")
+                            print("    setor vazio — pulando")
                             results.append({
                                 "setor_codigo": setor_codigo,
                                 "setor": setor_nome_completo,
@@ -1106,13 +1970,17 @@ def run(
                             })
                             break  # sai do loop de retry
 
-                        # Exporta XLSX
-                        xlsx_path = export_setor_xlsx(frame, page)
-
-                        # Parseia o XLSX
-                        pacientes = parse_setor_xlsx(
-                            xlsx_path, setor_codigo, setor_nome_completo
+                        # Aquisição DOM (sem exportação/parse de planilha)
+                        sector_rows = read_sector_rows(
+                            frame,
+                            page,
+                            setor_codigo=setor_codigo,
+                            setor_nome=setor_nome_completo,
                         )
+                        pacientes = sector_rows["pacientes"]
+                        omitted = int(sector_rows["rows_omitted"])
+                        rows_omitted_total += omitted
+                        pages_processed_total += int(sector_rows["pages"])
                         print(
                             f"    pacientes extraídos: {len(pacientes)}"
                         )
@@ -1121,25 +1989,45 @@ def run(
                             "setor_codigo": setor_codigo,
                             "setor": setor_nome_completo,
                             "pacientes": pacientes,
+                            "rows_omitted": omitted,
                         })
                         if _attempt > 0:
                             _retried.append(setor)
                         break  # sucesso — sai do loop de retry
 
                     except Exception as _exc:
-                        _last_error = _exc
+                        _last_reason = getattr(
+                            _exc, "reason", "sector_extraction_failed"
+                        )
                         if _attempt < _max_retries:
                             continue
                         _failed.append(setor)
-                        print(f"    [ERRO] {_last_error}")
+                        print(f"    [ERRO] motivo={_last_reason}")
                         results.append({
                             "setor_codigo": "",
                             "setor": setor,
                             "pacientes": [],
-                            "erro": str(_last_error),
+                            "erro": _last_reason,
                         })
 
-            json_path, csv_path = save_results(results, csv_only=csv_only)
+            summary = build_extraction_summary(
+                discovered=discovered_count,
+                selected=selected_count,
+                results=results,
+                rows_omitted=rows_omitted_total,
+                scope_limited=scope_limited,
+                pages_processed=pages_processed_total,
+            )
+            if summary["scope_complete"]:
+                json_path, csv_path, summary_path = save_results(
+                    results,
+                    csv_only=csv_only,
+                    summary=summary,
+                )
+            else:
+                json_path = None
+                csv_path = None
+                summary_path = save_extraction_summary(summary)
 
             total_pacientes = sum(len(r.get("pacientes", [])) for r in results)
             print("\n" + "=" * 70)
@@ -1168,13 +2056,17 @@ def run(
             print(f"Total pacientes:    {total_pacientes}")
             if json_path:
                 print(f"JSON: {json_path}")
-            print(f"CSV:  {csv_path}")
+            if csv_path:
+                print(f"CSV:  {csv_path}")
+            else:
+                print("CSV:  não publicado (escopo incompleto)")
+            print(f"Resumo: {summary_path}")
             print("=" * 70)
 
-        except Exception as e:
-            print(f"[FATAL] {e}")
-            if page is not None:
-                save_debug(page)
+            return 0 if summary["scope_complete"] else 1
+
+        except Exception:
+            print("[FATAL] census extraction failed")
             raise
         finally:
             if context:
@@ -1191,15 +2083,20 @@ def main() -> None:
         global DOWNLOADS_DIR  # noqa: PLW0603
         DOWNLOADS_DIR = Path(args.output_dir)
 
-    run(
-        source_system_url=os.getenv("SOURCE_SYSTEM_URL", ""),
-        username=os.getenv("SOURCE_SYSTEM_USERNAME", ""),
-        password=os.getenv("SOURCE_SYSTEM_PASSWORD", ""),
-        headless=args.headless,
-        max_setores=args.max_setores,
-        pause_ms=args.pause_ms,
-        csv_only=args.csv_only,
-    )
+    try:
+        exit_code = run(
+            source_system_url=os.getenv("SOURCE_SYSTEM_URL", ""),
+            username=os.getenv("SOURCE_SYSTEM_USERNAME", ""),
+            password=os.getenv("SOURCE_SYSTEM_PASSWORD", ""),
+            headless=args.headless,
+            max_setores=args.max_setores,
+            pause_ms=args.pause_ms,
+            csv_only=args.csv_only,
+        )
+    except Exception:
+        sys.exit(1)
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

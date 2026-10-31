@@ -345,13 +345,13 @@ Playwright/Chromium e Python, preservando a vida útil do disco.
 
 ### 4a.1 Limites padrão por réplica
 
-| Montagem | Padrão | Variável de override |
-| --- | --- | --- |
-| `/tmp` | `1g` | `WORKER_TMPFS_TMP_SIZE` |
-| `/var/tmp` | `128m` | `WORKER_TMPFS_VAR_TMP_SIZE` |
-| `/home/10001/.cache` | `256m` | `WORKER_TMPFS_CACHE_SIZE` |
-| `/home/10001/.config` | `64m` | `WORKER_TMPFS_CONFIG_SIZE` |
-| `/dev/shm` (`shm_size`) | `512m` | `WORKER_SHM_SIZE` |
+| Montagem                | Padrão | Variável de override        |
+| ----------------------- | ------ | --------------------------- |
+| `/tmp`                  | `1g`   | `WORKER_TMPFS_TMP_SIZE`     |
+| `/var/tmp`              | `128m` | `WORKER_TMPFS_VAR_TMP_SIZE` |
+| `/home/10001/.cache`    | `256m` | `WORKER_TMPFS_CACHE_SIZE`   |
+| `/home/10001/.config`   | `64m`  | `WORKER_TMPFS_CONFIG_SIZE`  |
+| `/dev/shm` (`shm_size`) | `512m` | `WORKER_SHM_SIZE`           |
 
 Os limites são conservadores e suportam até 15 workers em um host com
 ~62 GiB de RAM. Overrides são opcionais e não exigem editar o Compose.
@@ -375,10 +375,10 @@ WORKER_TMPFS_CONFIG_SIZE=128m
 ```
 
 > **Aviso:** nunca imprimir nem versionar secrets.
-`docker compose config` interpola variáveis do `.env`, incluindo
-`DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD` e credenciais do sistema fonte.
-Não redirecione essa saída para arquivos rastreados nem a cole em canais
-de log. Use apenas para validação local e descarte a saída.
+> `docker compose config` interpola variáveis do `.env`, incluindo
+> `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD` e credenciais do sistema fonte.
+> Não redirecione essa saída para arquivos rastreados nem a cole em canais
+> de log. Use apenas para validação local e descarte a saída.
 
 ### 4a.4 Validação operacional
 
@@ -425,7 +425,7 @@ docker compose -f compose.yml -f compose.prod.yml up -d --force-recreate worker
 >
 > O runtime hospitalar usa
 > `process_ingestion_runs_persistent_session --loop --real-handle
-> --enable-real-queue`. A `RealHandleBridge` foi validada contra a interface
+--enable-real-queue`. A `RealHandleBridge` foi validada contra a interface
 > real, incluindo autenticação, admissões, demografia, full-sync, evoluções,
 > renovação de sessão, restart e saída sanitizada.
 >
@@ -595,13 +595,13 @@ vazando para o overlay Docker.
 
 O orquestrador usa variáveis próprias, independentes dos `WORKER_*`:
 
-| Variável | Padrão | Descrição |
-| --- | --- | --- |
-| `CENSUS_ORCHESTRATOR_SHM_SIZE` | `512m` | Chrome (`/dev/shm`) |
-| `CENSUS_ORCHESTRATOR_TMPFS_TMP_SIZE` | `1g` | Máximo de `/tmp` |
-| `CENSUS_ORCHESTRATOR_TMPFS_VAR_TMP_SIZE` | `128m` | `/var/tmp` |
-| `CENSUS_ORCHESTRATOR_TMPFS_CACHE_SIZE` | `256m` | `~/.cache` |
-| `CENSUS_ORCHESTRATOR_TMPFS_CONFIG_SIZE` | `64m` | `~/.config` |
+| Variável                                 | Padrão | Descrição           |
+| ---------------------------------------- | ------ | ------------------- |
+| `CENSUS_ORCHESTRATOR_SHM_SIZE`           | `512m` | Chrome (`/dev/shm`) |
+| `CENSUS_ORCHESTRATOR_TMPFS_TMP_SIZE`     | `1g`   | Máximo de `/tmp`    |
+| `CENSUS_ORCHESTRATOR_TMPFS_VAR_TMP_SIZE` | `128m` | `/var/tmp`          |
+| `CENSUS_ORCHESTRATOR_TMPFS_CACHE_SIZE`   | `256m` | `~/.cache`          |
+| `CENSUS_ORCHESTRATOR_TMPFS_CONFIG_SIZE`  | `64m`  | `~/.config`         |
 
 Overrides são feitos no `.env`, sem editar o Compose:
 
@@ -619,13 +619,51 @@ CENSUS_ORCHESTRATOR_TMPFS_CONFIG_SIZE=128m
 > `DJANGO_SECRET_KEY`, `POSTGRES_PASSWORD` e credenciais do sistema fonte.
 > Use `--profile orchestrator` ao inspecionar apenas o orquestrador.
 
+### 5.6.1 Aquisição DOM do censo, implantação conjunta e rollback
+
+O ciclo operacional passou a ler o censo diretamente do DOM da UI, sem baixar
+nem parsear planilha. O contrato de artefatos continua o mesmo: CSV temporário
+`censo-*.csv` e `censo-extraction-summary.json` versão 1, validados pelo
+`extract_census` antes de qualquer persistência.
+
+Limites operacionais explícitos:
+
+- página nativa de 100 linhas (ou a menor opção nativa ≥ 100), verificada após
+  a pesquisa, porque a fonte pode restaurar o padrão;
+- até 10 segundos por página para os tooltips das datas preenchidas
+  inicializarem; depois disso o setor é rejeitado, sem hora inventada;
+- no máximo 50 páginas por setor, com término comprovado por controle de
+  próxima desabilitado;
+- linhas são contadas até o fim, independentemente de 100 pacientes; leitos
+  sem prontuário continuam contando;
+- quando o paginator não oferece total independente confiável, isso é uma
+  limitação registrada, não uma falha por si só nem motivo para inventar total.
+
+**Implantação conjunta.** Coletor e comando fazem parte da mesma imagem: o
+command exige o resumo v1 e o CSV canônico do mesmo contrato. Não implante um
+sem o outro e não compartilhe diretório de handoff entre versões. A migração
+`0025_censussnapshot_source_timestamps` é aditiva e opcional em relação aos
+dados antigos: apenas cria as duas colunas de origem; não há backfill e os
+snapshots existentes permanecem válidos com os campos nulos.
+
+**Rollback.** Em falha, pare a versão nova e restaure a imagem anterior, que
+usa a exportação XLSX. Não apague snapshots nem reverta a migração: as colunas
+opcionais podem permanecer no banco e ficam sem consumidor no código antigo.
+Não publique CSV/resumo de uma versão para o command de outra.
+
+Não há serviço, timer ou agendamento novo nesta entrega. A conferência
+pós-deploy é de leitura e usa apenas metadados agregados (setor, páginas,
+conclusão, contagens e rejeições); não crie pacientes de teste em produção. Não
+há promessa de fator de aceleração: os tempos medidos não incluem login,
+pesquisa, aplicação da página longa nem espera de tooltips.
+
 ### 5.7 Troubleshooting
 
-| Problema | Causa provável | Ação |
-| --- | --- | --- |
-| `ENOSPC` (`/tmp`) | tmpfs cheio | Ajustar TMPFS_TMP_SIZE |
-| Chromium (shm) | `/dev/shm` cheio | Ajustar `CENSUS_ORCHESTRATOR_SHM_SIZE` |
-| Container não sobe | Config/.env | Ver logs do container |
+| Problema           | Causa provável   | Ação                                   |
+| ------------------ | ---------------- | -------------------------------------- |
+| `ENOSPC` (`/tmp`)  | tmpfs cheio      | Ajustar TMPFS_TMP_SIZE                 |
+| Chromium (shm)     | `/dev/shm` cheio | Ajustar `CENSUS_ORCHESTRATOR_SHM_SIZE` |
+| Container não sobe | Config/.env      | Ver logs do container                  |
 
 ### 5.8 Rollback e desabilitação
 
@@ -728,11 +766,11 @@ docker compose -f compose.yml -f compose.prod.yml --profile recovery run \
 
 Valores aceitos para `--extractor`:
 
-| Extrator | Descrição |
-| --- | --- |
-| `discharges` | Altas do dia |
-| `admissions` | Admissões do dia |
-| `deaths` | Óbitos do dia |
+| Extrator          | Descrição                           |
+| ----------------- | ----------------------------------- |
+| `discharges`      | Altas do dia                        |
+| `admissions`      | Admissões do dia                    |
+| `deaths`          | Óbitos do dia                       |
 | `official_census` | Censo oficial (arquivo TXT via ZIP) |
 
 Os extratores selecionados executam na ordem determinística padrão
@@ -777,13 +815,13 @@ iostat -x 5
 O runtime `historical_recovery` usa variáveis próprias, independentes dos
 `WORKER_*` e `CENSUS_ORCHESTRATOR_*`:
 
-| Variável | Padrão | Descrição |
-| --- | --- | --- |
-| `HISTORICAL_RECOVERY_SHM_SIZE` | `1g` | Chrome (`/dev/shm`) |
-| `HISTORICAL_RECOVERY_TMPFS_TMP_SIZE` | `2g` | Máximo de `/tmp` |
-| `HISTORICAL_RECOVERY_TMPFS_VAR_TMP_SIZE` | `256m` | `/var/tmp` |
-| `HISTORICAL_RECOVERY_TMPFS_CACHE_SIZE` | `512m` | `~/.cache` |
-| `HISTORICAL_RECOVERY_TMPFS_CONFIG_SIZE` | `128m` | `~/.config` |
+| Variável                                 | Padrão | Descrição           |
+| ---------------------------------------- | ------ | ------------------- |
+| `HISTORICAL_RECOVERY_SHM_SIZE`           | `1g`   | Chrome (`/dev/shm`) |
+| `HISTORICAL_RECOVERY_TMPFS_TMP_SIZE`     | `2g`   | Máximo de `/tmp`    |
+| `HISTORICAL_RECOVERY_TMPFS_VAR_TMP_SIZE` | `256m` | `/var/tmp`          |
+| `HISTORICAL_RECOVERY_TMPFS_CACHE_SIZE`   | `512m` | `~/.cache`          |
+| `HISTORICAL_RECOVERY_TMPFS_CONFIG_SIZE`  | `128m` | `~/.config`         |
 
 Overrides são feitos no `.env`, sem editar o Compose:
 
@@ -803,11 +841,11 @@ HISTORICAL_RECOVERY_TMPFS_CONFIG_SIZE=256m
 
 ### 5a.8 Troubleshooting
 
-| Problema | Causa | Ação |
-| --- | --- | --- |
-| `ENOSPC` `/tmp` | tmpfs cheio | Subir `HISTORICAL_RECOVERY_TMPFS_TMP_SIZE` |
-| Chromium (shm) | `/dev/shm` pequeno | Subir `HISTORICAL_RECOVERY_SHM_SIZE` |
-| Container não inicia | Config ausente | `docker compose logs` |
+| Problema             | Causa              | Ação                                       |
+| -------------------- | ------------------ | ------------------------------------------ |
+| `ENOSPC` `/tmp`      | tmpfs cheio        | Subir `HISTORICAL_RECOVERY_TMPFS_TMP_SIZE` |
+| Chromium (shm)       | `/dev/shm` pequeno | Subir `HISTORICAL_RECOVERY_SHM_SIZE`       |
+| Container não inicia | Config ausente     | `docker compose logs`                      |
 
 ### 5a.9 Paralelismo e segurança
 
@@ -869,11 +907,11 @@ documentados abaixo; instalar os arquivos nunca habilita nem inicia nada.
 
 ### 5b.1 Agendamentos (America/Bahia, offsets fixos sem aleatorização de disparo)
 
-| Timer | Modo do script | Agendamento (`OnCalendar`) | `Persistent` | O que executa |
-| --- | --- | --- | --- | --- |
-| `sirhosp-historical-recovery.timer` | `d1-recovery` | `OnCalendar=*-*-* 05:00:00 America/Bahia` | `true` | D-1 (dia anterior em `America/Bahia`) com os quatro extratores na ordem canônica `discharges, admissions, deaths, official_census` via `run_exit_reconciliation_runtime --mode d1`. |
-| `sirhosp-discharges.timer` | `hourly-discharges` | `OnCalendar=*-*-* *:13:00 America/Bahia` | `true` | Altas do dia corrente via `run_exit_reconciliation_runtime --mode hourly` (13 minutos após cada hora). |
-| `sirhosp-stale-reconciliation.timer` | `stale-sweep` | `OnCalendar=*-*-* *:47:00 America/Bahia` | `true` | Varredura horária limitada de internações órfãs via `reconcile_stale_admissions` (lock advisory próprio, enfileira no máximo 100 confirmações, sem Playwright). |
+| Timer                                | Modo do script      | Agendamento (`OnCalendar`)                | `Persistent` | O que executa                                                                                                                                                                       |
+| ------------------------------------ | ------------------- | ----------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sirhosp-historical-recovery.timer`  | `d1-recovery`       | `OnCalendar=*-*-* 05:00:00 America/Bahia` | `true`       | D-1 (dia anterior em `America/Bahia`) com os quatro extratores na ordem canônica `discharges, admissions, deaths, official_census` via `run_exit_reconciliation_runtime --mode d1`. |
+| `sirhosp-discharges.timer`           | `hourly-discharges` | `OnCalendar=*-*-* *:13:00 America/Bahia`  | `true`       | Altas do dia corrente via `run_exit_reconciliation_runtime --mode hourly` (13 minutos após cada hora).                                                                              |
+| `sirhosp-stale-reconciliation.timer` | `stale-sweep`       | `OnCalendar=*-*-* *:47:00 America/Bahia`  | `true`       | Varredura horária limitada de internações órfãs via `reconcile_stale_admissions` (lock advisory próprio, enfileira no máximo 100 confirmações, sem Playwright).                     |
 
 `America/Bahia` no literal `OnCalendar=` torna os agendamentos independentes do
 fuso do host. Os offsets fixos 05:00 / :13 / :47 (sem aleatorização de disparo) mantêm
@@ -1003,12 +1041,12 @@ docker compose --env-file .env -f compose.hospital.yml --profile recovery run \
 Os limiares abaixo são defaults seguros e **documentados como placeholders**
 aguardando calibração com carga real (nota RPSA-S11):
 
-| Threshold | Default horário | Default catch-up |
-| --- | ---: | ---: |
-| `max_latency_seconds` | `30.0` | `300.0` |
-| `max_error_rate` | `0.10` | `0.10` |
-| `max_db_seconds` | `15.0` | `180.0` |
-| `max_queue_depth` | `0` | `0` |
+| Threshold             | Default horário | Default catch-up |
+| --------------------- | --------------: | ---------------: |
+| `max_latency_seconds` |          `30.0` |          `300.0` |
+| `max_error_rate`      |          `0.10` |           `0.10` |
+| `max_db_seconds`      |          `15.0` |          `180.0` |
+| `max_queue_depth`     |             `0` |              `0` |
 
 Caveat de calibração da fila: `max_queue_depth` avalia a fila **residual**
 amostrada após o fechamento dos serviços síncronos, e não o pico
@@ -1093,7 +1131,7 @@ Procedimento autorizado:
    catálogo de internações dos pares afetados e/ou **revisão operador
    par-a-par** pela ferramenta protegida de revisão.
 6. **Rollback:** para reverter um lote, use `rollback_admission_reconciliation
-   --batch <uuid>` (valida o estado posterior de todos os itens e reverte
+--batch <uuid>` (valida o estado posterior de todos os itens e reverte
    atomicamente na ordem inversa) ou `--operation <uuid>` para uma operação.
    Assimetria documentada: o rollback reverte o estado das internações e anexa
    eventos inversos, mas as linhas de `DischargeRecord`/`DeathRecord` continuam
@@ -1207,12 +1245,12 @@ advisory próprios); esta suíte **não afirma exclusão mútua entre workflows*
 
 ### 5c.1 Propriedade adaptativa, fronteira declarada e fallback inerte
 
-| Runtime | Comando | Agendamento | O que faz |
-| --- | --- | --- | --- |
-| orquestrador adaptativo (`census_orchestrator`) | `materialize_daily_statistics --date <D-1>` | dentro do loop, na primeira drenagem segura depois da tentativa D-1 | Publica a revisão da data D-1 respeitando a fronteira e registra um aviso técnico quando a recuperação D-1 falhou ou não pôde ser comprovada. |
-| `sirhosp-daily-statistics.service` + `sirhosp-daily-statistics.timer` (fallback manual) | `materialize_daily_statistics --finalize` | `OnCalendar=*-*-* 07:30:00 America/Bahia` (timer desabilitado) | Fecha as datas locais elegíveis dentro de `STATISTICS_FINALIZATION_LOOKBACK_DAYS` quando o operador decide rodar a suíte manualmente. |
-| `sirhosp-discharges.timer` (fallback manual) | cadência intradiária de altas pelo scheduler da seção 5b | `OnCalendar=*-*-* *:13:00 America/Bahia` (timer desabilitado) | Repete a cadência que o orquestrador já executa naturalmente dentro do loop. |
-| `sirhosp-historical-recovery.timer` (fallback manual) | recuperação D-1 pelo scheduler da seção 5b | `OnCalendar=*-*-* 05:00:00 America/Bahia` (timer desabilitado) | Repete a recuperação D-1 que o orquestrador já executa naturalmente na janela `[01:00, 05:00)` `America/Bahia`. |
+| Runtime                                                                                 | Comando                                                  | Agendamento                                                         | O que faz                                                                                                                                     |
+| --------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| orquestrador adaptativo (`census_orchestrator`)                                         | `materialize_daily_statistics --date <D-1>`              | dentro do loop, na primeira drenagem segura depois da tentativa D-1 | Publica a revisão da data D-1 respeitando a fronteira e registra um aviso técnico quando a recuperação D-1 falhou ou não pôde ser comprovada. |
+| `sirhosp-daily-statistics.service` + `sirhosp-daily-statistics.timer` (fallback manual) | `materialize_daily_statistics --finalize`                | `OnCalendar=*-*-* 07:30:00 America/Bahia` (timer desabilitado)      | Fecha as datas locais elegíveis dentro de `STATISTICS_FINALIZATION_LOOKBACK_DAYS` quando o operador decide rodar a suíte manualmente.         |
+| `sirhosp-discharges.timer` (fallback manual)                                            | cadência intradiária de altas pelo scheduler da seção 5b | `OnCalendar=*-*-* *:13:00 America/Bahia` (timer desabilitado)       | Repete a cadência que o orquestrador já executa naturalmente dentro do loop.                                                                  |
+| `sirhosp-historical-recovery.timer` (fallback manual)                                   | recuperação D-1 pelo scheduler da seção 5b               | `OnCalendar=*-*-* 05:00:00 America/Bahia` (timer desabilitado)      | Repete a recuperação D-1 que o orquestrador já executa naturalmente na janela `[01:00, 05:00)` `America/Bahia`.                               |
 
 **Fronteira declarada.** `STATISTICS_ACTIVATION_DATE` (`YYYY-MM-DD`, local
 `America/Bahia`) no `.env` do hospital é entregue ao container persistente pelo
@@ -1332,17 +1370,17 @@ release imutável.
 
 Checks emitidos como `[preflight] check=<nome> status=PASS|FAIL`:
 
-| Check | O que prova |
-| --- | --- |
-| `release` | a tag existe, está publicada (não é draft) e a release é imutável |
-| `asset_match` | os onze assets instalados (Compose hospitalar, scheduler, preflight, os dois units de estatísticas e os seis units das cadências de saída) são byte a byte os da mesma tag |
-| `scheduler_contract` | o runtime canônico de quatro extratores (`discharges`, `admissions`, `deaths`, `official_census`) está no branch executável dos modos `hourly-discharges` e `d1-recovery` do scheduler |
-| `image_version` | `SIRHOSP_VERSION` do `.env` é igual à tag exata (prova host-level de que a imagem do Compose pertence à release) |
-| `activation_date` | `STATISTICS_ACTIVATION_DATE` declarada de forma inequívoca: data futura ou bootstrap da data corrente **antes das 20:00** `America/Bahia` |
-| `legacy_timer_state` | os timers `sirhosp-discharges.timer`, `sirhosp-historical-recovery.timer` e `sirhosp-daily-statistics.timer` continuam `disabled`/`inactive` (fallback manual inerte) |
-| `orchestrator_service` | o serviço conhecido `census_orchestrator` existe no Compose hospitalar |
-| `cadence_hourly_discharges` | existe o marcador agregado de sucesso hourly nas últimas 2 horas, **nos logs do orquestrador** |
-| `cadence_d1_recovery` | existe o marcador agregado de sucesso D-1 nas últimas 30 horas, **nos logs do orquestrador** |
+| Check                       | O que prova                                                                                                                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `release`                   | a tag existe, está publicada (não é draft) e a release é imutável                                                                                                                      |
+| `asset_match`               | os onze assets instalados (Compose hospitalar, scheduler, preflight, os dois units de estatísticas e os seis units das cadências de saída) são byte a byte os da mesma tag             |
+| `scheduler_contract`        | o runtime canônico de quatro extratores (`discharges`, `admissions`, `deaths`, `official_census`) está no branch executável dos modos `hourly-discharges` e `d1-recovery` do scheduler |
+| `image_version`             | `SIRHOSP_VERSION` do `.env` é igual à tag exata (prova host-level de que a imagem do Compose pertence à release)                                                                       |
+| `activation_date`           | `STATISTICS_ACTIVATION_DATE` declarada de forma inequívoca: data futura ou bootstrap da data corrente **antes das 20:00** `America/Bahia`                                              |
+| `legacy_timer_state`        | os timers `sirhosp-discharges.timer`, `sirhosp-historical-recovery.timer` e `sirhosp-daily-statistics.timer` continuam `disabled`/`inactive` (fallback manual inerte)                  |
+| `orchestrator_service`      | o serviço conhecido `census_orchestrator` existe no Compose hospitalar                                                                                                                 |
+| `cadence_hourly_discharges` | existe o marcador agregado de sucesso hourly nas últimas 2 horas, **nos logs do orquestrador**                                                                                         |
+| `cadence_d1_recovery`       | existe o marcador agregado de sucesso D-1 nas últimas 30 horas, **nos logs do orquestrador**                                                                                           |
 
 Dependências explícitas do host: `bash`, `curl`, `python3`, `cmp`, `systemctl`,
 `date`, `grep`, `mktemp`, `rm`, `docker`. A leitura do runtime usa uma interface
@@ -1714,20 +1752,20 @@ paciente/internação/evento, parâmetros, texto clínico, URL ou erro bruto.
 
 #### 6.1.1 Flags e interpretação
 
-| Flag | Default | Significado |
-| --- | ---: | --- |
-| `--window-hours` | `24` | Janela de avaliação em horas (positivo). |
-| `--settling-minutes` | `60` | Tempo mínimo após o fim do run de internações para exigir o full-sync correspondente (não negativo). |
-| `--max-active-age-minutes` | `120` | Idade máxima da run queued/running mais antiga entre intents suportados (positivo). |
-| `--max-full-sync-failure-percent` | `20.0` | Percentual máximo de falhas terminais de full-sync (0..100). |
-| `--min-full-sync-terminal-sample` | `5` | Amostra mínima terminal para a taxa alarmar (positivo). |
-| `--max-movement-age-hours` | desligado | Alarme de frescor da última `PatientMovement` (positivo quando ativo). |
-| `--max-admission-age-hours` | desligado | Alarme de frescor da última atualização de `Admission` (positivo quando ativo). |
-| `--max-event-age-hours` | desligado | Alarme de frescor do último `ClinicalEvent` (positivo quando ativo). |
-| `--missing-dates-max` (RPSA-S10) | `7` | Datas de extração de altas ausentes/incompletas aceitas antes do alarme de ação operacional (não negativo). |
-| `--backlog-age-max-hours` (RPSA-S10) | `48` | Idade máxima da evidência de reconciliação `pending`/`ambiguous` mais antiga (positivo). |
-| `--conflict-max-count` (RPSA-S10) | `0` | Evidências de reconciliação `conflict` toleradas (não negativo). |
-| `--duplicate-max-count` (RPSA-S10) | `0` | Pares de internações duplicadas confirmados pela fonte tolerados (não negativo). |
+| Flag                                 |   Default | Significado                                                                                                 |
+| ------------------------------------ | --------: | ----------------------------------------------------------------------------------------------------------- |
+| `--window-hours`                     |      `24` | Janela de avaliação em horas (positivo).                                                                    |
+| `--settling-minutes`                 |      `60` | Tempo mínimo após o fim do run de internações para exigir o full-sync correspondente (não negativo).        |
+| `--max-active-age-minutes`           |     `120` | Idade máxima da run queued/running mais antiga entre intents suportados (positivo).                         |
+| `--max-full-sync-failure-percent`    |    `20.0` | Percentual máximo de falhas terminais de full-sync (0..100).                                                |
+| `--min-full-sync-terminal-sample`    |       `5` | Amostra mínima terminal para a taxa alarmar (positivo).                                                     |
+| `--max-movement-age-hours`           | desligado | Alarme de frescor da última `PatientMovement` (positivo quando ativo).                                      |
+| `--max-admission-age-hours`          | desligado | Alarme de frescor da última atualização de `Admission` (positivo quando ativo).                             |
+| `--max-event-age-hours`              | desligado | Alarme de frescor do último `ClinicalEvent` (positivo quando ativo).                                        |
+| `--missing-dates-max` (RPSA-S10)     |       `7` | Datas de extração de altas ausentes/incompletas aceitas antes do alarme de ação operacional (não negativo). |
+| `--backlog-age-max-hours` (RPSA-S10) |      `48` | Idade máxima da evidência de reconciliação `pending`/`ambiguous` mais antiga (positivo).                    |
+| `--conflict-max-count` (RPSA-S10)    |       `0` | Evidências de reconciliação `conflict` toleradas (não negativo).                                            |
+| `--duplicate-max-count` (RPSA-S10)   |       `0` | Pares de internações duplicadas confirmados pela fonte tolerados (não negativo).                            |
 
 Invariantes batch-bound (qualquer contagem positiva torna unhealthy):
 
@@ -1982,11 +2020,11 @@ docker compose -f compose.yml -f compose.prod.yml exec -T web \
   --window-hours 168 --min-attempts 3 > /tmp/cfc-characterization.txt
 ```
 
-| Flag | Default | Significado |
-| --- | ---: | --- |
-| `--window-hours` | `168` | Janela de caracterização em horas (positivo). |
-| `--min-attempts` | `3` | Mínimo de runs terminais por paciente para entrar na coorte fail-only (exclui ruído de alta recente). |
-| `--max-per-stage-rows` | `5000` | Teto de segurança de linhas de perfil por estágio (positivo). |
+| Flag                   | Default | Significado                                                                                           |
+| ---------------------- | ------: | ----------------------------------------------------------------------------------------------------- |
+| `--window-hours`       |   `168` | Janela de caracterização em horas (positivo).                                                         |
+| `--min-attempts`       |     `3` | Mínimo de runs terminais por paciente para entrar na coorte fail-only (exclui ruído de alta recente). |
+| `--max-per-stage-rows` |  `5000` | Teto de segurança de linhas de perfil por estágio (positivo).                                         |
 
 Interpretação da saída: `cohort:` (pacientes fail-only, runs falhos,
 mediana/máximo de tentativas, idade da primeira/última falha),
@@ -2128,13 +2166,13 @@ rootless.
 
 Cada `intent` possui um limite de idade individual diferente:
 
-| Intent | Limite stale |
-| --- | ---: |
-| `admissions_only` | 20 min |
-| `demographics_only` | 20 min |
-| `full_sync` | 60 min |
-| `census_extraction` | 120 min |
-| vazio/desconhecido | 60 min |
+| Intent              | Limite stale |
+| ------------------- | -----------: |
+| `admissions_only`   |       20 min |
+| `demographics_only` |       20 min |
+| `full_sync`         |       60 min |
+| `census_extraction` |      120 min |
+| vazio/desconhecido  |       60 min |
 
 Uma run é candidata a stale quando:
 
@@ -2253,13 +2291,13 @@ Uma run marcada como `failed` pelo stale recovery é terminal:
 
 ## 8. Troubleshooting
 
-| Problema | Verificação |
-| --- | --- |
-| Orquestrador não inicia | `journalctl -u sirhosp-census-orch -n 30`: fila |
-| Stale running detected | `IngestionRun` `running` > 3h; ver seção 7 |
-| Stale recovery circuit breaker | Comando abortou sem mutar; ver workers/logs |
-| Extração de censo falha | `docker compose logs web`: credenciais |
-| Altas não extrai | `journalctl -u sirhosp-discharges -n 30`: credenciais |
-| Worker não processa | `docker compose logs worker`: fila, conexão DB |
-| Container não sobe | `docker compose logs web`: `.env`, secrets, porta |
-| Lock preso no orquestrador | Lock advisory liberado ao fechar sessão DB |
+| Problema                       | Verificação                                           |
+| ------------------------------ | ----------------------------------------------------- |
+| Orquestrador não inicia        | `journalctl -u sirhosp-census-orch -n 30`: fila       |
+| Stale running detected         | `IngestionRun` `running` > 3h; ver seção 7            |
+| Stale recovery circuit breaker | Comando abortou sem mutar; ver workers/logs           |
+| Extração de censo falha        | `docker compose logs web`: credenciais                |
+| Altas não extrai               | `journalctl -u sirhosp-discharges -n 30`: credenciais |
+| Worker não processa            | `docker compose logs worker`: fila, conexão DB        |
+| Container não sobe             | `docker compose logs web`: `.env`, secrets, porta     |
+| Lock preso no orquestrador     | Lock advisory liberado ao fechar sessão DB            |
