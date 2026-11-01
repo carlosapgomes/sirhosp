@@ -288,6 +288,11 @@ def test_census_run_uses_canonical_authenticated_bootstrap(
         "fechar_dialogos_iniciais",
         stop_after_authentication,
     )
+    # official_census still owns a save_debug error path; current_inpatients
+    # no longer defines one. Neutralize when present so the auth-regression
+    # probe does not depend on a writable debug/ directory (CI runners are
+    # non-root: mkdir would raise PermissionError instead of SystemExit).
+    monkeypatch.setattr(module, "save_debug", lambda _page: None, raising=False)
 
     with pytest.raises(expected_exception):
         module.run(**run_kwargs)
