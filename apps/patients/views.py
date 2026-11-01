@@ -139,6 +139,7 @@ def admission_list_view(
             trajectory.append({
                 "sector": m.sector,
                 "entry_date": m.movement_date,
+                "source_movement_at": m.source_movement_at,
                 "days": max(days, 0),
                 "origin": m.origin,
                 "discharge_type": m.discharge_type,

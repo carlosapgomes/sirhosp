@@ -59,7 +59,13 @@
             {% for item in trajectory %}
               <tr>
                 <td>{{ item.sector }}</td>
-                <td>{{ item.entry_date|date:"d/m/Y" }}</td>
+                <td>
+                  {% if item.source_movement_at %}
+                    {{ item.source_movement_at|date:"d/m/Y H:i" }}
+                  {% else %}
+                    {{ item.entry_date|date:"d/m/Y" }}
+                  {% endif %}
+                </td>
                 <td>{{ item.days }}</td>
                 <td>
                   {% if item.is_active %}

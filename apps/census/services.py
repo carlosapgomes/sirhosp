@@ -1001,6 +1001,7 @@ def upsert_patient_movements() -> dict:
                 "origin": snap.origem.strip(),
                 "bed": snap.leito.strip(),
                 "discharge_type": snap.tipo_alta.strip(),
+                "source_movement_at": snap.source_movement_at,
                 "first_seen_at": now,
                 "last_seen_at": now,
             },
@@ -1009,8 +1010,14 @@ def upsert_patient_movements() -> dict:
         if created:
             movements_created += 1
         else:
+            # D2: a snapshot with a time refreshes the stored value; a
+            # snapshot without a time never erases an already known time.
+            update_fields = ["last_seen_at"]
             movement.last_seen_at = now
-            movement.save(update_fields=["last_seen_at"])
+            if snap.source_movement_at is not None:
+                movement.source_movement_at = snap.source_movement_at
+                update_fields.append("source_movement_at")
+            movement.save(update_fields=update_fields)
             movements_updated += 1
 
         touched_patients.add(patient.pk)

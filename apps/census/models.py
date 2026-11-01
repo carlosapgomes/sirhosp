@@ -755,6 +755,14 @@ class PatientMovement(models.Model):
     last_seen_at = models.DateTimeField(
         help_text="Último snapshot (atualizado a cada repetição)",
     )
+    source_movement_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Optional real movement timestamp supplied by the source census "
+            "snapshot; null when the source only carried a date or no value"
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
