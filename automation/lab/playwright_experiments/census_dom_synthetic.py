@@ -636,8 +636,11 @@ function chooseSector(index) {
     : CATALOG.sectors.findIndex(candidate => candidate.label === sector.click_selects);
   const target = targetIndex >= 0 ? CATALOG.sectors[targetIndex] : sector;
   state.selected = targetIndex >= 0 ? targetIndex : index;
-  input.value = target.code;
-  descriptionLabel.textContent = target.description;
+  // Real portal shape (probed 2026-11-01): the input keeps the internal
+  // unit id while sgDescricaoLabel carries the full native
+  // "code - description" identity.
+  input.value = String(1000 + (targetIndex >= 0 ? targetIndex : index));
+  descriptionLabel.textContent = target.label;
   panel.style.display = 'none';
 }
 

@@ -486,9 +486,13 @@ def scenario_selection(ec: Any, pw: Any) -> dict[str, Any]:
             frame, page, pediatric["label"]
         )
         info = ec.get_current_setor_info(frame)
+        try:
+            ec._confirm_selected_setor(pediatric["label"], info)
+            confirmed = True
+        except ec.CensusExtractionError:
+            confirmed = False
         checks["accented_confirmed"] = (
-            info.get("codigo") == "4 8"
-            and "PEDIÁTRICA" in (info.get("nome") or "")
+            confirmed and "PEDIÁTRICA" in (info.get("nome") or "")
         )
         checks["shared_north"] = ec.select_setor(
             frame, page, north["label"]
@@ -499,8 +503,8 @@ def scenario_selection(ec: Any, pw: Any) -> dict[str, Any]:
         )
         south_info = ec.get_current_setor_info(frame)
         checks["shared_codes_distinct"] = (
-            north_info.get("codigo") == "5 1"
-            and south_info.get("codigo") == "5 1"
+            north_info.get("nome") == north["label"]
+            and south_info.get("nome") == south["label"]
             and north_info.get("nome") != south_info.get("nome")
         )
         checks["absent_rejected"] = not ec.select_setor(
@@ -735,12 +739,34 @@ def _tooltip_catalog() -> dict[str, Any]:
         ],
         global_tip="05/05/2026 05:55",
     )
+    observation = make_sector(
+        "20 10",
+        "TOOLTIP OBSERVACAO",
+        [
+            make_row(
+                "T-10",
+                "SYN-T-10",
+                "PACIENTE SINTÉTICO T10",
+                dt_int="01/02",
+                int_tip=(
+                    "01/02/2026 05:00Tempo em observação exce"
+                    "dendo o limite administrativo"
+                ),
+                dt_mvt="02/02",
+                mvt_tip=(
+                    "02/02/2026 06:00 Tempo em observação da"
+                    " unidade de emergência"
+                ),
+            )
+        ],
+    )
     return {
         "sectors": [
             correct,
             empty,
             attribute,
             delayed,
+            observation,
             ambiguous,
             invalid,
             mismatched,
@@ -799,6 +825,13 @@ def scenario_tooltips(ec: Any, pw: Any) -> dict[str, Any]:
                         and patients[0]["dt_int"] == "01/02/2026 06:00"
                         and round(time.monotonic() - started, 3) >= 2.0,
                         "reason": "delayed_initialization",
+                    }
+                elif sector["code"] == "20 10":
+                    results[name] = {
+                        "ok": bool(patients)
+                        and patients[0]["dt_int"] == "01/02/2026 05:00"
+                        and patients[0]["dt_mvt"] == "02/02/2026 06:00",
+                        "reason": "observation_suffix_extracted",
                     }
                 elif sector["code"] == "20 9":
                     results[name] = {

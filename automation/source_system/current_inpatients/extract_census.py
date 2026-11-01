@@ -480,7 +480,6 @@ _READ_PAGE_JS = r"""
             && rect.height > 0
         );
     };
-    const datetime = /^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}$/;
     const headers = Array.from(
         table.querySelectorAll('thead th'),
         (th) => clean(
@@ -493,11 +492,21 @@ _READ_PAGE_JS = r"""
         window.PrimeFaces?.widget?.Tooltip
         && widget instanceof window.PrimeFaces.widget.Tooltip
     );
+    const datetimePattern = /\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}/g;
     const candidatesFor = (cell) => {
         if (!cell) return [];
         const nodes = [cell, ...cell.querySelectorAll('*')];
         const ids = new Set(nodes.map((node) => node.id).filter(Boolean));
         const candidates = [];
+        // Observation-sector tooltips carry the timestamp followed by
+        // extra administrative text; the exact "DD/MM/AAAA HH:MM" pattern
+        // is extracted from anywhere in the content, and every distinct
+        // match counts so a second timestamp still surfaces as ambiguity.
+        const addDatetimeMatches = (text) => {
+            for (const match of String(text || '').matchAll(datetimePattern)) {
+                candidates.push(match[0]);
+            }
+        };
         for (const node of nodes) {
             for (const attribute of [
                 'title',
@@ -506,8 +515,7 @@ _READ_PAGE_JS = r"""
                 'data-tooltip',
                 'data-title',
             ]) {
-                const value = clean(node.getAttribute(attribute));
-                if (datetime.test(value)) candidates.push(value);
+                addDatetimeMatches(clean(node.getAttribute(attribute)));
             }
         }
         for (const widget of tooltipWidgets) {
@@ -521,8 +529,7 @@ _READ_PAGE_JS = r"""
                 document.getElementById(widget.cfg?.id),
                 widget.jq?.[0],
             ]) {
-                const value = clean(element?.textContent);
-                if (datetime.test(value)) candidates.push(value);
+                addDatetimeMatches(clean(element?.textContent));
             }
         }
         return [...new Set(candidates)];
@@ -748,6 +755,22 @@ def _confirm_selected_setor(
     if requested_identity is None:
         requested_key = _identity_key(normalize_setor_label(requested))
         if not requested_key or requested_key not in selected_description_key:
+            raise CensusExtractionError(SECTOR_SELECTION_MISMATCH_REASON)
+        return
+
+    # The real portal fills the input with the internal unit id (e.g.
+    # "780") and keeps the native identity in sgDescricaoLabel as the
+    # full "code - description" label. When the label itself carries the
+    # native identity, it is the authoritative source; the separate input
+    # code is only consulted for panels whose label is description-only.
+    selected_identity = parse_setor_identity(selected_name)
+    if selected_identity is not None:
+        if (
+            selected_identity["code_key"]
+            != requested_identity["code_key"]
+            or selected_identity["description_key"]
+            != requested_identity["description_key"]
+        ):
             raise CensusExtractionError(SECTOR_SELECTION_MISMATCH_REASON)
         return
 
@@ -1278,24 +1301,21 @@ def extract_setores(
         return []
 
     # Some panels render rows lazily on scroll; collect the full list by
-    # scrolling in bounded steps and merging every read.
-    stale_reads = 0
+    # scrolling in bounded steps and merging every read. Completeness is
+    # proven only by the panel's explicit bottom: a read that adds nothing
+    # does NOT mean the end (the real portal renders every row up front),
+    # so the loop keeps scrolling until the bottom signal or the bound.
+    # The bound is the fail-closed guard for panels whose scroll never
+    # confirms a bottom; hitting it leaves "complete" false.
     complete = False
     for _ in range(MAX_SETOR_PANEL_SCROLLS):
         if _scroll_setor_panel(frame, page):
             complete = True
             break
         more = dedupe_setores(_read_setores_from_dom(frame))
-        before = len(setores)
         for label in more:
             if label not in setores:
                 setores.append(label)
-        if len(setores) == before:
-            stale_reads += 1
-            if stale_reads >= 2:
-                break
-        else:
-            stale_reads = 0
 
     _close_setor_dropdown(frame)
     if status is not None:
@@ -1953,10 +1973,21 @@ def run(
                         # Extrair código e nome completo após pesquisar
                         setor_info = get_current_setor_info(frame)
                         _confirm_selected_setor(setor, setor_info)
-                        setor_codigo = setor_info.get("codigo", "")
-                        setor_nome_completo = (
-                            setor_info.get("nome") or setor
-                        )
+                        # A identidade nativa canônica (código + descrição do
+                        # dropdown) é a do label pedido, já confirmada acima;
+                        # o input real guarda o id interno da unidade e o
+                        # label real traz "código - descrição" completos.
+                        requested_identity = parse_setor_identity(setor)
+                        if requested_identity is not None:
+                            setor_codigo = requested_identity["code"]
+                            setor_nome_completo = (
+                                requested_identity["description"]
+                            )
+                        else:
+                            setor_codigo = setor_info.get("codigo", "")
+                            setor_nome_completo = (
+                                setor_info.get("nome") or setor
+                            )
 
                         tem_pacientes = _result_has_patients(
                             refreshed_result

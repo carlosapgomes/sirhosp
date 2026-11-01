@@ -219,14 +219,50 @@ class TestSectorIdentity:
             "4C - CLINICA MÉDICA PEDIÁTRICA - HGRS"
         )
 
+    def test_confirm_accepts_real_portal_internal_id_with_full_label(
+        self,
+    ) -> None:
+        """Real portal: the input holds the internal unit id (e.g. "780")
+        while sgDescricaoLabel carries the full native "code - description".
+        Identity must come from the native label, not the internal id.
+        """
+        ec._confirm_selected_setor(
+            "0 - CENTRO CIRURGICO HGRS",
+            {
+                "codigo": "780",
+                "nome": "0 - CENTRO CIRURGICO HGRS",
+            },
+        )
+
+    def test_confirm_rejects_internal_id_label_of_other_sector(self) -> None:
+        with pytest.raises(ec.CensusExtractionError) as error:
+            ec._confirm_selected_setor(
+                "0 - CENTRO CIRURGICO HGRS",
+                {
+                    "codigo": "781",
+                    "nome": "0 - EMERGENCIA HGRS",
+                },
+            )
+        assert error.value.reason == ec.SECTOR_SELECTION_MISMATCH_REASON
+
     def test_confirm_accepts_accented_native_description(self) -> None:
         requested = "4 8 - 4C - CLINICA MÉDICA PEDIÁTRICA - HGRS"
         ec._confirm_selected_setor(
             requested,
             {
-                "codigo": "4 8",
-                "nome": "4C - CLINICA MÉDICA PEDIÁTRICA - HGRS",
+                "codigo": "912",
+                "nome": "4 8 - 4C - CLINICA MÉDICA PEDIÁTRICA - HGRS",
             },
+        )
+
+    def test_confirm_accepts_description_only_label_with_input_code(
+        self,
+    ) -> None:
+        """Panels whose label is description-only still confirm through the
+        separate input code (synthetic contract retained)."""
+        ec._confirm_selected_setor(
+            "4 8 - CLINICA MÉDICA",
+            {"codigo": "4 8", "nome": "CLINICA MÉDICA"},
         )
 
     def test_confirm_rejects_shared_code_with_other_description(self) -> None:

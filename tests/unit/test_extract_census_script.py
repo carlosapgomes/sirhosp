@@ -265,6 +265,32 @@ class TestExtractSetoresCollection:
 
         assert result == ["UTI A", "ENF B"]
 
+    def test_static_panel_without_lazy_loading_is_complete(self) -> None:
+        """Real portal shape: every row is rendered up front.
+
+        Reads never grow after the first one (no lazy loading), but the
+        scroll container still advances until its explicit bottom. The
+        discovery must keep scrolling for that bottom instead of abandoning
+        completeness on stable reads.
+        """
+        frame = MagicMock()
+        page = MagicMock()
+        status: dict[str, bool] = {"complete": True}
+        scrolls = [False, False, False, True]
+
+        with (
+            patch.object(ec, "safe_click", return_value=True),
+            patch.object(ec, "wait_ajax_idle"),
+            patch.object(
+                ec, "_read_setores_from_dom", return_value=["UTI A", "ENF B"]
+            ),
+            patch.object(ec, "_scroll_setor_panel", side_effect=scrolls),
+        ):
+            result = ec.extract_setores(frame, page, status=status)
+
+        assert result == ["UTI A", "ENF B"]
+        assert status["complete"] is True
+
     def test_returns_empty_when_nothing_discovered(self) -> None:
         frame = MagicMock()
         page = MagicMock()
@@ -279,15 +305,17 @@ class TestExtractSetoresCollection:
     def test_bounds_scroll_attempts(self) -> None:
         frame = MagicMock()
         page = MagicMock()
+        status: dict[str, bool] = {"complete": True}
         with (
             patch.object(ec, "safe_click", return_value=True),
             patch.object(ec, "wait_ajax_idle"),
             patch.object(ec, "_read_setores_from_dom", return_value=["UTI A"]),
             patch.object(ec, "_scroll_setor_panel", return_value=False) as scroll,
         ):
-            result = ec.extract_setores(frame, page)
+            result = ec.extract_setores(frame, page, status=status)
         assert result == ["UTI A"]
-        assert scroll.call_count <= ec.MAX_SETOR_PANEL_SCROLLS
+        assert scroll.call_count == ec.MAX_SETOR_PANEL_SCROLLS
+        assert status["complete"] is False
 
     def test_scroll_panel_stops_at_bottom(self) -> None:
         frame = MagicMock()
