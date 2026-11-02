@@ -161,6 +161,72 @@ class TestNormalizationAndEligibility:
         assert patient["dt_int"] == "01/02/2026 08:15"
 
 
+class TestSectorCsvIdentity:
+    """CSV sector identity contract (XLSX parity / capacity catalog).
+
+    The CSV code column carries the internal unit id held by the suggestion
+    input; the native label only confirms the selection. Its code part is a
+    ward prefix from a different code space and must never be published as
+    the CSV code (production regression: occupancy measurements matched
+    zero patients against the official catalog).
+    """
+
+    def test_ward_prefix_is_replaced_by_internal_unit_id(self) -> None:
+        code, name = ec.resolve_sector_csv_identity(
+            "1 6 - 1A - CIRURGIA GERAL - HGRS",
+            {
+                "codigo": "640",
+                "nome": "1 6 - 1A - CIRURGIA GERAL - HGRS",
+            },
+        )
+        assert code == "640"
+        assert name == "1 6 - 1A - CIRURGIA GERAL - HGRS"
+
+    def test_uti_prefix_is_replaced_by_internal_unit_id(self) -> None:
+        code, _name = ec.resolve_sector_csv_identity(
+            "0 T - UTI GERAL ADULTO 2 - HGRS",
+            {
+                "codigo": "634",
+                "nome": "0 T - UTI GERAL ADULTO 2 - HGRS",
+            },
+        )
+        assert code == "634"
+
+    def test_auxiliary_sector_keeps_internal_id_and_full_label(self) -> None:
+        code, name = ec.resolve_sector_csv_identity(
+            "751 - SALA DE PROCEDIMENTO ADULTO - HGRS",
+            {
+                "codigo": "751",
+                "nome": "751 - SALA DE PROCEDIMENTO ADULTO - HGRS",
+            },
+        )
+        assert code == "751"
+        assert name == "751 - SALA DE PROCEDIMENTO ADULTO - HGRS"
+
+    def test_description_only_label_keeps_input_code(self) -> None:
+        code, name = ec.resolve_sector_csv_identity(
+            "4 8 - CLINICA MÉDICA",
+            {"codigo": "4 8", "nome": "CLINICA MÉDICA"},
+        )
+        assert code == "4 8"
+        assert name == "CLINICA MÉDICA"
+
+    def test_empty_input_falls_back_to_requested_prefix(self) -> None:
+        code, name = ec.resolve_sector_csv_identity(
+            "1 6 - 1A - CIRURGIA GERAL - HGRS",
+            {"codigo": "", "nome": "1 6 - 1A - CIRURGIA GERAL - HGRS"},
+        )
+        assert code == "1 6"
+        assert name == "1 6 - 1A - CIRURGIA GERAL - HGRS"
+
+    def test_empty_label_falls_back_to_requested_label(self) -> None:
+        code, name = ec.resolve_sector_csv_identity(
+            "5 1 - ALA NORTE", {"codigo": "5 1", "nome": ""}
+        )
+        assert code == "5 1"
+        assert name == "5 1 - ALA NORTE"
+
+
 class TestSourceTooltip:
     def test_single_associated_timestamp_is_used(self) -> None:
         value = ec.enrich_source_timestamp(

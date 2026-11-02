@@ -136,7 +136,19 @@ def _run_operational(
         artifacts = sorted(
             path.name for path in output.iterdir() if path.is_file()
         )
-        csv_facts = _csv_facts(csv_files[0]) if len(csv_files) == 1 else None
+        csv_facts = (
+            _csv_facts(
+                csv_files[0],
+                expected_identity={
+                    sector["label"]: str(1000 + index)
+                    for index, sector in enumerate(
+                        catalog["sectors"]
+                    )
+                },
+            )
+            if len(csv_files) == 1
+            else None
+        )
         external_requests = [
             url for url in requests if not url.startswith(server.url)
         ]
@@ -152,8 +164,16 @@ def _run_operational(
     }
 
 
-def _csv_facts(path: Path) -> dict[str, int]:
-    """Aggregate-only facts about one produced transport CSV."""
+def _csv_facts(
+    path: Path,
+    expected_identity: dict[str, str] | None = None,
+) -> dict[str, int]:
+    """Aggregate-only facts about one produced transport CSV.
+
+    ``expected_identity`` maps the full native label to the internal unit
+    id; when provided, rows whose ``(setor, setor_codigo)`` pair deviates
+    from the catalog identity are counted as mismatches.
+    """
     rows = _read_csv(path)
     positions: dict[tuple[str, ...], int] = {}
     for row in rows:
@@ -164,6 +184,11 @@ def _csv_facts(path: Path) -> dict[str, int]:
             row.get("dt_mvt", ""),
         )
         positions[key] = positions.get(key, 0) + 1
+    identity_pairs = (
+        {(label, code) for label, code in expected_identity.items()}
+        if expected_identity is not None
+        else None
+    )
     return {
         "rows": len(rows),
         "distinct_sectors": len(
@@ -187,6 +212,19 @@ def _csv_facts(path: Path) -> dict[str, int]:
             for row in rows
             if ":" in (row.get("dt_int") or "")
             and ":" in (row.get("dt_mvt") or "")
+        ),
+        "sector_identity_mismatches": (
+            sum(
+                1
+                for row in rows
+                if (
+                    row.get("setor", ""),
+                    row.get("setor_codigo", ""),
+                )
+                not in (identity_pairs or set())
+            )
+            if identity_pairs is not None
+            else 0
         ),
     }
 
@@ -400,6 +438,7 @@ def scenario_full_catalog(ec: Any, pw: Any) -> dict[str, Any]:
         and facts.get("bed_label_rows") == 41
         and facts.get("duplicate_position_rows") == 2
         and facts.get("date_values_without_hour") == 0
+        and facts.get("sector_identity_mismatches") == 0
         and result["external_requests"] == 0
     )
     return {

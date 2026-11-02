@@ -735,6 +735,28 @@ def parse_setor_identity(label: str | None) -> dict[str, str] | None:
     }
 
 
+def resolve_sector_csv_identity(
+    requested: str, info: dict[str, str]
+) -> tuple[str, str]:
+    """Resolve the transport CSV sector identity ``(code, full label)``.
+
+    Downstream parity contract (historical XLSX export and the official
+    capacity catalog): the CSV code column carries the internal unit id
+    held by the suggestion input, and the name column carries the full
+    native ``"code - description"`` label. The native label is
+    authoritative only for selection confirmation; its code part is a ward
+    prefix from a different code space and must never be published as the
+    CSV code.
+    """
+    selected_code = normalize_setor_label(info.get("codigo"))
+    selected_label = normalize_setor_label(info.get("nome"))
+    requested_identity = parse_setor_identity(requested)
+    code = selected_code or (
+        requested_identity["code"] if requested_identity is not None else ""
+    )
+    return code, selected_label or requested
+
+
 def _confirm_selected_setor(
     requested: str, info: dict[str, str]
 ) -> None:
@@ -1973,21 +1995,15 @@ def run(
                         # Extrair código e nome completo após pesquisar
                         setor_info = get_current_setor_info(frame)
                         _confirm_selected_setor(setor, setor_info)
-                        # A identidade nativa canônica (código + descrição do
-                        # dropdown) é a do label pedido, já confirmada acima;
-                        # o input real guarda o id interno da unidade e o
-                        # label real traz "código - descrição" completos.
-                        requested_identity = parse_setor_identity(setor)
-                        if requested_identity is not None:
-                            setor_codigo = requested_identity["code"]
-                            setor_nome_completo = (
-                                requested_identity["description"]
-                            )
-                        else:
-                            setor_codigo = setor_info.get("codigo", "")
-                            setor_nome_completo = (
-                                setor_info.get("nome") or setor
-                            )
+                        # Identidade do CSV (paridade XLSX/catálogo): a
+                        # coluna código carrega o id interno da unidade que
+                        # o input guarda; o label nativo apenas confirma a
+                        # seleção e seu prefixo de ala pertence a outro
+                        # espaço de códigos — nunca é o código do CSV.
+                        (
+                            setor_codigo,
+                            setor_nome_completo,
+                        ) = resolve_sector_csv_identity(setor, setor_info)
 
                         tem_pacientes = _result_has_patients(
                             refreshed_result

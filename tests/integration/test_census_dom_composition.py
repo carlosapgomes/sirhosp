@@ -236,7 +236,7 @@ def test_browser_dom_handoff_and_rejection(
     assert second["movements_created"] == 0
     movement = PatientMovement.objects.get(
         patient__patient_source_key="SYN-G001",
-        sector="ALA SINTÉTICA 01",
+        sector=generic_sector(1)["label"],
     )
     assert movement.movement_date == date(2026, 2, 6)
 
