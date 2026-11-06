@@ -20,3 +20,4 @@ research/codegen/
 db_backups/
 tmp/
 .pi-web/
+.pi/
