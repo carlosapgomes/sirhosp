@@ -53,13 +53,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 
 from django.db.models.functions import Trim
 
+from apps.census.bed_ordering import (
+    natural_bed_order_key as natural_bed_order_key,
+)
 from apps.census.models import BedStatus, CensusSnapshot, OccupancyMeasurement
 from apps.census.occupancy import (
     assign_official_group_keys,
@@ -134,9 +136,6 @@ _CLINICAL_EXIT_KINDS: frozenset[str] = frozenset(
 )
 """Exit kinds whose episode already carries a clinical moment of its own."""
 
-_BED_TOKEN_RE = re.compile(r"(\d+)")
-
-
 class EventDerivationError(Exception):
     """The selected window cannot produce detected report events."""
 
@@ -185,32 +184,6 @@ def exit_event_label(*, kind: str, destination_sector_id: int | None) -> str | N
     ):
         return TRANSFER_LABEL_UNIDENTIFIED_DESTINATION
     return None
-
-
-def natural_bed_order_key(*, bed: str, name: str, record: str) -> tuple[object, ...]:
-    """Natural ordering key of one report row that carries a bed.
-
-    Bed labels sort by their alphanumeric segments, so ``2`` precedes ``10``
-    and ``UTI02`` precedes ``UTI10``. Rows without a bed come after every row
-    with a bed, and normalized name and record break the remaining ties.
-    """
-    cleaned = bed.strip()
-    return (
-        0 if cleaned else 1,
-        _bed_tokens(cleaned),
-        _normalized_text(name),
-        record.strip(),
-    )
-
-
-def _bed_tokens(bed: str) -> tuple[tuple[int, object], ...]:
-    """Numeric-aware tokens of one bed label; digits sort before letters."""
-    tokens: list[tuple[int, object]] = []
-    for part in _BED_TOKEN_RE.split(bed):
-        if not part:
-            continue
-        tokens.append((0, int(part)) if part.isdigit() else (1, part.upper()))
-    return tuple(tokens)
 
 
 def _normalized_text(value: str) -> str:

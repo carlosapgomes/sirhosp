@@ -22,6 +22,7 @@ from django.db import transaction
 from django.db.models import Prefetch, QuerySet
 from django.utils import timezone
 
+from apps.census.bed_ordering import natural_bed_key, natural_bed_order_key
 from apps.census.models import (
     BedStatus,
     CalculationPolicy,
@@ -3124,7 +3125,8 @@ def _physical_sector_rows(
         by_key: dict[tuple[str, str], list[_ObservedRow]] = defaultdict(list)
         for row in keyed_by_source[source]:
             by_key[(_normalize_identity(row.bed), source)].append(row)
-        for key_rows in by_key.values():
+        for key in sorted(by_key, key=lambda item: natural_bed_key(item[0])):
+            key_rows = by_key[key]
             outcome = _classify_key_rows(key_rows)
             if outcome.position is not None:
                 positions_by_status[outcome.position.status] += 1
@@ -3759,7 +3761,7 @@ def _v4_source_summary(
             continue
         by_bed[bed].append(row)
 
-    for bed in sorted(by_bed):
+    for bed in sorted(by_bed, key=natural_bed_key):
         key_rows = by_bed[bed]
         outcome = _classify_key_rows_v4(key_rows, partitioned=partitioned)
         duplicate_extra_rows += outcome.duplicate_extra_rows
@@ -4438,7 +4440,10 @@ def _v5_patient_item(
     return _V5PatientItem(
         record=patient.record,
         names=sorted(patient.names),
-        beds=sorted({line.bed for line in patient.lines if line.bed}),
+        beds=sorted(
+            {line.bed for line in patient.lines if line.bed},
+            key=natural_bed_key,
+        ),
         missing_bed=any(not line.bed for line in patient.lines),
         source_codes=sorted(
             {line.code for line in patient.lines if line.code}
@@ -4449,6 +4454,30 @@ def _v5_patient_item(
             len(patient.lines) if len(patient.names) > 1 else 0
         ),
     )
+
+
+def _v5_patient_order_key(item: _V5PatientItem) -> tuple[object, ...]:
+    """Order one v5 patient item by its first bed in natural bed order.
+
+    The item's beds are already naturally sorted, so the first bed is the
+    patient's position in the sector list; patients without a bed sort
+    last, with name and record as tie-breakers.
+    """
+    return natural_bed_order_key(
+        bed=item.beds[0] if item.beds else "",
+        name=item.names[0] if item.names else "",
+        record=item.record,
+    )
+
+
+def _v5_operational_order_key(row: _V5OperationalRow) -> tuple[object, ...]:
+    """Order one v5 operational row by bed, then status and source code."""
+    return (natural_bed_key(row.bed), row.status, row.source_code)
+
+
+def _v5_incomplete_order_key(row: _V5IncompleteRow) -> tuple[object, ...]:
+    """Order one v5 incomplete-identity row by bed, name and record."""
+    return natural_bed_order_key(bed=row.bed, name=row.name, record=row.record)
 
 
 def _v5_source_block(
@@ -4486,7 +4515,9 @@ def _v5_shared_beds(
             bed_records[bed].add(patient.record)
     return [
         _V5SharedBedCase(bed=bed, patient_count=len(records))
-        for bed, records in sorted(bed_records.items())
+        for bed, records in sorted(
+            bed_records.items(), key=lambda item: natural_bed_key(item[0])
+        )
         if len(records) > 1
     ]
 
@@ -4501,7 +4532,9 @@ def _v5_shared_states(
             bed_states[row.bed].add(row.status)
     return [
         _V5SharedStateCase(bed=bed, state_count=len(states))
-        for bed, states in sorted(bed_states.items())
+        for bed, states in sorted(
+            bed_states.items(), key=lambda item: natural_bed_key(item[0])
+        )
         if len(states) > 1
     ]
 
@@ -4688,11 +4721,13 @@ def _v5_units(
                     )
                     for code in codes
                 ],
-                patients=sorted(
-                    unit_patients, key=lambda item: (item.record, item.names)
+                patients=sorted(unit_patients, key=_v5_patient_order_key),
+                operational_rows=sorted(
+                    unit_operational, key=_v5_operational_order_key
                 ),
-                operational_rows=unit_operational,
-                incomplete_rows=unit_incomplete,
+                incomplete_rows=sorted(
+                    unit_incomplete, key=_v5_incomplete_order_key
+                ),
                 shared_beds=_v5_shared_beds(unit_patients),
                 shared_state_beds=_v5_shared_states(unit_operational),
             )
@@ -4779,11 +4814,13 @@ def _v5_unmapped_units(
                         operational_rows=unit_operational,
                     )
                 ],
-                patients=sorted(
-                    unit_patients, key=lambda item: (item.record, item.names)
+                patients=sorted(unit_patients, key=_v5_patient_order_key),
+                operational_rows=sorted(
+                    unit_operational, key=_v5_operational_order_key
                 ),
-                operational_rows=unit_operational,
-                incomplete_rows=unit_incomplete,
+                incomplete_rows=sorted(
+                    unit_incomplete, key=_v5_incomplete_order_key
+                ),
                 shared_beds=_v5_shared_beds(unit_patients),
                 shared_state_beds=_v5_shared_states(unit_operational),
                 is_unmapped=True,

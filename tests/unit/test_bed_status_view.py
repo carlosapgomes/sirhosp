@@ -5474,3 +5474,221 @@ class TestBedOperationalDetailPage:
         # the topbar freshness context processor) — no per-row query.
         assert len(run_scoped) == 1
         assert len(snapshot_queries) <= 3
+
+
+# ---------------------------------------------------------------------------
+# Bed ordering inside each sector collapsible of /beds/
+#
+# The sector lists must follow the natural order of the bed identifier
+# (``2`` before ``10``, ``UTI02`` before ``UTI10``), not the lexicographic
+# order of the raw identifier text nor the patient record order.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestBedStatusBedOrdering:
+    """Beds inside one sector collapsible follow natural bed order."""
+
+    @staticmethod
+    def _at(local_date, hour=12):
+        return timezone.make_aware(
+            datetime.combine(local_date, time(hour=hour)),
+            timezone.get_current_timezone(),
+        )
+
+    @staticmethod
+    def _run():
+        return IngestionRun.objects.create(
+            intent="census_extraction", status="succeeded"
+        )
+
+    @staticmethod
+    def _snapshot(
+        run,
+        *,
+        captured_at,
+        code,
+        sector,
+        status=BedStatus.EMPTY,
+        patient_marker="",
+        age_band=None,
+        bed=None,
+        record=None,
+    ):
+        return CensusSnapshot.objects.create(
+            ingestion_run=run,
+            captured_at=captured_at,
+            setor_codigo=code,
+            setor=sector,
+            leito=bed if bed is not None else "",
+            prontuario=(
+                record
+                if record is not None
+                else (patient_marker if status == BedStatus.OCCUPIED else "")
+            ),
+            nome=(
+                f"Synthetic Patient {patient_marker}"
+                if status == BedStatus.OCCUPIED
+                else status.upper()
+            ),
+            especialidade="SYN",
+            bed_status=status,
+            age_band=(
+                age_band
+                if age_band is not None
+                else ("not_applicable" if status != BedStatus.OCCUPIED else "unknown")
+            ),
+        )
+
+    @staticmethod
+    def _catalog(effective_from, algorithm_version):
+        catalog = CapacityCatalogVersion.objects.create(
+            effective_from=effective_from,
+            source_reference=f"synthetic {algorithm_version} ordering catalog",
+            source_sha256=(f"{effective_from:%Y%m%d}" + "c" * 64)[:64],
+            schema_version="3.0",
+            algorithm_version=algorithm_version,
+        )
+        group = CapacityGroupDefinition.objects.create(
+            catalog=catalog,
+            stable_key="A",
+            display_name="Group A",
+            official_capacity=20,
+            calculation_policy=CalculationPolicy.STANDARD,
+        )
+        CapacitySectorMembership.objects.create(
+            catalog=catalog,
+            group=group,
+            source_code="100",
+            configured_source_name="Sector A",
+            source_display_name="Setor A",
+            age_selector="all",
+        )
+        return catalog
+
+    def _materialize(self, run_id):
+        from apps.census.occupancy import materialize_occupancy_measurement
+
+        return materialize_occupancy_measurement(run_id=run_id)
+
+    def test_v5_patients_ordered_naturally_by_bed(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, "occupancy-v5")
+        run = self._run()
+        captured_at = self._at(today)
+        # Records ascend in the opposite order of the natural bed order, so
+        # sorting by record (or lexicographically by bed) cannot pass.
+        for bed, record in (
+            ("10", "5001"),
+            ("2", "5002"),
+            ("UTI10", "5003"),
+            ("UTI02", "5004"),
+            ("", "5005"),
+        ):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                patient_marker=f"REC-{record}",
+                record=record,
+                age_band="age_12_or_over",
+                bed=bed,
+            )
+        self._materialize(run.pk)
+        response = admin_client.get(reverse("census:bed_status"))
+        assert response.status_code == 200
+        patients = response.context["units"][0].patients
+        assert [p.beds[0] if p.beds else "" for p in patients] == [
+            "2",
+            "10",
+            "UTI02",
+            "UTI10",
+            "",
+        ]
+
+    def test_v5_patient_beds_listed_in_natural_order(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, "occupancy-v5")
+        run = self._run()
+        captured_at = self._at(today)
+        for bed in ("10", "2"):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                patient_marker="REC-DUP",
+                record="6001",
+                age_band="age_12_or_over",
+                bed=bed,
+            )
+        self._materialize(run.pk)
+        response = admin_client.get(reverse("census:bed_status"))
+        patient = response.context["units"][0].patients[0]
+        assert patient.beds == ["2", "10"]
+
+    def test_v5_operational_rows_ordered_naturally_by_bed(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, "occupancy-v5")
+        run = self._run()
+        captured_at = self._at(today)
+        for bed in ("10", "2", "UTI10", "UTI02"):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="100",
+                sector="Sector A",
+                status=BedStatus.EMPTY,
+                bed=bed,
+            )
+        self._materialize(run.pk)
+        response = admin_client.get(reverse("census:bed_status"))
+        rows = response.context["units"][0].operational_rows
+        assert [row.bed for row in rows] == ["2", "10", "UTI02", "UTI10"]
+
+    def test_v4_positions_ordered_naturally_by_bed(self, admin_client):
+        today = timezone.localdate()
+        self._catalog(today, "occupancy-v4")
+        run = self._run()
+        captured_at = self._at(today)
+        for index, bed in enumerate(("10", "2", "UTI10", "UTI02")):
+            self._snapshot(
+                run,
+                captured_at=captured_at,
+                code="100",
+                sector="Sector A",
+                status=BedStatus.OCCUPIED,
+                patient_marker=f"800{index}",
+                record=f"800{index}",
+                age_band="age_12_or_over",
+                bed=bed,
+            )
+        self._materialize(run.pk)
+        response = admin_client.get(reverse("census:bed_status"))
+        positions = response.context["units"][0].sources[0].positions
+        assert [pos.leito for pos in positions] == ["2", "10", "UTI02", "UTI10"]
+
+    def test_legacy_positions_ordered_naturally_by_bed(self, admin_client):
+        now = timezone.now()
+        for bed, status, record in (
+            ("10", BedStatus.EMPTY, ""),
+            ("2", BedStatus.OCCUPIED, "7001"),
+            ("UTI10", BedStatus.EMPTY, ""),
+            ("UTI02", BedStatus.EMPTY, ""),
+        ):
+            CensusSnapshot.objects.create(
+                captured_at=now,
+                setor="SETOR ORDENACAO",
+                leito=bed,
+                prontuario=record,
+                nome="PACIENTE ORDENACAO" if record else status.upper(),
+                especialidade="SYN",
+                bed_status=status,
+            )
+        response = admin_client.get(reverse("census:bed_status"))
+        assert response.status_code == 200
+        positions = response.context["units"][0].sources[0].positions
+        assert [pos.leito for pos in positions] == ["2", "10", "UTI02", "UTI10"]
