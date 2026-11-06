@@ -10,7 +10,8 @@ Defines the chronological patient trajectory section on the admission detail pag
 
 The system SHALL display the patient's sector trajectory on the admission
 detail page when `PatientMovement` records exist for that patient during
-the admission period.
+the admission period, showing the movement time whenever the source census
+provided it.
 
 #### Scenario: Trajectory timeline is rendered with movements
 
@@ -42,6 +43,27 @@ the admission period.
 - **AND** no `PatientMovement` records exist for that patient
 - **THEN** an informative message is displayed indicating no trajectory
   data is available yet
+
+#### Scenario: Movement time is shown when available
+
+- **WHEN** the trajectory timeline is rendered
+- **AND** a `PatientMovement` has a non-null `source_movement_at`
+- **THEN** that entry displays date and time in `DD/MM/AAAA HH:MM` in the
+  configured timezone
+
+#### Scenario: Date-only entries degrade gracefully in the same trajectory
+
+- **WHEN** the trajectory timeline is rendered for a patient whose
+  movements mix entries with and without `source_movement_at`
+- **THEN** entries without a source time display only `DD/MM/AAAA`
+- **AND** no placeholder time (such as `00:00`) is displayed for them
+
+#### Scenario: Durations remain date-based despite visible times
+
+- **WHEN** consecutive movements have source times on their shared
+  boundary dates
+- **THEN** the days-per-sector calculation still uses only movement dates
+- **AND** displayed durations are identical to the date-only behavior
 
 ### Requirement: Trajectory is ordered chronologically
 
