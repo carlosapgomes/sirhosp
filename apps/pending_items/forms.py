@@ -1,4 +1,4 @@
-"""Forms for contextual pending-item writes (PEND-S1)."""
+"""Forms for contextual pending-item writes (PEND-S1/S1 catalog)."""
 
 from __future__ import annotations
 
@@ -16,11 +16,18 @@ FINALIZE_CHOICES = [
 ]
 
 
+class PendingItemTypeChoiceField(forms.ModelChoiceField):
+    """Type selector labelled ``Categoria > Tipo`` so homonyms differ."""
+
+    def label_from_instance(self, obj: PendingItemType) -> str:
+        return f"{obj.category.name} > {obj.name}"
+
+
 class PendingItemForm(forms.Form):
     """Create form: catalog type plus mandatory description."""
 
-    item_type = forms.ModelChoiceField(
-        queryset=PendingItemType.objects.all(),
+    item_type = PendingItemTypeChoiceField(
+        queryset=PendingItemType.objects.select_related("category"),
         label="Tipo",
     )
     description = forms.CharField(

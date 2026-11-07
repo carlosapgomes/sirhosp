@@ -1,8 +1,8 @@
-"""Inpatient pending items domain (PEND-S1).
+"""Inpatient pending items domain (PEND-S1/S1 catalog).
 
-Three small tables: an admin-managed type catalog seeded only with
-``Outro``, admission-scoped items without a redundant patient FK, and an
-append-only revision history with author/type snapshots.
+Four small tables: admin-managed catalog categories and types, admission
+scoped items without a redundant patient FK, and an append-only revision
+history with author, type and observed-classification snapshots.
 """
 
 from __future__ import annotations
@@ -20,6 +20,24 @@ OUTRO_SLUG = "outro"
 
 OUTRO_NAME = "Outro"
 """Display name of the protected fallback catalog entry."""
+
+CATEGORY_SLUG_OUTRAS_PENDENCIAS = "outras-pendencias"
+"""Stable identifier of the category that every preserved legacy type uses."""
+
+PROFILE_SCHEDULING = "agendamento"
+PROFILE_TREATMENT = "tratamento-periodo"
+PROFILE_SIMPLE = "registro-simples"
+PROFILE_SIGNATURE = "assinatura-documento"
+
+PROFILE_CHOICES = [
+    (PROFILE_SCHEDULING, "Agendamento"),
+    (PROFILE_TREATMENT, "Tratamento com período"),
+    (PROFILE_SIMPLE, "Registro simples"),
+    (PROFILE_SIGNATURE, "Assinatura de documento"),
+]
+
+PROFILE_VALUES = tuple(value for value, _label in PROFILE_CHOICES)
+"""The four fixed form profiles a catalog type may declare (S1, D1)."""
 
 STATUS_ACTIVE = "active"
 STATUS_RESOLVED = "resolved"
@@ -61,6 +79,46 @@ CLOSED_EPISODE_MESSAGE = (
 
 OUTRO_PROTECTED_MESSAGE = "O tipo “Outro” é protegido e não pode ser alterado."
 
+SLUG_IMMUTABLE_MESSAGE = (
+    "O identificador (slug) é definido na criação e não pode ser alterado."
+)
+
+TYPE_CONTRACT_PROTECTED_MESSAGE = (
+    "Este tipo já é usado por pendências ou versões: categoria, perfil, "
+    "complementos RNM e obrigatoriedade de observações não podem mudar."
+)
+
+
+class PendingItemCategory(models.Model):
+    """Administrative grouping of catalog types with a stable slug (S1)."""
+
+    name = models.CharField(max_length=100, unique=True)
+    slug = models.SlugField(max_length=100, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self) -> str:
+        return self.name
+
+    def clean(self) -> None:
+        super().clean()
+        if self.pk is None:
+            return
+        stored_slug = (
+            PendingItemCategory.objects.filter(pk=self.pk)
+            .values_list("slug", flat=True)
+            .first()
+        )
+        if stored_slug is not None and stored_slug != self.slug:
+            raise ValidationError({"slug": SLUG_IMMUTABLE_MESSAGE})
+
+    def save(self, *args, **kwargs) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
 
 class PendingItemTypeQuerySet(models.QuerySet):
     """Block queryset deletes that would remove the protected ``Outro``."""
@@ -72,22 +130,43 @@ class PendingItemTypeQuerySet(models.QuerySet):
 
 
 class PendingItemType(models.Model):
-    """Admin-managed catalog of pending-item types, seeded only with Outro."""
+    """Admin-managed catalog of pending-item types grouped by category."""
 
-    name = models.CharField(max_length=100, unique=True)
+    name = models.CharField(max_length=100)
     slug = models.SlugField(max_length=100, unique=True)
+    category = models.ForeignKey(
+        PendingItemCategory,
+        on_delete=models.PROTECT,
+        related_name="types",
+    )
+    profile = models.CharField(max_length=32, choices=PROFILE_CHOICES)
+    has_rnm_complements = models.BooleanField(default=False)
+    requires_description = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     objects = PendingItemTypeQuerySet.as_manager()
 
     class Meta:
-        ordering = ["name"]
+        ordering = ["category__name", "name"]
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(slug=OUTRO_SLUG, name=OUTRO_NAME)
                 | ~models.Q(slug=OUTRO_SLUG),
                 name="ck_pending_item_type_outro_identity",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(profile__in=PROFILE_VALUES),
+                name="ck_pending_item_type_profile",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(has_rnm_complements=False)
+                | models.Q(profile=PROFILE_SCHEDULING),
+                name="ck_pending_item_type_rnm_requires_scheduling",
+            ),
+            models.UniqueConstraint(
+                fields=["category", "name"],
+                name="uq_pending_item_type_category_name",
             ),
         ]
 
@@ -98,19 +177,57 @@ class PendingItemType(models.Model):
     def is_outro(self) -> bool:
         return self.slug == OUTRO_SLUG
 
-    def save(self, *args, **kwargs) -> None:
-        if self.pk is not None:
-            old = (
-                PendingItemType.objects.filter(pk=self.pk)
-                .values("slug", "name")
-                .first()
+    def is_referenced(self) -> bool:
+        """True when an item or any revision references this type (D1)."""
+        if self.pk is None:
+            return False
+        return (
+            PendingItem.objects.filter(item_type_id=self.pk).exists()
+            or PendingItemRevision.objects.filter(item_type_id=self.pk).exists()
+        )
+
+    def clean(self) -> None:
+        super().clean()
+        if self.pk is None:
+            return
+        stored = (
+            PendingItemType.objects.filter(pk=self.pk)
+            .values(
+                "slug",
+                "name",
+                "category_id",
+                "profile",
+                "has_rnm_complements",
+                "requires_description",
             )
+            .first()
+        )
+        if stored is None:
+            return
+        if stored["slug"] != self.slug:
+            raise ValidationError({"slug": SLUG_IMMUTABLE_MESSAGE})
+        if stored["slug"] == OUTRO_SLUG:
+            category_slug = self.category.slug if self.category_id else None
             if (
-                old is not None
-                and old["slug"] == OUTRO_SLUG
-                and (self.slug != OUTRO_SLUG or self.name != OUTRO_NAME)
+                self.name != OUTRO_NAME
+                or self.profile != PROFILE_SIMPLE
+                or self.has_rnm_complements
+                or not self.requires_description
+                or category_slug != CATEGORY_SLUG_OUTRAS_PENDENCIAS
             ):
                 raise ValidationError(OUTRO_PROTECTED_MESSAGE)
+            return
+        contract_changed = (
+            stored["category_id"] != self.category_id
+            or stored["profile"] != self.profile
+            or stored["has_rnm_complements"] != self.has_rnm_complements
+            or stored["requires_description"] != self.requires_description
+        )
+        if contract_changed and self.is_referenced():
+            raise ValidationError(TYPE_CONTRACT_PROTECTED_MESSAGE)
+
+    def save(self, *args, **kwargs) -> None:
+        self.clean()
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):  # type: ignore[override]
@@ -206,6 +323,14 @@ class PendingItemRevision(models.Model):
         related_name="+",
     )
     type_name = models.CharField(max_length=100)
+    type_slug = models.SlugField(max_length=100, null=True, blank=True)
+    category_name = models.CharField(max_length=100, null=True, blank=True)
+    category_slug = models.SlugField(max_length=100, null=True, blank=True)
+    profile = models.CharField(
+        max_length=32, choices=PROFILE_CHOICES, null=True, blank=True
+    )
+    has_rnm_complements = models.BooleanField(null=True, blank=True)
+    requires_description = models.BooleanField(null=True, blank=True)
     description = models.TextField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES)
     note = models.TextField(blank=True, default="")
@@ -230,6 +355,18 @@ class PendingItemRevision(models.Model):
             models.CheckConstraint(
                 condition=models.Q(version__gte=1),
                 name="ck_pending_item_revision_version_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(profile__isnull=True)
+                | models.Q(profile__in=PROFILE_VALUES),
+                name="ck_pending_item_revision_profile",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(profile__isnull=True)
+                | models.Q(has_rnm_complements__isnull=True)
+                | models.Q(has_rnm_complements=False)
+                | models.Q(profile=PROFILE_SCHEDULING),
+                name="ck_pending_item_revision_rnm_requires_scheduling",
             ),
         ]
 

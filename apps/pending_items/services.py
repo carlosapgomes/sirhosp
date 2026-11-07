@@ -60,9 +60,28 @@ class InvalidStatusTransitionError(PendingItemsError):
 
 def _require_type(item_type: PendingItemType) -> PendingItemType:
     try:
-        return PendingItemType.objects.get(pk=item_type.pk)
+        return PendingItemType.objects.select_related("category").get(
+            pk=item_type.pk
+        )
     except PendingItemType.DoesNotExist:
         raise ValidationError("Tipo inválido.") from None
+
+
+def classification_snapshot(item_type: PendingItemType) -> dict[str, object]:
+    """Observed classification metadata stored on every new revision (D4).
+
+    Names and slugs are copied, never referenced, so renaming the catalog
+    cannot rewrite what a version observed.
+    """
+    category = item_type.category
+    return {
+        "category_name": category.name,
+        "category_slug": category.slug,
+        "type_slug": item_type.slug,
+        "profile": item_type.profile,
+        "has_rnm_complements": item_type.has_rnm_complements,
+        "requires_description": item_type.requires_description,
+    }
 
 
 def _require_text(description: str | None) -> str:
@@ -120,6 +139,7 @@ def create_pending_item(
             author=author,
             author_name=label,
             is_system=False,
+            **classification_snapshot(fresh_type),
         )
     return item
 
@@ -180,6 +200,7 @@ def update_pending_item(
             author=author,
             author_name=label,
             is_system=False,
+            **classification_snapshot(fresh_type),
         )
     return locked, True
 
@@ -229,18 +250,20 @@ def finalize_pending_item(
                 "updated_at",
             ]
         )
+        item_type = _require_type(locked.item_type)
         PendingItemRevision.objects.create(
             item=locked,
             version=locked.version,
             action=ACTION_FINALIZED,
-            item_type=locked.item_type,
-            type_name=locked.item_type.name,
+            item_type=item_type,
+            type_name=item_type.name,
             description=locked.description,
             status=target_status,
             note=clean_note,
             author=author,
             author_name=label,
             is_system=False,
+            **classification_snapshot(item_type),
         )
     return locked
 
@@ -273,7 +296,7 @@ def close_pending_items_for_confirmed_exit(
     now = timezone.now()
     actives = list(
         PendingItem.objects.select_for_update()
-        .select_related("item_type")
+        .select_related("item_type__category")
         .filter(admission_id=admission.pk, status=STATUS_ACTIVE)
         .order_by("pk")
     )
@@ -307,5 +330,6 @@ def close_pending_items_for_confirmed_exit(
             author=None,
             author_name=SYSTEM_AUTHOR_NAME,
             is_system=True,
+            **classification_snapshot(item.item_type),
         )
     return len(actives)

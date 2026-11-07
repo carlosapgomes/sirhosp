@@ -36,6 +36,7 @@ from apps.pending_items.models import (
     STATUS_CLOSED_UNRESOLVED,
     STATUS_RESOLVED,
     PendingItem,
+    PendingItemCategory,
     PendingItemType,
 )
 from apps.pending_items.queries import (
@@ -113,6 +114,17 @@ def _make_census_row(
 
 def _outro() -> PendingItemType:
     return PendingItemType.objects.get(slug=OUTRO_SLUG)
+
+
+def _custom_type(slug: str = "q-extra") -> PendingItemType:
+    """Create a synthetic catalog type inside the fallback category."""
+    return PendingItemType.objects.create(
+        slug=slug,
+        name=f"Extra {slug}",
+        category=PendingItemCategory.objects.get(slug="outras-pendencias"),
+        profile="registro-simples",
+        requires_description=False,
+    )
 
 
 def _make_user(username: str) -> User:
@@ -370,9 +382,7 @@ class TestAggregateFilters:
         self, db: object
     ) -> None:
         author, _other = self._two_patient_scene()
-        extra_type = PendingItemType.objects.create(
-            slug="q-extra", name="Extra Sintetico",
-        )
+        extra_type = _custom_type()
         patient = Patient.objects.get(patient_source_key="P_Q_F1")
         admission = Admission.objects.get(
             patient=patient, discharge_date__isnull=True
@@ -901,7 +911,7 @@ class TestSpecialtyLabels:
         assert options.especialidades == [
             {"value": "NEF", "label": "NEFROLOGIA", "code": "NEF"}
         ]
-        assert [t.slug for t in options.tipos] == [OUTRO_SLUG]
+        assert OUTRO_SLUG in [t.slug for t in options.tipos]
         assert [u.username for u in options.criadores] == ["q_opt_author"]
         assert [u.username for u in options.atualizadores] == ["q_opt_author"]
         assert options.has_system_updates is False

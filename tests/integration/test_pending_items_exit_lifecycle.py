@@ -63,12 +63,16 @@ from apps.pending_items.eligibility import IneligibleAdmissionError
 from apps.pending_items.models import (
     ACTION_CREATED,
     ACTION_FINALIZED,
+    CATEGORY_SLUG_OUTRAS_PENDENCIAS,
     GROUP_NAME,
+    OUTRO_NAME,
     OUTRO_SLUG,
+    PROFILE_SIMPLE,
     STATUS_ACTIVE,
     STATUS_CLOSED_UNRESOLVED,
     STATUS_RESOLVED,
     PendingItem,
+    PendingItemCategory,
     PendingItemRevision,
     PendingItemType,
 )
@@ -141,15 +145,27 @@ def _ensure_bootstrap() -> None:
 
     ``django_db(transaction=True)`` (the concurrency class) flushes the
     database after every transactional test, removing rows created by
-    data migrations (the ``Desospitalização`` group and ``Outro`` type).
-    The HTTP suite keeps proving the migration bootstrap with strict
-    ``.get``; this lifecycle suite only needs the rows to exist.
+    data migrations (the ``Desospitalização`` group, the catalog
+    categories and ``Outro``). The HTTP suite keeps proving the migration
+    bootstrap with strict ``.get``; this lifecycle suite only needs the
+    rows to exist, including the full contract of ``Outro``.
     """
     from django.contrib.auth.models import Group
 
     Group.objects.get_or_create(name=GROUP_NAME)
+    category, _created = PendingItemCategory.objects.get_or_create(
+        slug=CATEGORY_SLUG_OUTRAS_PENDENCIAS,
+        defaults={"name": "Outras pendências"},
+    )
     PendingItemType.objects.get_or_create(
-        slug=OUTRO_SLUG, defaults={"name": "Outro"}
+        slug=OUTRO_SLUG,
+        defaults={
+            "name": OUTRO_NAME,
+            "category": category,
+            "profile": PROFILE_SIMPLE,
+            "has_rnm_complements": False,
+            "requires_description": True,
+        },
     )
 
 

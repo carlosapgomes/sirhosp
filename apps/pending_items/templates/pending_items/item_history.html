@@ -30,7 +30,7 @@
         <th scope="col">Ação</th>
         <th scope="col">Data/hora</th>
         <th scope="col">Autor</th>
-        <th scope="col">Tipo</th>
+        <th scope="col">Classificação</th>
         <th scope="col">Descrição</th>
         <th scope="col">Status</th>
         <th scope="col">Anotação</th>
@@ -43,7 +43,13 @@
           <td>{{ revision.get_action_display }}</td>
           <td>{{ revision.created_at|date:"d/m/Y H:i" }}</td>
           <td>{% if revision.is_system %}Sistema{% else %}{{ revision.author_name|default:"—" }}{% endif %}</td>
-          <td>{{ revision.type_name }}</td>
+          <td>
+            {% if revision.category_name %}{{ revision.category_name }} &middot;{% endif %}
+            {{ revision.type_name }}
+            {% if not revision.category_name %}
+              <span class="d-block text-muted">Classificação não registrada nesta versão</span>
+            {% endif %}
+          </td>
           <td class="text-break">{{ revision.description|linebreaksbr }}</td>
           <td>{{ revision.get_status_display }}</td>
           <td class="text-break">{{ revision.note|linebreaksbr|default:"—" }}</td>

@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import openpyxl
 import pytest
+from django.apps import apps as django_apps
 from django.contrib.auth.models import Group, User
 from django.utils import timezone
 from playwright.sync_api import Browser, Page, ViewportSize, sync_playwright
@@ -34,13 +35,18 @@ from apps.census.models import (
     Specialty,
 )
 from apps.patients.models import Admission, Patient
+from apps.pending_items.catalog import load_pending_item_catalog
 from apps.pending_items.models import (
+    CATEGORY_SLUG_OUTRAS_PENDENCIAS,
     GROUP_NAME,
+    OUTRO_NAME,
     OUTRO_SLUG,
+    PROFILE_SIMPLE,
     STATUS_ACTIVE,
     STATUS_CLOSED_UNRESOLVED,
     STATUS_RESOLVED,
     PendingItem,
+    PendingItemCategory,
     PendingItemRevision,
     PendingItemType,
 )
@@ -188,14 +194,37 @@ def _ensure_bootstrap() -> None:
 
     ``django_db(transaction=True)`` flushes the database between tests,
     which also removes rows created by data migrations (the
-    ``Desospitalização`` group and the ``Outro`` type). The HTTP suite
-    keeps proving the migration bootstrap with plain ``.get``; here the
-    journeys only need the rows to exist, so recreate them idempotently.
+    ``Desospitalização`` group, the catalog categories and the ``Outro``
+    type). The HTTP suite keeps proving the migration bootstrap with
+    plain ``.get``; here the journeys only need the rows to exist, so
+    recreate the fallback category and ``Outro`` with its full contract.
     """
     Group.objects.get_or_create(name=GROUP_NAME)
-    PendingItemType.objects.get_or_create(
-        slug=OUTRO_SLUG, defaults={"name": "Outro"}
+    category, _created = PendingItemCategory.objects.get_or_create(
+        slug=CATEGORY_SLUG_OUTRAS_PENDENCIAS,
+        defaults={"name": "Outras pendências"},
     )
+    PendingItemType.objects.get_or_create(
+        slug=OUTRO_SLUG,
+        defaults={
+            "name": OUTRO_NAME,
+            "category": category,
+            "profile": PROFILE_SIMPLE,
+            "has_rnm_complements": False,
+            "requires_description": True,
+        },
+    )
+
+
+def _load_catalog() -> None:
+    """Restore the whole canonical catalog after a transactional flush.
+
+    Post-S1 journeys that need more than the fallback entry use the
+    reapplication context of the catalog load, never a simulated legacy
+    adoption.
+    """
+    _ensure_bootstrap()
+    load_pending_item_catalog(django_apps, initial=False)
 
 
 def _make_writer(username: str = "browser_writer") -> User:
@@ -238,6 +267,20 @@ def _login(page: Page, base_url: str, username: str) -> None:
     page.fill("#id_password", "pw123456")
     page.click("button[type=submit]")
     page.wait_for_url("**/painel/**", timeout=15000)
+
+
+def _make_admin(username: str = "browser_catalog_admin") -> User:
+    return User.objects.create_superuser(
+        username=username, password="pw123456", email=""
+    )
+
+
+def _login_admin(page: Page, base_url: str, username: str) -> None:
+    page.goto(f"{base_url}/admin/login/", wait_until="domcontentloaded")
+    page.fill("#id_username", username)
+    page.fill("#id_password", "pw123456")
+    page.click("input[type=submit]")
+    page.wait_for_url("**/admin/**", timeout=15000)
 
 
 def _make_agg_movement(
@@ -476,6 +519,106 @@ class TestContextualJourney:
             "document.scrollingElement.scrollWidth - window.innerWidth"
         )
         assert overflow <= 1
+
+
+@pytest.mark.django_db(transaction=True)
+class TestCatalogAdminJourney:
+    """S1 verification: admin -> portal selection -> observed history."""
+
+    def test_admin_maintains_catalog_and_portal_shows_context(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _served = routed_browser_page
+        _make_writer()
+        _make_admin()
+        _load_catalog()
+        admission = _make_eligible_admission("P_BROWSER_CATALOG")
+
+        page = new_page()
+        _login_admin(page, live_server.url, "browser_catalog_admin")
+
+        page.goto(
+            f"{live_server.url}/admin/pending_items/pendingitemcategory/add/",
+            wait_until="domcontentloaded",
+        )
+        page.fill("#id_name", "Categoria Sintetica S1")
+        page.fill("#id_slug", "categoria-sintetica-s1")
+        page.click("input[type=submit]")
+        page.wait_for_url("**/admin/pending_items/pendingitemcategory/")
+        assert "Categoria Sintetica S1" in page.content()
+
+        page.goto(
+            f"{live_server.url}/admin/pending_items/pendingitemtype/add/",
+            wait_until="domcontentloaded",
+        )
+        page.select_option("#id_category", label="Categoria Sintetica S1")
+        page.fill("#id_name", "Tipo Alfa Sintetico")
+        page.fill("#id_slug", "tipo-alfa-sintetico")
+        page.select_option("#id_profile", "registro-simples")
+        page.click("input[type=submit]")
+        page.wait_for_url("**/admin/pending_items/pendingitemtype/")
+        item_type = PendingItemType.objects.get(slug="tipo-alfa-sintetico")
+        assert item_type.category.slug == "categoria-sintetica-s1"
+        assert item_type.profile == "registro-simples"
+
+        page.context.clear_cookies()
+        _login(page, live_server.url, "browser_writer")
+        page.goto(
+            f"{live_server.url}/admissions/{admission.pk}/pending-items/",
+            wait_until="domcontentloaded",
+        )
+        selector = page.locator("#id_item_type")
+        labels = selector.locator("option").all_inner_texts()
+        assert "Categoria Sintetica S1 > Tipo Alfa Sintetico" in labels
+        assert "Exames de imagem > RNM" in labels
+        assert "CHD (Centro de Hemorragia Digestiva) > RNM" in labels
+        rnm_values = [
+            option.get_attribute("value")
+            for option in selector.locator("option").all()
+            if option.inner_text()
+            in {
+                "Exames de imagem > RNM",
+                "CHD (Centro de Hemorragia Digestiva) > RNM",
+            }
+        ]
+        assert len(set(rnm_values)) == 2
+
+        page.select_option("#id_item_type", str(item_type.pk))
+        page.fill("#id_description", "pendencia sintetica do catalogo")
+        page.click('[data-testid="pending-create"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+        assert "Tipo Alfa Sintetico" in page.content()
+
+        page.context.clear_cookies()
+        _login_admin(page, live_server.url, "browser_catalog_admin")
+        page.goto(
+            f"{live_server.url}/admin/pending_items/pendingitemtype/"
+            f"{item_type.pk}/change/",
+            wait_until="domcontentloaded",
+        )
+        page.fill("#id_name", "Tipo Beta Sintetico")
+        page.click("input[type=submit]")
+        page.wait_for_url("**/admin/pending_items/pendingitemtype/")
+        assert PendingItemType.objects.get(
+            pk=item_type.pk
+        ).name == "Tipo Beta Sintetico"
+
+        page.context.clear_cookies()
+        _login(page, live_server.url, "browser_writer")
+        page.goto(
+            f"{live_server.url}/admissions/{admission.pk}/pending-items/",
+            wait_until="domcontentloaded",
+        )
+        listing = page.content()
+        assert "Tipo Beta Sintetico" in listing
+        assert "Tipo Alfa Sintetico" not in listing
+
+        page.click('[data-testid^="pending-history-"]')
+        page.wait_for_url("**/history/**")
+        history = page.content()
+        assert "Tipo Beta Sintetico" in history
+        assert "Tipo Alfa Sintetico" in history
+        assert "Categoria Sintetica S1" in history
 
 
 @pytest.mark.django_db(transaction=True)
