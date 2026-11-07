@@ -25,6 +25,7 @@ from apps.pending_items.models import (
     OUTRO_SLUG,
     PROFILE_SCHEDULING,
     PROFILE_SIMPLE,
+    PendingItemType,
 )
 
 
@@ -235,6 +236,17 @@ CATALOG_TYPES: tuple[CatalogType, ...] = (
         requires_description=True,
     ),
 )
+
+
+def type_display_label(item_type: PendingItemType) -> str:
+    """Category-qualified type label shared by every selector.
+
+    Homonymous catalog types (``RNM`` under two categories) are only
+    distinguishable by their category, so forms and the aggregate filter
+    must render the exact same text; this function is the single source
+    of that format.
+    """
+    return f"{item_type.category.name} > {item_type.name}"
 
 
 class CatalogLoadError(Exception):

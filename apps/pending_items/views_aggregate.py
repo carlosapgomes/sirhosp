@@ -23,6 +23,7 @@ from django.views.decorators.http import require_GET
 
 from apps.patients.models import Admission
 from apps.pending_items import policy
+from apps.pending_items.catalog import type_display_label
 from apps.pending_items.details import attempted_detail_rows
 from apps.pending_items.eligibility import (
     IneligibleAdmissionError,
@@ -234,6 +235,10 @@ def aggregate(request: HttpRequest) -> HttpResponse:
         "page_title": "Pendências",
         "indicators": indicators,
         "options": options,
+        "type_filter_options": [
+            {"pk": item_type.pk, "label": type_display_label(item_type)}
+            for item_type in options.tipos
+        ],
         "filter_error": filter_error,
         "filter_hint": _filter_hint(filters, options),
         "can_write": member,

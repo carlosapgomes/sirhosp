@@ -14,6 +14,7 @@ from django.core.exceptions import ValidationError
 from django.forms.models import ModelChoiceField
 
 from apps.pending_items import details
+from apps.pending_items.catalog import type_display_label
 from apps.pending_items.models import (
     STATUS_CLOSED_UNRESOLVED,
     STATUS_RESOLVED,
@@ -79,7 +80,7 @@ class PendingItemTypeChoiceField(forms.ModelChoiceField):
     """Type selector labelled ``Categoria > Tipo`` so homonyms differ."""
 
     def label_from_instance(self, obj: PendingItemType) -> str:
-        return f"{obj.category.name} > {obj.name}"
+        return type_display_label(obj)
 
 
 class PendingItemForm(forms.Form):
@@ -206,7 +207,7 @@ class PendingItemForm(forms.Form):
             options.append(
                 {
                     "value": item_type.pk,
-                    "label": f"{item_type.category.name} > {item_type.name}",
+                    "label": type_display_label(item_type),
                     "category": str(item_type.category_id),
                     "profile": item_type.profile,
                     "rnm": "1" if item_type.has_rnm_complements else "0",

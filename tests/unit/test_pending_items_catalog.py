@@ -22,6 +22,7 @@ from django.db.models import ProtectedError
 
 from apps.census.models import BedStatus, CensusSnapshot
 from apps.patients.models import Admission, Patient
+from apps.pending_items.catalog import type_display_label
 from apps.pending_items.models import (
     ACTION_CREATED,
     GROUP_NAME,
@@ -496,3 +497,16 @@ class TestClassificationSnapshots:
         newest = PendingItemRevision.objects.get(item=item, version=2)
         assert newest.category_slug == "cat-legada"
         assert newest.requires_description is False
+
+
+@pytest.mark.django_db
+class TestTypeDisplayLabel:
+    """S3-P2-1: one shared ``Categoria > Tipo`` label for homonyms."""
+
+    def test_homonymous_types_are_qualified_by_category(self) -> None:
+        imagem_rnm = PendingItemType.objects.get(slug="imagem-rnm")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        assert type_display_label(imagem_rnm) == "Exames de imagem > RNM"
+        assert type_display_label(chd_rnm) == (
+            "CHD (Centro de Hemorragia Digestiva) > RNM"
+        )

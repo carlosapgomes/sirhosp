@@ -106,8 +106,8 @@
         <label for="f_tipo" class="form-label small fw-semibold">Tipo</label>
         <select name="tipo" id="f_tipo" class="form-select form-select-sm">
           <option value="">Todos</option>
-          {% for tipo in options.tipos %}
-            <option value="{{ tipo.pk }}"{% if tipo.pk|stringformat:"s" == request.GET.tipo %} selected{% endif %}>{{ tipo.category.name }} > {{ tipo.name }}</option>
+          {% for tipo in type_filter_options %}
+            <option value="{{ tipo.pk }}"{% if tipo.pk|stringformat:"s" == request.GET.tipo %} selected{% endif %}>{{ tipo.label }}</option>
           {% endfor %}
         </select>
       </div>
