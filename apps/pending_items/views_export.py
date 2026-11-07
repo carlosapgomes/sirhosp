@@ -1,11 +1,13 @@
-"""XLSX export of the aggregate cut (PEND-S4, D8/PP-08).
+"""XLSX export of the aggregate cut (STRUCT-PEND-S4, D7/PP-08).
 
 Any authenticated user downloads every item of the shared conservative
 cut — filters and per-item ordering apply, only view mode and
-pagination are ignored. One row per item in its current state, exact
-PP-08 columns, literal text cells, no history, no server-side file.
-``Cache-Control: private, no-store`` on every response; GET never
-mutates (a count-only log line carries no clinical payload).
+pagination are ignored. One row per item in its current state, the
+exact 23 PP-08 columns with the item/admission ids and the structured
+details, literal text cells, native date cells, no history and no
+server-side file. ``Cache-Control: private, no-store`` on every
+response; GET never mutates (a count-only log line carries no clinical
+payload).
 """
 
 from __future__ import annotations
@@ -17,12 +19,14 @@ from django.http import HttpRequest, HttpResponse
 from django.utils import timezone
 from django.views.decorators.http import require_GET
 
+from apps.pending_items import details
 from apps.pending_items.export import (
     XLSX_MIME,
     build_pending_items_workbook,
     created_by_label,
+    detail_cells,
+    excel_instant,
     export_filename,
-    format_export_datetime,
     updated_by_label,
 )
 from apps.pending_items.queries import (
@@ -67,14 +71,17 @@ def aggregate_export(request: HttpRequest) -> HttpResponse:
         [item.admission_id for item in ordered]
     )
     code_to_name, name_to_code = specialty_labels()
-    rows: list[list[str]] = []
+    rows: list[list[object]] = []
     for item in ordered:
         occupation = cut.occupations[item.admission_id]
+        item_type = item.item_type
         _sigla, especialidade = resolve_specialty(
             occupation.especialidade, code_to_name, name_to_code
         )
         rows.append(
             [
+                item.pk,
+                item.admission_id,
                 occupation.prontuario,
                 occupation.patient_name,
                 occupation.setor,
@@ -83,12 +90,18 @@ def aggregate_export(request: HttpRequest) -> HttpResponse:
                     occupation.admission_id, FIRST_UNIT_UNKNOWN
                 ),
                 especialidade,
-                item.item_type.name,
+                item_type.category.name,
+                item_type.name,
                 item.description,
+                *detail_cells(
+                    item_type.profile,
+                    item_type.has_rnm_complements,
+                    details.stored_details(item),
+                ),
                 item.get_status_display(),
-                format_export_datetime(item.created_at),
+                excel_instant(item.created_at),
                 created_by_label(item),
-                format_export_datetime(item.updated_at),
+                excel_instant(item.updated_at),
                 updated_by_label(item),
             ]
         )

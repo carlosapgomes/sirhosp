@@ -26,6 +26,7 @@ import pytest
 from django.apps import apps as django_apps
 from django.contrib.auth.models import Group, User
 from django.utils import timezone
+from openpyxl.utils import get_column_letter
 from playwright.sync_api import (
     Browser,
     Locator,
@@ -58,6 +59,7 @@ from apps.pending_items.models import (
     PendingItemRevision,
     PendingItemType,
 )
+from apps.pending_items.queries import AGGREGATE_PER_PAGE
 
 TZ = ZoneInfo("America/Bahia")
 ASSETS_DIR = (
@@ -770,14 +772,24 @@ class TestAggregateJourney:
 
 
 EXPECTED_EXPORT_HEADERS = [
+    "ID da pendência",
+    "ID da internação",
     "Registro",
     "Nome",
     "Unidade atual",
     "Leito",
     "Primeira unidade de internação",
     "Especialidade",
+    "Categoria",
     "Tipo",
     "Descrição/observação",
+    "Agendada?",
+    "Data agendada",
+    "Contraste",
+    "Sedação",
+    "Início do tratamento",
+    "Previsão de término",
+    "Assinatura do sumário em",
     "Status",
     "Criado em",
     "Criado por",
@@ -785,76 +797,121 @@ EXPECTED_EXPORT_HEADERS = [
     "Atualizado por",
 ]
 
+EXPORT_COLUMN = {
+    header: index for index, header in enumerate(EXPECTED_EXPORT_HEADERS)
+}
 
-def _make_export_scene() -> dict[str, list[str]]:
-    """22 patients: 23 actives (one formula-like) plus one resolved."""
-    _ensure_bootstrap()
+EXPORT_TEXT_HEADERS = (
+    "Registro",
+    "Nome",
+    "Unidade atual",
+    "Leito",
+    "Primeira unidade de internação",
+    "Especialidade",
+    "Categoria",
+    "Tipo",
+    "Descrição/observação",
+    "Agendada?",
+    "Contraste",
+    "Sedação",
+    "Status",
+    "Criado por",
+    "Atualizado por",
+)
+
+EXPORT_DETAIL_HEADERS = (
+    "Agendada?",
+    "Data agendada",
+    "Contraste",
+    "Sedação",
+    "Início do tratamento",
+    "Previsão de término",
+    "Assinatura do sumário em",
+)
+
+S4_EXPORT_RNM_DATE = date(2026, 11, 10)
+S4_EXPORT_RNM_EDITED = date(2026, 11, 15)
+S4_EXPORT_TOMOGRAPHY_DATE = date(2026, 1, 1)
+S4_EXPORT_TREATMENT_START = date(2026, 11, 1)
+S4_EXPORT_TREATMENT_END = date(2026, 11, 10)
+S4_EXPORT_SIGNATURE_AT = datetime(2026, 11, 12, 9, 30, tzinfo=TZ)
+S4_EXPORT_FORMULA_TEXT = "=1+1-sintetico"
+S4_EXPORT_FILLERS = AGGREGATE_PER_PAGE + 1
+
+
+def _make_export_admission(
+    key: str, *, setor: str, leito: str, with_movement: bool = False
+) -> Admission:
+    patient = Patient.objects.create(
+        patient_source_key=key,
+        source_system="tasy",
+        name=f"PACIENTE SINTETICO {key}",
+    )
+    admission = Admission.objects.create(
+        patient=patient,
+        source_system="tasy",
+        source_admission_key=f"ADM_{key}",
+        admission_date=_dt("2026-06-01T08:00:00"),
+    )
+    CensusSnapshot.objects.create(
+        captured_at=_dt("2026-06-10T08:00:00"),
+        setor=setor,
+        leito=leito,
+        prontuario=key,
+        nome=f"PACIENTE SINTETICO {key}",
+        bed_status=BedStatus.OCCUPIED,
+    )
+    if with_movement:
+        _make_agg_movement(patient, "PRONTO SOCORRO", "2026-06-01")
+    return admission
+
+
+def _make_export_fillers(admission: Admission) -> None:
+    """Push the active selection past one page with synthetic fillers."""
     outro = PendingItemType.objects.get(slug=OUTRO_SLUG)
-
-    def _admit(key: str, setor: str, leito: str) -> Admission:
-        patient = Patient.objects.create(
-            patient_source_key=key,
-            source_system="tasy",
-            name=f"PACIENTE SINTETICO {key}",
-        )
-        admission = Admission.objects.create(
-            patient=patient,
-            source_system="tasy",
-            source_admission_key=f"ADM_{key}",
-            admission_date=_dt("2026-06-01T08:00:00"),
-        )
-        CensusSnapshot.objects.create(
-            captured_at=_dt("2026-06-10T08:00:00"),
-            setor=setor,
-            leito=leito,
-            prontuario=key,
-            nome="PACIENTE SINTETICO",
-            bed_status=BedStatus.OCCUPIED,
-        )
-        return admission
-
-    active: list[str] = []
-    for index in range(21):
-        key = f"P_EXP_DL{index:02d}"
-        admission = _admit(key, "CLINICA MEDICA", f"L{index:02d}")
-        description = f"exp-dl-{index:02d}"
+    for index in range(S4_EXPORT_FILLERS):
         PendingItem.objects.create(
             admission=admission,
             item_type=outro,
-            description=description,
+            description=f"exp-dl-preenchimento-{index:02d}",
             status=STATUS_ACTIVE,
             version=1,
         )
-        active.append(description)
-    uti = _admit("P_EXP_DL_U", "UTI GERAL", "U01")
-    for description in ("exp-dl-uti-a", "=1+1-sintetico"):
-        PendingItem.objects.create(
-            admission=uti,
-            item_type=outro,
-            description=description,
-            status=STATUS_ACTIVE,
-            version=1,
-        )
-        active.append(description)
-    PendingItem.objects.create(
-        admission=uti,
-        item_type=outro,
-        description="exp-dl-uti-resolvida",
-        status=STATUS_RESOLVED,
-        version=2,
-        finalized_at=_dt("2026-06-11T10:00:00"),
-    )
+
+
+def _open_export(path: Path):
+    sheet = openpyxl.load_workbook(path).active
+    assert sheet is not None
+    return sheet
+
+
+def _export_rows(sheet) -> list[list]:
+    return [
+        [cell.value for cell in row] for row in sheet.iter_rows(min_row=2)
+    ]
+
+
+def _export_cell(sheet, row: int, header: str):
+    return sheet.cell(row=row, column=EXPORT_COLUMN[header] + 1)
+
+
+def _export_row_for(sheet, item_id: int) -> int:
+    for row in range(2, sheet.max_row + 1):
+        if _export_cell(sheet, row, "ID da pendência").value == item_id:
+            return row
+    raise AssertionError(f"item {item_id} missing from the downloaded XLSX")
+
+
+def _export_ids(sheet) -> set[int]:
     return {
-        "active": active,
-        "uti": ["exp-dl-uti-a", "=1+1-sintetico"],
+        row[EXPORT_COLUMN["ID da pendência"]] for row in _export_rows(sheet)
     }
 
 
-def _read_export_rows(path: Path) -> list[list]:
-    workbook = openpyxl.load_workbook(path)
-    sheet = workbook.active
-    assert sheet is not None
-    return [[cell.value for cell in row] for row in sheet.iter_rows()]
+def _assert_export_sheet_usability(sheet) -> None:
+    last_column = get_column_letter(len(EXPECTED_EXPORT_HEADERS))
+    assert sheet.freeze_panes == "A2"
+    assert sheet.auto_filter.ref == f"A1:{last_column}{sheet.max_row}"
 
 
 def _assert_literal_cell(path: Path, value: str) -> None:
@@ -873,23 +930,148 @@ def _assert_literal_cell(path: Path, value: str) -> None:
 
 @pytest.mark.django_db(transaction=True)
 class TestExportJourney:
-    """PEND-S4: reader downloads the filtered cut beyond the page."""
+    """STRUCT-PEND-S4: real download of the 23-column workbook.
 
-    def test_reader_filters_and_downloads_both_modes(
+    Creates an RNM and a treatment item (plus the signature and simple
+    profiles) in the same episode through the live_server forms, edits a
+    scheduled date, finalizes another pending item, then downloads in
+    both views with categoria/status filters and verifies the saved file
+    with openpyxl: ids, values, native date cells, literal strings,
+    first unit, the complete (multi-page) selection, the empty selection
+    and the sheet usability (autofilter + frozen header).
+    """
+
+    def _create_profiles(self, page: Page, admission: Admission) -> None:
+        """Create RNM, treatment, signature, tomography and a simple item."""
+        imagem_rnm = PendingItemType.objects.get(slug="imagem-rnm")
+        tomografia = PendingItemType.objects.get(slug="imagem-tomografia")
+        antibioticos = PendingItemType.objects.get(
+            slug="infeccioso-antibioticos"
+        )
+        sumario = PendingItemType.objects.get(slug="sumario-assinatura")
+        outro = PendingItemType.objects.get(slug=OUTRO_SLUG)
+
+        page.select_option("#id_item_type", str(imagem_rnm.pk))
+        page.select_option("#id_is_scheduled", "sim")
+        page.fill("#id_scheduled_date", S4_EXPORT_RNM_DATE.isoformat())
+        page.select_option("#id_contrast", "sim")
+        page.fill("#id_description", "exp-dl-rnm")
+        page.click('[data-testid="pending-create"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+
+        page.select_option("#id_item_type", str(antibioticos.pk))
+        page.fill(
+            "#id_treatment_start_date", S4_EXPORT_TREATMENT_START.isoformat()
+        )
+        page.fill(
+            "#id_treatment_end_date", S4_EXPORT_TREATMENT_END.isoformat()
+        )
+        page.fill("#id_description", "exp-dl-tratamento")
+        page.click('[data-testid="pending-create"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+
+        page.select_option("#id_item_type", str(sumario.pk))
+        page.fill("#id_signature_at", "2026-11-12T09:30")
+        page.fill("#id_description", "exp-dl-assinatura")
+        page.click('[data-testid="pending-create"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+
+        page.select_option("#id_item_type", str(tomografia.pk))
+        page.select_option("#id_is_scheduled", "sim")
+        page.fill(
+            "#id_scheduled_date", S4_EXPORT_TOMOGRAPHY_DATE.isoformat()
+        )
+        page.fill("#id_description", "exp-dl-tomografia")
+        page.click('[data-testid="pending-create"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+
+        page.select_option("#id_item_type", str(outro.pk))
+        page.fill("#id_description", S4_EXPORT_FORMULA_TEXT)
+        page.click('[data-testid="pending-create"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+
+    def test_reader_downloads_both_views_with_category_and_status(
         self, live_server, routed_browser_page, tmp_path
     ) -> None:
         new_page, _served = routed_browser_page
+        _load_catalog()
+        _make_writer(username="export_dl_writer")
         _make_reader(username="export_dl_reader")
-        expected = _make_export_scene()
+        other = _make_export_admission(
+            "P_EXP_DL_FILL", setor="ENFERMARIA 1", leito="E02"
+        )
+        _make_export_fillers(other)
+        admission = _make_export_admission(
+            "0004321",
+            setor="UTI GERAL",
+            leito="U01",
+            with_movement=True,
+        )
+        imagem_category = PendingItemType.objects.get(
+            slug="imagem-rnm"
+        ).category_id
+        regula_category = PendingItemType.objects.get(
+            slug="regulacao-ortopedia"
+        ).category_id
 
+        writer_page = new_page()
+        _login(writer_page, live_server.url, "export_dl_writer")
+        writer_page.goto(
+            f"{live_server.url}/admissions/{admission.pk}/pending-items/",
+            wait_until="domcontentloaded",
+        )
+        self._create_profiles(writer_page, admission)
+
+        rnm = PendingItem.objects.get(
+            admission=admission, item_type__slug="imagem-rnm"
+        )
+        tomografia = PendingItem.objects.get(
+            admission=admission, item_type__slug="imagem-tomografia"
+        )
+        antibioticos = PendingItem.objects.get(
+            admission=admission, item_type__slug="infeccioso-antibioticos"
+        )
+        sumario = PendingItem.objects.get(
+            admission=admission, item_type__slug="sumario-assinatura"
+        )
+        formula_item = PendingItem.objects.get(
+            admission=admission, description=S4_EXPORT_FORMULA_TEXT
+        )
+        assert sumario.signature_at == S4_EXPORT_SIGNATURE_AT
+        assert antibioticos.treatment_end_date == S4_EXPORT_TREATMENT_END
+
+        # Edit one scheduled date through the contextual edit page.
+        writer_page.click(f'[data-testid="pending-edit-{rnm.pk}"]')
+        writer_page.wait_for_url("**/edit/**")
+        writer_page.fill(
+            "#id_scheduled_date", S4_EXPORT_RNM_EDITED.isoformat()
+        )
+        writer_page.click('[data-testid="pending-save"]')
+        writer_page.wait_for_url(
+            f"**/admissions/{admission.pk}/pending-items/**"
+        )
+        rnm.refresh_from_db()
+        assert rnm.scheduled_date == S4_EXPORT_RNM_EDITED
+
+        # Finalize another pending item (the tomography).
+        writer_page.click(
+            f'[data-testid="pending-finalize-{tomografia.pk}"]'
+        )
+        writer_page.select_option("#id_target_status", "resolved")
+        writer_page.click('[data-testid="pending-finalize-confirm"]')
+        writer_page.wait_for_url(
+            f"**/admissions/{admission.pk}/pending-items/**"
+        )
+        tomografia.refresh_from_db()
+        assert tomografia.status == STATUS_RESOLVED
+
+        # Reader downloads in both views; the panel paginates but the
+        # workbook must contain the complete selection.
         page = new_page(accept_downloads=True)
         _login(page, live_server.url, "export_dl_reader")
         page.goto(
-            f"{live_server.url}/pendencias/",
-            wait_until="domcontentloaded",
+            f"{live_server.url}/pendencias/", wait_until="domcontentloaded"
         )
-        assert page.locator('[data-testid="pagination"]').count() == 1
-
         with page.expect_download() as full_info:
             page.click('[data-testid="aggregate-export"]')
         full = full_info.value
@@ -897,34 +1079,147 @@ class TestExportJourney:
         assert full.suggested_filename.endswith(".xlsx")
         full_path = tmp_path / "full.xlsx"
         full.save_as(str(full_path))
-        full_rows = _read_export_rows(full_path)
-        assert full_rows[0] == EXPECTED_EXPORT_HEADERS
-        assert len(full_rows) == 1 + len(expected["active"])
-        assert {row[7] for row in full_rows[1:]} == set(
-            expected["active"]
+        full_sheet = _open_export(full_path)
+        assert [cell.value for cell in full_sheet[1]] == (
+            EXPECTED_EXPORT_HEADERS
         )
-        _assert_literal_cell(full_path, "=1+1-sintetico")
+        _assert_export_sheet_usability(full_sheet)
+        active_ids = set(
+            PendingItem.objects.filter(
+                admission__in=[admission.pk, other.pk],
+                status=STATUS_ACTIVE,
+            ).values_list("pk", flat=True)
+        )
+        assert _export_ids(full_sheet) == active_ids
+        assert len(active_ids) > AGGREGATE_PER_PAGE
+        _assert_literal_cell(full_path, S4_EXPORT_FORMULA_TEXT)
 
-        page.select_option("#f_unidade", "UTI GERAL")
-        with page.expect_navigation():
-            page.click('[data-testid="filters-apply"]')
-        assert "exp-dl-uti-a" in page.content()
-        assert "exp-dl-00" not in page.content()
-        with page.expect_download() as unit_info:
-            page.click('[data-testid="aggregate-export"]')
-        unit_path = tmp_path / "uti.xlsx"
-        unit_info.value.save_as(str(unit_path))
-        unit_rows = _read_export_rows(unit_path)
-        assert {row[7] for row in unit_rows[1:]} == set(expected["uti"])
-        assert all(row[2] == "UTI GERAL" for row in unit_rows[1:])
-
+        # The by-item view paginates, so page 1 cannot show every row the
+        # download above already contains.
         with page.expect_navigation():
             page.click('[data-testid="view-items"]')
-        with page.expect_download() as items_info:
+        assert page.locator('[data-testid="pagination"]').count() == 1
+        assert "exp-dl-rnm" not in page.content()
+        with page.expect_download() as items_full_info:
             page.click('[data-testid="aggregate-export"]')
-        items_path = tmp_path / "uti-items.xlsx"
-        items_info.value.save_as(str(items_path))
-        assert _read_export_rows(items_path) == unit_rows
+        items_full_path = tmp_path / "itens-completo.xlsx"
+        items_full_info.value.save_as(str(items_full_path))
+        items_full_sheet = _open_export(items_full_path)
+        assert _export_rows(items_full_sheet) == _export_rows(full_sheet)
+
+        # RNM row: edited native date, unknown sedation, first unit, ids.
+        rnm_row = _export_row_for(full_sheet, rnm.pk)
+        assert _export_cell(full_sheet, rnm_row, "ID da internação").value == (
+            admission.pk
+        )
+        assert _export_cell(full_sheet, rnm_row, "Registro").value == "0004321"
+        assert _export_cell(full_sheet, rnm_row, "Registro").data_type in (
+            "s",
+            "inlineStr",
+        )
+        assert _export_cell(full_sheet, rnm_row, "Categoria").value == (
+            "Exames de imagem"
+        )
+        assert _export_cell(full_sheet, rnm_row, "Tipo").value == "RNM"
+        scheduled = _export_cell(full_sheet, rnm_row, "Data agendada")
+        assert scheduled.is_date is True
+        assert scheduled.number_format == "dd/mm/yyyy"
+        assert scheduled.value == datetime(2026, 11, 15, 0, 0)
+        assert _export_cell(full_sheet, rnm_row, "Agendada?").value == "Sim"
+        assert _export_cell(full_sheet, rnm_row, "Contraste").value == "Sim"
+        assert _export_cell(full_sheet, rnm_row, "Sedação").value == (
+            "Não informado"
+        )
+        assert _export_cell(
+            full_sheet, rnm_row, "Primeira unidade de internação"
+        ).value == "PRONTO SOCORRO"
+
+        # Treatment row: both civil dates native; scheduling fields empty.
+        treatment_row = _export_row_for(full_sheet, antibioticos.pk)
+        assert _export_cell(
+            full_sheet, treatment_row, "Início do tratamento"
+        ).value == datetime(2026, 11, 1, 0, 0)
+        assert _export_cell(
+            full_sheet, treatment_row, "Previsão de término"
+        ).value == datetime(2026, 11, 10, 0, 0)
+        assert _export_cell(full_sheet, treatment_row, "Agendada?").value in (
+            "",
+            None,
+        )
+
+        # Signature row: institutional wall clock, tz-naive instant.
+        signature_row = _export_row_for(full_sheet, sumario.pk)
+        signature = _export_cell(
+            full_sheet, signature_row, "Assinatura do sumário em"
+        )
+        assert signature.is_date is True
+        assert signature.number_format == "dd/mm/yyyy hh:mm"
+        assert signature.value == datetime(2026, 11, 12, 9, 30)
+        assert signature.value.tzinfo is None
+
+        # Simple profile: every detail cell empty (never "Não").
+        formula_row = _export_row_for(full_sheet, formula_item.pk)
+        for header in EXPORT_DETAIL_HEADERS:
+            assert _export_cell(full_sheet, formula_row, header).value in (
+                "",
+                None,
+            ), header
+        assert _export_cell(
+            full_sheet, formula_row, "Descrição/observação"
+        ).value == S4_EXPORT_FORMULA_TEXT
+
+        # Category + status filters in both views.
+        page.select_option("#f_categoria", str(imagem_category))
+        page.select_option("#f_status", "active")
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        with page.expect_download() as category_info:
+            page.click('[data-testid="aggregate-export"]')
+        category_path = tmp_path / "categoria.xlsx"
+        category_info.value.save_as(str(category_path))
+        category_sheet = _open_export(category_path)
+        assert _export_ids(category_sheet) == {rnm.pk}
+
+        page.select_option("#f_status", "all")
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        with page.expect_download() as all_info:
+            page.click('[data-testid="aggregate-export"]')
+        all_path = tmp_path / "categoria-todas.xlsx"
+        all_info.value.save_as(str(all_path))
+        all_sheet = _open_export(all_path)
+        assert _export_ids(all_sheet) == {rnm.pk, tomografia.pk}
+        assert _export_cell(
+            all_sheet, _export_row_for(all_sheet, tomografia.pk), "Status"
+        ).value == "Resolvida"
+
+        # Same selection in the patient view downloads the same rows.
+        with page.expect_navigation():
+            page.click('[data-testid="view-patients"]')
+        with page.expect_download() as patients_info:
+            page.click('[data-testid="aggregate-export"]')
+        patients_path = tmp_path / "categoria-todas-pacientes.xlsx"
+        patients_info.value.save_as(str(patients_path))
+        patients_sheet = _open_export(patients_path)
+        assert _export_rows(patients_sheet) == _export_rows(all_sheet)
+        _assert_export_sheet_usability(patients_sheet)
+
+        # Empty selection: valid workbook with the header and no row.
+        page.goto(
+            f"{live_server.url}/pendencias/?categoria={regula_category}",
+            wait_until="domcontentloaded",
+        )
+        with page.expect_download() as empty_info:
+            page.click('[data-testid="aggregate-export"]')
+        empty_path = tmp_path / "vazio.xlsx"
+        empty_info.value.save_as(str(empty_path))
+        empty_sheet = _open_export(empty_path)
+        assert [cell.value for cell in empty_sheet[1]] == (
+            EXPECTED_EXPORT_HEADERS
+        )
+        assert empty_sheet.max_row == 1
+        _assert_export_sheet_usability(empty_sheet)
+
 
 
 @pytest.mark.django_db(transaction=True)
