@@ -3,9 +3,13 @@
   Entrada {{ admission.admission_date|date:"d/m/Y H:i"|default:"—" }}
 </div>
 <div class="small text-muted mb-2">
-  {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
+  {{ item.item_type.category.name }} &middot; {{ item.item_type.name }} &middot;
+  {{ item.get_status_display }} &middot; v{{ item.version }}
 </div>
-<p class="text-break">{{ item.description|linebreaksbr }}</p>
+{% if item.description %}
+  <p class="text-break">{{ item.description|linebreaksbr }}</p>
+{% endif %}
+{% include "pending_items/_item_details.html" with rows=item.detail_rows %}
 
 {% if error %}
   <div class="alert alert-danger" role="alert">{{ error }}</div>
@@ -18,41 +22,17 @@
   </div>
 {% endif %}
 
+{% if attempted_rows %}
+  <div class="alert alert-warning" role="note">
+    <div class="small fw-semibold mb-1">Detalhes digitados (não salvos):</div>
+    <ul class="small mb-0">
+      {% for row in attempted_rows %}<li>{{ row }}</li>{% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
 {% if form %}
-  <form method="post" action="{{ post_url }}"{% if modal %} hx-post="{{ post_url }}" hx-target="#pending-modal-body" hx-swap="innerHTML"{% endif %} novalidate>
-    {% csrf_token %}
-    <input type="hidden" name="next" value="{{ next_url }}">
-    {{ form.expected_version }}
-    {% if form.non_field_errors %}
-      <div class="alert alert-danger small" role="alert">{{ form.non_field_errors }}</div>
-    {% endif %}
-    <div class="mb-3">
-      <label for="id_item_type" class="form-label small fw-semibold">Tipo</label>
-      {{ form.item_type.errors }}
-      <select name="item_type" id="id_item_type" class="form-select" required>
-        {% for choice_value, choice_label in form.item_type.field.choices %}
-          {% if choice_value %}
-            <option value="{{ choice_value }}"{% if form.item_type.value|stringformat:"s" == choice_value|stringformat:"s" %} selected{% endif %}>{{ choice_label }}</option>
-          {% endif %}
-        {% endfor %}
-      </select>
-    </div>
-    <div class="mb-3">
-      <label for="id_description" class="form-label small fw-semibold">Descrição/observação</label>
-      {{ form.description.errors }}
-      <textarea name="description" id="id_description" rows="3" class="form-control" required>{{ form.description.value|default:"" }}</textarea>
-    </div>
-    <div class="d-flex gap-2">
-      <button type="submit" class="btn btn-primary" data-testid="pending-save">
-        <i class="bi bi-check-lg me-1"></i> Salvar alterações
-      </button>
-      {% if modal %}
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
-      {% else %}
-        <a href="{{ next_url }}" class="btn btn-outline-secondary">Voltar</a>
-      {% endif %}
-    </div>
-  </form>
+  {% include "pending_items/_pending_form_fields.html" with form_mode="edit" primary_testid="pending-save" primary_label="Salvar alterações" add_another=False back_url=next_url %}
 {% elif not modal %}
   <a href="{{ next_url }}" class="btn btn-outline-secondary">Voltar</a>
 {% endif %}

@@ -28,6 +28,12 @@
   </div>
 </div>
 
+{% if messages %}
+  {% for message in messages %}
+    <div class="alert alert-success" role="status">{{ message }}</div>
+  {% endfor %}
+{% endif %}
+
 {% if error %}
   <div class="alert alert-danger" role="alert">{{ error }}</div>
 {% endif %}
@@ -40,32 +46,7 @@
   <div class="card border-0 shadow-sm mb-3">
     <div class="card-body">
       <h2 class="h6 mb-3">Nova pendência</h2>
-      <form method="post" novalidate>
-        {% csrf_token %}
-        {% if form.non_field_errors %}
-          <div class="alert alert-danger small" role="alert">{{ form.non_field_errors }}</div>
-        {% endif %}
-        <div class="mb-3">
-          <label for="id_item_type" class="form-label small fw-semibold">Tipo</label>
-          {{ form.item_type.errors }}
-          <select name="item_type" id="id_item_type" class="form-select" required>
-            <option value="">Selecione…</option>
-            {% for choice_value, choice_label in form.item_type.field.choices %}
-              {% if choice_value %}
-                <option value="{{ choice_value }}"{% if form.item_type.value|stringformat:"s" == choice_value|stringformat:"s" %} selected{% endif %}>{{ choice_label }}</option>
-              {% endif %}
-            {% endfor %}
-          </select>
-        </div>
-        <div class="mb-3">
-          <label for="id_description" class="form-label small fw-semibold">Descrição/observação</label>
-          {{ form.description.errors }}
-          <textarea name="description" id="id_description" rows="3" class="form-control" required>{{ form.description.value|default:"" }}</textarea>
-        </div>
-        <button type="submit" class="btn btn-primary" data-testid="pending-create">
-          <i class="bi bi-plus-circle me-1"></i> Cadastrar pendência
-        </button>
-      </form>
+      {% include "pending_items/_pending_form_fields.html" with form_mode="create" primary_testid="pending-create" primary_label="Cadastrar pendência" add_another=True back_url="" %}
     </div>
   </div>
 {% endif %}
@@ -76,12 +57,18 @@
   <div class="card mb-3 border-0 shadow-sm">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap mb-2">
-        <span class="badge bg-light text-dark border">{{ item.item_type.name }}</span>
+        <div>
+          <div class="small text-muted">{{ item.item_type.category.name }}</div>
+          <span class="badge bg-light text-dark border">{{ item.item_type.name }}</span>
+        </div>
         <span class="badge {% if item.status == 'active' %}bg-warning-subtle text-warning-emphasis{% elif item.status == 'resolved' %}bg-success-subtle text-success-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %}">
           {{ item.get_status_display }}
         </span>
       </div>
-      <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+      {% if item.description %}
+        <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+      {% endif %}
+      {% include "pending_items/_item_details.html" with rows=item.detail_rows %}
       <div class="small text-muted mb-2">
         v{{ item.version }}
         &middot; criada por {{ item.created_by_name|default:"—" }} em {{ item.created_at|date:"d/m/Y H:i" }}

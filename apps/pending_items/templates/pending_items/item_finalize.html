@@ -18,9 +18,12 @@
 <div class="card border-0 shadow-sm mb-3">
   <div class="card-body">
     <div class="small text-muted mb-2">
-      {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
+      {{ item.item_type.category.name }} &middot; {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
     </div>
-    <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+    {% if item.description %}
+      <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+    {% endif %}
+    {% include "pending_items/_item_details.html" with rows=item.detail_rows %}
   </div>
 </div>
 

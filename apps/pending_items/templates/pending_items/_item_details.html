@@ -1,0 +1,14 @@
+{% comment %}
+Shared presentation of the applicable pending-item details (D6).
+
+``rows`` is the list produced by ``pending_items.details.detail_rows``;
+S2 renders it in the contextual list and history and S3 reuses the same
+partial in the aggregate instead of reimplementing the rules.
+{% endcomment %}
+{% if rows %}
+  <ul class="list-unstyled small mb-2" data-testid="pending-details">
+    {% for row in rows %}
+      <li>{{ row.label }}: {{ row.value }}</li>
+    {% endfor %}
+  </ul>
+{% endif %}

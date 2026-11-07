@@ -368,11 +368,19 @@ def _clear_pending_items_rows() -> None:
 
     Reversing ``0003`` restores the global unique type name, so the
     load-matrix tests must clear the catalog (except the protected
-    ``Outro``) before migrating back.
+    ``Outro``) before migrating back. The statements are raw on purpose:
+    the tests also run while the schema is at an older migration state,
+    where the current model fields do not exist yet (STRUCT-PEND-S2 added
+    nullable columns), and only these tables/columns are shared by every
+    state this harness reaches.
     """
-    PendingItemRevision.objects.all().delete()
-    PendingItem.objects.all().delete()
-    PendingItemType.objects.exclude(slug=OUTRO_SLUG).delete()
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM pending_items_pendingitemrevision")
+        cursor.execute("DELETE FROM pending_items_pendingitem")
+        cursor.execute(
+            "DELETE FROM pending_items_pendingitemtype WHERE slug <> %s",
+            [OUTRO_SLUG],
+        )
 
 
 def _reset_to_base_state():

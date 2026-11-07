@@ -333,6 +333,7 @@ class TestClassificationSnapshots:
             admission=admission,
             item_type=item_type,
             description="registro sintetico",
+            details={"is_scheduled": True},
             author=writer,
         )
         revision = PendingItemRevision.objects.get(item=item, version=1)
@@ -442,6 +443,7 @@ class TestClassificationSnapshots:
             admission=admission,
             item_type=item_type,
             description="registro sintetico",
+            details={"is_scheduled": False},
             author=writer,
         )
         Admission.objects.filter(pk=admission.pk).update(

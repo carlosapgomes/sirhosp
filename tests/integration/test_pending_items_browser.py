@@ -17,7 +17,7 @@ All fixtures are synthetic; no production source is ever contacted.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -26,7 +26,13 @@ import pytest
 from django.apps import apps as django_apps
 from django.contrib.auth.models import Group, User
 from django.utils import timezone
-from playwright.sync_api import Browser, Page, ViewportSize, sync_playwright
+from playwright.sync_api import (
+    Browser,
+    Locator,
+    Page,
+    ViewportSize,
+    sync_playwright,
+)
 
 from apps.census.models import (
     BedStatus,
@@ -41,7 +47,9 @@ from apps.pending_items.models import (
     GROUP_NAME,
     OUTRO_NAME,
     OUTRO_SLUG,
+    PROFILE_SIGNATURE,
     PROFILE_SIMPLE,
+    PROFILE_TREATMENT,
     STATUS_ACTIVE,
     STATUS_CLOSED_UNRESOLVED,
     STATUS_RESOLVED,
@@ -970,3 +978,585 @@ class TestAggregateMobileJourney:
             "document.scrollingElement.scrollWidth - window.innerWidth"
         )
         assert overflow <= 1
+
+
+S2_SCHEDULED_DATE = date(2026, 11, 10)
+S2_MODAL_DATE = date(2026, 11, 15)
+
+
+def _option_hidden_flags(page: Page) -> list[list]:
+    """Return ``[category_slug, hidden]`` for every catalog type option."""
+    flags = page.evaluate(
+        """() => Array.from(document.querySelectorAll('#id_item_type option'))
+            .filter((option) => option.dataset.category)
+            .map((option) => [option.dataset.category, option.hidden])"""
+    )
+    return flags
+
+
+def _rnm_revision(rnm_type: PendingItemType, item: PendingItem, **details) -> None:
+    PendingItemRevision.objects.create(
+        item=item,
+        version=1,
+        action="created",
+        item_type=rnm_type,
+        type_name=rnm_type.name,
+        category_name=rnm_type.category.name,
+        category_slug=rnm_type.category.slug,
+        type_slug=rnm_type.slug,
+        profile=rnm_type.profile,
+        has_rnm_complements=rnm_type.has_rnm_complements,
+        requires_description=rnm_type.requires_description,
+        description=item.description,
+        status=STATUS_ACTIVE,
+        **details,
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestStructuredContextualJourney:
+    """STRUCT-PEND-S2: progressive cadastro, search and Save-and-add-another."""
+
+    def test_progressive_create_search_keyboard_and_add_another(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _ = routed_browser_page
+        _make_writer(username="s2_browser_writer")
+        admission = _make_eligible_admission("P_S2_BROWSER_PROGRESSIVE")
+        _load_catalog()
+        tomografia = PendingItemType.objects.get(slug="imagem-tomografia")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+
+        page = new_page()
+        _login(page, live_server.url, "s2_browser_writer")
+        page.goto(
+            f"{live_server.url}/admissions/{admission.pk}/pending-items/",
+            wait_until="domcontentloaded",
+        )
+
+        # Progressive: no profile fields before a type is chosen.
+        assert page.locator("#pending-group-agendamento").is_visible() is False
+        assert page.locator("#pending-group-tratamento").is_visible() is False
+        assert page.locator("#pending-group-rnm").is_visible() is False
+
+        # Category narrows the type options; nothing is deleted.
+        image_category = str(tomografia.category_id)
+        chd_category = str(chd_rnm.category_id)
+        page.select_option("#id_category", label="Exames de imagem")
+        flags = dict(_option_hidden_flags(page))
+        assert flags[image_category] is False
+        assert flags[chd_category] is True
+
+        page.select_option("#id_item_type", str(tomografia.pk))
+        assert page.locator("#pending-group-agendamento").is_visible() is True
+        assert page.locator("#pending-group-tratamento").is_visible() is False
+        assert page.locator("#pending-group-rnm").is_visible() is False
+
+        # Agendada Não keeps the optional date hidden and needs no observation.
+        page.select_option("#id_is_scheduled", "nao")
+        assert page.locator("#pending-scheduled-date").is_visible() is False
+        page.fill("#id_description", "")
+        page.click('[data-testid="pending-create"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+        created = PendingItem.objects.get(admission=admission)
+        assert created.is_scheduled is False
+        assert created.description == ""
+        assert "Agendada: Não" in page.content()
+
+        # Search shows both RNM entries and the chosen one sets the category.
+        page.fill("#id_type_search", "rnm")
+        visible = {
+            category
+            for category, hidden in _option_hidden_flags(page)
+            if not hidden
+        }
+        assert image_category in visible
+        assert chd_category in visible
+        page.select_option("#id_item_type", str(chd_rnm.pk))
+        assert page.locator("#id_category").input_value() == chd_category
+        assert page.locator("#pending-group-rnm").is_visible() is True
+
+        # Keyboard: arrow keys change Agendada and reveal the date control.
+        page.select_option("#id_is_scheduled", "nao")
+        assert page.locator("#pending-scheduled-date").is_visible() is False
+        page.locator("#id_is_scheduled").focus()
+        page.keyboard.press("ArrowUp")
+        assert page.locator("#id_is_scheduled").input_value() == "sim"
+        assert page.locator("#pending-scheduled-date").is_visible() is True
+
+        page.fill("#id_scheduled_date", S2_SCHEDULED_DATE.isoformat())
+        page.select_option("#id_contrast", "sim")
+        page.select_option("#id_sedation", "nao")
+        page.locator('[data-testid="pending-save-new"]').focus()
+        assert page.evaluate("document.activeElement.dataset.testid") == (
+            "pending-save-new"
+        )
+        with page.expect_navigation():
+            page.keyboard.press("Enter")
+        assert page.locator(".errorlist").count() == 0
+
+        created_rows = list(
+            PendingItem.objects.filter(admission=admission).values_list(
+                "item_type__slug", "description", "is_scheduled",
+                "scheduled_date", "contrast", "sedation",
+            )
+        )
+        assert "chd-rnm" in [row[0] for row in created_rows], created_rows
+        rnm = PendingItem.objects.get(admission=admission, item_type=chd_rnm)
+        assert rnm.is_scheduled is True
+        assert rnm.scheduled_date == S2_SCHEDULED_DATE
+        assert rnm.contrast is True
+        assert rnm.sedation is False
+        content = page.content()
+        assert "Data agendada: 10/11/2026" in content
+        assert "Contraste: Sim" in content
+        assert "Sedação: Não" in content
+
+        # Save and add another returns an empty form, not copied details.
+        assert page.locator("#id_scheduled_date").input_value() == ""
+        assert page.locator("#id_description").input_value() == ""
+        assert PendingItem.objects.filter(admission=admission).count() == 2
+        page.reload(wait_until="domcontentloaded")
+        assert PendingItem.objects.filter(admission=admission).count() == 2
+
+        page.click(f'[data-testid="pending-history-{rnm.pk}"]')
+        page.wait_for_url("**/history/**")
+        history = page.content()
+        assert "Contraste: Sim" in history
+        assert "Data agendada: 10/11/2026" in history
+        overflow = page.evaluate(
+            "document.scrollingElement.scrollWidth - window.innerWidth"
+        )
+        assert overflow <= 1
+
+    def test_mobile_viewport_creates_and_edits_details(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _ = routed_browser_page
+        _make_writer(username="s2_browser_mobile")
+        admission = _make_eligible_admission("P_S2_BROWSER_MOBILE")
+        _load_catalog()
+        tomografia = PendingItemType.objects.get(slug="imagem-tomografia")
+
+        page = new_page(viewport={"width": 390, "height": 844})
+        _login(page, live_server.url, "s2_browser_mobile")
+        page.goto(
+            f"{live_server.url}/admissions/{admission.pk}/pending-items/",
+            wait_until="domcontentloaded",
+        )
+
+        page.select_option("#id_item_type", str(tomografia.pk))
+        assert page.locator("#pending-group-agendamento").is_visible() is True
+        page.select_option("#id_is_scheduled", "nao")
+        page.click('[data-testid="pending-create"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+        item = PendingItem.objects.get(admission=admission)
+        assert item.is_scheduled is False
+        assert (
+            page.evaluate(
+                "document.scrollingElement.scrollWidth - window.innerWidth"
+            )
+            <= 1
+        )
+
+        page.click(f'[data-testid="pending-edit-{item.pk}"]')
+        page.wait_for_url("**/edit/**")
+        page.select_option("#id_is_scheduled", "sim")
+        assert page.locator("#pending-scheduled-date").is_visible() is True
+        page.fill("#id_scheduled_date", "2026-11-12")
+        page.click('[data-testid="pending-save"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+        item.refresh_from_db()
+        assert item.is_scheduled is True
+        assert item.scheduled_date.isoformat() == "2026-11-12"
+        assert "Data agendada: 12/11/2026" in page.content()
+        assert (
+            page.evaluate(
+                "document.scrollingElement.scrollWidth - window.innerWidth"
+            )
+            <= 1
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestStructuredEditSurfaces:
+    """STRUCT-PEND-S2: shared rules in the contextual page and the modal."""
+
+    def test_quick_edit_modal_writes_details_and_keeps_other_values(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _ = routed_browser_page
+        _make_writer(username="s2_browser_modal")
+        scene = _make_aggregate_scene()
+        admission = scene["admission_a"]
+        assert isinstance(admission, Admission)
+        _load_catalog()
+        rnm_type = PendingItemType.objects.get(slug="imagem-rnm")
+        item = PendingItem.objects.create(
+            admission=admission,
+            item_type=rnm_type,
+            description="rnm do modal sintetica",
+            status=STATUS_ACTIVE,
+            version=1,
+            is_scheduled=True,
+            contrast=True,
+        )
+        _rnm_revision(rnm_type, item, is_scheduled=True, contrast=True)
+
+        page = new_page()
+        _login(page, live_server.url, "s2_browser_modal")
+        page.goto(f"{live_server.url}/pendencias/", wait_until="domcontentloaded")
+        page.click(f'[data-testid="pending-edit-{item.pk}"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_scheduled_date",
+            state="visible",
+            timeout=15000,
+        )
+        modal_scheduled = page.locator(
+            "#pending-modal-body #id_is_scheduled"
+        ).input_value()
+        assert modal_scheduled == "sim"
+        page.fill(
+            "#pending-modal-body #id_scheduled_date",
+            S2_MODAL_DATE.isoformat(),
+        )
+        with page.expect_navigation():
+            page.click("#pending-modal-body [data-testid='pending-save']")
+        item.refresh_from_db()
+        assert item.scheduled_date == S2_MODAL_DATE
+        assert item.contrast is True
+        assert item.description == "rnm do modal sintetica"
+        assert "atualizada com sucesso" in page.content()
+
+        # Conflict: another version lands while the modal stays open.
+        page.click(f'[data-testid="pending-edit-{item.pk}"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_scheduled_date",
+            state="visible",
+            timeout=15000,
+        )
+        page.fill("#pending-modal-body #id_scheduled_date", "2026-11-20")
+        PendingItem.objects.filter(pk=item.pk).update(version=item.version + 1)
+        page.click("#pending-modal-body [data-testid='pending-save']")
+        page.wait_for_selector(
+            "#pending-modal-body .alert-danger",
+            state="visible",
+            timeout=15000,
+        )
+        conflict = page.locator("#pending-modal-body").inner_html()
+        assert "alterada por outra pessoa" in conflict
+        assert "20/11/2026" in conflict
+        item.refresh_from_db()
+        assert item.scheduled_date == S2_MODAL_DATE
+
+    def test_confirmed_and_cancelled_detail_removal(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _ = routed_browser_page
+        _make_writer(username="s2_browser_removal")
+        admission = _make_eligible_admission("P_S2_BROWSER_REMOVAL")
+        _load_catalog()
+        rnm_type = PendingItemType.objects.get(slug="imagem-rnm")
+        tomografia = PendingItemType.objects.get(slug="imagem-tomografia")
+        item = PendingItem.objects.create(
+            admission=admission,
+            item_type=rnm_type,
+            description="",
+            status=STATUS_ACTIVE,
+            version=1,
+            is_scheduled=True,
+            scheduled_date=S2_SCHEDULED_DATE,
+            contrast=True,
+        )
+        _rnm_revision(
+            rnm_type,
+            item,
+            is_scheduled=True,
+            scheduled_date=S2_SCHEDULED_DATE,
+            contrast=True,
+        )
+        edit_url = (
+            f"{live_server.url}/admissions/{admission.pk}/pending-items/"
+            f"{item.pk}/edit/"
+        )
+        list_url = f"{live_server.url}/admissions/{admission.pk}/pending-items/"
+
+        page = new_page()
+        _login(page, live_server.url, "s2_browser_removal")
+        page.goto(edit_url, wait_until="domcontentloaded")
+        page.select_option("#id_item_type", str(tomografia.pk))
+        assert page.locator("#pending-removal-box").is_visible() is True
+        removal_text = page.locator("#pending-removal-box").inner_text()
+        assert "Contraste" in removal_text
+        assert "Sedação" not in removal_text
+        page.goto(list_url, wait_until="domcontentloaded")
+        item.refresh_from_db()
+        assert item.item_type_id == rnm_type.pk
+        assert item.contrast is True
+        assert item.version == 1
+
+        page.goto(edit_url, wait_until="domcontentloaded")
+        page.select_option("#id_item_type", str(tomografia.pk))
+        page.check("#id_confirm_detail_removal")
+        page.click('[data-testid="pending-save"]')
+        page.wait_for_url(f"**/admissions/{admission.pk}/pending-items/**")
+        item.refresh_from_db()
+        assert item.item_type_id == tomografia.pk
+        assert item.contrast is None
+        assert item.scheduled_date == S2_SCHEDULED_DATE
+
+        page.click(f'[data-testid="pending-history-{item.pk}"]')
+        page.wait_for_url("**/history/**")
+        assert "Contraste: Sim" in page.content()
+
+
+S2_TREATMENT_START = date(2026, 11, 1)
+S2_TREATMENT_END = date(2026, 11, 10)
+S2_SIGNATURE_FIRST = datetime(2026, 11, 12, 9, 30, tzinfo=TZ)
+S2_SIGNATURE_SECOND = datetime(2026, 11, 14, 8, 0, tzinfo=TZ)
+
+
+def _pending_item_card(page: Page, item_id: int) -> Locator:
+    """The contextual card that owns one item's details and actions."""
+    return page.locator(
+        "div.card",
+        has=page.locator(f'[data-testid="pending-history-{item_id}"]'),
+    )
+
+
+def _card_detail_text(page: Page, item_id: int) -> str:
+    return _pending_item_card(page, item_id).locator(
+        '[data-testid="pending-details"]'
+    ).inner_text()
+
+
+def _horizontal_overflow(page: Page) -> float:
+    return page.evaluate(
+        "document.scrollingElement.scrollWidth - window.innerWidth"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestStructuredTreatmentAndSignatureJourney:
+    """STRUCT-PEND-S2 R4: browser create/edit for the two remaining profiles.
+
+    The treatment-period (``Antibióticos``) and signature-document
+    (``Assinatura do sumário de alta``) profiles are exercised through the
+    real live_server form, their contextual edit page and the persisted
+    history, including keyboard submission and the 390 px viewport.
+    """
+
+    def test_treatment_period_create_edit_history_and_keyboard(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _ = routed_browser_page
+        _make_writer(username="s2_browser_treatment")
+        admission = _make_eligible_admission("P_S2_BROWSER_TREATMENT")
+        _load_catalog()
+        antibioticos = PendingItemType.objects.get(
+            slug="infeccioso-antibioticos"
+        )
+        assert antibioticos.profile == PROFILE_TREATMENT
+        patient_key = admission.patient.patient_source_key
+        admission_date = admission.admission_date
+        list_url = f"{live_server.url}/admissions/{admission.pk}/pending-items/"
+
+        page = new_page()
+        _login(page, live_server.url, "s2_browser_treatment")
+        page.goto(list_url, wait_until="domcontentloaded")
+
+        # Only the treatment-period group applies to this type.
+        page.select_option("#id_item_type", str(antibioticos.pk))
+        assert page.locator("#pending-group-tratamento").is_visible() is True
+        assert page.locator("#pending-group-assinatura").is_visible() is False
+        assert page.locator("#pending-group-agendamento").is_visible() is False
+        assert page.locator("#pending-group-rnm").is_visible() is False
+
+        # Partial period: only the start date, submitted by keyboard.
+        page.fill("#id_treatment_start_date", S2_TREATMENT_START.isoformat())
+        page.locator('[data-testid="pending-create"]').focus()
+        assert (
+            page.evaluate("document.activeElement.dataset.testid")
+            == "pending-create"
+        )
+        with page.expect_navigation():
+            page.keyboard.press("Enter")
+        page.wait_for_url(list_url)
+
+        item = PendingItem.objects.get(admission=admission)
+        assert item.treatment_start_date == S2_TREATMENT_START
+        assert item.treatment_end_date is None
+        assert item.signature_at is None
+        assert item.is_scheduled is None
+        assert item.status == STATUS_ACTIVE
+        assert item.version == 1
+        assert item.finalized_at is None
+        details = _card_detail_text(page, item.pk)
+        assert "Início do tratamento: 01/11/2026" in details
+        assert "Previsão de término: Não informado" in details
+
+        # Edit recovers the stored start date and adds the end date.
+        page.click(f'[data-testid="pending-edit-{item.pk}"]')
+        page.wait_for_url("**/edit/**")
+        assert page.locator("#pending-group-tratamento").is_visible() is True
+        assert page.locator("#id_treatment_start_date").input_value() == (
+            "2026-11-01"
+        )
+        assert page.locator("#id_treatment_end_date").input_value() == ""
+        page.fill("#id_treatment_end_date", S2_TREATMENT_END.isoformat())
+        page.locator('[data-testid="pending-save"]').focus()
+        assert (
+            page.evaluate("document.activeElement.dataset.testid")
+            == "pending-save"
+        )
+        with page.expect_navigation():
+            page.keyboard.press("Enter")
+        page.wait_for_url(list_url)
+
+        item.refresh_from_db()
+        assert item.treatment_start_date == S2_TREATMENT_START
+        assert item.treatment_end_date == S2_TREATMENT_END
+        assert item.version == 2
+        details = _card_detail_text(page, item.pk)
+        assert "Início do tratamento: 01/11/2026" in details
+        assert "Previsão de término: 10/11/2026" in details
+
+        # History keeps both versions with their own details.
+        page.click(f'[data-testid="pending-history-{item.pk}"]')
+        page.wait_for_url("**/history/**")
+        current = page.locator('[data-testid="pending-details"]').inner_text()
+        assert "Início do tratamento: 01/11/2026" in current
+        assert "Previsão de término: 10/11/2026" in current
+        versions = page.locator("tbody tr")
+        assert versions.count() == 2
+        first = versions.nth(0).inner_text()
+        second = versions.nth(1).inner_text()
+        assert "v1" in first
+        assert "Início do tratamento: 01/11/2026" in first
+        assert "Previsão de término: Não informado" in first
+        assert "v2" in second
+        assert "Previsão de término: 10/11/2026" in second
+        assert "Antibióticos" in page.content()
+
+        # 390 px: the stored details still render without overflow.
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.goto(list_url, wait_until="domcontentloaded")
+        assert "Previsão de término: 10/11/2026" in _card_detail_text(
+            page, item.pk
+        )
+        assert _horizontal_overflow(page) <= 1
+
+        # Creating and editing details neither finalizes nor moves the episode.
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        assert admission.admission_date == admission_date
+        assert admission.patient.patient_source_key == patient_key
+        item.refresh_from_db()
+        assert item.status == STATUS_ACTIVE
+        assert item.finalized_at is None
+        assert set(item.revisions.values_list("action", flat=True)) == {
+            "created",
+            "updated",
+        }
+
+    def test_signature_document_create_edit_mobile_and_does_not_finalize(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _ = routed_browser_page
+        _make_writer(username="s2_browser_signature")
+        admission = _make_eligible_admission("P_S2_BROWSER_SIGNATURE")
+        _load_catalog()
+        sumario = PendingItemType.objects.get(slug="sumario-assinatura")
+        assert sumario.profile == PROFILE_SIGNATURE
+        patient_key = admission.patient.patient_source_key
+        admission_date = admission.admission_date
+        list_url = f"{live_server.url}/admissions/{admission.pk}/pending-items/"
+
+        page = new_page(viewport={"width": 390, "height": 844})
+        _login(page, live_server.url, "s2_browser_signature")
+        page.goto(list_url, wait_until="domcontentloaded")
+
+        page.select_option("#id_item_type", str(sumario.pk))
+        assert page.locator("#pending-group-assinatura").is_visible() is True
+        assert page.locator("#pending-group-tratamento").is_visible() is False
+        assert page.locator("#pending-group-agendamento").is_visible() is False
+        assert page.locator("#pending-group-rnm").is_visible() is False
+
+        # Signature entered by keyboard at 390 px.
+        page.fill("#id_signature_at", "2026-11-12T09:30")
+        page.locator('[data-testid="pending-create"]').focus()
+        assert (
+            page.evaluate("document.activeElement.dataset.testid")
+            == "pending-create"
+        )
+        with page.expect_navigation():
+            page.keyboard.press("Enter")
+        page.wait_for_url(list_url)
+
+        item = PendingItem.objects.get(admission=admission)
+        assert item.signature_at == S2_SIGNATURE_FIRST
+        assert item.treatment_start_date is None
+        assert item.treatment_end_date is None
+        assert item.is_scheduled is None
+        assert item.status == STATUS_ACTIVE
+        assert item.version == 1
+        assert item.finalized_at is None
+        details = _card_detail_text(page, item.pk)
+        assert "Assinatura do sumário em: 12/11/2026 09:30" in details
+        assert _horizontal_overflow(page) <= 1
+
+        # Edit recovers the stored instant in local wall time and persists
+        # the new one; the item stays active.
+        page.click(f'[data-testid="pending-edit-{item.pk}"]')
+        page.wait_for_url("**/edit/**")
+        assert page.locator("#pending-group-assinatura").is_visible() is True
+        assert page.locator("#id_signature_at").input_value() == (
+            "2026-11-12T09:30"
+        )
+        page.fill("#id_signature_at", "2026-11-14T08:00")
+        page.locator('[data-testid="pending-save"]').focus()
+        with page.expect_navigation():
+            page.keyboard.press("Enter")
+        page.wait_for_url(list_url)
+        item.refresh_from_db()
+        assert item.signature_at == S2_SIGNATURE_SECOND
+        assert item.status == STATUS_ACTIVE
+        assert item.version == 2
+        assert "Assinatura do sumário em: 14/11/2026 08:00" in (
+            _card_detail_text(page, item.pk)
+        )
+        assert _horizontal_overflow(page) <= 1
+
+        # A later edit of the observation alone keeps the stored instant.
+        page.click(f'[data-testid="pending-edit-{item.pk}"]')
+        page.wait_for_url("**/edit/**")
+        page.fill("#id_description", "sumario assinado sintetico")
+        page.click('[data-testid="pending-save"]')
+        page.wait_for_url(list_url)
+        item.refresh_from_db()
+        assert item.signature_at == S2_SIGNATURE_SECOND
+        assert item.description == "sumario assinado sintetico"
+        assert item.version == 3
+
+        # History shows the current value and each version's own value.
+        page.click(f'[data-testid="pending-history-{item.pk}"]')
+        page.wait_for_url("**/history/**")
+        current = page.locator('[data-testid="pending-details"]').inner_text()
+        assert "Assinatura do sumário em: 14/11/2026 08:00" in current
+        versions = page.locator("tbody tr")
+        assert versions.count() == 3
+        assert "12/11/2026 09:30" in versions.nth(0).inner_text()
+        assert "14/11/2026 08:00" in versions.nth(1).inner_text()
+        assert "14/11/2026 08:00" in versions.nth(2).inner_text()
+        assert "Assinatura do sumário de alta" in page.content()
+
+        # Signing never finalizes the item nor changes the episode identity.
+        admission.refresh_from_db()
+        assert admission.discharge_date is None
+        assert admission.admission_date == admission_date
+        assert admission.patient.patient_source_key == patient_key
+        assert item.finalized_at is None
+        assert set(item.revisions.values_list("action", flat=True)) == {
+            "created",
+            "updated",
+        }

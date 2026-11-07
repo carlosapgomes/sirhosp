@@ -23,6 +23,7 @@ from django.views.decorators.http import require_GET
 
 from apps.patients.models import Admission
 from apps.pending_items import policy
+from apps.pending_items.details import attempted_detail_rows
 from apps.pending_items.eligibility import (
     IneligibleAdmissionError,
     check_write_eligibility,
@@ -299,6 +300,7 @@ def _edit_response(
     modal: bool,
     attempted: str | None,
     status: int,
+    attempted_rows: list[str] | None = None,
 ) -> HttpResponse:
     context = {
         "admission": admission,
@@ -308,6 +310,7 @@ def _edit_response(
         "error": error,
         "attempted": attempted or "",
         "show_attempted": bool(attempted),
+        "attempted_rows": attempted_rows or [],
         "next_url": next_url,
         "modal": modal,
         "post_url": reverse("pending_items:aggregate_edit", args=[item.pk]),
@@ -315,6 +318,11 @@ def _edit_response(
     }
     if modal:
         template = "pending_items/_aggregate_edit_form.html"
+        # htmx swaps only successful responses; the fragment itself carries
+        # the conflict/bloqueio message and the current version token, so the
+        # modal stays open instead of silently ignoring the 409.
+        if status in (409, 400):
+            status = 200
     else:
         template = "pending_items/aggregate_edit.html"
     return render(request, template, context, status=status)
@@ -332,7 +340,7 @@ def aggregate_edit(request: HttpRequest, item_id: int) -> HttpResponse:
     """
     item = get_object_or_404(
         PendingItem.objects.select_related(
-            "item_type", "admission__patient"
+            "item_type__category", "admission__patient"
         ),
         pk=item_id,
     )
@@ -341,20 +349,24 @@ def aggregate_edit(request: HttpRequest, item_id: int) -> HttpResponse:
 
     if request.method == "POST":
         next_url = _safe_next(request.POST.get("next"))
+        attempted_text = request.POST.get("description") or ""
+        attempted = attempted_detail_rows(request.POST)
         if not policy.can_write_pending_items(request.user):
             return _edit_response(
                 request, admission, item, None,
                 policy.WRITE_DENIED_MESSAGE, next_url, modal,
-                attempted=request.POST.get("description") or "", status=403,
+                attempted=attempted_text, status=403,
+                attempted_rows=attempted,
             )
         try:
             require_write_eligibility(admission)
         except IneligibleAdmissionError as exc:
             return _edit_response(
                 request, admission, item, None, str(exc), next_url, modal,
-                attempted=request.POST.get("description") or "", status=403,
+                attempted=attempted_text, status=403,
+                attempted_rows=attempted,
             )
-        form = PendingItemEditForm(request.POST)
+        form = PendingItemEditForm(request.POST, item=item)
         if not form.is_valid():
             return _edit_response(
                 request, admission, item, form, None, next_url, modal,
@@ -364,7 +376,12 @@ def aggregate_edit(request: HttpRequest, item_id: int) -> HttpResponse:
             update_pending_item(
                 item=item,
                 item_type=form.cleaned_data["item_type"],
+                category=form.cleaned_data.get("category"),
                 description=form.cleaned_data["description"],
+                details=form.cleaned_data["submitted_details"],
+                confirm_detail_removal=bool(
+                    form.cleaned_data.get("confirm_detail_removal")
+                ),
                 author=request.user,  # type: ignore[arg-type]
                 expected_version=form.cleaned_data["expected_version"],
             )
@@ -374,23 +391,19 @@ def aggregate_edit(request: HttpRequest, item_id: int) -> HttpResponse:
                 request,
                 admission,
                 item,
-                PendingItemEditForm(
-                    initial={
-                        "item_type": item.item_type_id,
-                        "description": item.description,
-                        "expected_version": item.version,
-                    }
-                ),
+                PendingItemEditForm(item=item),
                 CONFLICT_MESSAGE,
                 next_url,
                 modal,
-                attempted=form.cleaned_data["description"],
+                attempted=attempted_text,
                 status=409,
+                attempted_rows=attempted,
             )
         except InvalidStatusTransitionError as exc:
             return _edit_response(
                 request, admission, item, None, str(exc), next_url, modal,
-                attempted=form.cleaned_data["description"], status=400,
+                attempted=attempted_text, status=400,
+                attempted_rows=attempted,
             )
         except (ValidationError, IneligibleAdmissionError) as exc:
             return _edit_response(
@@ -400,7 +413,8 @@ def aggregate_edit(request: HttpRequest, item_id: int) -> HttpResponse:
         except PermissionDenied as exc:
             return _edit_response(
                 request, admission, item, None, str(exc), next_url, modal,
-                attempted=form.cleaned_data["description"], status=403,
+                attempted=attempted_text, status=403,
+                attempted_rows=attempted,
             )
         messages.success(request, "Pendência atualizada com sucesso.")
         if modal:
@@ -430,13 +444,7 @@ def aggregate_edit(request: HttpRequest, item_id: int) -> HttpResponse:
         request,
         admission,
         item,
-        PendingItemEditForm(
-            initial={
-                "item_type": item.item_type_id,
-                "description": item.description,
-                "expected_version": item.version,
-            }
-        ),
+        PendingItemEditForm(item=item),
         None,
         next_url,
         modal,
@@ -473,6 +481,8 @@ def _finalize_response(
     }
     if modal:
         template = "pending_items/_aggregate_finalize_form.html"
+        if status in (409, 400):
+            status = 200
     else:
         template = "pending_items/aggregate_finalize.html"
     return render(request, template, context, status=status)

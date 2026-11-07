@@ -12,6 +12,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import ProtectedError
 
+from apps.pending_items import details
+
 GROUP_NAME = "Desospitalização"
 """Django group whose effective membership authorizes pending-item writes."""
 
@@ -250,6 +252,13 @@ class PendingItem(models.Model):
         related_name="pending_items",
     )
     description = models.TextField()
+    is_scheduled = models.BooleanField(null=True, blank=True)
+    scheduled_date = models.DateField(null=True, blank=True)
+    treatment_start_date = models.DateField(null=True, blank=True)
+    treatment_end_date = models.DateField(null=True, blank=True)
+    signature_at = models.DateTimeField(null=True, blank=True)
+    contrast = models.BooleanField(null=True, blank=True)
+    sedation = models.BooleanField(null=True, blank=True)
     status = models.CharField(
         max_length=20, choices=STATUS_CHOICES, default=STATUS_ACTIVE
     )
@@ -296,15 +305,47 @@ class PendingItem(models.Model):
                 condition=models.Q(version__gte=1),
                 name="ck_pending_item_version_positive",
             ),
+            models.CheckConstraint(
+                condition=models.Q(scheduled_date__isnull=True)
+                | models.Q(is_scheduled__isnull=False, is_scheduled=True),
+                name="ck_pending_item_scheduled_date_requires_yes",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(treatment_start_date__isnull=True)
+                | models.Q(treatment_end_date__isnull=True)
+                | models.Q(
+                    treatment_end_date__gte=models.F("treatment_start_date")
+                ),
+                name="ck_pending_item_treatment_period_order",
+            ),
         ]
 
     def __str__(self) -> str:
         return f"Pendência #{self.pk} ({self.get_status_display()})"
 
+    @property
+    def detail_rows(self) -> list[dict[str, str]]:
+        """Shared presentation of this item's applicable details (D6)."""
+        return details.detail_rows(
+            self.item_type.profile,
+            self.item_type.has_rnm_complements,
+            details.stored_details(self),
+        )
+
     def clean(self) -> None:
         super().clean()
-        if not (self.description or "").strip():
+        if not self.item_type_id:
+            return
+        item_type = self.item_type
+        if item_type.requires_description and not (
+            self.description or ""
+        ).strip():
             raise ValidationError({"description": "Descrição é obrigatória."})
+        values = details.stored_details(self)
+        details.validate_detail_placement(
+            item_type.profile, item_type.has_rnm_complements, values
+        )
+        details.validate_detail_coherence(values)
 
 
 class PendingItemRevision(models.Model):
@@ -332,6 +373,13 @@ class PendingItemRevision(models.Model):
     has_rnm_complements = models.BooleanField(null=True, blank=True)
     requires_description = models.BooleanField(null=True, blank=True)
     description = models.TextField()
+    is_scheduled = models.BooleanField(null=True, blank=True)
+    scheduled_date = models.DateField(null=True, blank=True)
+    treatment_start_date = models.DateField(null=True, blank=True)
+    treatment_end_date = models.DateField(null=True, blank=True)
+    signature_at = models.DateTimeField(null=True, blank=True)
+    contrast = models.BooleanField(null=True, blank=True)
+    sedation = models.BooleanField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES)
     note = models.TextField(blank=True, default="")
     author = models.ForeignKey(
@@ -368,10 +416,47 @@ class PendingItemRevision(models.Model):
                 | models.Q(profile=PROFILE_SCHEDULING),
                 name="ck_pending_item_revision_rnm_requires_scheduling",
             ),
+            models.CheckConstraint(
+                condition=models.Q(scheduled_date__isnull=True)
+                | models.Q(is_scheduled__isnull=False, is_scheduled=True),
+                name="ck_pending_item_revision_scheduled_date_requires_yes",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(treatment_start_date__isnull=True)
+                | models.Q(treatment_end_date__isnull=True)
+                | models.Q(
+                    treatment_end_date__gte=models.F("treatment_start_date")
+                ),
+                name="ck_pending_item_revision_treatment_period_order",
+            ),
         ]
 
     def __str__(self) -> str:
         return f"Revisão v{self.version} da pendência #{self.item_id}"
+
+    @property
+    def details_known(self) -> bool:
+        """False for versions written before the classification snapshot."""
+        return self.profile is not None
+
+    @property
+    def detail_rows(self) -> list[dict[str, str]]:
+        """Shared presentation using the metadata observed by the version."""
+        return details.detail_rows(
+            self.profile,
+            self.has_rnm_complements,
+            details.stored_details(self),
+        )
+
+    def clean(self) -> None:
+        super().clean()
+        if self.profile is None:
+            return
+        values = details.stored_details(self)
+        details.validate_detail_placement(
+            self.profile, bool(self.has_rnm_complements), values
+        )
+        details.validate_detail_coherence(values)
 
     def save(self, *args, **kwargs) -> None:
         if self.pk is not None:

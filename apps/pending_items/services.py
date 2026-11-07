@@ -9,6 +9,8 @@ system author because no author-kind input exists.
 
 from __future__ import annotations
 
+from typing import Mapping
+
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -16,6 +18,12 @@ from django.utils import timezone
 
 from apps.patients.models import Admission
 from apps.pending_items import policy
+from apps.pending_items.details import (
+    DETAIL_FIELD_NAMES,
+    detail_snapshot,
+    plan_details,
+    stored_details,
+)
 from apps.pending_items.eligibility import (
     IneligibleAdmissionError,
     require_write_eligibility,
@@ -28,6 +36,7 @@ from apps.pending_items.models import (
     STATUS_ACTIVE,
     STATUS_CLOSED_UNRESOLVED,
     PendingItem,
+    PendingItemCategory,
     PendingItemRevision,
     PendingItemType,
 )
@@ -84,11 +93,24 @@ def classification_snapshot(item_type: PendingItemType) -> dict[str, object]:
     }
 
 
-def _require_text(description: str | None) -> str:
+def _require_description(
+    item_type: PendingItemType, description: str | None
+) -> str:
+    """Observations are required only for the generic catalog entries."""
     text = (description or "").strip()
-    if not text:
+    if item_type.requires_description and not text:
         raise ValidationError({"description": "Descrição é obrigatória."})
     return text
+
+
+def _require_category_match(
+    item_type: PendingItemType, category: PendingItemCategory | None
+) -> None:
+    """The persisted classification comes from the type (D3)."""
+    if category is not None and item_type.category_id != category.pk:
+        raise ValidationError(
+            {"item_type": "Selecione um tipo da categoria escolhida."}
+        )
 
 
 def _locked_admission(admission_id: int) -> Admission:
@@ -106,11 +128,24 @@ def create_pending_item(
     item_type: PendingItemType,
     description: str,
     author: User,
+    category: PendingItemCategory | None = None,
+    details: Mapping[str, object] | None = None,
 ) -> PendingItem:
-    """Create an active item plus its v1 revision, atomically."""
+    """Create an active item plus its v1 revision, atomically.
+
+    ``details`` carries only the values the caller explicitly submitted
+    with the seven typed names of ``details.DETAIL_FIELD_NAMES``.
+    """
     policy.require_can_write(author)
-    text = _require_text(description)
     fresh_type = _require_type(item_type)
+    _require_category_match(fresh_type, category)
+    text = _require_description(fresh_type, description)
+    resolved, _removed = plan_details(
+        profile=fresh_type.profile,
+        has_rnm_complements=fresh_type.has_rnm_complements,
+        stored={},
+        submitted=details or {},
+    )
     label = author.get_username()
     with transaction.atomic():
         locked = _locked_admission(admission.pk)
@@ -126,6 +161,7 @@ def create_pending_item(
             updated_by=author,
             updated_by_name=label,
             is_system_updated=False,
+            **resolved,
         )
         PendingItemRevision.objects.create(
             item=item,
@@ -140,6 +176,7 @@ def create_pending_item(
             author_name=label,
             is_system=False,
             **classification_snapshot(fresh_type),
+            **detail_snapshot(resolved),
         )
     return item
 
@@ -151,11 +188,20 @@ def update_pending_item(
     description: str,
     author: User,
     expected_version: int,
+    category: PendingItemCategory | None = None,
+    details: Mapping[str, object] | None = None,
+    confirm_detail_removal: bool = False,
 ) -> tuple[PendingItem, bool]:
-    """Edit an active item; no effective change writes no new version."""
+    """Edit an active item; no effective change writes no new version.
+
+    ``details`` carries only the submitted typed values; omitted keys keep
+    the stored value unless the new classification forces a removal, which
+    requires ``confirm_detail_removal``.
+    """
     policy.require_can_write(author)
-    text = _require_text(description)
     fresh_type = _require_type(item_type)
+    _require_category_match(fresh_type, category)
+    text = _require_description(fresh_type, description)
     label = author.get_username()
     with transaction.atomic():
         locked_admission = _locked_admission(item.admission_id)
@@ -169,10 +215,27 @@ def update_pending_item(
             raise InvalidStatusTransitionError(FINALIZED_MESSAGE)
         if locked.version != expected_version:
             raise VersionConflictError(CONFLICT_MESSAGE)
-        if locked.item_type_id == fresh_type.pk and locked.description == text:
+        current = stored_details(locked)
+        resolved, _removed = plan_details(
+            profile=fresh_type.profile,
+            has_rnm_complements=fresh_type.has_rnm_complements,
+            stored=current,
+            submitted=details or {},
+            confirm_removal=confirm_detail_removal,
+        )
+        unchanged_details = all(
+            current[name] == resolved[name] for name in DETAIL_FIELD_NAMES
+        )
+        if (
+            locked.item_type_id == fresh_type.pk
+            and locked.description == text
+            and unchanged_details
+        ):
             return locked, False
         locked.item_type = fresh_type
         locked.description = text
+        for name in DETAIL_FIELD_NAMES:
+            setattr(locked, name, resolved[name])
         locked.version += 1
         locked.updated_by = author
         locked.updated_by_name = label
@@ -181,6 +244,7 @@ def update_pending_item(
             update_fields=[
                 "item_type",
                 "description",
+                *DETAIL_FIELD_NAMES,
                 "version",
                 "updated_by",
                 "updated_by_name",
@@ -201,6 +265,7 @@ def update_pending_item(
             author_name=label,
             is_system=False,
             **classification_snapshot(fresh_type),
+            **detail_snapshot(resolved),
         )
     return locked, True
 
@@ -264,6 +329,7 @@ def finalize_pending_item(
             author_name=label,
             is_system=False,
             **classification_snapshot(item_type),
+            **detail_snapshot(locked),
         )
     return locked
 
@@ -331,5 +397,6 @@ def close_pending_items_for_confirmed_exit(
             author_name=SYSTEM_AUTHOR_NAME,
             is_system=True,
             **classification_snapshot(item.item_type),
+            **detail_snapshot(item),
         )
     return len(actives)

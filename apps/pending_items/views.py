@@ -1,24 +1,27 @@
-"""Contextual pending-item surfaces (PEND-S1, D7 subset).
+"""Contextual pending-item surfaces (STRUCT-PEND-S2, D5/D6).
 
 List, create, edit, finalize and read-only history nested under the
 selected admission. Every response carries ``Cache-Control: private,
 no-store``. Writes require POST+CSRF, effective group membership and a
 uniquely identified current open admission; failures re-render with an
-explicit status instead of raising through the cache decorator.
+explicit status instead of raising through the cache decorator. Rejected
+writes keep every attempted value visible.
 """
 
 from __future__ import annotations
 
 from functools import wraps
 
+from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 
 from apps.patients.models import Admission
 from apps.patients.reconciliation import admission_has_date_only_closure
-from apps.pending_items import policy
+from apps.pending_items import details, policy
 from apps.pending_items.eligibility import (
     IneligibleAdmissionError,
     check_write_eligibility,
@@ -44,6 +47,12 @@ from apps.pending_items.services import (
     update_pending_item,
 )
 
+SAVE_AND_ADD_ANOTHER = "save_new"
+CREATED_MESSAGE = "Pendência cadastrada com sucesso."
+CREATED_AND_NEXT_MESSAGE = (
+    "Pendência cadastrada com sucesso. Preencha a próxima abaixo."
+)
+
 
 def private_no_store(view_func):
     """Set Cache-Control private/no-store on every wrapped response."""
@@ -60,9 +69,13 @@ def private_no_store(view_func):
 def _items_for(admission: Admission):
     return (
         PendingItem.objects.filter(admission=admission)
-        .select_related("item_type")
+        .select_related("item_type__category")
         .order_by("status", "created_at", "pk")
     )
+
+
+def _attempted_rows(post_data) -> list[str]:
+    return details.attempted_detail_rows(post_data)
 
 
 @login_required
@@ -84,88 +97,7 @@ def admission_pending_items(
     # D 00:00 carrier hour is never displayed.
     discharge_date_only = admission_has_date_only_closure(admission)
 
-    if request.method == "POST":
-        if not member:
-            return render(
-                request,
-                "pending_items/admission_items.html",
-                {
-                    "admission": admission,
-                    "patient": admission.patient,
-                    "items": _items_for(admission),
-                    "form": PendingItemForm(),
-                    "can_write": False,
-                    "block_message": block_message,
-                    "error": policy.WRITE_DENIED_MESSAGE,
-                    "page_title": "Pendências",
-                    "discharge_date_only": discharge_date_only,
-                },
-                status=403,
-            )
-        try:
-            require_write_eligibility(admission)
-        except IneligibleAdmissionError as exc:
-            return render(
-                request,
-                "pending_items/admission_items.html",
-                {
-                    "admission": admission,
-                    "patient": admission.patient,
-                    "items": _items_for(admission),
-                    "form": PendingItemForm(),
-                    "can_write": False,
-                    "block_message": str(exc),
-                    "error": str(exc),
-                    "page_title": "Pendências",
-                    "discharge_date_only": discharge_date_only,
-                },
-                status=403,
-            )
-        form = PendingItemForm(request.POST)
-        if form.is_valid():
-            try:
-                create_pending_item(
-                    admission=admission,
-                    item_type=form.cleaned_data["item_type"],
-                    description=form.cleaned_data["description"],
-                    author=request.user,  # type: ignore[arg-type]
-                )
-            except (ValidationError, IneligibleAdmissionError) as exc:
-                return render(
-                    request,
-                    "pending_items/admission_items.html",
-                    {
-                        "admission": admission,
-                        "patient": admission.patient,
-                        "items": _items_for(admission),
-                        "form": form,
-                        "can_write": True,
-                        "block_message": None,
-                        "error": _first_message(exc),
-                        "page_title": "Pendências",
-                        "discharge_date_only": discharge_date_only,
-                    },
-                )
-            except PermissionDenied as exc:
-                return render(
-                    request,
-                    "pending_items/admission_items.html",
-                    {
-                        "admission": admission,
-                        "patient": admission.patient,
-                        "items": _items_for(admission),
-                        "form": form,
-                        "can_write": False,
-                        "block_message": block_message,
-                        "error": str(exc),
-                        "page_title": "Pendências",
-                        "discharge_date_only": discharge_date_only,
-                    },
-                    status=403,
-                )
-            return redirect(
-                "pending_items:admission_items", admission_id=admission.pk
-            )
+    def _render(form, *, can_write_now: bool, error=None, status: int = 200):
         return render(
             request,
             "pending_items/admission_items.html",
@@ -174,29 +106,66 @@ def admission_pending_items(
                 "patient": admission.patient,
                 "items": _items_for(admission),
                 "form": form,
-                "can_write": True,
-                "block_message": None,
-                "error": None,
+                "can_write": can_write_now,
+                "block_message": block_message,
+                "error": error,
                 "page_title": "Pendências",
                 "discharge_date_only": discharge_date_only,
             },
+            status=status,
         )
 
-    return render(
-        request,
-        "pending_items/admission_items.html",
-        {
-            "admission": admission,
-            "patient": admission.patient,
-            "items": _items_for(admission),
-            "form": PendingItemForm(),
-            "can_write": can_write,
-            "block_message": block_message,
-            "error": None,
-            "page_title": "Pendências",
-            "discharge_date_only": discharge_date_only,
-        },
-    )
+    if request.method == "POST":
+        if not member:
+            return _render(
+                PendingItemForm(),
+                can_write_now=False,
+                error=policy.WRITE_DENIED_MESSAGE,
+                status=403,
+            )
+        try:
+            require_write_eligibility(admission)
+        except IneligibleAdmissionError as exc:
+            return _render(
+                PendingItemForm(),
+                can_write_now=False,
+                error=str(exc),
+                status=403,
+            )
+        form = PendingItemForm(request.POST)
+        if form.is_valid():
+            try:
+                create_pending_item(
+                    admission=admission,
+                    item_type=form.cleaned_data["item_type"],
+                    category=form.cleaned_data.get("category"),
+                    description=form.cleaned_data["description"],
+                    details=form.cleaned_data["submitted_details"],
+                    author=request.user,  # type: ignore[arg-type]
+                )
+            except (ValidationError, IneligibleAdmissionError) as exc:
+                return _render(
+                    form, can_write_now=True, error=_first_message(exc)
+                )
+            except PermissionDenied as exc:
+                return _render(
+                    PendingItemForm(),
+                    can_write_now=False,
+                    error=str(exc),
+                    status=403,
+                )
+            messages.success(
+                request,
+                CREATED_AND_NEXT_MESSAGE
+                if request.POST.get("action") == SAVE_AND_ADD_ANOTHER
+                else CREATED_MESSAGE,
+            )
+            return redirect(
+                "pending_items:admission_items", admission_id=admission.pk
+            )
+        return _render(form, can_write_now=True)
+
+    return _render(PendingItemForm(), can_write_now=can_write)
 
 
 @login_required
@@ -208,32 +177,52 @@ def pending_item_edit(
     admission = get_object_or_404(
         Admission.objects.select_related("patient"), pk=admission_id
     )
-    item = get_object_or_404(PendingItem, pk=item_id, admission=admission)
+    item = get_object_or_404(
+        PendingItem.objects.select_related("item_type__category"),
+        pk=item_id,
+        admission=admission,
+    )
     eligibility = check_write_eligibility(admission)
     member = policy.can_write_pending_items(request.user)
 
     if request.method == "POST":
         if not member:
             return _edit_response(
-                request, admission, item, None, policy.WRITE_DENIED_MESSAGE,
+                request,
+                admission,
+                item,
+                None,
+                policy.WRITE_DENIED_MESSAGE,
                 status=403,
+                attempted=_attempted_rows(request.POST),
+                attempted_text=request.POST.get("description") or "",
             )
         try:
             require_write_eligibility(admission)
         except IneligibleAdmissionError as exc:
             return _edit_response(
-                request, admission, item, None, str(exc), status=403
+                request,
+                admission,
+                item,
+                None,
+                str(exc),
+                status=403,
+                attempted=_attempted_rows(request.POST),
+                attempted_text=request.POST.get("description") or "",
             )
-        form = PendingItemEditForm(request.POST)
+        form = PendingItemEditForm(request.POST, item=item)
         if not form.is_valid():
-            return _edit_response(
-                request, admission, item, form, None, status=200
-            )
+            return _edit_response(request, admission, item, form, None)
         try:
             update_pending_item(
                 item=item,
                 item_type=form.cleaned_data["item_type"],
+                category=form.cleaned_data.get("category"),
                 description=form.cleaned_data["description"],
+                details=form.cleaned_data["submitted_details"],
+                confirm_detail_removal=bool(
+                    form.cleaned_data.get("confirm_detail_removal")
+                ),
                 author=request.user,  # type: ignore[arg-type]
                 expected_version=form.cleaned_data["expected_version"],
             )
@@ -243,28 +232,32 @@ def pending_item_edit(
                 request,
                 admission,
                 item,
-                PendingItemEditForm(
-                    initial={
-                        "item_type": item.item_type_id,
-                        "description": item.description,
-                        "expected_version": item.version,
-                    }
-                ),
+                PendingItemEditForm(item=item),
                 CONFLICT_MESSAGE,
                 status=409,
-            )
-        except InvalidStatusTransitionError as exc:
-            return _edit_response(
-                request, admission, item, None, str(exc), status=400
+                attempted=_attempted_rows(request.POST),
+                attempted_text=request.POST.get("description") or "",
             )
         except (ValidationError, IneligibleAdmissionError) as exc:
             return _edit_response(
-                request, admission, item, form, _first_message(exc),
-                status=200,
+                request,
+                admission,
+                item,
+                form,
+                _first_message(exc),
+                attempted=_attempted_rows(request.POST),
+                attempted_text=request.POST.get("description") or "",
             )
-        except PermissionDenied as exc:
+        except (InvalidStatusTransitionError, PermissionDenied) as exc:
             return _edit_response(
-                request, admission, item, None, str(exc), status=403
+                request,
+                admission,
+                item,
+                None,
+                str(exc),
+                status=400 if isinstance(exc, InvalidStatusTransitionError) else 403,
+                attempted=_attempted_rows(request.POST),
+                attempted_text=request.POST.get("description") or "",
             )
         return redirect(
             "pending_items:admission_items", admission_id=admission.pk
@@ -272,32 +265,33 @@ def pending_item_edit(
 
     if not member:
         return _edit_response(
-            request, admission, item, None, policy.WRITE_DENIED_MESSAGE,
+            request,
+            admission,
+            item,
+            None,
+            policy.WRITE_DENIED_MESSAGE,
             status=403,
         )
     if not eligibility.eligible:
         return _edit_response(
-            request, admission, item, None,
-            reason_message(eligibility.reason), status=403,
+            request,
+            admission,
+            item,
+            None,
+            reason_message(eligibility.reason),
+            status=403,
         )
     if item.status != STATUS_ACTIVE:
         return _edit_response(
-            request, admission, item, None,
-            "Pendências finalizadas não podem ser editadas.", status=200,
+            request,
+            admission,
+            item,
+            None,
+            "Pendências finalizadas não podem ser editadas.",
+            status=200,
         )
     return _edit_response(
-        request,
-        admission,
-        item,
-        PendingItemEditForm(
-            initial={
-                "item_type": item.item_type_id,
-                "description": item.description,
-                "expected_version": item.version,
-            }
-        ),
-        None,
-        status=200,
+        request, admission, item, PendingItemEditForm(item=item), None
     )
 
 
@@ -307,7 +301,9 @@ def _edit_response(
     item: PendingItem,
     form,
     error: str | None,
-    status: int,
+    status: int = 200,
+    attempted: list[str] | None = None,
+    attempted_text: str | None = None,
 ) -> HttpResponse:
     return render(
         request,
@@ -318,6 +314,11 @@ def _edit_response(
             "item": item,
             "form": form,
             "error": error,
+            "attempted_rows": attempted or [],
+            "attempted_text": attempted_text or "",
+            "back_url": reverse(
+                "pending_items:admission_items", args=[admission.pk]
+            ),
             "page_title": "Editar pendência",
         },
         status=status,
@@ -450,7 +451,11 @@ def pending_item_history(
     admission = get_object_or_404(
         Admission.objects.select_related("patient"), pk=admission_id
     )
-    item = get_object_or_404(PendingItem, pk=item_id, admission=admission)
+    item = get_object_or_404(
+        PendingItem.objects.select_related("item_type__category"),
+        pk=item_id,
+        admission=admission,
+    )
     revisions = list(
         PendingItemRevision.objects.filter(item=item).order_by("version")
     )
@@ -469,6 +474,6 @@ def pending_item_history(
 
 def _first_message(exc: Exception) -> str:
     if isinstance(exc, ValidationError):
-        messages = getattr(exc, "messages", None) or [str(exc)]
-        return str(messages[0])
+        found = getattr(exc, "messages", None) or [str(exc)]
+        return str(found[0])
     return str(exc)
