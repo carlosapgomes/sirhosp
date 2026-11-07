@@ -535,6 +535,110 @@ class TestAggregateFilters:
 
 
 @pytest.mark.django_db
+class TestCategoryFilter:
+    """STRUCT-PEND-S3 R3: category restricts before grouping/pagination.
+
+    The two RNM catalog entries share the visible name, so only the
+    category tells them apart; category and type combine as an
+    intersection, an incompatible pair stays empty instead of being
+    ignored, and unusable ids never break the cut.
+    """
+
+    def _rnm_scene(self) -> tuple[PendingItemType, PendingItemType]:
+        imagem_rnm = PendingItemType.objects.get(slug="imagem-rnm")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        patient = _make_patient("P_Q_CAT1")
+        admission = _make_admission(patient, "ADM_Q_CAT1")
+        _make_census_row("P_Q_CAT1")
+        _make_item(admission, description="rnm imagem", item_type=imagem_rnm)
+        _make_item(admission, description="rnm chd", item_type=chd_rnm)
+        return imagem_rnm, chd_rnm
+
+    def test_category_restricts_repeated_type_names(
+        self, db: object
+    ) -> None:
+        imagem_rnm, chd_rnm = self._rnm_scene()
+        assert imagem_rnm.name == chd_rnm.name == "RNM"
+        assert imagem_rnm.category_id != chd_rnm.category_id
+        assert _filtered_descriptions(
+            f"categoria={chd_rnm.category_id}"
+        ) == ["rnm chd"]
+        assert _filtered_descriptions(
+            f"categoria={imagem_rnm.category_id}"
+        ) == ["rnm imagem"]
+
+    def test_category_and_type_are_an_intersection(
+        self, db: object
+    ) -> None:
+        imagem_rnm, chd_rnm = self._rnm_scene()
+        assert _filtered_descriptions(
+            f"categoria={chd_rnm.category_id}&tipo={imagem_rnm.pk}"
+        ) == []
+        assert _filtered_descriptions(
+            f"categoria={chd_rnm.category_id}&tipo={chd_rnm.pk}"
+        ) == ["rnm chd"]
+
+    def test_unusable_category_ids_stay_safe_and_void(
+        self, db: object
+    ) -> None:
+        imagem_rnm, chd_rnm = self._rnm_scene()
+        filters, error = parse_aggregate_filters(_params(""))
+        assert error is None
+        assert filters.category_id is None
+        voided, void_error = parse_aggregate_filters(
+            _params("categoria=abc")
+        )
+        assert void_error is None
+        assert voided.void is True
+        assert _filtered_descriptions("categoria=abc") == []
+        missing = chd_rnm.category_id + 10_000
+        assert not PendingItemCategory.objects.filter(pk=missing).exists()
+        assert _filtered_descriptions(f"categoria={missing}") == []
+        assert _filtered_descriptions(
+            f"categoria={imagem_rnm.category_id}"
+        ) == ["rnm imagem"]
+
+    def test_category_applies_before_grouping(self, db: object) -> None:
+        imagem_rnm, chd_rnm = self._rnm_scene()
+        second = _make_patient("P_Q_CAT2")
+        admission_second = _make_admission(second, "ADM_Q_CAT2")
+        _make_census_row("P_Q_CAT2", setor="UTI", leito="U02")
+        _make_item(
+            admission_second, description="rnm imagem so", item_type=imagem_rnm
+        )
+        cut = resolve_current_cut()
+        filters, error = parse_aggregate_filters(
+            _params(f"categoria={chd_rnm.category_id}")
+        )
+        assert error is None
+        items = list(
+            apply_aggregate_filters(base_current_items(cut), cut, filters)
+        )
+        groups = group_by_patient(items, cut)
+        assert len(groups) == 1
+        assert groups[0].occupation.prontuario == "P_Q_CAT1"
+        assert [item.description for item in groups[0].items] == ["rnm chd"]
+
+    def test_category_never_widens_the_conservative_cut(
+        self, db: object
+    ) -> None:
+        imagem_rnm, chd_rnm = self._rnm_scene()
+        ambiguous = _make_patient("P_Q_CAT3")
+        ambiguous_admission = _make_admission(ambiguous, "ADM_Q_CAT3")
+        _make_census_row("P_Q_CAT3", setor="UTI", leito="U03")
+        _make_census_row("P_Q_CAT3", setor="ENF", leito="E03")
+        _make_item(
+            ambiguous_admission,
+            description="rnm chd ambiguo",
+            item_type=chd_rnm,
+        )
+        assert _filtered_descriptions() == ["rnm chd", "rnm imagem"]
+        assert _filtered_descriptions(
+            f"categoria={chd_rnm.category_id}"
+        ) == ["rnm chd"]
+
+
+@pytest.mark.django_db
 class TestFirstUnit:
     def test_fk_movement_inside_interval_is_first(self, db: object) -> None:
         patient = _make_patient("P_Q_U1")

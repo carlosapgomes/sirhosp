@@ -126,6 +126,24 @@ def _make_item(
     return item
 
 
+def _make_typed_item(
+    admission: Admission,
+    item_type: PendingItemType,
+    *,
+    description: str = "",
+    **details: object,
+) -> PendingItem:
+    """Create one item of a catalog type with synthetic typed details."""
+    return PendingItem.objects.create(
+        admission=admission,
+        item_type=item_type,
+        description=description,
+        status=STATUS_ACTIVE,
+        version=1,
+        **details,
+    )
+
+
 def _eligible_admission(
     key: str = "P_EXP_1",
     *,
@@ -569,3 +587,74 @@ class TestExportEnvelope:
         item.refresh_from_db()
         assert item.description == "pura export"
         assert item.version == 1
+
+
+@pytest.mark.django_db
+class TestCategorizedExportParity:
+    """STRUCT-PEND-S3: the old XLSX contract keeps the new filter's cut.
+
+    Before S4 the workbook still has 13 columns without item/admission
+    ids, so selection is compared through unique synthetic markers in
+    the observation column only.
+    """
+
+    def test_category_filter_matches_panel_and_old_workbook(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_CAT")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        imagem_rnm = PendingItemType.objects.get(slug="imagem-rnm")
+        _make_typed_item(
+            admission, chd_rnm, description="marcador-cat-chd"
+        )
+        _make_typed_item(
+            admission, imagem_rnm, description="marcador-cat-imagem"
+        )
+        category = chd_rnm.category_id
+        panel = reader_client.get(
+            f"/pendencias/?categoria={category}"
+        ).content.decode()
+        assert "marcador-cat-chd" in panel
+        assert "marcador-cat-imagem" not in panel
+        ws = _workbook(reader_client.get(f"{EXPORT_URL}?categoria={category}"))
+        assert _descriptions(ws) == ["marcador-cat-chd"]
+        incompatible = _workbook(
+            reader_client.get(
+                f"{EXPORT_URL}?categoria={category}&tipo={imagem_rnm.pk}"
+            )
+        )
+        assert incompatible.max_row == 1
+        invalid = _workbook(
+            reader_client.get(f"{EXPORT_URL}?categoria=abc")
+        )
+        assert invalid.max_row == 1
+
+    def test_confirmed_exit_leaves_panel_indicators_and_workbook(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_EXIT")
+        item = _make_item(admission, description="marcador-saida-confirmada")
+        _make_typed_item(
+            _eligible_admission("P_EXP_EXIT_KEEP"),
+            PendingItemType.objects.get(slug=OUTRO_SLUG),
+            description="marcador-permanece",
+        )
+        Admission.objects.filter(pk=admission.pk).update(
+            discharge_date=_dt("2026-06-12T10:00:00")
+        )
+        panel = reader_client.get("/pendencias/").content.decode()
+        assert "marcador-saida-confirmada" not in panel
+        assert "marcador-permanece" in panel
+        assert 'data-testid="indicators-patients">1<' in panel
+        workbook = _workbook(reader_client.get(EXPORT_URL))
+        assert "marcador-saida-confirmada" not in _descriptions(workbook)
+        assert "marcador-permanece" in _descriptions(workbook)
+        context_url = f"/admissions/{admission.pk}/pending-items/"
+        context = reader_client.get(context_url).content.decode()
+        assert "marcador-saida-confirmada" in context
+        history = reader_client.get(
+            f"/pendencias/{item.pk}/history/",
+            headers={"HX-Request": "true"},
+        )
+        assert history.status_code == 200
+        assert "PACIENTE SINTETICO P_EXP_EXIT" in history.content.decode()

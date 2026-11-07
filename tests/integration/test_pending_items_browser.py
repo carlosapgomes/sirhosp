@@ -1560,3 +1560,321 @@ class TestStructuredTreatmentAndSignatureJourney:
             "created",
             "updated",
         }
+
+
+S3_CHD_DATE = date(2026, 11, 10)
+S3_CHD_EDITED = "2026-11-15"
+
+
+def _make_s3_admission(key: str, setor: str, leito: str) -> Admission:
+    patient = Patient.objects.create(
+        patient_source_key=key,
+        source_system="tasy",
+        name=f"PACIENTE SINTETICO {key}",
+    )
+    admission = Admission.objects.create(
+        patient=patient,
+        source_system="tasy",
+        source_admission_key=f"ADM_{key}",
+        admission_date=_dt("2026-06-01T08:00:00"),
+    )
+    CensusSnapshot.objects.create(
+        captured_at=_dt("2026-06-10T08:00:00"),
+        setor=setor,
+        leito=leito,
+        prontuario=key,
+        nome=f"PACIENTE SINTETICO {key}",
+        bed_status=BedStatus.OCCUPIED,
+    )
+    return admission
+
+
+def _s3_item(
+    admission: Admission,
+    item_type: PendingItemType,
+    description: str,
+    *,
+    legacy_first: bool = False,
+    **details,
+) -> PendingItem:
+    """Active item with its revision snapshot; optionally a pre-S1 legacy v1."""
+    version = 2 if legacy_first else 1
+    item = PendingItem.objects.create(
+        admission=admission,
+        item_type=item_type,
+        description=description,
+        status=STATUS_ACTIVE,
+        version=version,
+        **details,
+    )
+    if legacy_first:
+        PendingItemRevision.objects.create(
+            item=item,
+            version=1,
+            action="created",
+            item_type=item_type,
+            type_name=item_type.name,
+            description=description,
+            status=STATUS_ACTIVE,
+        )
+    PendingItemRevision.objects.create(
+        item=item,
+        version=version,
+        action="created" if version == 1 else "updated",
+        item_type=item_type,
+        type_name=item_type.name,
+        category_name=item_type.category.name,
+        category_slug=item_type.category.slug,
+        type_slug=item_type.slug,
+        profile=item_type.profile,
+        has_rnm_complements=item_type.has_rnm_complements,
+        requires_description=item_type.requires_description,
+        description=description,
+        status=STATUS_ACTIVE,
+        is_scheduled=details.get("is_scheduled"),
+        scheduled_date=details.get("scheduled_date"),
+        contrast=details.get("contrast"),
+        sedation=details.get("sedation"),
+    )
+    return item
+
+
+@pytest.mark.django_db(transaction=True)
+class TestCategorizedAggregateJourney:
+    """STRUCT-PEND-S3: categorized follow-up in both aggregate views."""
+
+    def _scene(self) -> dict[str, object]:
+        _load_catalog()
+        admission_a = _make_s3_admission("P_S3_CAT_A", "UTI GERAL", "U01")
+        admission_b = _make_s3_admission("P_S3_CAT_B", "ENFERMARIA 1", "E02")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        imagem_rnm = PendingItemType.objects.get(slug="imagem-rnm")
+        chd_a = _s3_item(
+            admission_a,
+            chd_rnm,
+            "marcador-chd-a",
+            legacy_first=True,
+            is_scheduled=True,
+            scheduled_date=S3_CHD_DATE,
+            contrast=True,
+        )
+        imagem_a = _s3_item(
+            admission_a,
+            imagem_rnm,
+            "marcador-imagem-a",
+            is_scheduled=False,
+            contrast=False,
+            sedation=False,
+        )
+        chd_b = _s3_item(
+            admission_b, chd_rnm, "marcador-chd-b", is_scheduled=False
+        )
+        return {
+            "admission_a": admission_a,
+            "admission_b": admission_b,
+            "chd_rnm": chd_rnm,
+            "imagem_rnm": imagem_rnm,
+            "chd_a": chd_a,
+            "imagem_a": imagem_a,
+            "chd_b": chd_b,
+        }
+
+    def test_categorized_filters_details_and_refresh(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _served = routed_browser_page
+        _make_writer(username="s3_browser_writer")
+        scene = self._scene()
+        chd_rnm = scene["chd_rnm"]
+        imagem_rnm = scene["imagem_rnm"]
+        chd_a = scene["chd_a"]
+        chd_b = scene["chd_b"]
+        assert isinstance(chd_rnm, PendingItemType)
+        assert isinstance(imagem_rnm, PendingItemType)
+        assert isinstance(chd_a, PendingItem)
+        assert isinstance(chd_b, PendingItem)
+        admission_a = scene["admission_a"]
+        admission_b = scene["admission_b"]
+        assert isinstance(admission_a, Admission)
+        assert isinstance(admission_b, Admission)
+
+        page = new_page()
+        _login(page, live_server.url, "s3_browser_writer")
+        page.goto(
+            f"{live_server.url}/pendencias/", wait_until="domcontentloaded"
+        )
+        unfiltered = page.content()
+        assert "CHD (Centro de Hemorragia Digestiva)" in unfiltered
+        assert "Exames de imagem" in unfiltered
+        assert "Data agendada: 10/11/2026" in unfiltered
+        assert "Contraste: Sim" in unfiltered
+        assert "Sedação: Não informado" in unfiltered
+        assert "Sedação: Não" in unfiltered
+
+        page.select_option("#f_categoria", str(chd_rnm.category_id))
+        page.select_option("#f_tipo", str(chd_rnm.pk))
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        filtered = page.content()
+        assert f"categoria={chd_rnm.category_id}" in page.url
+        assert "marcador-chd-a" in filtered
+        assert "marcador-chd-b" in filtered
+        assert "marcador-imagem-a" not in filtered
+        assert (
+            page.locator('[data-testid="indicators-patients"]').inner_text()
+            == "2"
+        )
+
+        page.click(f'[data-testid="pending-history-{chd_a.pk}"]')
+        page.wait_for_selector(
+            f"#history-body-{chd_a.pk} >> text=Data agendada: 10/11/2026",
+            timeout=15000,
+        )
+        fragment = page.locator(f"#history-body-{chd_a.pk}").inner_text()
+        assert "Detalhes não registrados nesta versão" in fragment
+        assert "Classificação não registrada nesta versão" in fragment
+
+        page.select_option("#f_tipo", str(imagem_rnm.pk))
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        incompatible = page.content()
+        assert "Nenhuma pendência corresponde aos filtros." in incompatible
+        assert "não se combinam" in incompatible
+
+        page.select_option("#f_categoria", str(imagem_rnm.category_id))
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        imagem_view = page.content()
+        assert "marcador-imagem-a" in imagem_view
+        assert "marcador-chd-a" not in imagem_view
+        assert "Contraste: Não" in imagem_view
+
+        page.select_option("#f_categoria", str(chd_rnm.category_id))
+        page.select_option("#f_tipo", str(chd_rnm.pk))
+        with page.expect_navigation():
+            page.click('[data-testid="filters-apply"]')
+        with page.expect_navigation():
+            page.click('[data-testid="view-items"]')
+        assert "view=items" in page.url
+        assert f"categoria={chd_rnm.category_id}" in page.url
+        items_view = page.content()
+        assert "marcador-chd-a" in items_view
+        assert "marcador-imagem-a" not in items_view
+        assert "Data agendada: 10/11/2026" in items_view
+
+        page.click(f'[data-testid="pending-edit-{chd_a.pk}"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_scheduled_date",
+            state="visible",
+            timeout=15000,
+        )
+        page.fill("#pending-modal-body #id_scheduled_date", S3_CHD_EDITED)
+        with page.expect_navigation():
+            page.click("#pending-modal-body [data-testid='pending-save']")
+        assert "view=items" in page.url
+        assert f"categoria={chd_rnm.category_id}" in page.url
+        assert f"tipo={chd_rnm.pk}" in page.url
+        edited = page.content()
+        assert "Data agendada: 15/11/2026" in edited
+        assert "atualizada com sucesso" in edited
+        page.click(f'[data-testid="pending-history-{chd_a.pk}"]')
+        page.wait_for_selector(
+            f"#history-body-{chd_a.pk} >> text=Data agendada: 15/11/2026",
+            timeout=15000,
+        )
+        versions = page.locator(f"#history-body-{chd_a.pk}").inner_text()
+        assert "v2" in versions
+        assert "Contraste: Sim" in versions
+
+        page.click(f'[data-testid="pending-finalize-{chd_b.pk}"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_target_status",
+            state="visible",
+            timeout=15000,
+        )
+        page.select_option(
+            "#pending-modal-body #id_target_status", STATUS_CLOSED_UNRESOLVED
+        )
+        with page.expect_navigation():
+            page.click('[data-testid="pending-finalize-confirm"]')
+        assert f"categoria={chd_rnm.category_id}" in page.url
+        finalized = page.content()
+        assert "marcador-chd-b" not in finalized
+        assert "marcador-chd-a" in finalized
+        assert (
+            page.locator(f'[data-testid="pending-row-{chd_b.pk}"]').count()
+            == 0
+        )
+        assert (
+            page.locator('[data-testid="indicators-patients"]').inner_text()
+            == "1"
+        )
+        with page.expect_navigation():
+            page.click('[data-testid="view-patients"]')
+        assert "view=patients" in page.url
+        assert f"categoria={chd_rnm.category_id}" in page.url
+        assert (
+            page.locator(
+                f'[data-testid="patient-group-{admission_b.pk}"]'
+            ).count()
+            == 0
+        )
+        assert (
+            page.locator(
+                f'[data-testid="patient-group-{admission_a.pk}"]'
+            ).count()
+            == 1
+        )
+        page.goto(
+            f"{live_server.url}/pendencias/?status=all"
+            f"&categoria={chd_rnm.category_id}",
+            wait_until="domcontentloaded",
+        )
+        assert "marcador-chd-b" in page.content()
+
+    def test_mobile_categorized_panel(
+        self, live_server, routed_browser_page
+    ) -> None:
+        new_page, _served = routed_browser_page
+        _make_writer(username="s3_browser_mobile")
+        scene = self._scene()
+        chd_rnm = scene["chd_rnm"]
+        chd_a = scene["chd_a"]
+        assert isinstance(chd_rnm, PendingItemType)
+        assert isinstance(chd_a, PendingItem)
+
+        page = new_page(viewport={"width": 390, "height": 844})
+        _login(page, live_server.url, "s3_browser_mobile")
+        page.goto(
+            f"{live_server.url}/pendencias/?view=items"
+            f"&categoria={chd_rnm.category_id}&tipo={chd_rnm.pk}",
+            wait_until="domcontentloaded",
+        )
+        content = page.content()
+        assert "marcador-chd-a" in content
+        assert "marcador-imagem-a" not in content
+        assert "Data agendada: 10/11/2026" in content
+        assert "Contraste: Sim" in content
+
+        page.click(f'[data-testid="pending-history-{chd_a.pk}"]')
+        page.wait_for_selector(
+            f"#history-body-{chd_a.pk} >> text=Data agendada: 10/11/2026",
+            timeout=15000,
+        )
+        assert "Detalhes não registrados nesta versão" in page.locator(
+            f"#history-body-{chd_a.pk}"
+        ).inner_text()
+
+        page.click(f'[data-testid="pending-edit-{chd_a.pk}"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_scheduled_date",
+            state="visible",
+            timeout=15000,
+        )
+        page.click('#pending-modal-body button[data-bs-dismiss="modal"]')
+        page.wait_for_selector(
+            "#pending-modal-body #id_scheduled_date",
+            state="hidden",
+            timeout=15000,
+        )
+        assert _horizontal_overflow(page) <= 1

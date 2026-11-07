@@ -44,6 +44,8 @@ from apps.pending_items.queries import (
     FIRST_UNIT_UNKNOWN,
     VIEW_ITEMS,
     VIEW_PATIENTS,
+    AggregateFilters,
+    AggregateOptions,
     CurrentCut,
     PatientGroup,
     aggregate_options,
@@ -170,6 +172,28 @@ def _group_card(
     }
 
 
+def _filter_hint(
+    filters: AggregateFilters, options: AggregateOptions
+) -> str | None:
+    """Explain an incompatible category+type pair instead of hiding it.
+
+    The two filters intersect (D6), so a pair from different categories
+    can only return an empty cut; the panel says so instead of silently
+    dropping one of the criteria.
+    """
+    if filters.category_id is None or filters.item_type_id is None:
+        return None
+    for item_type in options.tipos:
+        if item_type.pk == filters.item_type_id:
+            if item_type.category_id != filters.category_id:
+                return (
+                    "A categoria e o tipo selecionados não se combinam. "
+                    "Ajuste os filtros para ver resultados."
+                )
+            return None
+    return None
+
+
 @login_required
 @private_no_store
 @require_GET
@@ -211,6 +235,7 @@ def aggregate(request: HttpRequest) -> HttpResponse:
         "indicators": indicators,
         "options": options,
         "filter_error": filter_error,
+        "filter_hint": _filter_hint(filters, options),
         "can_write": member,
         "current_path": request.get_full_path(),
         "pagination_base": pagination_base,
