@@ -1,0 +1,156 @@
+{% comment %}
+Progressive reveal for the shared pending-item form (STRUCT-PEND-S2).
+
+Hides the profile groups that do not apply to the selected type, keeps
+typed values while their group is hidden, reveals the optional date when
+Agendada is Sim and asks for confirmation before details stop applying.
+Every rule is revalidated on the server.
+{% endcomment %}
+<script>
+  (() => {
+    const form = document.getElementById("pending-form");
+    if (!form) return;
+
+    const typeSelect = form.querySelector("#id_item_type");
+    if (!typeSelect) return;
+    const categorySelect = form.querySelector("#id_category");
+    const searchInput = form.querySelector("#id_type_search");
+    const groups = Array.from(form.querySelectorAll("[data-pending-group]"));
+    const removalBox = form.querySelector("#pending-removal-box");
+    const removalList = form.querySelector("#pending-removal-list");
+    const confirmInput = form.querySelector("#id_confirm_detail_removal");
+    const scheduledChoice = form.querySelector("#id_is_scheduled");
+    const scheduledDateWrap = form.querySelector("#pending-scheduled-date");
+    const description = form.querySelector("#id_description");
+    const descriptionHint = form.querySelector("#pending-description-hint");
+    const storedScheduledDate = form.dataset.storedScheduledDate || "";
+    const scheduledDateLabel = form.dataset.labelScheduledDate || "Data agendada";
+
+    const plain = (text) =>
+      (text || "")
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase();
+
+    const selectedOption = () => typeSelect.selectedOptions[0] || null;
+
+    const setGroupEnabled = (group, enabled) => {
+      group.hidden = !enabled;
+      group.querySelectorAll("input, select, textarea").forEach((input) => {
+        input.disabled = !enabled;
+      });
+    };
+
+    const syncTypeFilter = () => {
+      const category = categorySelect ? categorySelect.value : "";
+      const term = plain(searchInput ? searchInput.value.trim() : "");
+      Array.from(typeSelect.options).forEach((option) => {
+        if (!option.value) return;
+        const matchesCategory =
+          !category || option.dataset.category === category;
+        const matchesTerm = !term || plain(option.textContent).includes(term);
+        option.hidden = !(matchesCategory && matchesTerm);
+      });
+    };
+
+    const syncGroups = () => {
+      const option = selectedOption();
+      const hasType = Boolean(option && option.value);
+      const profile = hasType ? option.dataset.profile : "";
+      const hasRnm = hasType && option.dataset.rnm === "1";
+      groups.forEach((group) => {
+        const key = group.dataset.pendingGroup;
+        const applies =
+          hasType && (key === "rnm" ? hasRnm : key === profile);
+        setGroupEnabled(group, applies);
+      });
+      if (description) {
+        description.required =
+          hasType && option.dataset.requiresDescription === "1";
+      }
+      if (descriptionHint) {
+        descriptionHint.hidden = !(
+          hasType && option.dataset.requiresDescription === "1"
+        );
+      }
+    };
+
+    const syncScheduledDate = () => {
+      if (!scheduledChoice || !scheduledDateWrap) return;
+      const show = scheduledChoice.value === "sim" && !scheduledChoice.disabled;
+      scheduledDateWrap.hidden = !show;
+      scheduledDateWrap.querySelectorAll("input").forEach((input) => {
+        input.disabled = !show;
+      });
+    };
+
+    const syncRemovalBox = () => {
+      if (!removalBox) return;
+      const option = selectedOption();
+      const labels =
+        option && option.value && option.dataset.removals
+          ? option.dataset.removals.split("|").filter(Boolean)
+          : [];
+      if (
+        scheduledChoice &&
+        storedScheduledDate &&
+        scheduledChoice.value !== "sim"
+      ) {
+        labels.push(scheduledDateLabel);
+      }
+      removalList.innerHTML = "";
+      labels.forEach((label) => {
+        const item = document.createElement("li");
+        item.textContent = label;
+        removalList.appendChild(item);
+      });
+      removalBox.hidden = labels.length === 0;
+      if (confirmInput) {
+        confirmInput.disabled = labels.length === 0;
+        confirmInput.required = labels.length > 0;
+        if (labels.length === 0) confirmInput.checked = false;
+      }
+    };
+
+    const syncAll = () => {
+      syncTypeFilter();
+      syncGroups();
+      syncScheduledDate();
+      syncRemovalBox();
+    };
+
+    if (categorySelect) {
+      categorySelect.addEventListener("change", () => {
+        const category = categorySelect.value;
+        const option = selectedOption();
+        if (
+          category &&
+          option &&
+          option.value &&
+          option.dataset.category !== category
+        ) {
+          typeSelect.value = "";
+        }
+        syncAll();
+      });
+    }
+    typeSelect.addEventListener("change", () => {
+      const option = selectedOption();
+      if (categorySelect && option && option.value) {
+        categorySelect.value = option.dataset.category;
+      }
+      syncAll();
+    });
+    if (searchInput) {
+      searchInput.addEventListener("input", syncTypeFilter);
+    }
+    if (scheduledChoice) {
+      scheduledChoice.addEventListener("change", () => {
+        syncScheduledDate();
+        syncRemovalBox();
+      });
+    }
+
+    syncAll();
+  })();
+</script>

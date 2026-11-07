@@ -1,0 +1,155 @@
+{% comment %}
+Shared progressive cadastro/edição form (STRUCT-PEND-S2, D5).
+
+Used by the contextual page, the contextual edit page and the quick-edit
+modal so the profile rules, accessibility and keyboard behavior are
+implemented once. JavaScript only reveals the applicable groups; the
+server validates every submission again.
+{% endcomment %}
+<form method="post"
+      action="{{ post_url|default:'' }}"
+      id="pending-form"
+      data-stored-scheduled-date="{% if item.scheduled_date %}{{ item.scheduled_date|date:'Y-m-d' }}{% endif %}"
+      data-label-scheduled-date="Data agendada"
+      {% if modal %}hx-post="{{ post_url }}" hx-target="#pending-modal-body" hx-swap="innerHTML"{% endif %}
+      novalidate>
+  {% csrf_token %}
+  {% if next_url %}<input type="hidden" name="next" value="{{ next_url }}">{% endif %}
+  {{ form.expected_version }}
+  {% if form.non_field_errors %}
+    <div class="alert alert-danger small" role="alert">{{ form.non_field_errors }}</div>
+  {% endif %}
+
+  <fieldset class="mb-3">
+    <legend class="h6">Classificação</legend>
+    <div class="row g-2">
+      <div class="col-12 col-md-6">
+        <label for="id_category" class="form-label small fw-semibold">Categoria</label>
+        {{ form.category.errors }}
+        <select name="category" id="id_category" class="form-select" aria-describedby="pending-category-hint">
+          <option value="">Todas as categorias</option>
+          {% for option in form.category_options %}
+            <option value="{{ option.pk }}" data-slug="{{ option.slug }}"{% if form.category.value|stringformat:"s" == option.pk|stringformat:"s" %} selected{% endif %}>{{ option.label }}</option>
+          {% endfor %}
+        </select>
+        <p id="pending-category-hint" class="form-text small mb-0">Escolha a categoria para reduzir a lista de tipos.</p>
+      </div>
+      <div class="col-12 col-md-6">
+        <label for="id_type_search" class="form-label small fw-semibold">Buscar tipo</label>
+        <input type="search" name="type_search" id="id_type_search" class="form-control" autocomplete="off" aria-describedby="pending-type-hint">
+        <p id="pending-type-hint" class="form-text small mb-0">A busca mostra Categoria &gt; Tipo, inclusive as duas RNM.</p>
+      </div>
+      <div class="col-12">
+        <label for="id_item_type" class="form-label small fw-semibold">Tipo</label>
+        {{ form.item_type.errors }}
+        <select name="item_type" id="id_item_type" class="form-select" required>
+          <option value="">Selecione…</option>
+          {% for option in form.type_options %}
+            <option value="{{ option.value }}"
+                    data-category="{{ option.category }}"
+                    data-profile="{{ option.profile }}"
+                    data-rnm="{{ option.rnm }}"
+                    data-requires-description="{{ option.requires_description }}"
+                    data-removals="{{ option.removals }}"
+                    {% if form.item_type.value|stringformat:"s" == option.value|stringformat:"s" %}selected{% endif %}>{{ option.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset class="mb-3">
+    <legend class="h6">Detalhes aplicáveis</legend>
+    <p class="form-text small" id="pending-details-hint">Somente os campos do tipo escolhido são enviados.</p>
+
+    <div class="border rounded p-3 mb-2" id="pending-group-agendamento" data-pending-group="agendamento">
+      <div class="row g-2">
+        <div class="col-12 col-md-6">
+          <label for="id_is_scheduled" class="form-label small fw-semibold">Agendada?</label>
+          {{ form.is_scheduled.errors }}
+          {{ form.is_scheduled }}
+          <p id="pending-is-scheduled-hint" class="form-text small mb-0">Obrigatório nos tipos de agendamento. “Não informado” é diferente de “Não”.</p>
+        </div>
+        <div class="col-12 col-md-6" id="pending-scheduled-date">
+          <label for="id_scheduled_date" class="form-label small fw-semibold">Data agendada (opcional)</label>
+          {{ form.scheduled_date.errors }}
+          {{ form.scheduled_date }}
+        </div>
+      </div>
+    </div>
+
+    <div class="border rounded p-3 mb-2" id="pending-group-tratamento" data-pending-group="tratamento-periodo">
+      <div class="row g-2">
+        <div class="col-12 col-md-6">
+          <label for="id_treatment_start_date" class="form-label small fw-semibold">Início do tratamento (opcional)</label>
+          {{ form.treatment_start_date.errors }}
+          {{ form.treatment_start_date }}
+        </div>
+        <div class="col-12 col-md-6">
+          <label for="id_treatment_end_date" class="form-label small fw-semibold">Previsão de término (opcional)</label>
+          {{ form.treatment_end_date.errors }}
+          {{ form.treatment_end_date }}
+        </div>
+      </div>
+    </div>
+
+    <div class="border rounded p-3 mb-2" id="pending-group-assinatura" data-pending-group="assinatura-documento">
+      <label for="id_signature_at" class="form-label small fw-semibold">Assinatura do sumário em (opcional)</label>
+      {{ form.signature_at.errors }}
+      {{ form.signature_at }}
+      <p class="form-text small mb-0">Registrar a assinatura não finaliza a pendência nem a internação.</p>
+    </div>
+
+    <div class="border rounded p-3 mb-2" id="pending-group-rnm" data-pending-group="rnm">
+      <div class="row g-2">
+        <div class="col-12 col-md-6">
+          <label for="id_contrast" class="form-label small fw-semibold">Contraste</label>
+          {{ form.contrast.errors }}
+          {{ form.contrast }}
+        </div>
+        <div class="col-12 col-md-6">
+          <label for="id_sedation" class="form-label small fw-semibold">Sedação</label>
+          {{ form.sedation.errors }}
+          {{ form.sedation }}
+        </div>
+      </div>
+    </div>
+  </fieldset>
+
+  <div class="mb-3">
+    <label for="id_description" class="form-label small fw-semibold">Observações</label>
+    {{ form.description.errors }}
+    <textarea name="description" id="id_description" rows="3" class="form-control" aria-describedby="pending-description-hint">{{ form.description.value|default:"" }}</textarea>
+    <p id="pending-description-hint" class="form-text small mb-0">Obrigatório apenas para Outro e Regulação &gt; Outros.</p>
+  </div>
+
+  <div class="alert alert-warning" id="pending-removal-box" role="note"{% if not form.removal_labels %} hidden{% endif %}>
+    <p class="small fw-semibold mb-1">Estes detalhes deixarão de se aplicar e serão removidos deste registro:</p>
+    <ul class="small mb-2" id="pending-removal-list">
+      {% for label in form.removal_labels %}<li>{{ label }}</li>{% endfor %}
+    </ul>
+    <div class="form-check">
+      <input type="checkbox" name="confirm_detail_removal" id="id_confirm_detail_removal" class="form-check-input"{% if form.confirm_detail_removal.value %} checked{% endif %}>
+      <label for="id_confirm_detail_removal" class="form-check-label small">Confirmo a remoção destes detalhes</label>
+    </div>
+    <p class="form-text small mb-0">O histórico mantém os valores anteriores.</p>
+  </div>
+
+  <div class="d-flex gap-2 flex-wrap">
+    <button type="submit" class="btn btn-primary" data-testid="{{ primary_testid|default:'pending-save' }}">
+      <i class="bi bi-check-lg me-1"></i> {{ primary_label|default:"Salvar" }}
+    </button>
+    {% if add_another %}
+      <button type="submit" name="action" value="save_new" class="btn btn-outline-primary" data-testid="pending-save-new">
+        <i class="bi bi-plus-circle me-1"></i> Salvar e adicionar outra
+      </button>
+    {% endif %}
+    {% if modal %}
+      <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+    {% elif back_url %}
+      <a href="{{ back_url }}" class="btn btn-outline-secondary">Voltar</a>
+    {% endif %}
+  </div>
+</form>
+
+{% include "pending_items/_pending_form_script.html" %}

@@ -12,7 +12,8 @@ escaping, GET purity and a relative query budget. All synthetic.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -126,6 +127,60 @@ def _make_item(
         PendingItem.objects.filter(pk=item.pk).update(created_at=created_at)
         item.refresh_from_db()
     return item
+
+
+def _make_typed_item(
+    admission: Admission,
+    item_type: PendingItemType,
+    *,
+    description: str = "",
+    status: str = STATUS_ACTIVE,
+    version: int = 1,
+    **details: object,
+) -> PendingItem:
+    """Create one item of a catalog type with synthetic typed details."""
+    return PendingItem.objects.create(
+        admission=admission,
+        item_type=item_type,
+        description=description,
+        status=status,
+        version=version,
+        **details,
+    )
+
+
+def _typed_revision(
+    item: PendingItem, version: int, *, legacy: bool = False
+) -> PendingItemRevision:
+    """Snapshot a write would leave behind, or a legacy detail-less one."""
+    item_type = item.item_type
+    snapshot: dict[str, Any] = {}
+    if not legacy:
+        snapshot = {
+            "category_name": item_type.category.name,
+            "category_slug": item_type.category.slug,
+            "type_slug": item_type.slug,
+            "profile": item_type.profile,
+            "has_rnm_complements": item_type.has_rnm_complements,
+            "requires_description": item_type.requires_description,
+            "is_scheduled": item.is_scheduled,
+            "scheduled_date": item.scheduled_date,
+            "treatment_start_date": item.treatment_start_date,
+            "treatment_end_date": item.treatment_end_date,
+            "signature_at": item.signature_at,
+            "contrast": item.contrast,
+            "sedation": item.sedation,
+        }
+    return PendingItemRevision.objects.create(
+        item=item,
+        version=version,
+        action="created" if version == 1 else "updated",
+        item_type=item_type,
+        type_name=item_type.name,
+        description=item.description,
+        status=item.status,
+        **snapshot,
+    )
 
 
 def _eligible_admission(
@@ -847,3 +902,221 @@ class TestAggregateQueryBudgetHttp:
         big_cost = self._get_cost(writer_client)
         assert small_cost > 0
         assert big_cost <= small_cost
+
+
+@pytest.mark.django_db
+class TestCategorizedPresentationHttp:
+    """STRUCT-PEND-S3 R1/R2: category, type and details in both views."""
+
+    def _four_profile_scene(self) -> dict[str, PendingItem]:
+        admission = _eligible_admission("P_PORTAL_CAT1")
+        return {
+            "chd_rnm": _make_typed_item(
+                admission,
+                PendingItemType.objects.get(slug="chd-rnm"),
+                description="rnm chd sintetica",
+                is_scheduled=True,
+                scheduled_date=date(2026, 11, 10),
+                contrast=True,
+            ),
+            "imagem_rnm": _make_typed_item(
+                admission,
+                PendingItemType.objects.get(slug="imagem-rnm"),
+                description="rnm imagem sintetica",
+                is_scheduled=False,
+                contrast=False,
+                sedation=False,
+            ),
+            "tratamento": _make_typed_item(
+                admission,
+                PendingItemType.objects.get(slug="infeccioso-antibioticos"),
+                description="antibioticos sintetica",
+                treatment_start_date=date(2026, 11, 1),
+                treatment_end_date=date(2026, 11, 10),
+            ),
+            "assinatura": _make_typed_item(
+                admission,
+                PendingItemType.objects.get(slug="sumario-assinatura"),
+                description="assinatura sintetica",
+                signature_at=_dt("2026-11-12T09:30:00"),
+            ),
+        }
+
+    def test_both_views_show_category_type_and_details(
+        self, writer_client: Client
+    ) -> None:
+        self._four_profile_scene()
+        for url in ("/pendencias/", "/pendencias/?view=items"):
+            content = writer_client.get(url).content.decode()
+            assert "CHD (Centro de Hemorragia Digestiva)" in content
+            assert "Exames de imagem" in content
+            assert "Controle infeccioso" in content
+            assert "Sumário de alta" in content
+            assert "Data agendada: 10/11/2026" in content
+            assert "Início do tratamento: 01/11/2026" in content
+            assert "Previsão de término: 10/11/2026" in content
+            assert "Assinatura do sumário em: 12/11/2026 09:30" in content
+            assert "Contraste: Sim" in content
+            assert "Contraste: Não" in content
+            assert "Sedação: Não informado" in content
+            assert "Sedação: Não" in content
+
+    def test_unknown_is_not_no_and_inapplicable_has_no_row(
+        self, writer_client: Client
+    ) -> None:
+        self._four_profile_scene()
+        content = writer_client.get("/pendencias/").content.decode()
+        assert "Agendada: Sim" in content
+        assert "Agendada: Não" in content
+        # Only the two scheduling profiles own the field; the treatment and
+        # signature records are not rendered as Não.
+        assert content.count("Agendada:") == 2
+        assert content.count("Sedação:") == 2
+
+    def test_collapsible_history_marks_old_revision_unknown(
+        self, writer_client: Client
+    ) -> None:
+        scene = self._four_profile_scene()
+        item = scene["chd_rnm"]
+        item.version = 2
+        item.save()
+        _typed_revision(item, 1, legacy=True)
+        _typed_revision(item, 2)
+        response = writer_client.get(
+            f"/pendencias/{item.pk}/history/",
+            headers={"HX-Request": "true"},
+        )
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "Detalhes" in content
+        assert "Detalhes não registrados nesta versão" in content
+        assert "Classificação não registrada nesta versão" in content
+        assert "Data agendada: 10/11/2026" in content
+        assert "Contraste: Sim" in content
+        assert "Sedação: Não informado" in content
+
+
+@pytest.mark.django_db
+class TestCategoryFilterHttp:
+    """STRUCT-PEND-S3 R3: the category filter is combinable and never ignored."""
+
+    def _two_rnm_scene(
+        self,
+    ) -> tuple[Admission, PendingItemType, PendingItemType]:
+        admission = _eligible_admission("P_PORTAL_CATF1")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        imagem_rnm = PendingItemType.objects.get(slug="imagem-rnm")
+        _make_typed_item(admission, chd_rnm, description="filtro rnm chd")
+        _make_typed_item(admission, imagem_rnm, description="filtro rnm imagem")
+        return admission, chd_rnm, imagem_rnm
+
+    def test_category_filter_intersects_with_type(
+        self, writer_client: Client
+    ) -> None:
+        _admission, chd_rnm, imagem_rnm = self._two_rnm_scene()
+        for view in ("patients", "items"):
+            content = writer_client.get(
+                f"/pendencias/?view={view}&categoria={chd_rnm.category_id}"
+            ).content.decode()
+            assert "filtro rnm chd" in content
+            assert "filtro rnm imagem" not in content
+        combined = writer_client.get(
+            f"/pendencias/?categoria={chd_rnm.category_id}"
+            f"&tipo={chd_rnm.pk}"
+        ).content.decode()
+        assert "filtro rnm chd" in combined
+        assert "filtro rnm imagem" not in combined
+
+    def test_incompatible_combination_stays_empty_and_orients(
+        self, writer_client: Client
+    ) -> None:
+        _admission, chd_rnm, imagem_rnm = self._two_rnm_scene()
+        response = writer_client.get(
+            f"/pendencias/?categoria={chd_rnm.category_id}"
+            f"&tipo={imagem_rnm.pk}"
+        )
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "filtro rnm chd" not in content
+        assert "filtro rnm imagem" not in content
+        assert "Nenhuma pendência corresponde aos filtros." in content
+        assert "não se combinam" in content
+
+    def test_invalid_category_id_is_safe(
+        self, writer_client: Client
+    ) -> None:
+        _admission, chd_rnm, _imagem_rnm = self._two_rnm_scene()
+        for raw in ("abc", str(chd_rnm.category_id + 10_000)):
+            response = writer_client.get(f"/pendencias/?categoria={raw}")
+            assert response.status_code == 200
+            content = response.content.decode()
+            assert "filtro rnm chd" not in content
+            assert "filtro rnm imagem" not in content
+            assert "Nenhuma pendência corresponde aos filtros." in content
+            assert 'data-testid="indicators-patients">1<' in content
+
+    def test_category_applies_before_pagination(
+        self, writer_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_PORTAL_CATP")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        imagem_rnm = PendingItemType.objects.get(slug="imagem-rnm")
+        for index in range(AGGREGATE_PER_PAGE + 3):
+            _make_typed_item(
+                admission, chd_rnm, description=f"cat pagina {index:02d}"
+            )
+        _make_typed_item(admission, imagem_rnm, description="cat fora")
+        first = writer_client.get(
+            f"/pendencias/?view=items&categoria={chd_rnm.category_id}"
+        ).content.decode()
+        second = writer_client.get(
+            f"/pendencias/?view=items&categoria={chd_rnm.category_id}&page=2"
+        ).content.decode()
+        assert first.count("cat pagina ") == AGGREGATE_PER_PAGE
+        assert second.count("cat pagina ") == 3
+        assert "cat fora" not in first
+        assert "cat fora" not in second
+        assert f"categoria={chd_rnm.category_id}" in first
+
+
+@pytest.mark.django_db
+class TestCategorizedRefreshHttp:
+    """STRUCT-PEND-S3 R4: writes keep the filtered panel context."""
+
+    def test_detail_only_edit_keeps_filters_and_mode(
+        self, writer_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_PORTAL_CATR1")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        item = _make_typed_item(
+            admission,
+            chd_rnm,
+            description="edicao detalhe sintetica",
+            is_scheduled=True,
+            scheduled_date=date(2026, 11, 10),
+            contrast=True,
+        )
+        _typed_revision(item, 1)
+        filtered = (
+            f"/pendencias/?view=items&categoria={chd_rnm.category_id}"
+            f"&tipo={chd_rnm.pk}"
+        )
+        response = writer_client.post(
+            f"/pendencias/{item.pk}/edit/",
+            {
+                "next": filtered,
+                "expected_version": str(item.version),
+                "item_type": str(chd_rnm.pk),
+                "category": str(chd_rnm.category_id),
+                "description": item.description,
+                "is_scheduled": "sim",
+                "scheduled_date": "2026-11-18",
+                "contrast": "sim",
+            },
+        )
+        assert response.status_code == 302
+        assert response.url == filtered  # type: ignore[attr-defined]
+        item.refresh_from_db()
+        assert item.scheduled_date == date(2026, 11, 18)
+        content = writer_client.get(filtered).content.decode()
+        assert "Data agendada: 18/11/2026" in content

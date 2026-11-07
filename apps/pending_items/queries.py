@@ -31,6 +31,7 @@ from apps.pending_items.models import (
     FINAL_STATUSES,
     STATUS_ACTIVE,
     PendingItem,
+    PendingItemCategory,
     PendingItemType,
 )
 
@@ -85,6 +86,7 @@ class AggregateFilters:
     unidade: str = ""
     leito: str = ""
     especialidade: str = ""
+    category_id: int | None = None
     item_type_id: int | None = None
     creator_id: int | None = None
     updater_id: int | None = None
@@ -120,6 +122,7 @@ class AggregateOptions:
     unidades: list[str]
     leitos: list[str]
     especialidades: list[dict[str, str]]
+    categorias: list[PendingItemCategory]
     tipos: list[PendingItemType]
     criadores: list[User]
     atualizadores: list[User]
@@ -350,6 +353,7 @@ def parse_aggregate_filters(params: QueryDict) -> tuple[AggregateFilters, str | 
     if ordering not in (ORDER_DEFAULT, ORDER_TIME_ASC, ORDER_TIME_DESC):
         ordering = ORDER_DEFAULT
     item_type_id, type_void = _parse_optional_id(params.get("tipo"))
+    category_id, category_void = _parse_optional_id(params.get("categoria"))
     creator_id, creator_void = _parse_optional_id(params.get("criador"))
     updater_raw = (params.get("atualizador") or "").strip()
     updater_id: int | None = None
@@ -377,6 +381,7 @@ def parse_aggregate_filters(params: QueryDict) -> tuple[AggregateFilters, str | 
             unidade=(params.get("unidade") or "").strip(),
             leito=(params.get("leito") or "").strip(),
             especialidade=(params.get("especialidade") or "").strip(),
+            category_id=category_id,
             item_type_id=item_type_id,
             creator_id=creator_id,
             updater_id=updater_id,
@@ -384,7 +389,7 @@ def parse_aggregate_filters(params: QueryDict) -> tuple[AggregateFilters, str | 
             min_open=min_open,
             max_open=max_open,
             ordering=ordering,
-            void=type_void or creator_void or updater_void,
+            void=type_void or category_void or creator_void or updater_void,
         ),
         error,
     )
@@ -399,7 +404,12 @@ def base_current_items(cut: CurrentCut) -> QuerySet[PendingItem]:
     """
     return (
         PendingItem.objects.filter(admission_id__in=list(cut.occupations))
-        .select_related("item_type", "admission", "created_by", "updated_by")
+        .select_related(
+            "item_type__category",
+            "admission",
+            "created_by",
+            "updated_by",
+        )
         .order_by("created_at", "pk")
     )
 
@@ -426,6 +436,10 @@ def apply_aggregate_filters(
         items = items.filter(admission_id__in=allowed)
     if filters.item_type_id is not None:
         items = items.filter(item_type_id=filters.item_type_id)
+    if filters.category_id is not None:
+        # Category and type intersect (D6): an incompatible pair yields an
+        # empty cut instead of ignoring one of the two filters.
+        items = items.filter(item_type__category_id=filters.category_id)
     if filters.creator_id is not None:
         items = items.filter(created_by_id=filters.creator_id)
     if filters.updater_system:
@@ -699,6 +713,7 @@ def aggregate_options(
         {"value": raw, "label": code_to_name.get(raw, raw), "code": raw}
         for raw in raw_specs
     ]
+    categorias = list(PendingItemCategory.objects.all())
     tipos = list(PendingItemType.objects.all())
     if cut.occupations:
         base = PendingItem.objects.filter(
@@ -725,6 +740,7 @@ def aggregate_options(
         unidades=setores,
         leitos=leitos,
         especialidades=especialidades,
+        categorias=categorias,
         tipos=tipos,
         criadores=criadores,
         atualizadores=atualizadores,

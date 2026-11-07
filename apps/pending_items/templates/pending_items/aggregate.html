@@ -94,11 +94,20 @@
         </select>
       </div>
       <div class="col-6 col-md-3">
+        <label for="f_categoria" class="form-label small fw-semibold">Categoria</label>
+        <select name="categoria" id="f_categoria" class="form-select form-select-sm">
+          <option value="">Todas</option>
+          {% for categoria in options.categorias %}
+            <option value="{{ categoria.pk }}"{% if categoria.pk|stringformat:"s" == request.GET.categoria %} selected{% endif %}>{{ categoria.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-6 col-md-3">
         <label for="f_tipo" class="form-label small fw-semibold">Tipo</label>
         <select name="tipo" id="f_tipo" class="form-select form-select-sm">
           <option value="">Todos</option>
-          {% for tipo in options.tipos %}
-            <option value="{{ tipo.pk }}"{% if tipo.pk|stringformat:"s" == request.GET.tipo %} selected{% endif %}>{{ tipo.name }}</option>
+          {% for tipo in type_filter_options %}
+            <option value="{{ tipo.pk }}"{% if tipo.pk|stringformat:"s" == request.GET.tipo %} selected{% endif %}>{{ tipo.label }}</option>
           {% endfor %}
         </select>
       </div>
@@ -151,6 +160,10 @@
   <div class="alert alert-danger" role="alert">{{ filter_error }}</div>
 {% endif %}
 
+{% if filter_hint %}
+  <div class="alert alert-warning" role="status" data-testid="filter-hint">{{ filter_hint }}</div>
+{% endif %}
+
 {% if not has_census %}
   <div class="alert alert-info" role="status">Sem foto de censo atual: o agregado está vazio.</div>
 {% endif %}
@@ -190,8 +203,14 @@
           <tbody>
             {% for row in group.rows %}
               <tr data-testid="pending-row-{{ row.item.pk }}">
-                <td><span class="badge bg-light text-dark border">{{ row.item.item_type.name }}</span></td>
-                <td class="text-break">{{ row.item.description|linebreaksbr }}</td>
+                <td>
+                  <div class="small text-muted">{{ row.item.item_type.category.name }}</div>
+                  <span class="badge bg-light text-dark border">{{ row.item.item_type.name }}</span>
+                </td>
+                <td class="text-break">
+                  {{ row.item.description|linebreaksbr }}
+                  {% include "pending_items/_item_details.html" with rows=row.item.detail_rows %}
+                </td>
                 <td>
                   <span class="badge {% if row.item.status == 'active' %}bg-warning-subtle text-warning-emphasis{% elif row.item.status == 'resolved' %}bg-success-subtle text-success-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %}">
                     {{ row.item.get_status_display }}
@@ -278,8 +297,14 @@
                 <td>{{ row.setor }} / {{ row.leito }}</td>
                 <td>{{ row.esp_sigla }}{% if row.esp_nome != row.esp_sigla %}<br><span class="small text-muted">{{ row.esp_nome }}</span>{% endif %}</td>
                 <td>{{ row.first_unit }}</td>
-                <td><span class="badge bg-light text-dark border">{{ row.item.item_type.name }}</span></td>
-                <td class="text-break">{{ row.item.description|linebreaksbr }}</td>
+                <td>
+                  <div class="small text-muted">{{ row.item.item_type.category.name }}</div>
+                  <span class="badge bg-light text-dark border">{{ row.item.item_type.name }}</span>
+                </td>
+                <td class="text-break">
+                  {{ row.item.description|linebreaksbr }}
+                  {% include "pending_items/_item_details.html" with rows=row.item.detail_rows %}
+                </td>
                 <td>
                   <span class="badge {% if row.item.status == 'active' %}bg-warning-subtle text-warning-emphasis{% elif row.item.status == 'resolved' %}bg-success-subtle text-success-emphasis{% else %}bg-secondary-subtle text-secondary-emphasis{% endif %}">
                     {{ row.item.get_status_display }}

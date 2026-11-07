@@ -37,14 +37,17 @@ from apps.pending_items.models import (
     ACTION_CREATED,
     ACTION_FINALIZED,
     ACTION_UPDATED,
+    CATEGORY_SLUG_OUTRAS_PENDENCIAS,
     GROUP_NAME,
     INELIGIBLE_MESSAGE,
     OUTRO_NAME,
     OUTRO_SLUG,
+    PROFILE_SIMPLE,
     STATUS_ACTIVE,
     STATUS_CLOSED_UNRESOLVED,
     STATUS_RESOLVED,
     PendingItem,
+    PendingItemCategory,
     PendingItemRevision,
     PendingItemType,
 )
@@ -119,6 +122,24 @@ def _make_census_row(
         prontuario=prontuario,
         nome="PACIENTE SINTETICO",
         bed_status=BedStatus.OCCUPIED,
+    )
+
+
+def _custom_type(
+    *,
+    slug: str,
+    name: str,
+    profile: str = PROFILE_SIMPLE,
+    requires_description: bool = False,
+) -> PendingItemType:
+    """Create a synthetic catalog type inside the canonical fallback group."""
+    category = PendingItemCategory.objects.get(slug=CATEGORY_SLUG_OUTRAS_PENDENCIAS)
+    return PendingItemType.objects.create(
+        slug=slug,
+        name=name,
+        category=category,
+        profile=profile,
+        requires_description=requires_description,
     )
 
 
@@ -221,9 +242,7 @@ class TestOutroProtection:
         patient = _make_patient("P_PEND_REF")
         admission = _make_admission(patient, "ADM_PEND_REF")
         _make_census_row("P_PEND_REF")
-        item_type = PendingItemType.objects.create(
-            slug="doc", name="Documento"
-        )
+        item_type = _custom_type(slug="doc", name="Documento")
         create_pending_item(
             admission=admission,
             item_type=item_type,
@@ -239,9 +258,7 @@ class TestOutroProtection:
         patient = _make_patient("P_PEND_REN")
         admission = _make_admission(patient, "ADM_PEND_REN")
         _make_census_row("P_PEND_REN")
-        item_type = PendingItemType.objects.create(
-            slug="exam", name="Exame Antigo"
-        )
+        item_type = _custom_type(slug="exam", name="Exame Antigo")
         item = create_pending_item(
             admission=admission,
             item_type=item_type,
@@ -254,6 +271,15 @@ class TestOutroProtection:
         assert revision.type_name == "Exame Antigo"
         item.refresh_from_db()
         assert item.item_type.name == "Exame Novo"
+
+
+@pytest.mark.django_db
+class TestCatalogIdentity:
+    def test_unused_type_slug_is_immutable(self, db: object) -> None:
+        item_type = _custom_type(slug="slug-estavel", name="Slug Estavel")
+        item_type.slug = "slug-trocado"
+        with pytest.raises(ValidationError):
+            item_type.save()
 
 
 @pytest.mark.django_db

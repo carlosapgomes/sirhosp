@@ -14,9 +14,12 @@
 <div class="card border-0 shadow-sm mb-3">
   <div class="card-body">
     <div class="small text-muted mb-2">
-      {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
+      {{ item.item_type.category.name }} &middot; {{ item.item_type.name }} &middot; {{ item.get_status_display }} &middot; v{{ item.version }}
     </div>
-    <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+    {% if item.description %}
+      <p class="card-text text-break">{{ item.description|linebreaksbr }}</p>
+    {% endif %}
+    {% include "pending_items/_item_details.html" with rows=item.detail_rows %}
   </div>
 </div>
 
@@ -30,7 +33,8 @@
         <th scope="col">Ação</th>
         <th scope="col">Data/hora</th>
         <th scope="col">Autor</th>
-        <th scope="col">Tipo</th>
+        <th scope="col">Classificação</th>
+        <th scope="col">Detalhes</th>
         <th scope="col">Descrição</th>
         <th scope="col">Status</th>
         <th scope="col">Anotação</th>
@@ -43,7 +47,24 @@
           <td>{{ revision.get_action_display }}</td>
           <td>{{ revision.created_at|date:"d/m/Y H:i" }}</td>
           <td>{% if revision.is_system %}Sistema{% else %}{{ revision.author_name|default:"—" }}{% endif %}</td>
-          <td>{{ revision.type_name }}</td>
+          <td>
+            {% if revision.category_name %}{{ revision.category_name }} &middot;{% endif %}
+            {{ revision.type_name }}
+            {% if not revision.category_name %}
+              <span class="d-block text-muted">Classificação não registrada nesta versão</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if not revision.details_known %}
+              <span class="d-block text-muted">Detalhes não registrados nesta versão</span>
+            {% elif revision.detail_rows %}
+              {% for row in revision.detail_rows %}
+                <span class="d-block">{{ row.label }}: {{ row.value }}</span>
+              {% endfor %}
+            {% else %}
+              <span class="d-block text-muted">Sem detalhes aplicáveis</span>
+            {% endif %}
+          </td>
           <td class="text-break">{{ revision.description|linebreaksbr }}</td>
           <td>{{ revision.get_status_display }}</td>
           <td class="text-break">{{ revision.note|linebreaksbr|default:"—" }}</td>

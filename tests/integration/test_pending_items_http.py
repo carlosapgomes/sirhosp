@@ -20,12 +20,14 @@ from django.test import Client
 from apps.census.models import BedStatus, CensusSnapshot
 from apps.patients.models import Admission, Patient
 from apps.pending_items.models import (
+    ACTION_CREATED,
     INELIGIBLE_MESSAGE,
     OUTRO_SLUG,
     STATUS_ACTIVE,
     STATUS_CLOSED_UNRESOLVED,
     STATUS_RESOLVED,
     PendingItem,
+    PendingItemCategory,
     PendingItemRevision,
     PendingItemType,
 )
@@ -598,6 +600,11 @@ class TestCacheHeaders:
         _assert_private_no_store(error)
 
 
+def _category_id(slug: str = "outras-pendencias") -> int:
+    """Return a canonical category PK through its stable slug."""
+    return PendingItemCategory.objects.get(slug=slug).pk
+
+
 @pytest.mark.django_db
 class TestAdminCatalog:
     def _admin_client(self, client: Client) -> Client:
@@ -611,10 +618,30 @@ class TestAdminCatalog:
         admin_client = self._admin_client(client)
         response = admin_client.post(
             "/admin/pending_items/pendingitemtype/add/",
-            {"name": "Transporte", "slug": "transporte"},
+            {
+                "name": "Transporte",
+                "slug": "transporte",
+                "category": str(_category_id()),
+                "profile": "registro-simples",
+            },
         )
         assert response.status_code == 302
-        assert PendingItemType.objects.filter(slug="transporte").exists()
+        created = PendingItemType.objects.get(slug="transporte")
+        assert created.category.slug == "outras-pendencias"
+        assert created.profile == "registro-simples"
+
+    def test_admin_cannot_add_type_without_category_and_profile(
+        self, client: Client
+    ) -> None:
+        admin_client = self._admin_client(client)
+        response = admin_client.post(
+            "/admin/pending_items/pendingitemtype/add/",
+            {"name": "Sem Categoria", "slug": "sem-categoria"},
+        )
+        assert response.status_code == 200
+        assert not PendingItemType.objects.filter(
+            slug="sem-categoria"
+        ).exists()
 
     def test_admin_cannot_rename_outro(self, client: Client) -> None:
         admin_client = self._admin_client(client)
@@ -643,7 +670,11 @@ class TestAdminCatalog:
         admin_client = self._admin_client(client)
         admission = _eligible_admission("P_HTTP_ADM")
         item_type = PendingItemType.objects.create(
-            slug="admref", name="Referenciado"
+            slug="admref",
+            name="Referenciado",
+            category_id=_category_id(),
+            profile="registro-simples",
+            requires_description=False,
         )
         PendingItem.objects.create(
             admission=admission,
@@ -659,6 +690,141 @@ class TestAdminCatalog:
         assert response.status_code == 200
         assert PendingItemType.objects.filter(slug="admref").exists()
 
+    def test_admin_cannot_change_type_slug(self, client: Client) -> None:
+        admin_client = self._admin_client(client)
+        item_type = PendingItemType.objects.create(
+            slug="slug-fixo",
+            name="Slug Fixo",
+            category_id=_category_id(),
+            profile="registro-simples",
+            requires_description=False,
+        )
+        response = admin_client.post(
+            f"/admin/pending_items/pendingitemtype/{item_type.pk}/change/",
+            {
+                "name": item_type.name,
+                "slug": "slug-trocado",
+                "category": str(item_type.category_id),
+                "profile": item_type.profile,
+            },
+        )
+        assert response.status_code == 200
+        item_type.refresh_from_db()
+        assert item_type.slug == "slug-fixo"
+
+    def test_admin_cannot_change_used_type_contract(
+        self, client: Client
+    ) -> None:
+        admin_client = self._admin_client(client)
+        admission = _eligible_admission("P_HTTP_ADM_CONTRACT")
+        item_type = PendingItemType.objects.create(
+            slug="contrato-usado",
+            name="Contrato Usado",
+            category_id=_category_id("quadro-clinico"),
+            profile="registro-simples",
+            requires_description=False,
+        )
+        PendingItem.objects.create(
+            admission=admission,
+            item_type=item_type,
+            description="referencia atual",
+            status=STATUS_ACTIVE,
+            version=1,
+        )
+        response = admin_client.post(
+            f"/admin/pending_items/pendingitemtype/{item_type.pk}/change/",
+            {
+                "name": item_type.name,
+                "slug": item_type.slug,
+                "category": str(_category_id()),
+                "profile": "tratamento-periodo",
+            },
+        )
+        assert response.status_code == 200
+        item_type.refresh_from_db()
+        assert item_type.category.slug == "quadro-clinico"
+        assert item_type.profile == "registro-simples"
+
+    def test_admin_cannot_change_outro_contract(
+        self, client: Client
+    ) -> None:
+        admin_client = self._admin_client(client)
+        outro = PendingItemType.objects.get(slug=OUTRO_SLUG)
+        response = admin_client.post(
+            f"/admin/pending_items/pendingitemtype/{outro.pk}/change/",
+            {
+                "name": outro.name,
+                "slug": outro.slug,
+                "category": str(_category_id("sumario-alta")),
+                "profile": "agendamento",
+                "has_rnm_complements": "on",
+            },
+        )
+        assert response.status_code == 200
+        outro.refresh_from_db()
+        assert outro.name == "Outro"
+        assert outro.category.slug == "outras-pendencias"
+        assert outro.profile == "registro-simples"
+        assert outro.has_rnm_complements is False
+        assert outro.requires_description is True
+
+    def test_admin_can_rename_used_type_visible_name(
+        self, client: Client
+    ) -> None:
+        admin_client = self._admin_client(client)
+        admission = _eligible_admission("P_HTTP_ADM_RENAME")
+        item_type = PendingItemType.objects.create(
+            slug="renomeavel",
+            name="Nome Antigo",
+            category_id=_category_id(),
+            profile="registro-simples",
+            requires_description=False,
+        )
+        PendingItem.objects.create(
+            admission=admission,
+            item_type=item_type,
+            description="referencia atual",
+            status=STATUS_ACTIVE,
+            version=1,
+        )
+        response = admin_client.post(
+            f"/admin/pending_items/pendingitemtype/{item_type.pk}/change/",
+            {
+                "name": "Nome Novo",
+                "slug": item_type.slug,
+                "category": str(item_type.category_id),
+                "profile": item_type.profile,
+            },
+        )
+        assert response.status_code == 302
+        item_type.refresh_from_db()
+        assert item_type.name == "Nome Novo"
+
+    def test_admin_cannot_change_category_slug(
+        self, client: Client
+    ) -> None:
+        admin_client = self._admin_client(client)
+        category = PendingItemCategory.objects.get(slug="outras-pendencias")
+        response = admin_client.post(
+            f"/admin/pending_items/pendingitemcategory/{category.pk}/change/",
+            {"name": category.name, "slug": "outras-trocadas"},
+        )
+        assert response.status_code == 200
+        category.refresh_from_db()
+        assert category.slug == "outras-pendencias"
+
+    def test_admin_cannot_delete_referenced_category(
+        self, client: Client
+    ) -> None:
+        admin_client = self._admin_client(client)
+        category = PendingItemCategory.objects.get(slug="quadro-clinico")
+        response = admin_client.post(
+            f"/admin/pending_items/pendingitemcategory/{category.pk}/delete/",
+            {"post": "yes"},
+        )
+        assert response.status_code == 200
+        assert PendingItemCategory.objects.filter(pk=category.pk).exists()
+
     def test_items_and_revisions_have_no_admin_crud(
         self, db: object
     ) -> None:
@@ -669,6 +835,116 @@ class TestAdminCatalog:
         }
         assert "PendingItem" not in registered
         assert "PendingItemRevision" not in registered
+
+
+@pytest.mark.django_db
+class TestCatalogSelectionAndHistory:
+    """PI-02/PI-06: contextualized labels and observed classification."""
+
+    def test_create_selector_labels_include_category(
+        self, writer_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_HTTP_LABELS")
+        response = writer_client.get(
+            f"/admissions/{admission.pk}/pending-items/"
+        )
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "Outras pendências &gt; Outro" in content
+        assert "Exames de imagem &gt; RNM" in content
+        assert "CHD (Centro de Hemorragia Digestiva) &gt; RNM" in content
+
+    def test_edit_selector_labels_include_category(
+        self, writer_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_HTTP_LABELS_EDIT")
+        item_type = PendingItemType.objects.get(slug="imagem-rnm")
+        item = PendingItem.objects.create(
+            admission=admission,
+            item_type=item_type,
+            description="pendencia com rnm",
+            status=STATUS_ACTIVE,
+            version=1,
+        )
+        response = writer_client.get(
+            f"/admissions/{admission.pk}/pending-items/{item.pk}/edit/"
+        )
+        assert response.status_code == 200
+        assert "Exames de imagem &gt; RNM" in response.content.decode()
+
+    def test_new_revision_records_observed_classification(
+        self, writer_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_HTTP_SNAPSHOT")
+        item_type = PendingItemType.objects.get(slug="quadro-melhora-clinica")
+        response = writer_client.post(
+            f"/admissions/{admission.pk}/pending-items/",
+            {
+                "item_type": str(item_type.pk),
+                "description": "registro sintetico",
+            },
+        )
+        assert response.status_code == 302
+        item = PendingItem.objects.get(admission=admission)
+        revision = PendingItemRevision.objects.get(item=item, version=1)
+        assert revision.type_name == "Melhora clínica"
+        assert revision.type_slug == "quadro-melhora-clinica"
+        assert revision.category_name == "Quadro clínico"
+        assert revision.category_slug == "quadro-clinico"
+        assert revision.profile == "registro-simples"
+        assert revision.has_rnm_complements is False
+        assert revision.requires_description is False
+
+        item_type.name = "Melhora clínica observada"
+        item_type.save()
+        renamed_revision = PendingItemRevision.objects.get(
+            item=item, version=1
+        )
+        assert renamed_revision.type_name == "Melhora clínica"
+        assert renamed_revision.category_name == "Quadro clínico"
+        history = writer_client.get(
+            f"/admissions/{admission.pk}/pending-items/{item.pk}/history/"
+        )
+        content = history.content.decode()
+        assert "Melhora clínica observada" in content
+        assert "Quadro clínico" in content
+
+    def test_history_explains_missing_classification_for_older_version(
+        self, writer_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_HTTP_LEGACY_HISTORY")
+        item_type = PendingItemType.objects.get(slug="quadro-risco-obito")
+        item = PendingItem.objects.create(
+            admission=admission,
+            item_type=item_type,
+            description="registro anterior a classificacao",
+            status=STATUS_ACTIVE,
+            version=1,
+        )
+        PendingItemRevision.objects.create(
+            item=item,
+            version=1,
+            action=ACTION_CREATED,
+            item_type=item_type,
+            type_name=item_type.name,
+            description=item.description,
+            status=STATUS_ACTIVE,
+        )
+        PendingItemRevision.objects.filter(item=item, version=1).update(
+            category_name=None,
+            category_slug=None,
+            type_slug=None,
+            profile=None,
+            has_rnm_complements=None,
+            requires_description=None,
+        )
+        response = writer_client.get(
+            f"/admissions/{admission.pk}/pending-items/{item.pk}/history/"
+        )
+        assert response.status_code == 200
+        content = response.content.decode()
+        assert "Classificação não registrada nesta versão" in content
+        assert "Risco de óbito" in content
 
 
 @pytest.mark.django_db

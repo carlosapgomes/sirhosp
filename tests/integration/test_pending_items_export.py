@@ -1,19 +1,20 @@
-"""PEND-S4: pending-items XLSX export HTTP integration (R1-R4).
+"""PEND-S4/STRUCT-PEND-S4: pending-items XLSX export HTTP integration.
 
-Failing-before: no ``pendencias/export.xlsx`` route exists in
-``apps/pending_items/urls.py``, so every export GET below 404s until
-the slice is implemented.
+Covers R1-R5: the exact 23-column PP-08 contract with one row per item
+in its current state, native date/datetime/id cells, the four catalog
+profiles (scheduling with and without RNM complements, treatment
+period, signature and simple), literal text safety, the shared
+conservative cut (filters, no pagination, ambiguity exclusion, empty
+headers-only), cache directives, GET purity, no residual files and the
+real confirmed exit excluding the episode from the current cut while
+its contextual history remains.
 
-Covers authenticated-only download for readers, members and groupless
-superusers, the shared conservative cut with one row per item across
-pages and views, exact PP-08 columns with first unit/authors/dates and
-no history, literal text cells, empty workbooks, cache directives, GET
-purity and the censo-style filename. All synthetic.
+All fixtures are synthetic; no production source is ever contacted.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
@@ -23,9 +24,16 @@ from django.contrib.auth.models import Group, User
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
+from openpyxl.utils import get_column_letter
 
 from apps.census.models import BedStatus, CensusSnapshot, Specialty
-from apps.patients.models import Admission, Patient
+from apps.patients.models import EXIT_HOSPITAL_DISCHARGE, Admission, Patient
+from apps.patients.reconciliation import (
+    EVIDENCE_SOURCE_DISCHARGE_RECORD,
+    DischargeExitEvidence,
+    apply_discharge_exit,
+    decide_discharge_match,
+)
 from apps.pending_items.export import EXPORT_HEADERS
 from apps.pending_items.models import (
     OUTRO_SLUG,
@@ -39,22 +47,36 @@ from apps.pending_items.models import (
 from apps.pending_items.queries import AGGREGATE_PER_PAGE
 
 TZ = ZoneInfo("America/Bahia")
+UTC = ZoneInfo("UTC")
 EXPORT_URL = "/pendencias/export.xlsx"
+
 EXPECTED_HEADERS = [
+    "ID da pendência",
+    "ID da internação",
     "Registro",
     "Nome",
     "Unidade atual",
     "Leito",
     "Primeira unidade de internação",
     "Especialidade",
+    "Categoria",
     "Tipo",
     "Descrição/observação",
+    "Agendada?",
+    "Data agendada",
+    "Contraste",
+    "Sedação",
+    "Início do tratamento",
+    "Previsão de término",
+    "Assinatura do sumário em",
     "Status",
     "Criado em",
     "Criado por",
     "Atualizado em",
     "Atualizado por",
 ]
+
+COLUMN = {header: index for index, header in enumerate(EXPECTED_HEADERS)}
 
 
 def _dt(value: str) -> datetime:
@@ -126,6 +148,24 @@ def _make_item(
     return item
 
 
+def _make_typed_item(
+    admission: Admission,
+    item_type: PendingItemType,
+    *,
+    description: str = "",
+    **details: object,
+) -> PendingItem:
+    """Create one item of a catalog type with synthetic typed details."""
+    return PendingItem.objects.create(
+        admission=admission,
+        item_type=item_type,
+        description=description,
+        status=STATUS_ACTIVE,
+        version=1,
+        **details,
+    )
+
+
 def _eligible_admission(
     key: str = "P_EXP_1",
     *,
@@ -153,8 +193,20 @@ def _rows(ws) -> list[list]:
     ]
 
 
+def _cell(ws, row: int, header: str):
+    return ws.cell(row=row, column=COLUMN[header] + 1)
+
+
+def _row_for(ws, item_id: int) -> int:
+    assert ws is not None
+    for row in range(2, ws.max_row + 1):
+        if _cell(ws, row, "ID da pendência").value == item_id:
+            return row
+    raise AssertionError(f"item {item_id} not exported")
+
+
 def _descriptions(ws) -> list[str]:
-    return [row[7] for row in _rows(ws)]
+    return [row[COLUMN["Descrição/observação"]] for row in _rows(ws)]
 
 
 def _cache_directives(response) -> set[str]:
@@ -277,7 +329,7 @@ class TestExportCutParity:
             _workbook(reader_client.get(f"{EXPORT_URL}?view=items"))
         )
         assert patients == items
-        assert [row[7] for row in patients] == [
+        assert [row[COLUMN["Descrição/observação"]] for row in patients] == [
             "modo segunda",
             "modo primeira",
         ]
@@ -432,21 +484,28 @@ class TestExportColumnsAndValues:
         assert list(EXPORT_HEADERS) == EXPECTED_HEADERS
         rows = _rows(ws)
         assert len(rows) == 1
-        assert rows[0] == [
-            "P_EXP_COL",
-            "PACIENTE SINTETICO P_EXP_COL",
-            "UTI GERAL",
-            "U07",
-            "Primeira unidade não identificada",
-            "CIRURGIA VASCULAR",
-            "Outro",
-            "linha completa export",
-            "Ativa",
-            "05/06/2026 10:30",
-            "export_reader",
-            "09/06/2026 18:45",
-            "export_editor",
-        ]
+        assert rows[0][COLUMN["ID da pendência"]] == item.pk
+        assert rows[0][COLUMN["ID da internação"]] == admission.pk
+        assert rows[0][COLUMN["Registro"]] == "P_EXP_COL"
+        assert rows[0][COLUMN["Nome"]] == "PACIENTE SINTETICO P_EXP_COL"
+        assert rows[0][COLUMN["Unidade atual"]] == "UTI GERAL"
+        assert rows[0][COLUMN["Leito"]] == "U07"
+        assert rows[0][COLUMN["Primeira unidade de internação"]] == (
+            "Primeira unidade não identificada"
+        )
+        assert rows[0][COLUMN["Especialidade"]] == "CIRURGIA VASCULAR"
+        assert rows[0][COLUMN["Categoria"]] == "Outras pendências"
+        assert rows[0][COLUMN["Tipo"]] == "Outro"
+        assert rows[0][COLUMN["Descrição/observação"]] == (
+            "linha completa export"
+        )
+        assert rows[0][COLUMN["Status"]] == "Ativa"
+        assert rows[0][COLUMN["Criado em"]] == datetime(2026, 6, 5, 10, 30)
+        assert rows[0][COLUMN["Criado por"]] == "export_reader"
+        assert rows[0][COLUMN["Atualizado em"]] == datetime(
+            2026, 6, 9, 18, 45
+        )
+        assert rows[0][COLUMN["Atualizado por"]] == "export_editor"
 
     def test_system_author_and_no_history_leak(
         self, reader_client: Client
@@ -478,8 +537,8 @@ class TestExportColumnsAndValues:
         ws = _workbook(reader_client.get(f"{EXPORT_URL}?status=all"))
         rows = _rows(ws)
         assert len(rows) == 1
-        assert rows[0][8] == "Encerrada sem resolução"
-        assert rows[0][12] == "Sistema"
+        assert rows[0][COLUMN["Status"]] == "Encerrada sem resolução"
+        assert rows[0][COLUMN["Atualizado por"]] == "Sistema"
         flat = " ".join(str(value) for row in rows for value in row)
         assert "nota-somente-revisao-export" not in flat
 
@@ -498,7 +557,234 @@ class TestExportColumnsAndValues:
         )
         _make_item(admission, description="com percurso export")
         ws = _workbook(reader_client.get(EXPORT_URL))
-        assert _rows(ws)[0][4] == "PRONTO SOCORRO"
+        assert _rows(ws)[0][COLUMN["Primeira unidade de internação"]] == (
+            "PRONTO SOCORRO"
+        )
+
+
+@pytest.mark.django_db
+class TestExportProfilesAndCellTypes:
+    """R1/R2: one row per item and native cells for all four profiles."""
+
+    def _scene(self) -> dict[str, object]:
+        Specialty.objects.get_or_create(
+            code="CIV", defaults={"name": "CIRURGIA VASCULAR"}
+        )
+        admission = _eligible_admission(
+            "0001234", setor="UTI GERAL", leito="U07", especialidade="CIV"
+        )
+        tomografia = PendingItemType.objects.get(slug="imagem-tomografia")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        antibioticos = PendingItemType.objects.get(
+            slug="infeccioso-antibioticos"
+        )
+        sumario = PendingItemType.objects.get(slug="sumario-assinatura")
+        outro = PendingItemType.objects.get(slug=OUTRO_SLUG)
+        return {
+            "admission": admission,
+            "tomografia": _make_typed_item(
+                admission,
+                tomografia,
+                description="tomografia sintetica",
+                is_scheduled=True,
+                scheduled_date=date(2026, 1, 1),
+            ),
+            "rnm": _make_typed_item(
+                admission,
+                chd_rnm,
+                description="rnm sintetica",
+                is_scheduled=True,
+                scheduled_date=date(2026, 11, 10),
+                contrast=True,
+            ),
+            "antibioticos": _make_typed_item(
+                admission,
+                antibioticos,
+                description="antibioticos sinteticos",
+                treatment_start_date=date(2026, 11, 1),
+                treatment_end_date=date(2026, 11, 10),
+            ),
+            "sumario": _make_typed_item(
+                admission,
+                sumario,
+                description="sumario sintetico",
+                signature_at=datetime(2026, 11, 12, 12, 30, tzinfo=UTC),
+            ),
+            "outro": _make_typed_item(
+                admission, outro, description="registro simples sintetico"
+            ),
+        }
+
+    def test_one_row_per_profile_with_typed_cells(
+        self, reader_client: Client
+    ) -> None:
+        scene = self._scene()
+        admission = scene["admission"]
+        assert isinstance(admission, Admission)
+        ws = _workbook(reader_client.get(EXPORT_URL))
+        assert ws is not None
+        assert [cell.value for cell in ws[1]] == EXPECTED_HEADERS
+        assert ws.max_row == 6
+
+        for name in ("tomografia", "rnm", "antibioticos", "sumario", "outro"):
+            item = scene[name]
+            assert isinstance(item, PendingItem)
+            row = _row_for(ws, item.pk)
+            assert _cell(ws, row, "ID da internação").value == admission.pk
+            assert _cell(ws, row, "Registro").value == "0001234"
+            assert _cell(ws, row, "Registro").data_type in ("s", "inlineStr")
+            assert _cell(ws, row, "Status").value == "Ativa"
+            assert _cell(ws, row, "Categoria").value == (
+                item.item_type.category.name
+            )
+            assert _cell(ws, row, "Tipo").value == item.item_type.name
+
+        # Scheduling without RNM complements: date native, complements N/A.
+        rnm = scene["rnm"]
+        assert isinstance(rnm, PendingItem)
+        row = _row_for(ws, rnm.pk)
+        assert _cell(ws, row, "Categoria").value == (
+            "CHD (Centro de Hemorragia Digestiva)"
+        )
+        assert _cell(ws, row, "Tipo").value == "RNM"
+        assert _cell(ws, row, "Agendada?").value == "Sim"
+        scheduled = _cell(ws, row, "Data agendada")
+        assert scheduled.is_date is True
+        assert scheduled.number_format == "dd/mm/yyyy"
+        assert scheduled.value == datetime(2026, 11, 10, 0, 0)
+        assert _cell(ws, row, "Contraste").value == "Sim"
+        assert _cell(ws, row, "Sedação").value == "Não informado"
+        assert _cell(ws, row, "Início do tratamento").value in ("", None)
+        assert _cell(ws, row, "Previsão de término").value in ("", None)
+        assert _cell(ws, row, "Assinatura do sumário em").value in ("", None)
+
+        # Tomografia: scheduled with known date, RNM complements empty.
+        tomografia = scene["tomografia"]
+        assert isinstance(tomografia, PendingItem)
+        row = _row_for(ws, tomografia.pk)
+        assert _cell(ws, row, "Agendada?").value == "Sim"
+        assert _cell(ws, row, "Data agendada").value == datetime(
+            2026, 1, 1, 0, 0
+        )
+        assert _cell(ws, row, "Contraste").value in ("", None)
+        assert _cell(ws, row, "Sedação").value in ("", None)
+
+        # Treatment period: both dates native, scheduling/signature N/A.
+        antibioticos = scene["antibioticos"]
+        assert isinstance(antibioticos, PendingItem)
+        row = _row_for(ws, antibioticos.pk)
+        assert _cell(ws, row, "Agendada?").value in ("", None)
+        assert _cell(ws, row, "Data agendada").value in ("", None)
+        assert _cell(ws, row, "Início do tratamento").value == datetime(
+            2026, 11, 1, 0, 0
+        )
+        assert _cell(ws, row, "Previsão de término").value == datetime(
+            2026, 11, 10, 0, 0
+        )
+        assert _cell(ws, row, "Assinatura do sumário em").value in ("", None)
+
+        # Signature: institutional wall clock, tz-naive Excel instant.
+        sumario = scene["sumario"]
+        assert isinstance(sumario, PendingItem)
+        row = _row_for(ws, sumario.pk)
+        signature = _cell(ws, row, "Assinatura do sumário em")
+        assert signature.is_date is True
+        assert signature.number_format == "dd/mm/yyyy hh:mm"
+        assert signature.value == datetime(2026, 11, 12, 9, 30)
+        assert signature.value.tzinfo is None
+        assert _cell(ws, row, "Início do tratamento").value in ("", None)
+
+        # Simple record: every detail cell is empty, none reads as Não.
+        outro = scene["outro"]
+        assert isinstance(outro, PendingItem)
+        row = _row_for(ws, outro.pk)
+        for header in (
+            "Agendada?",
+            "Data agendada",
+            "Contraste",
+            "Sedação",
+            "Início do tratamento",
+            "Previsão de término",
+            "Assinatura do sumário em",
+        ):
+            assert _cell(ws, row, header).value in ("", None), header
+
+    def test_civil_date_is_not_timezone_shifted(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_CIVIL")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        item = _make_typed_item(
+            admission,
+            chd_rnm,
+            description="data civil sintetica",
+            is_scheduled=True,
+            scheduled_date=date(2026, 1, 1),
+        )
+        ws = _workbook(reader_client.get(EXPORT_URL))
+        cell = _cell(ws, _row_for(ws, item.pk), "Data agendada")
+        assert cell.value == datetime(2026, 1, 1, 0, 0)
+        assert cell.value.date() == date(2026, 1, 1)
+
+    def test_instants_use_institutional_wall_clock(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_INST")
+        item = _make_item(admission, description="instante sintetico")
+        PendingItem.objects.filter(pk=item.pk).update(
+            created_at=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            updated_at=datetime(2026, 6, 10, 18, 45, tzinfo=UTC),
+        )
+        ws = _workbook(reader_client.get(EXPORT_URL))
+        row = _row_for(ws, item.pk)
+        created = _cell(ws, row, "Criado em")
+        updated = _cell(ws, row, "Atualizado em")
+        assert created.value == datetime(2026, 6, 10, 12, 0)
+        assert created.value.tzinfo is None
+        assert created.number_format == "dd/mm/yyyy hh:mm"
+        assert updated.value == datetime(2026, 6, 10, 15, 45)
+        assert updated.value.tzinfo is None
+
+    def test_unknown_scheduling_answer_stays_unknown(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_LEGACY")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        item = _make_typed_item(
+            admission, chd_rnm, description="agendada legada"
+        )
+        ws = _workbook(reader_client.get(EXPORT_URL))
+        row = _row_for(ws, item.pk)
+        assert _cell(ws, row, "Agendada?").value == "Não informado"
+        assert _cell(ws, row, "Data agendada").value in ("", None)
+        assert _cell(ws, row, "Contraste").value == "Não informado"
+        assert _cell(ws, row, "Sedação").value == "Não informado"
+
+
+@pytest.mark.django_db
+class TestExportSheetUsability:
+    """R5 at HTTP level: autofilter and frozen header on real responses."""
+
+    def test_autofilter_and_frozen_header(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_SHEET")
+        _make_item(admission, description="planilha usavel")
+        ws = _workbook(reader_client.get(EXPORT_URL))
+        assert ws is not None
+        assert ws.freeze_panes == "A2"
+        last_column = get_column_letter(len(EXPECTED_HEADERS))
+        assert ws.auto_filter.ref == f"A1:{last_column}{ws.max_row}"
+
+    def test_header_only_export_keeps_sheet_usability(
+        self, reader_client: Client
+    ) -> None:
+        ws = _workbook(reader_client.get(f"{EXPORT_URL}?unidade=INEXISTENTE"))
+        assert ws is not None
+        assert ws.max_row == 1
+        assert ws.max_column == 23
+        assert ws.freeze_panes == "A2"
+        assert ws.auto_filter.ref == "A1:W1"
 
 
 @pytest.mark.django_db
@@ -539,20 +825,33 @@ class TestExportEnvelope:
         assert ws.max_row == 1
         assert _descriptions(ws) == []
 
-    def test_formula_like_text_stays_literal(
+    def test_formula_like_text_stays_literal_meanwhile_dates_are_native(
         self, reader_client: Client
     ) -> None:
         admission = _eligible_admission("P_EXP_FORM")
-        payload = "=HIPERLINK(\"http://x.example\";\"x\")"
-        _make_item(admission, description=payload)
-        other = _make_item(admission, description="+1+1")
-        assert other.pk != 0
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        payload = '=HIPERLINK("http://x.example";"x")'
+        text_item = _make_item(admission, description=payload)
+        _make_item(admission, description="+1+1")
+        date_item = _make_typed_item(
+            admission,
+            chd_rnm,
+            description="-2+3",
+            is_scheduled=True,
+            scheduled_date=date(2026, 11, 10),
+        )
         ws = _workbook(reader_client.get(EXPORT_URL))
         assert ws is not None
-        for row in ws.iter_rows(min_row=2):
-            for cell in row:
-                assert cell.data_type in ("s", "inlineStr")
         assert payload in _descriptions(ws)
+        row = _row_for(ws, text_item.pk)
+        for header in ("Descrição/observação", "Nome", "Registro"):
+            assert _cell(ws, row, header).data_type in ("s", "inlineStr")
+        date_row = _row_for(ws, date_item.pk)
+        assert _cell(ws, date_row, "Data agendada").is_date is True
+        assert _cell(ws, date_row, "Descrição/observação").data_type in (
+            "s",
+            "inlineStr",
+        )
 
     def test_gets_never_mutate_business_tables(
         self, reader_client: Client
@@ -569,3 +868,193 @@ class TestExportEnvelope:
         item.refresh_from_db()
         assert item.description == "pura export"
         assert item.version == 1
+
+    def test_export_leaves_no_file_on_the_server(
+        self, reader_client: Client, settings, tmp_path
+    ) -> None:
+        settings.MEDIA_ROOT = tmp_path
+        admission = _eligible_admission("P_EXP_MEM")
+        _make_item(admission, description="memoria export")
+        for _ in range(3):
+            response = reader_client.get(EXPORT_URL)
+            assert response.status_code == 200
+            assert response.content
+        assert list(tmp_path.rglob("*")) == []
+
+
+@pytest.mark.django_db
+class TestCategorizedExportParity:
+    """STRUCT-PEND-S3/S4: the XLSX keeps the categorized cut of the panel."""
+
+    def test_category_filter_matches_panel_and_workbook(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_CAT")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        imagem_rnm = PendingItemType.objects.get(slug="imagem-rnm")
+        chd_item = _make_typed_item(
+            admission, chd_rnm, description="marcador-cat-chd"
+        )
+        imagem_item = _make_typed_item(
+            admission, imagem_rnm, description="marcador-cat-imagem"
+        )
+        category = chd_rnm.category_id
+        panel = reader_client.get(
+            f"/pendencias/?categoria={category}"
+        ).content.decode()
+        assert "marcador-cat-chd" in panel
+        assert "marcador-cat-imagem" not in panel
+        ws = _workbook(reader_client.get(f"{EXPORT_URL}?categoria={category}"))
+        assert _descriptions(ws) == ["marcador-cat-chd"]
+        assert [
+            row[COLUMN["ID da pendência"]] for row in _rows(ws)
+        ] == [chd_item.pk]
+        assert imagem_item.pk not in [
+            row[COLUMN["ID da pendência"]] for row in _rows(ws)
+        ]
+        incompatible = _workbook(
+            reader_client.get(
+                f"{EXPORT_URL}?categoria={category}&tipo={imagem_rnm.pk}"
+            )
+        )
+        assert incompatible.max_row == 1
+        invalid = _workbook(
+            reader_client.get(f"{EXPORT_URL}?categoria=abc")
+        )
+        assert invalid.max_row == 1
+
+    def test_category_and_status_filters_combine_in_both_modes(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_CAT_STATUS")
+        chd_rnm = PendingItemType.objects.get(slug="chd-rnm")
+        active = _make_typed_item(
+            admission, chd_rnm, description="marcador-cat-ativa"
+        )
+        finalized = _make_typed_item(
+            admission, chd_rnm, description="marcador-cat-finalizada"
+        )
+        PendingItem.objects.filter(pk=finalized.pk).update(
+            status=STATUS_RESOLVED,
+            finalized_at=_dt("2026-06-11T10:00:00"),
+        )
+        category = chd_rnm.category_id
+        for view in ("patients", "items"):
+            default = _workbook(
+                reader_client.get(
+                    f"{EXPORT_URL}?view={view}&categoria={category}"
+                )
+            )
+            assert default.max_row == 2
+            assert [row[COLUMN["ID da pendência"]] for row in _rows(default)] == [
+                active.pk
+            ]
+            everything = _workbook(
+                reader_client.get(
+                    f"{EXPORT_URL}?view={view}"
+                    f"&categoria={category}&status=all"
+                )
+            )
+            assert sorted(
+                row[COLUMN["ID da pendência"]] for row in _rows(everything)
+            ) == sorted([active.pk, finalized.pk])
+
+    def test_confirmed_exit_leaves_panel_indicators_and_workbook(
+        self, reader_client: Client
+    ) -> None:
+        admission = _eligible_admission("P_EXP_EXIT")
+        item = _make_item(admission, description="marcador-saida-confirmada")
+        _make_typed_item(
+            _eligible_admission("P_EXP_EXIT_KEEP"),
+            PendingItemType.objects.get(slug=OUTRO_SLUG),
+            description="marcador-permanece",
+        )
+        Admission.objects.filter(pk=admission.pk).update(
+            discharge_date=_dt("2026-06-12T10:00:00")
+        )
+        for query in ("", "?status=all"):
+            panel = reader_client.get(f"/pendencias/{query}").content.decode()
+            assert "marcador-saida-confirmada" not in panel
+            assert "marcador-permanece" in panel
+            workbook = _workbook(reader_client.get(f"{EXPORT_URL}{query}"))
+            assert "marcador-saida-confirmada" not in _descriptions(workbook)
+            assert "marcador-permanece" in _descriptions(workbook)
+        assert 'data-testid="indicators-patients">1<' in panel
+        context_url = f"/admissions/{admission.pk}/pending-items/"
+        context = reader_client.get(context_url).content.decode()
+        assert "marcador-saida-confirmada" in context
+        history = reader_client.get(
+            f"/pendencias/{item.pk}/history/",
+            headers={"HX-Request": "true"},
+        )
+        assert history.status_code == 200
+        assert "PACIENTE SINTETICO P_EXP_EXIT" in history.content.decode()
+
+
+@pytest.mark.django_db
+class TestExportConfirmedExit:
+    """R3: a real confirmed exit removes the episode from the current cut.
+
+    Separate evidence from the isolated Sistema-label serialization: the
+    discharge boundary (not a direct column update) closes the actives,
+    the episode leaves the current XLSX even with ``status=all`` and its
+    contextual history stays readable. The admission is never reopened
+    and the export cut is never widened.
+    """
+
+    def test_real_confirmed_exit_excluded_from_current_xlsx(
+        self, reader_client: Client
+    ) -> None:
+        exited = _eligible_admission("P_EXP_REAL_EXIT")
+        exited_item = _make_item(exited, description="marcador-saida-real")
+        kept = _eligible_admission("P_EXP_REAL_KEEP", leito="L02")
+        _make_item(kept, description="marcador-fica-real")
+        exit_at = _dt("2026-06-12T10:00:00")
+
+        evidence = DischargeExitEvidence(
+            patient_record=exited.patient.patient_source_key,
+            exit_datetime=exit_at,
+            admission_key=exited.source_admission_key,
+        )
+        decision = decide_discharge_match(evidence=evidence)
+        assert decision.admission is not None
+        assert decision.admission.pk == exited.pk
+        apply_discharge_exit(
+            decision=decision,
+            exit_datetime=exit_at,
+            exit_type=EXIT_HOSPITAL_DISCHARGE,
+            source_kind=EVIDENCE_SOURCE_DISCHARGE_RECORD,
+            source_id=42,
+        )
+
+        exited.refresh_from_db()
+        assert exited.discharge_date is not None
+        assert Admission.objects.filter(
+            patient_id=exited.patient_id, discharge_date__isnull=True
+        ).count() == 0
+        exited_item.refresh_from_db()
+        assert exited_item.status == STATUS_CLOSED_UNRESOLVED
+        assert exited_item.is_system_updated is True
+        assert exited_item.updated_by_name == "Sistema"
+
+        for query in ("", "?status=all", "?view=items&status=all"):
+            workbook = _workbook(reader_client.get(f"{EXPORT_URL}{query}"))
+            found = _descriptions(workbook)
+            assert "marcador-saida-real" not in found, query
+            assert "marcador-fica-real" in found, query
+            panel = reader_client.get(f"/pendencias/{query}").content.decode()
+            assert "marcador-saida-real" not in panel, query
+            assert "marcador-fica-real" in panel, query
+
+        context = reader_client.get(
+            f"/admissions/{exited.pk}/pending-items/"
+        ).content.decode()
+        assert "marcador-saida-real" in context
+        history = reader_client.get(
+            f"/pendencias/{exited_item.pk}/history/",
+            headers={"HX-Request": "true"},
+        )
+        assert history.status_code == 200
+        history_body = history.content.decode()
+        assert "PACIENTE SINTETICO P_EXP_REAL_EXIT" in history_body
+        assert "Sistema" in history_body
