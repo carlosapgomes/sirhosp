@@ -23,7 +23,7 @@ server validates every submission again.
   <fieldset class="mb-3">
     <legend class="h6">Classificação</legend>
     <div class="row g-2">
-      <div class="col-12 col-md-6">
+      <div class="col-12">
         <label for="id_category" class="form-label small fw-semibold">Categoria</label>
         {{ form.category.errors }}
         <select name="category" id="id_category" class="form-select" aria-describedby="pending-category-hint">
@@ -33,11 +33,6 @@ server validates every submission again.
           {% endfor %}
         </select>
         <p id="pending-category-hint" class="form-text small mb-0">Escolha a categoria para reduzir a lista de tipos.</p>
-      </div>
-      <div class="col-12 col-md-6">
-        <label for="id_type_search" class="form-label small fw-semibold">Buscar tipo</label>
-        <input type="search" name="type_search" id="id_type_search" class="form-control" autocomplete="off" aria-describedby="pending-type-hint">
-        <p id="pending-type-hint" class="form-text small mb-0">A busca mostra Categoria &gt; Tipo, inclusive as duas RNM.</p>
       </div>
       <div class="col-12">
         <label for="id_item_type" class="form-label small fw-semibold">Tipo</label>

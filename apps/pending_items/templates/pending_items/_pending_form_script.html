@@ -14,7 +14,6 @@ Every rule is revalidated on the server.
     const typeSelect = form.querySelector("#id_item_type");
     if (!typeSelect) return;
     const categorySelect = form.querySelector("#id_category");
-    const searchInput = form.querySelector("#id_type_search");
     const groups = Array.from(form.querySelectorAll("[data-pending-group]"));
     const removalBox = form.querySelector("#pending-removal-box");
     const removalList = form.querySelector("#pending-removal-list");
@@ -25,12 +24,6 @@ Every rule is revalidated on the server.
     const descriptionHint = form.querySelector("#pending-description-hint");
     const storedScheduledDate = form.dataset.storedScheduledDate || "";
     const scheduledDateLabel = form.dataset.labelScheduledDate || "Data agendada";
-
-    const plain = (text) =>
-      (text || "")
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase();
 
     const selectedOption = () => typeSelect.selectedOptions[0] || null;
 
@@ -43,13 +36,11 @@ Every rule is revalidated on the server.
 
     const syncTypeFilter = () => {
       const category = categorySelect ? categorySelect.value : "";
-      const term = plain(searchInput ? searchInput.value.trim() : "");
       Array.from(typeSelect.options).forEach((option) => {
         if (!option.value) return;
-        const matchesCategory =
-          !category || option.dataset.category === category;
-        const matchesTerm = !term || plain(option.textContent).includes(term);
-        option.hidden = !(matchesCategory && matchesTerm);
+        option.hidden = Boolean(
+          category && option.dataset.category !== category
+        );
       });
     };
 
@@ -141,9 +132,6 @@ Every rule is revalidated on the server.
       }
       syncAll();
     });
-    if (searchInput) {
-      searchInput.addEventListener("input", syncTypeFilter);
-    }
     if (scheduledChoice) {
       scheduledChoice.addEventListener("change", () => {
         syncScheduledDate();

@@ -1310,9 +1310,9 @@ def _rnm_revision(rnm_type: PendingItemType, item: PendingItem, **details) -> No
 
 @pytest.mark.django_db(transaction=True)
 class TestStructuredContextualJourney:
-    """STRUCT-PEND-S2: progressive cadastro, search and Save-and-add-another."""
+    """STRUCT-PEND-S2: progressive cadastro and Save-and-add-another."""
 
-    def test_progressive_create_search_keyboard_and_add_another(
+    def test_progressive_create_keyboard_and_add_another(
         self, live_server, routed_browser_page
     ) -> None:
         new_page, _ = routed_browser_page
@@ -1330,6 +1330,7 @@ class TestStructuredContextualJourney:
         )
 
         # Progressive: no profile fields before a type is chosen.
+        assert page.locator("#id_type_search").count() == 0
         assert page.locator("#pending-group-agendamento").is_visible() is False
         assert page.locator("#pending-group-tratamento").is_visible() is False
         assert page.locator("#pending-group-rnm").is_visible() is False
@@ -1358,16 +1359,21 @@ class TestStructuredContextualJourney:
         assert created.description == ""
         assert "Agendada: Não" in page.content()
 
-        # Search shows both RNM entries and the chosen one sets the category.
-        page.fill("#id_type_search", "rnm")
-        visible = {
-            category
-            for category, hidden in _option_hidden_flags(page)
-            if not hidden
-        }
-        assert image_category in visible
-        assert chd_category in visible
-        page.select_option("#id_item_type", str(chd_rnm.pk))
+        # Both RNM entries are offered and the label tells them apart; the
+        # chosen type sets the category automatically.
+        rnm_labels = page.evaluate(
+            """() => Array.from(
+                    document.querySelectorAll('#id_item_type option')
+                )
+                .map((option) => option.textContent.trim())
+                .filter((label) => label.endsWith(' > RNM'))"""
+        )
+        assert "Exames de imagem > RNM" in rnm_labels
+        assert "CHD (Centro de Hemorragia Digestiva) > RNM" in rnm_labels
+        page.select_option(
+            "#id_item_type",
+            label="CHD (Centro de Hemorragia Digestiva) > RNM",
+        )
         assert page.locator("#id_category").input_value() == chd_category
         assert page.locator("#pending-group-rnm").is_visible() is True
 

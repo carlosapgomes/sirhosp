@@ -142,7 +142,7 @@ def _detail_names() -> tuple[str, ...]:
 
 @pytest.mark.django_db
 class TestProgressiveCreateForm:
-    """PP-10/R1: the page offers category, search and profile details."""
+    """PP-10/R1: the page offers category, type and profile details."""
 
     def test_create_form_exposes_classification_and_details(
         self, writer_client: Client
@@ -152,7 +152,9 @@ class TestProgressiveCreateForm:
         content = response.content.decode()
         assert response.status_code == 200
         assert 'name="category"' in content
-        assert 'name="type_search"' in content
+        assert 'name="type_search"' not in content
+        assert 'id="id_type_search"' not in content
+        assert "pending-type-hint" not in content
         assert 'name="is_scheduled"' in content
         assert 'name="scheduled_date"' in content
         assert 'name="treatment_start_date"' in content
@@ -396,6 +398,8 @@ class TestContextualEdit:
         assert response.status_code == 200
         assert 'value="2026-11-10"' in content
         assert 'value="sim"' in content
+        assert 'name="type_search"' not in content
+        assert "pending-type-hint" not in content
 
     def test_detail_only_edit_creates_version_and_history(
         self, writer_client: Client
@@ -608,6 +612,8 @@ class TestQuickEditModal:
         assert response.status_code == 200
         assert 'name="is_scheduled"' in content
         assert 'name="contrast"' in content
+        assert 'name="type_search"' not in content
+        assert "pending-type-hint" not in content
         assert 'value="2026-11-10"' in content
         assert '"private, no-store"' not in content
         assert "private" in response.headers["Cache-Control"]

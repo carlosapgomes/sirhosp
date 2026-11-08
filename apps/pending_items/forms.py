@@ -101,12 +101,7 @@ class PendingItemForm(forms.Form):
     item_type = PendingItemTypeChoiceField(
         queryset=PendingItemType.objects.select_related("category"),
         label="Tipo",
-        widget=forms.Select(
-            attrs={
-                "class": "form-select",
-                "aria-describedby": "pending-type-hint",
-            }
-        ),
+        widget=forms.Select(attrs={"class": "form-select"}),
     )
     is_scheduled = YesNoField(
         label="Agendada?",
