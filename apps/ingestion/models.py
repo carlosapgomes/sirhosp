@@ -120,6 +120,10 @@ class IngestionRun(models.Model):
 
     class Meta:
         ordering = ["-started_at"]
+        indexes = [
+            # Metrics page filters/counts runs by finished_at window.
+            models.Index(fields=["finished_at"]),
+        ]
 
     def __str__(self) -> str:
         return (
@@ -190,6 +194,10 @@ class CensusExecutionBatch(models.Model):
 
     class Meta:
         ordering = ["-started_at"]
+        indexes = [
+            # Metrics page filters/counts batches by finished_at window.
+            models.Index(fields=["finished_at"]),
+        ]
 
     def __str__(self) -> str:
         return f"CensusExecutionBatch #{self.pk} [{self.status}]"
