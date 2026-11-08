@@ -249,7 +249,7 @@ Respostas autenticadas da feature que contenham informação clínica SHALL decl
 
 ### Requirement: PP-10 Cadastro individual progressivo
 
-O portal SHALL cadastrar uma pendência por vez, mantendo paciente e internação identificados. SHALL permitir selecionar categoria e depois tipo, ou buscar tipo com categoria visível; exibir somente campos aplicáveis; oferecer Salvar e Salvar e adicionar outra; e preservar entradas válidas em erros. Cadastro, edição contextual e edição rápida SHALL compartilhar regras de preenchimento e acessibilidade por teclado.
+O portal SHALL cadastrar uma pendência por vez, mantendo paciente e internação identificados. SHALL permitir selecionar categoria e depois tipo, com cada opção de tipo exibindo sua categoria para distinguir homônimos; exibir somente campos aplicáveis; oferecer Salvar e Salvar e adicionar outra; e preservar entradas válidas em erros. Cadastro, edição contextual e edição rápida SHALL compartilhar regras de preenchimento e acessibilidade por teclado.
 
 #### Scenario: Selecionar categoria e descobrir campos
 
@@ -259,10 +259,9 @@ O portal SHALL cadastrar uma pendência por vez, mantendo paciente e internaçã
 
 #### Scenario: Buscar RNM com contexto
 
-- **WHEN** a equipe busca RNM e seleciona Exames de imagem > RNM
-- **THEN** categoria e tipo ficam coerentes e aparecem Agendada?, Contraste e Sedação
-- **AND** selecionar Sim em Agendada? disponibiliza a data opcional
-- **AND** os controles possuem rótulos acessíveis e funcionam por teclado
+- **WHEN** a equipe procura RNM na lista de tipos e há duas entradas RNM em categorias distintas
+- **THEN** cada opção exibe Categoria > Tipo, distinguindo Exames de imagem > RNM de CHD > RNM
+- **AND** selecionar uma delas define a categoria correspondente automaticamente
 
 #### Scenario: Adicionar outra sem duplicação
 
