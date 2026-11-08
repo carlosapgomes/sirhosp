@@ -1303,6 +1303,10 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
     IWBO-S3: Batch detail mode via ?batch_id=<id>. When batch_id is
     present and valid, renders run table only for that batch. Without
     batch_id, no global runs table is shown — only batch history.
+
+    IRMPP-S1: aggregates are computed only for the tab/mode that renders
+    them — no final-failure aggregate outside the patients tab, and no
+    global run-window/filter-option scans outside the batch detail mode.
     """
     periodo = request.GET.get("periodo", "24h").strip()
     status = request.GET.get("status", "").strip()
@@ -1393,52 +1397,64 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
             technical_failures,
         )
 
-    result = _build_filtered_queryset(
-        periodo=periodo,
-        status=status,
-        intent=intent,
-        failure_reason=failure_reason,
-    )
+    # D1: only the batch detail mode renders the run filters, so the
+    # global run-window aggregation and the global filter-option scans are
+    # computed only there. The aggregation's rendered consumers were the
+    # dead `runs`/`ingestion_stats` context keys removed below; scoping it
+    # to the detail mode (instead of deleting it) is what this slice
+    # decides.
+    filter_options: dict[str, list[str]] = {
+        "statuses": [],
+        "intents": [],
+        "failure_reasons": [],
+    }
+    if show_batch_detail:
+        _build_filtered_queryset(
+            periodo=periodo,
+            status=status,
+            intent=intent,
+            failure_reason=failure_reason,
+        )
 
-    # Collect distinct values for filter dropdowns from the full dataset
-    # (not filtered by status/intent so dropdowns always have options).
-    # .order_by() clears Meta.ordering so .distinct() works correctly;
-    # otherwise DISTINCT applies to (field, started_at) tuples.
-    all_finished = IngestionRun.objects.filter(finished_at__isnull=False)
-    all_statuses = sorted(
-        all_finished.order_by().values_list("status", flat=True).distinct()
-    )
-    all_intents = sorted(
-        t for t in
-        all_finished.order_by().values_list("intent", flat=True).distinct()
-        if t
-    )
-    all_failure_reasons = sorted(
-        r for r in
-        all_finished.order_by().exclude(failure_reason="")
-        .values_list("failure_reason", flat=True).distinct()
-    )
+        # Collect distinct values for filter dropdowns from the full dataset
+        # (not filtered by status/intent so dropdowns always have options).
+        # .order_by() clears Meta.ordering so .distinct() works correctly;
+        # otherwise DISTINCT applies to (field, started_at) tuples.
+        all_finished = IngestionRun.objects.filter(finished_at__isnull=False)
+        filter_options = {
+            "statuses": sorted(
+                all_finished.order_by().values_list("status", flat=True).distinct()
+            ),
+            "intents": sorted(
+                t for t in
+                all_finished.order_by().values_list("intent", flat=True).distinct()
+                if t
+            ),
+            "failure_reasons": sorted(
+                r for r in
+                all_finished.order_by().exclude(failure_reason="")
+                .values_list("failure_reason", flat=True).distinct()
+            ),
+        }
 
-    batch_failure_stats = _get_latest_batch_failure_stats()
+    # D1: the latest-batch failure aggregate is rendered only by the
+    # patients tab, so no other tab/mode pays for it.
+    batch_failure_stats = (
+        _get_latest_batch_failure_stats() if tab == "patients" else None
+    )
 
     # IWBO-S2: Batch history table (paginated)
     batch_history_context = _get_batch_history_context(request)
 
     context: dict[str, Any] = {
         "page_title": "Métricas de Ingestão",
-        "ingestion_stats": result["stats"],
-        "runs": result["runs"],
         "filters": {
             "periodo": periodo,
             "status": status,
             "intent": intent,
             "failure_reason": failure_reason,
         },
-        "filter_options": {
-            "statuses": all_statuses,
-            "intents": all_intents,
-            "failure_reasons": all_failure_reasons,
-        },
+        "filter_options": filter_options,
         "batch_failure_stats": batch_failure_stats,
         "active_tab": tab,
         **batch_history_context,

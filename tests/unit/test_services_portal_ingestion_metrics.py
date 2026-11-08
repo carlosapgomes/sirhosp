@@ -1,5 +1,6 @@
 """Slice IRMD-S6 & S7: Ingestion metrics page route, filters, and run table tests.
 Slice CQM-S5: Backend data for latest batch final failures.
+Slice IRMPP-S1: Lazy computation by active tab/mode.
 """
 
 from __future__ import annotations
@@ -7,7 +8,9 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from django.db import connection
 from django.test import Client
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
@@ -382,10 +385,15 @@ def _make_final_failure(batch: CensusExecutionBatch, **kwargs) -> FinalRunFailur
 
 @pytest.mark.django_db
 class TestIngestionMetricsBatchFailureStats:
-    """CQM-S5: Backend delivery of batch failure stats in ingestion_metrics."""
+    """CQM-S5: Backend delivery of batch failure stats in ingestion_metrics.
+
+    IRMPP-S1: the latest-batch aggregate is only computed for the
+    patients tab, which is the tab that renders it.
+    """
 
     def _get_page(self, admin_client, **params):
         url = reverse("services_portal:ingestion_metrics")
+        params.setdefault("tab", "patients")
         return admin_client.get(url, params)
 
     def test_no_batch_returns_empty_failure_stats(self, admin_client):
@@ -525,10 +533,14 @@ def _make_run_with_attempt(
 
 @pytest.mark.django_db
 class TestIngestionMetricsBatchWorkerEfficiency:
-    """IWBO-S1: Batch worker efficiency metrics in ingestion_metrics."""
+    """IWBO-S1: Batch worker efficiency metrics in ingestion_metrics.
+
+    IRMPP-S1: these metrics live in the patients-tab latest-batch block.
+    """
 
     def _get_page(self, admin_client, **params):
         url = reverse("services_portal:ingestion_metrics")
+        params.setdefault("tab", "patients")
         return admin_client.get(url, params)
 
     def test_no_batch_returns_new_keys_with_zero_defaults(self, admin_client):
@@ -1371,3 +1383,151 @@ class TestIngestionMetricsBatchDetail:
         assert runs[59].pk in p2_ids
         assert runs[59].pk not in p1_ids
         assert runs[0].pk not in p2_ids
+
+
+# ── IRMPP-S1: Lazy computation by active tab/mode ──────────────────────
+
+_FINAL_FAILURE_TABLE = '"ingestion_finalrunfailure"'
+_RUN_TABLE = '"ingestion_ingestionrun"'
+
+
+def _captured_sql(captured: CaptureQueriesContext) -> list[str]:
+    """Normalized SQL text of every query captured during one page render."""
+    return [" ".join(query["sql"].split()) for query in captured.captured_queries]
+
+
+def _global_window_aggregations(queries: list[str]) -> list[str]:
+    """Queries aggregating runs over the global ``finished_at`` window."""
+    return [q for q in queries if _RUN_TABLE in q and '"finished_at" >= ' in q]
+
+
+def _global_filter_option_scans(queries: list[str]) -> list[str]:
+    """Global DISTINCT scans over all finished runs feeding the dropdowns.
+
+    Scoped to the ``finished_at IS NOT NULL`` form so the per-batch
+    ``DISTINCT worker_label`` issued by the history table is not counted
+    (that one is out of scope for this slice).
+    """
+    return [
+        q
+        for q in queries
+        if q.startswith("SELECT DISTINCT") and '"finished_at" IS NOT NULL' in q
+    ]
+
+
+@pytest.mark.django_db
+class TestIngestionMetricsLazyComputation:
+    """IRMPP-S1: only the aggregates the active tab/mode renders are computed."""
+
+    def _get_page(self, admin_client, **params):
+        url = reverse("services_portal:ingestion_metrics")
+        return admin_client.get(url, params)
+
+    def _capture(self, admin_client, **params):
+        with CaptureQueriesContext(connection) as captured:
+            response = self._get_page(admin_client, **params)
+        return response, _captured_sql(captured)
+
+    def _fixture(self) -> tuple[CensusExecutionBatch, IngestionRun]:
+        """One finished batch with a run and one final failure (synthetic)."""
+        batch = _make_batch()
+        run = _make_run(batch=batch, status="succeeded", intent="full_sync")
+        _make_final_failure(
+            batch, patient_record="SYNTH-S1-RECORD", intent="full_sync"
+        )
+        return batch, run
+
+    # ── R1: default runs tab content parity ──────────────────────────
+
+    def test_default_runs_tab_keeps_history_content(self, admin_client):
+        """R1: default tab still renders history, its batch link and guidance."""
+        batch, _ = self._fixture()
+        response = self._get_page(admin_client)
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "Histórico de Lotes" in content
+        assert f"batch_id={batch.pk}" in content
+        assert "Selecione um batch" in content
+
+    # ── R2: no final-failure aggregate on the default tab ────────────
+
+    def test_default_runs_tab_issues_no_final_failure_query(self, admin_client):
+        """R2: the default tab issues no query against the final failures."""
+        self._fixture()
+        _, queries = self._capture(admin_client)
+        assert [q for q in queries if _FINAL_FAILURE_TABLE in q] == []
+
+    def test_patients_tab_still_issues_final_failure_query(self, admin_client):
+        """R2 control: the patients tab keeps computing the aggregate."""
+        self._fixture()
+        _, queries = self._capture(admin_client, tab="patients")
+        assert [q for q in queries if _FINAL_FAILURE_TABLE in q] != []
+
+    # ── R3: global aggregation + filter options only in detail mode ──
+
+    def test_default_runs_tab_issues_no_global_window_aggregation(self, admin_client):
+        """R3: no global run-window aggregation on the default tab."""
+        self._fixture()
+        _, queries = self._capture(admin_client)
+        assert _global_window_aggregations(queries) == []
+
+    def test_default_runs_tab_issues_no_global_filter_option_scan(self, admin_client):
+        """R3: none of the 3 global filter-option DISTINCTs on the default tab."""
+        self._fixture()
+        _, queries = self._capture(admin_client)
+        assert _global_filter_option_scans(queries) == []
+
+    def test_patients_tab_issues_no_global_run_window_scan(self, admin_client):
+        """R3: the patients tab also skips window aggregation and option scans."""
+        self._fixture()
+        _, queries = self._capture(admin_client, tab="patients")
+        assert _global_window_aggregations(queries) == []
+        assert _global_filter_option_scans(queries) == []
+
+    def test_batch_detail_keeps_global_aggregation_and_filter_options(
+        self, admin_client
+    ):
+        """R3 control: batch detail still computes window aggregation + options."""
+        batch, _ = self._fixture()
+        _, queries = self._capture(admin_client, tab="runs", batch_id=batch.pk)
+        assert _global_window_aggregations(queries) != []
+        scans = _global_filter_option_scans(queries)
+        assert len(scans) == 3  # status, intent, failure_reason
+        scanned_sql = " ".join(scans)
+        for column in ('"status"', '"intent"', '"failure_reason"'):
+            assert column in scanned_sql
+
+    # ── R4: dead context keys removed ────────────────────────────────
+
+    def test_dead_context_keys_are_absent_in_every_mode(self, admin_client):
+        """R4: `runs` and `ingestion_stats` are no longer provided."""
+        batch, _ = self._fixture()
+        for label, params in (
+            ("default runs tab", {}),
+            ("patients tab", {"tab": "patients"}),
+            ("batch detail", {"batch_id": batch.pk}),
+        ):
+            response = self._get_page(admin_client, **params)
+            assert "runs" not in response.context, label
+            assert "ingestion_stats" not in response.context, label
+
+    # ── R5: patients tab and batch detail content parity ─────────────
+
+    def test_patients_tab_keeps_failure_content(self, admin_client):
+        """R5: the patients tab still renders the failure table and cards."""
+        self._fixture()
+        response = self._get_page(admin_client, tab="patients")
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "SYNTH-S1-RECORD" in content
+        assert "Prontuário" in content
+        assert "Workers observados" in content
+
+    def test_batch_detail_keeps_selected_batch_content(self, admin_client):
+        """R5: batch detail still renders the selected batch and its runs."""
+        batch, run = self._fixture()
+        response = self._get_page(admin_client, batch_id=batch.pk)
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert f"Batch #{batch.pk}" in content
+        assert f">{run.pk}<" in content
