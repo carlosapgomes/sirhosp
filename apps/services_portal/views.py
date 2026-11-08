@@ -1322,6 +1322,7 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
     show_batch_detail = False
     batch_not_found = False
     selected_batch_runs_page = None
+    selected_batch_runs_page_range: list[int | str] = []
     selected_batch_stats = None
 
     if batch_id_raw:
@@ -1382,6 +1383,10 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
                 selected_batch_runs_page = run_paginator.page(
                     run_paginator.num_pages
                 )
+            # IRMPP-S3: long ranges collapse to first/last + window + ellipsis.
+            selected_batch_runs_page_range = list(
+                run_paginator.get_elided_page_range(selected_batch_runs_page.number)
+            )
         else:
             batch_not_found = True
 
@@ -1469,6 +1474,7 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
         "show_batch_detail": show_batch_detail,
         "selected_batch": selected_batch,
         "selected_batch_runs_page": selected_batch_runs_page,
+        "selected_batch_runs_page_range": selected_batch_runs_page_range,
         "selected_batch_stats": selected_batch_stats,
         "batch_not_found": batch_not_found,
         # PFIF-S5: derived (read-only) findings presentation for detail mode.
@@ -2078,6 +2084,8 @@ def _get_batch_history_context(request: HttpRequest) -> dict:
     Returns dict with keys:
         batch_history: list of batch history dicts for current page.
         batch_page: django Page object (for template pagination).
+        batch_page_range: elided page range (IRMPP-S3: long ranges collapse
+            to first/last + window around the current page + ellipsis).
     """
     batches_qs = (
         CensusExecutionBatch.objects
@@ -2119,6 +2127,7 @@ def _get_batch_history_context(request: HttpRequest) -> dict:
     return {
         "batch_history": batch_history,
         "batch_page": page,
+        "batch_page_range": list(paginator.get_elided_page_range(page.number)),
     }
 
 

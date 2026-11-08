@@ -1766,3 +1766,183 @@ class TestIngestionMetricsBatchHistoryQueryBudget:
         entries = response.context["batch_history"]
         assert all(entry["findings_total"] == 0 for entry in entries)
         assert all(entry["derived_status"] is None for entry in entries)
+
+
+# ── IRMPP-S3: Elided pagination ────────────────────────────────────────
+
+_HISTORY_PAGE_SIZE = 20
+_RUN_PAGE_SIZE = 50
+# Django's Paginator.get_elided_page_range() defaults (on_each_side=3,
+# on_ends=2) return the whole range while num_pages <= 10, so the range
+# only starts to be elided from 11 pages on.
+_ELISION_THRESHOLD_PAGES = 10
+_ELLIPSIS = "…"
+
+
+def _make_finished_batches(count: int) -> None:
+    """Create `count` finished batches, one hour apart, newest first."""
+    now = timezone.now()
+    CensusExecutionBatch.objects.bulk_create(
+        [
+            CensusExecutionBatch(
+                enqueue_finished_at=now - timedelta(hours=i + 1, minutes=5),
+                finished_at=now - timedelta(hours=i + 1),
+                status="succeeded",
+            )
+            for i in range(count)
+        ]
+    )
+
+
+def _make_batch_with_runs(run_count: int) -> CensusExecutionBatch:
+    """Create one finished batch holding `run_count` failed timed-out runs."""
+    now = timezone.now()
+    batch = CensusExecutionBatch.objects.create(
+        enqueue_finished_at=now - timedelta(hours=2),
+        finished_at=now - timedelta(hours=1),
+        status="succeeded",
+    )
+    IngestionRun.objects.bulk_create(
+        [
+            IngestionRun(
+                batch=batch,
+                status="failed",
+                intent="full_sync",
+                failure_reason="timeout",
+                timed_out=True,
+                worker_label=f"w:{i}",
+                queued_at=now - timedelta(hours=2),
+                processing_started_at=now - timedelta(hours=1, minutes=55),
+                finished_at=now - timedelta(hours=1) - timedelta(seconds=i),
+            )
+            for i in range(run_count)
+        ]
+    )
+    return batch
+
+
+def _pagination_nav(content: str, aria_label: str) -> str:
+    """Return the rendered `<nav>` element for one pagination control."""
+    start = content.index(f'<nav aria-label="{aria_label}"')
+    end = content.index("</nav>", start) + len("</nav>")
+    return content[start:end]
+
+
+@pytest.mark.django_db
+class TestIngestionMetricsElidedPagination:
+    """IRMPP-S3: long page ranges are elided instead of listing every page."""
+
+    def _get_page(self, admin_client, **params):
+        url = reverse("services_portal:ingestion_metrics")
+        return admin_client.get(url, params)
+
+    # ── R1: history elision ──────────────────────────────────────────
+
+    def test_history_elides_long_page_range(self, admin_client):
+        """R1: 11 pages render first/last + window + disabled ellipsis."""
+        _make_finished_batches(_HISTORY_PAGE_SIZE * (_ELISION_THRESHOLD_PAGES + 1))
+        response = self._get_page(admin_client)
+        nav = _pagination_nav(response.content.decode(), "Navegação de lotes")
+
+        assert f'<span class="page-link">{_ELLIPSIS}</span>' in nav
+        assert ">…</a>" not in nav  # ellipsis is not a link
+        assert "batch_page=1" in nav  # first page
+        assert f"batch_page={_ELISION_THRESHOLD_PAGES + 1}" in nav  # last page
+        assert "batch_page=5" not in nav  # elided intermediate page
+        linked_pages = set(re.findall(r"batch_page=(\d+)", nav))
+        assert len(linked_pages) < _ELISION_THRESHOLD_PAGES + 1
+
+    # ── R2: batch detail run elision ─────────────────────────────────
+
+    def test_batch_detail_elides_long_run_range(self, admin_client):
+        """R2: the run pagination of the detail mode is elided the same way."""
+        batch = _make_batch_with_runs(_RUN_PAGE_SIZE * (_ELISION_THRESHOLD_PAGES + 1))
+        response = self._get_page(admin_client, batch_id=batch.pk)
+        nav = _pagination_nav(response.content.decode(), "Navegação de execuções")
+
+        assert f'<span class="page-link">{_ELLIPSIS}</span>' in nav
+        assert ">…</a>" not in nav
+        assert "run_page=1" in nav
+        assert f"run_page={_ELISION_THRESHOLD_PAGES + 1}" in nav
+        assert "run_page=5" not in nav
+        linked_pages = set(re.findall(r"run_page=(\d+)", nav))
+        assert len(linked_pages) < _ELISION_THRESHOLD_PAGES + 1
+
+    # ── R4: elided links preserve navigation state ───────────────────
+
+    def test_elided_detail_links_preserve_navigation_state(self, admin_client):
+        """R4: page links keep batch_id, run_page and the active filters."""
+        batch = _make_batch_with_runs(_RUN_PAGE_SIZE * (_ELISION_THRESHOLD_PAGES + 1))
+        response = self._get_page(
+            admin_client,
+            batch_id=batch.pk,
+            periodo="48h",
+            status="failed",
+            intent="full_sync",
+            failure_reason="timeout",
+        )
+        nav = _pagination_nav(response.content.decode(), "Navegação de execuções")
+
+        page_links = [
+            href
+            for href in re.findall(r'href="([^"]+)"', nav)
+            if "run_page=2" in href
+        ]
+        assert page_links, nav
+        for href in page_links:
+            assert f"batch_id={batch.pk}" in href
+            assert "periodo=48h" in href
+            assert "status=failed" in href
+            assert "intent=full_sync" in href
+            assert "failure_reason=timeout" in href
+
+    def test_elided_history_links_preserve_batch_page(self, admin_client):
+        """R4: history page links keep the batch_page parameter."""
+        _make_finished_batches(_HISTORY_PAGE_SIZE * (_ELISION_THRESHOLD_PAGES + 1))
+        response = self._get_page(admin_client)
+        nav = _pagination_nav(response.content.decode(), "Navegação de lotes")
+
+        hrefs = re.findall(r'href="([^"]+)"', nav)
+        assert hrefs
+        assert all(re.search(r"batch_page=\d+", href) for href in hrefs), hrefs
+
+    # ── R3: short ranges keep rendering every page ───────────────────
+
+    def test_short_history_range_renders_every_page(self, admin_client):
+        """R3: two pages render both numbers and no ellipsis."""
+        _make_finished_batches(_HISTORY_PAGE_SIZE + 5)
+        response = self._get_page(admin_client)
+        nav = _pagination_nav(response.content.decode(), "Navegação de lotes")
+
+        assert _ELLIPSIS not in nav
+        for page_number in (1, 2):
+            assert f"batch_page={page_number}" in nav
+        assert "Anterior" in nav
+        assert "Próximo" in nav
+
+    def test_short_run_range_renders_every_page(self, admin_client):
+        """R3: two run pages render both numbers and no ellipsis."""
+        batch = _make_batch_with_runs(_RUN_PAGE_SIZE + 10)
+        response = self._get_page(admin_client, batch_id=batch.pk)
+        nav = _pagination_nav(response.content.decode(), "Navegação de execuções")
+
+        assert _ELLIPSIS not in nav
+        for page_number in (1, 2):
+            assert f"run_page={page_number}" in nav
+
+    # ── R5: pagination navs wrap ────────────────────────────────────
+
+    def test_both_pagination_navs_wrap(self, admin_client):
+        """R5: both pagination lists wrap and stay centered."""
+        batch = _make_batch_with_runs(_RUN_PAGE_SIZE * (_ELISION_THRESHOLD_PAGES + 1))
+        _make_finished_batches(_HISTORY_PAGE_SIZE * (_ELISION_THRESHOLD_PAGES + 1))
+        response = self._get_page(admin_client, batch_id=batch.pk)
+        content = response.content.decode()
+
+        for aria_label in ("Navegação de lotes", "Navegação de execuções"):
+            nav = _pagination_nav(content, aria_label)
+            pagination_list = re.search(r'<ul class="([^"]*pagination[^"]*)"', nav)
+            assert pagination_list, nav
+            classes = pagination_list.group(1).split()
+            assert "flex-wrap" in classes, (aria_label, classes)
+            assert "justify-content-center" in classes, (aria_label, classes)

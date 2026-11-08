@@ -359,7 +359,7 @@
     <!-- Paginação de execuções -->
     {% if selected_batch_runs_page.paginator.num_pages > 1 %}
     <nav aria-label="Navegação de execuções" class="px-3 py-2">
-      <ul class="pagination pagination-sm justify-content-center mb-0">
+      <ul class="pagination pagination-sm justify-content-center flex-wrap mb-0">
         {% if selected_batch_runs_page.has_previous %}
         <li class="page-item">
           <a class="page-link" href="?batch_id={{ selected_batch.pk }}&amp;run_page={{ selected_batch_runs_page.previous_page_number }}{% if filters.periodo != "24h" %}&amp;periodo={{ filters.periodo }}{% endif %}{% if filters.status %}&amp;status={{ filters.status }}{% endif %}{% if filters.intent %}&amp;intent={{ filters.intent }}{% endif %}{% if filters.failure_reason %}&amp;failure_reason={{ filters.failure_reason }}{% endif %}">Anterior</a>
@@ -370,10 +370,16 @@
         </li>
         {% endif %}
 
-        {% for num in selected_batch_runs_page.paginator.page_range %}
+        {% for num in selected_batch_runs_page_range %}
+        {% if num == selected_batch_runs_page.paginator.ELLIPSIS %}
+        <li class="page-item disabled" aria-hidden="true">
+          <span class="page-link">{{ num }}</span>
+        </li>
+        {% else %}
         <li class="page-item {% if num == selected_batch_runs_page.number %}active{% endif %}">
           <a class="page-link" href="?batch_id={{ selected_batch.pk }}&amp;run_page={{ num }}{% if filters.periodo != "24h" %}&amp;periodo={{ filters.periodo }}{% endif %}{% if filters.status %}&amp;status={{ filters.status }}{% endif %}{% if filters.intent %}&amp;intent={{ filters.intent }}{% endif %}{% if filters.failure_reason %}&amp;failure_reason={{ filters.failure_reason }}{% endif %}">{{ num }}</a>
         </li>
+        {% endif %}
         {% endfor %}
 
         {% if selected_batch_runs_page.has_next %}
@@ -495,7 +501,7 @@
     <!-- Pagination -->
     {% if batch_page.paginator.num_pages > 1 %}
     <nav aria-label="Navegação de lotes" class="px-3 py-2">
-      <ul class="pagination pagination-sm justify-content-center mb-0">
+      <ul class="pagination pagination-sm justify-content-center flex-wrap mb-0">
         {% if batch_page.has_previous %}
         <li class="page-item">
           <a class="page-link" href="?batch_page={{ batch_page.previous_page_number }}">Anterior</a>
@@ -506,10 +512,16 @@
         </li>
         {% endif %}
 
-        {% for num in batch_page.paginator.page_range %}
+        {% for num in batch_page_range %}
+        {% if num == batch_page.paginator.ELLIPSIS %}
+        <li class="page-item disabled" aria-hidden="true">
+          <span class="page-link">{{ num }}</span>
+        </li>
+        {% else %}
         <li class="page-item {% if num == batch_page.number %}active{% endif %}">
           <a class="page-link" href="?batch_page={{ num }}">{{ num }}</a>
         </li>
+        {% endif %}
         {% endfor %}
 
         {% if batch_page.has_next %}
