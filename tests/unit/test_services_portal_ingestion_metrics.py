@@ -1,10 +1,12 @@
 """Slice IRMD-S6 & S7: Ingestion metrics page route, filters, and run table tests.
 Slice CQM-S5: Backend data for latest batch final failures.
 Slice IRMPP-S1: Lazy computation by active tab/mode.
+Slice IRMPP-S2: Lightweight batch history, efficiency metrics in the detail.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 import pytest
@@ -763,10 +765,39 @@ class TestIngestionMetricsBatchWorkerEfficiency:
 
 # ── IWBO-S2: Batch history table ────────────────────────────────────────
 
+# IRMPP-S2: per-batch efficiency values the history table no longer carries.
+# They live in the batch detail block; a history entry exposing any of them
+# would mean the per-batch run/attempt scans came back.
+_REMOVED_HISTORY_METRIC_KEYS = (
+    "observed_worker_count",
+    "observed_worker_labels",
+    "observed_peak_concurrency",
+    "observed_avg_concurrency",
+    "throughput_jobs_per_minute",
+    "avg_processing_duration_seconds",
+    "avg_attempt_duration_seconds",
+)
+
+
+def _history_table_html(content: str) -> str:
+    """Markup of the batch history table only.
+
+    The page renders other tables whose labels overlap (``Jobs/min`` also
+    appears in the patients tab), so content assertions must be scoped to
+    the history table itself.
+    """
+    start = content.index("Histórico de Lotes")
+    end = content.index("</table>", start) + len("</table>")
+    return content[start:end]
+
 
 @pytest.mark.django_db
 class TestIngestionMetricsBatchHistory:
-    """IWBO-S2: Batch history table (pagination, reverse chronology, metrics, links)."""
+    """IWBO-S2: Batch history table (pagination, reverse chronology, links).
+
+    IRMPP-S2: rows carry only cheap batch-level columns; efficiency values
+    moved to the batch detail view.
+    """
 
     _page_size = 20
 
@@ -885,8 +916,13 @@ class TestIngestionMetricsBatchHistory:
         assert entry["runs_succeeded"] == 2
         assert entry["runs_failed"] == 1
 
-    def test_batch_history_context_worker_metrics(self, admin_client):
-        """Batch entry in history exposes worker distinct count."""
+    def test_batch_history_entry_exposes_only_cheap_columns(self, admin_client):
+        """R2/R3: a history entry carries only cheap batch-level values.
+
+        The efficiency values moved to the detail view (asserted in
+        ``TestIngestionMetricsBatchDetail``); their presence here would
+        mean the per-batch run/attempt scans returned.
+        """
         now = timezone.now()
         batch = CensusExecutionBatch.objects.create(
             enqueue_finished_at=now - timedelta(hours=1),
@@ -895,80 +931,50 @@ class TestIngestionMetricsBatchHistory:
         )
         _make_run_with_attempt(batch, status="succeeded", worker_label="w1:100")
         _make_run_with_attempt(batch, status="succeeded", worker_label="w2:200")
-        _make_run_with_attempt(
-            batch, status="succeeded", worker_label="",
-            processing_started_at=now - timedelta(minutes=20),
-            finished_at=now - timedelta(minutes=15),
-        )
+        _make_run_with_attempt(batch, status="failed", worker_label="w1:100")
         response = self._get_page(admin_client)
-        history = response.context["batch_history"]
-        entry = history[0]
-        assert entry["observed_worker_count"] == 2  # non-empty only
-        assert sorted(entry["observed_worker_labels"]) == ["w1:100", "w2:200"]
+        entry = response.context["batch_history"][0]
+        for key in (
+            "batch_id",
+            "status",
+            "started_at",
+            "finished_at",
+            "drain_duration_seconds",
+            "drain_duration_hours",
+            "runs_total",
+            "runs_succeeded",
+            "runs_failed",
+            "has_findings",
+            "findings_total",
+            "findings_items",
+            "derived_status",
+            "technical_failures",
+        ):
+            assert key in entry, key
+        for key in _REMOVED_HISTORY_METRIC_KEYS:
+            assert key not in entry, key
+        assert entry["runs_total"] == 3
+        assert entry["runs_succeeded"] == 2
+        assert entry["runs_failed"] == 1
 
-    def test_batch_history_context_peak_concurrency(self, admin_client):
-        """Batch entry in history exposes peak concurrency."""
-        now = timezone.now()
-        batch = CensusExecutionBatch.objects.create(
-            enqueue_finished_at=now - timedelta(minutes=20),
-            finished_at=now,
-            status="succeeded",
-        )
-
-        def _create_run_attempt(start_mins_ago, end_mins_ago):
-            start = now - timedelta(minutes=start_mins_ago)
-            end = now - timedelta(minutes=end_mins_ago)
-            run = IngestionRun.objects.create(
-                status="succeeded", intent="full_sync", batch=batch,
-                processing_started_at=start, finished_at=end,
-            )
-            a = IngestionRunAttempt.objects.create(
-                run=run, attempt_number=1, finished_at=end, status="succeeded",
-            )
-            IngestionRunAttempt.objects.filter(pk=a.pk).update(started_at=start)
-
-        _create_run_attempt(15, 10)
-        _create_run_attempt(13, 8)
-        _create_run_attempt(11, 6)
+    def test_batch_history_renders_only_cheap_columns(self, admin_client):
+        """R1: the history table renders no worker/efficiency column."""
+        self._make_simple_batch_with_run(finished_at_delta=timedelta(hours=2))
         response = self._get_page(admin_client)
-        history = response.context["batch_history"]
-        entry = history[0]
-        assert entry["observed_peak_concurrency"] == 3
-
-    def test_batch_history_context_throughput_and_durations(self, admin_client):
-        """Batch entry exposes throughput, avg processing, avg attempt."""
-        now = timezone.now()
-        drain_seconds = 600
-        batch = CensusExecutionBatch.objects.create(
-            enqueue_finished_at=now - timedelta(seconds=drain_seconds),
-            finished_at=now,
-            status="succeeded",
-        )
-
-        def _create_run_attempt(secs_ago):
-            start = now - timedelta(seconds=secs_ago)
-            end = now
-            run = IngestionRun.objects.create(
-                status="succeeded", intent="full_sync", batch=batch,
-                processing_started_at=start, finished_at=end,
-            )
-            a = IngestionRunAttempt.objects.create(
-                run=run, attempt_number=1, finished_at=end, status="succeeded",
-            )
-            IngestionRunAttempt.objects.filter(pk=a.pk).update(started_at=start)
-
-        _create_run_attempt(500)
-        _create_run_attempt(100)
-
-        response = self._get_page(admin_client)
-        history = response.context["batch_history"]
-        entry = history[0]
-        # 2 runs / (600s = 10 min) = 0.2 jobs/min
-        assert entry["throughput_jobs_per_minute"] == pytest.approx(0.2, rel=0.01)
-        # (500 + 100) / 2 = 300
-        assert entry["avg_processing_duration_seconds"] == 300
-        # (500 + 100) / 2 = 300
-        assert entry["avg_attempt_duration_seconds"] == 300
+        history_html = _history_table_html(response.content.decode())
+        for header in (
+            "Batch ID",
+            "Status",
+            "Início",
+            "Fim",
+            "Duração",
+            "Jobs",
+            "Sucesso",
+            "Falha",
+        ):
+            assert header in history_html, header
+        for removed in ("Workers", "Pico", "Jobs/min", "Méd/job", "Méd/tent"):
+            assert removed not in history_html, removed
 
     def test_batch_history_context_duration_and_timestamps(self, admin_client):
         """Batch entry exposes duration display fields."""
@@ -1311,6 +1317,126 @@ class TestIngestionMetricsBatchDetail:
         assert run_to.pk in run_ids
         assert run_ue.pk not in run_ids
 
+    # ── IRMPP-S2: Efficiency block moved from the history table ───────
+
+    def _make_efficiency_batch(self) -> CensusExecutionBatch:
+        """Batch with 600s drain and three overlapping attempts.
+
+        Values: 3 finished runs (all succeeded), 2 distinct worker labels
+        (one run has an empty label), attempts of 500s/300s/100s all
+        ending together and overlapping each other.
+        """
+        now = timezone.now()
+        batch = CensusExecutionBatch.objects.create(
+            enqueue_finished_at=now - timedelta(seconds=600),
+            finished_at=now,
+            status="succeeded",
+        )
+        for secs_ago, worker_label in (
+            (500, "w1:100"),
+            (300, "w2:200"),
+            (100, ""),
+        ):
+            start = now - timedelta(seconds=secs_ago)
+            run = IngestionRun.objects.create(
+                status="succeeded",
+                intent="full_sync",
+                batch=batch,
+                worker_label=worker_label,
+                queued_at=now - timedelta(seconds=660),
+                processing_started_at=start,
+                finished_at=now,
+            )
+            attempt = IngestionRunAttempt.objects.create(
+                run=run, attempt_number=1, finished_at=now, status="succeeded",
+            )
+            IngestionRunAttempt.objects.filter(pk=attempt.pk).update(
+                started_at=start,
+            )
+        return batch
+
+    def test_detail_context_exposes_batch_efficiency_values(self, admin_client):
+        """R4: detail exposes the efficiency values the history used to show."""
+        batch = self._make_efficiency_batch()
+        response = self._get_page(admin_client, batch_id=batch.pk)
+        efficiency = response.context["batch_efficiency"]
+        assert efficiency["batch_id"] == batch.pk
+        assert efficiency["observed_worker_count"] == 2  # empty label ignored
+        assert sorted(efficiency["observed_worker_labels"]) == [
+            "w1:100",
+            "w2:200",
+        ]
+        assert efficiency["observed_peak_concurrency"] == 3
+        # 500 + 300 + 100 = 900s of attempts over a 600s drain
+        assert efficiency["observed_avg_concurrency"] == pytest.approx(1.5, abs=0.05)
+        # 3 terminal runs / (600s = 10 min)
+        assert efficiency["throughput_jobs_per_minute"] == pytest.approx(
+            0.3, rel=0.01
+        )
+        # (500 + 300 + 100) / 3
+        assert efficiency["avg_processing_duration_seconds"] == 300
+        assert efficiency["avg_attempt_duration_seconds"] == 300
+
+    def test_detail_renders_efficiency_block(self, admin_client):
+        """R4: the detail view renders the efficiency block and its values."""
+        batch = self._make_efficiency_batch()
+        response = self._get_page(admin_client, batch_id=batch.pk)
+        content = response.content.decode()
+        assert "Eficiência do lote" in content
+        for label in (
+            "Workers observados",
+            "Concorrência observada (pico)",
+            "Concorrência média",
+            "Jobs/min",
+            "Média por job",
+            "Média por tentativa",
+        ):
+            assert label in content, label
+        # Values render with the active locale's decimal separator (pt-br).
+        assert re.search(
+            r'<div class="sirhosp-stat-value">1[.,]5</div>', content
+        ), "avg concurrency value not rendered"
+        assert re.search(
+            r'<div class="sirhosp-stat-value">0[.,]3</div>', content
+        ), "throughput value not rendered"
+        assert '<div class="sirhosp-stat-value">3</div>' in content
+        assert "w1:100" in content
+        assert "w2:200" in content
+
+    def test_detail_efficiency_is_scoped_to_the_selected_batch(self, admin_client):
+        """R4: efficiency values come from the selected batch only."""
+        now = timezone.now()
+        batch = self._make_efficiency_batch()
+        other = CensusExecutionBatch.objects.create(
+            enqueue_finished_at=now - timedelta(seconds=60),
+            finished_at=now,
+            status="succeeded",
+        )
+        _make_run_with_attempt(
+            other,
+            status="succeeded",
+            worker_label="other-worker",
+            processing_started_at=now - timedelta(seconds=30),
+            finished_at=now,
+        )
+
+        response = self._get_page(admin_client, batch_id=batch.pk)
+        efficiency = response.context["batch_efficiency"]
+        assert efficiency["runs_total"] == 3
+        assert "other-worker" not in efficiency["observed_worker_labels"]
+
+        other_response = self._get_page(admin_client, batch_id=other.pk)
+        other_efficiency = other_response.context["batch_efficiency"]
+        assert other_efficiency["runs_total"] == 1
+        assert other_efficiency["observed_worker_labels"] == ["other-worker"]
+
+    def test_invalid_batch_has_no_efficiency_block(self, admin_client):
+        """Spec: an invalid selected batch renders no efficiency block."""
+        self._make_efficiency_batch()
+        response = self._get_page(admin_client, batch_id=999999)
+        assert response.context["batch_efficiency"] is None
+        assert "Eficiência do lote" not in response.content.decode()
+
     # ── RED 4: Invalid batch ─────────────────────────────────────────
 
     def test_batch_detail_invalid_batch_id_shows_friendly_state(self, admin_client):
@@ -1405,8 +1531,8 @@ def _global_filter_option_scans(queries: list[str]) -> list[str]:
     """Global DISTINCT scans over all finished runs feeding the dropdowns.
 
     Scoped to the ``finished_at IS NOT NULL`` form so the per-batch
-    ``DISTINCT worker_label`` issued by the history table is not counted
-    (that one is out of scope for this slice).
+    ``DISTINCT worker_label`` of the batch efficiency computation is not
+    counted (that one is out of scope for this slice).
     """
     return [
         q
@@ -1531,3 +1657,112 @@ class TestIngestionMetricsLazyComputation:
         assert response.status_code == 200
         assert f"Batch #{batch.pk}" in content
         assert f">{run.pk}<" in content
+
+
+# ── IRMPP-S2: History query budget ─────────────────────────────────────
+
+_ATTEMPT_TABLE = '"ingestion_ingestionrunattempt"'
+
+
+def _attempt_table_queries(queries: list[str]) -> list[str]:
+    """Queries touching the ingestion run attempts table."""
+    return [q for q in queries if _ATTEMPT_TABLE in q]
+
+
+def _run_table_scan_queries(queries: list[str]) -> list[str]:
+    """Queries that read the ingestion runs table as their row source.
+
+    Matches the ``FROM "ingestion_ingestionrun"`` form (including a
+    ``DECLARE ... CURSOR FOR`` prefix), so the findings aggregate — which
+    joins runs only to scope by batch and reads stage metrics — is not
+    counted as a run scan.
+    """
+    return [q for q in queries if f"FROM {_RUN_TABLE}" in q]
+
+
+@pytest.mark.django_db
+class TestIngestionMetricsBatchHistoryQueryBudget:
+    """IRMPP-S2: history counts come from one bounded aggregate, no scans."""
+
+    def _fixture(self) -> list[CensusExecutionBatch]:
+        """Three finished batches, each with three runs and attempts."""
+        now = timezone.now()
+        batches = []
+        for i in range(3):
+            batch = CensusExecutionBatch.objects.create(
+                enqueue_finished_at=now - timedelta(hours=i + 2),
+                finished_at=now - timedelta(hours=i + 1),
+                status="succeeded",
+            )
+            for status, worker_label in (
+                ("succeeded", "w1:100"),
+                ("succeeded", "w2:200"),
+                ("failed", "w1:100"),
+            ):
+                _make_run_with_attempt(
+                    batch,
+                    status=status,
+                    worker_label=worker_label,
+                    processing_started_at=now - timedelta(hours=i + 1, minutes=4),
+                    finished_at=now - timedelta(hours=i + 1, minutes=2),
+                )
+            batches.append(batch)
+        return batches
+
+    def _capture(self, admin_client, **params):
+        url = reverse("services_portal:ingestion_metrics")
+        with CaptureQueriesContext(connection) as captured:
+            response = admin_client.get(url, params)
+        return response, _captured_sql(captured)
+
+    def test_history_issues_no_attempt_queries(self, admin_client):
+        """R3: the history emits zero queries against the attempts table."""
+        self._fixture()
+        _, queries = self._capture(admin_client)
+        assert _attempt_table_queries(queries) == []
+
+    def test_history_issues_no_per_batch_run_scans(self, admin_client):
+        """R2: one run-table query for the whole page, and it is the aggregate."""
+        self._fixture()
+        response, queries = self._capture(admin_client)
+        run_queries = _run_table_scan_queries(queries)
+        assert len(run_queries) == 1, run_queries
+        aggregate, = run_queries
+        assert "COUNT(" in aggregate
+        assert '"batch_id"' in aggregate
+        assert '"status"' in aggregate
+        assert " IN (" in aggregate  # limited to the page's batches
+        counts = [
+            (entry["runs_total"], entry["runs_succeeded"], entry["runs_failed"])
+            for entry in response.context["batch_history"]
+        ]
+        assert counts == [(3, 2, 1)] * 3
+
+    def test_run_count_budget_does_not_grow_with_page_batches(self, admin_client):
+        """R2: the counts aggregate stays at one query as batches grow."""
+        self._fixture()
+        _, queries_three = self._capture(admin_client)
+        now = timezone.now()
+        for i in range(3):
+            batch = CensusExecutionBatch.objects.create(
+                enqueue_finished_at=now - timedelta(hours=i + 6),
+                finished_at=now - timedelta(hours=i + 5),
+                status="succeeded",
+            )
+            _make_run_with_attempt(batch, status="succeeded", worker_label="w1:100")
+        _, queries_six = self._capture(admin_client)
+        assert len(_run_table_scan_queries(queries_six)) == 1
+        assert len(_attempt_table_queries(queries_six)) == 0
+        assert len(_run_table_scan_queries(queries_three)) == 1
+
+    def test_history_keeps_findings_aggregate_per_page(self, admin_client):
+        """R5: findings presentation still comes from one bounded query."""
+        self._fixture()
+        response, queries = self._capture(admin_client)
+        stage_queries = [
+            q for q in queries if '"ingestion_ingestionrunstagemetric"' in q
+        ]
+        assert len(stage_queries) == 1
+        entries = response.context["batch_history"]
+        assert all(entry["findings_total"] == 0 for entry in entries)
+        assert all(entry["derived_status"] is None for entry in entries)

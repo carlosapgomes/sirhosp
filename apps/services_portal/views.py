@@ -1386,6 +1386,7 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
             batch_not_found = True
 
     batch_findings = None
+    batch_efficiency = None
     if show_batch_detail and selected_batch is not None:
         findings_map = _summarize_batch_findings([selected_batch.pk])
         technical_failures = IngestionRun.objects.filter(
@@ -1395,6 +1396,12 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
             selected_batch.status,
             findings_map.get(selected_batch.pk, {}),
             technical_failures,
+        )
+        # IRMPP-S2: worker efficiency lives in the detail mode now (one
+        # batch per view), reusing the findings aggregate computed above.
+        batch_efficiency = _compute_batch_metrics(
+            selected_batch,
+            findings_map.get(selected_batch.pk, {}),
         )
 
     # D1: only the batch detail mode renders the run filters, so the
@@ -1466,6 +1473,8 @@ def ingestion_metrics(request: HttpRequest) -> HttpResponse:
         "batch_not_found": batch_not_found,
         # PFIF-S5: derived (read-only) findings presentation for detail mode.
         "batch_findings": batch_findings,
+        # IRMPP-S2: worker efficiency of the selected batch (detail mode).
+        "batch_efficiency": batch_efficiency,
         "run_filters": {
             "status": status,
             "intent": intent,
@@ -1857,8 +1866,8 @@ def _compute_batch_metrics(
     IngestionRunAttempt records.
 
     ``findings_by_code`` is an optional precomputed aggregate (PFIF-S5)
-    so batch history can reuse one query for the whole page; when
-    omitted, it is computed for this single batch.
+    so the batch detail mode can reuse the findings query it already
+    runs; when omitted, it is computed for this single batch.
 
     Returns dict with keys:
         batch_id, status, started_at, enqueue_finished_at, finished_at,
@@ -1990,15 +1999,84 @@ def _compute_batch_metrics(
     }
 
 
+def _page_run_counts(batch_ids: list[int]) -> dict[int, dict[str, int]]:
+    """Count runs by status for a whole history page in ONE query.
+
+    IRMPP-S2: replaces the per-batch run counts the history used to
+    issue. Bounded in query count (one for the page) and limited to the
+    page's batch ids; the database work for the aggregate itself grows
+    with the matching run rows.
+
+    Returns ``{batch_id: {"total": n, "succeeded": n, "failed": n}}``
+    with zeroed counts for batches that have no runs.
+    """
+    counts = {
+        batch_id: {"total": 0, "succeeded": 0, "failed": 0}
+        for batch_id in batch_ids
+    }
+    if not counts:
+        return counts
+    rows = (
+        IngestionRun.objects.filter(batch_id__in=batch_ids)
+        .values("batch_id", "status")
+        .annotate(status_total=Count("pk"))
+    )
+    for row in rows:
+        entry = counts[row["batch_id"]]
+        entry["total"] += row["status_total"]
+        if row["status"] in ("succeeded", "failed"):
+            entry[row["status"]] += row["status_total"]
+    return counts
+
+
+def _batch_history_entry(
+    batch: CensusExecutionBatch,
+    run_counts: dict[str, int],
+    findings_by_code: dict[str, int],
+) -> dict:
+    """Build one history row from cheap batch columns + page aggregates.
+
+    IRMPP-S2: no run or attempt record is read per batch here — the
+    efficiency metrics moved to the batch detail view.
+    """
+    drain_seconds: float | None = None
+    if batch.enqueue_finished_at and batch.finished_at:
+        drain_seconds = (
+            batch.finished_at - batch.enqueue_finished_at
+        ).total_seconds()
+    findings_presentation = _batch_findings_presentation(
+        batch.status,
+        findings_by_code,
+        run_counts["failed"],
+    )
+    return {
+        "batch_id": batch.pk,
+        "status": batch.status,
+        "started_at": batch.started_at,
+        "finished_at": batch.finished_at,
+        "drain_duration_seconds": drain_seconds,
+        "drain_duration_hours": (
+            round(drain_seconds / 3600, 1) if drain_seconds else None
+        ),
+        "runs_total": run_counts["total"],
+        "runs_succeeded": run_counts["succeeded"],
+        "runs_failed": run_counts["failed"],
+        # PFIF-S5: derived findings presentation (aggregate only).
+        **findings_presentation,
+    }
+
+
 def _get_batch_history_context(request: HttpRequest) -> dict:
     """Build context for the paginated batch history table.
 
     Queries finished CensusExecutionBatch records ordered by
-    -finished_at, -id, paginates using batch_page param, and
-    computes metrics only for batches on the current page.
+    -finished_at, -id, paginates using batch_page param, and derives the
+    row values only from the batches themselves plus two aggregates for
+    the whole page: run counts by status and findings (IRMPP-S2: no
+    per-batch run or attempt scan).
 
     Returns dict with keys:
-        batch_history: list of batch metric dicts for current page.
+        batch_history: list of batch history dicts for current page.
         batch_page: django Page object (for template pagination).
     """
     batches_qs = (
@@ -2023,22 +2101,23 @@ def _get_batch_history_context(request: HttpRequest) -> dict:
     except EmptyPage:
         page = paginator.page(paginator.num_pages)
 
-    # Compute metrics only for batches on this page; PFIF-S5 findings are
-    # aggregated for the whole page in ONE bounded query (never per batch
-    # row, never per finding).
+    # Derive the page's row values from two bounded aggregates (run
+    # counts and findings) — never per batch row, never per finding.
     page_batches = list(page.object_list)
-    findings_map = _summarize_batch_findings([b.pk for b in page_batches])
-    batch_metrics = []
-    for batch in page_batches:
-        batch_metrics.append(
-            _compute_batch_metrics(
-                batch,
-                findings_map.get(batch.pk, {}),
-            )
+    page_batch_ids = [batch.pk for batch in page_batches]
+    run_counts = _page_run_counts(page_batch_ids)
+    findings_map = _summarize_batch_findings(page_batch_ids)
+    batch_history = [
+        _batch_history_entry(
+            batch,
+            run_counts[batch.pk],
+            findings_map.get(batch.pk, {}),
         )
+        for batch in page_batches
+    ]
 
     return {
-        "batch_history": batch_metrics,
+        "batch_history": batch_history,
         "batch_page": page,
     }
 
