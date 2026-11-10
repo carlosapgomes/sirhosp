@@ -6,11 +6,14 @@ snapshot row, ordered by the minimum row ``captured_at`` descending and then by
 run primary key descending. ``finished_at`` never decides. Rows are read by
 that run and ordered by ``setor``, ``setor_codigo``, ``leito``, ``prontuario``
 and row primary key ascending, so two cycles are never mixed and legacy rows
-without a run never surface.
+without a run never surface. The served run primary key travels as
+``cycle_seq`` so consumers can order and deduplicate photos without relying on
+wall-clock time.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
 
@@ -21,6 +24,20 @@ from apps.ingestion.models import IngestionRun
 
 CENSUS_EXTRACTION_INTENT = "census_extraction"
 SUCCEEDED_STATUS = "succeeded"
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentPhoto:
+    """One completed census cycle as served upstream.
+
+    ``cycle_seq`` is the served run primary key: equal
+    (``captured_at``, ``cycle_seq``) pairs denote the same photo, and a later
+    cycle always carries the greater ``cycle_seq``.
+    """
+
+    captured_at: datetime
+    cycle_seq: int
+    rows: list[CensusSnapshot]
 
 
 class InvalidPhotoRow(Exception):
@@ -66,9 +83,13 @@ def patient_rows(run: IngestionRun) -> list[CensusSnapshot]:
     return rows
 
 
-def build_current_photo() -> tuple[datetime, list[CensusSnapshot]] | None:
-    """``(captured_at, patient_rows)`` of the latest eligible cycle, or ``None``."""
+def build_current_photo() -> CurrentPhoto | None:
+    """``CurrentPhoto`` of the latest eligible cycle, or ``None`` when absent."""
     run = latest_eligible_run()
     if run is None:
         return None
-    return photo_captured_at(run), patient_rows(run)
+    return CurrentPhoto(
+        captured_at=photo_captured_at(run),
+        cycle_seq=run.pk,
+        rows=patient_rows(run),
+    )

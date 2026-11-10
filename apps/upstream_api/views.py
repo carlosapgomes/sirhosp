@@ -82,11 +82,11 @@ def current_inpatients(request: HttpRequest) -> JsonResponse:
         photo = build_current_photo()
         if photo is None:
             return error_response("no_snapshot")
-        captured_at, rows = photo
         payload = {
-            "captured_at": captured_at.isoformat(),
-            "row_count": len(rows),
-            "patients": [_serialize_row(row) for row in rows],
+            "captured_at": photo.captured_at.isoformat(),
+            "cycle_seq": photo.cycle_seq,
+            "row_count": len(photo.rows),
+            "patients": [_serialize_row(row) for row in photo.rows],
         }
     except InvalidPhotoRow:
         _log_failure(request, CURRENT_INPATIENTS_ROUTE)

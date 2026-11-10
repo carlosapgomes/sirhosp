@@ -4,7 +4,8 @@ The photo is the census cycle of the latest ``census_extraction`` run with
 ``status = succeeded`` holding at least one snapshot row, ordered by the
 minimum row ``captured_at`` descending and then by run primary key descending.
 ``finished_at`` never decides, ``running``/``failed``/rowless runs never
-surface and legacy rows without a run never surface.
+surface and legacy rows without a run never surface. The served run primary
+key travels as ``cycle_seq`` (v1.1 additive photo field).
 
 Synthetic values only.
 """
@@ -60,7 +61,7 @@ def _row(
 def _photo_prontuarios() -> set[str]:
     photo = build_current_photo()
     assert photo is not None
-    return {row.prontuario for row in photo[1]}
+    return {row.prontuario for row in photo.rows}
 
 
 def test_no_eligible_run_yields_no_photo():
@@ -82,8 +83,8 @@ def test_newest_capture_wins():
     photo = build_current_photo()
 
     assert photo is not None
-    assert photo[0] == BASE_CAPTURED_AT + timedelta(hours=6)
-    assert {row.prontuario for row in photo[1]} == {"0000002"}
+    assert photo.captured_at == BASE_CAPTURED_AT + timedelta(hours=6)
+    assert {row.prontuario for row in photo.rows} == {"0000002"}
 
 
 def test_running_and_failed_cycles_never_surface():
@@ -97,8 +98,8 @@ def test_running_and_failed_cycles_never_surface():
     photo = build_current_photo()
 
     assert photo is not None
-    assert photo[0] == BASE_CAPTURED_AT
-    assert {row.prontuario for row in photo[1]} == {"0000001"}
+    assert photo.captured_at == BASE_CAPTURED_AT
+    assert {row.prontuario for row in photo.rows} == {"0000001"}
 
 
 def test_succeeded_run_without_rows_is_not_eligible():
@@ -136,8 +137,46 @@ def test_shared_captured_at_resolves_by_run_primary_key_without_mixing_rows():
     photo = build_current_photo()
 
     assert photo is not None
-    assert [row.ingestion_run_id for row in photo[1]] == [second.pk]
-    assert [row.prontuario for row in photo[1]] == ["0000002"]
+    assert [row.ingestion_run_id for row in photo.rows] == [second.pk]
+    assert [row.prontuario for row in photo.rows] == ["0000002"]
+
+
+def test_cycle_seq_is_the_served_run_primary_key():
+    run = _run()
+    _row(run, BASE_CAPTURED_AT)
+
+    photo = build_current_photo()
+
+    assert photo is not None
+    assert photo.cycle_seq == run.pk
+    assert isinstance(photo.cycle_seq, int)
+    assert not isinstance(photo.cycle_seq, bool)
+
+
+def test_cycles_sharing_one_captured_at_carry_distinct_cycle_seqs():
+    first = _run()
+    _row(first, BASE_CAPTURED_AT, prontuario="0000001")
+    second = _run()
+    _row(second, BASE_CAPTURED_AT, prontuario="0000002")
+    assert second.pk > first.pk
+
+    photo = build_current_photo()
+
+    assert photo is not None
+    assert photo.captured_at == BASE_CAPTURED_AT
+    assert photo.cycle_seq == second.pk
+    assert photo.cycle_seq != first.pk
+
+
+def test_cycle_without_patient_rows_still_carries_its_cycle_seq():
+    run = _run()
+    _row(run, BASE_CAPTURED_AT, prontuario="", nome="DESOCUPADO")
+
+    photo = build_current_photo()
+
+    assert photo is not None
+    assert photo.rows == []
+    assert photo.cycle_seq == run.pk
 
 
 def test_non_census_intents_are_not_eligible():

@@ -3,7 +3,8 @@
 Every case goes through the real middleware stack: CSRF exemption, the
 password-change allowlist and the Bearer gate. Row payloads follow the exact
 1:1 census identity contract; the photo is refused when a patient row carries
-a blank name.
+a blank name and carries ``cycle_seq`` (the served run primary key, v1.1
+additive field) as its wall-clock-independent identity.
 
 Synthetic values only: every prontuario, name and sector below is fabricated.
 """
@@ -110,7 +111,7 @@ def test_photo_returns_patient_rows_with_the_exact_row_contract():
 
     photo = _photo()
 
-    assert set(photo) == {"captured_at", "row_count", "patients"}
+    assert set(photo) == {"captured_at", "cycle_seq", "row_count", "patients"}
     assert photo["row_count"] == 1
     assert _has_explicit_offset(photo["captured_at"])
     assert datetime.fromisoformat(photo["captured_at"]) == CAPTURED_AT
@@ -205,6 +206,47 @@ def test_empty_completed_photo_is_200_with_no_patients():
     assert photo["patients"] == []
     assert photo["row_count"] == 0
     assert datetime.fromisoformat(photo["captured_at"]) == CAPTURED_AT
+    assert photo["cycle_seq"] == run.pk
+
+
+def test_photo_exposes_the_served_cycle_seq():
+    run = _run()
+    _row(run)
+
+    photo = _photo()
+
+    assert photo["cycle_seq"] == run.pk
+    assert isinstance(photo["cycle_seq"], int)
+    assert not isinstance(photo["cycle_seq"], bool)
+
+
+def test_cycle_seq_distinguishes_cycles_sharing_one_captured_at():
+    first = _run()
+    _row(first, prontuario="0000001")
+    second = _run()
+    _row(second, prontuario="0000002")
+    assert second.pk > first.pk
+
+    photo = _photo()
+
+    assert datetime.fromisoformat(photo["captured_at"]) == CAPTURED_AT
+    assert photo["cycle_seq"] == second.pk
+    assert photo["cycle_seq"] > first.pk
+    assert [row["prontuario"] for row in photo["patients"]] == ["0000002"]
+
+
+def test_repeated_polls_repeat_the_captured_at_and_cycle_seq_pair():
+    run = _run()
+    _row(run)
+
+    first = _photo()
+    second = _photo()
+
+    assert (first["captured_at"], first["cycle_seq"]) == (
+        second["captured_at"],
+        second["cycle_seq"],
+    )
+    assert first["cycle_seq"] == run.pk
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "failed"])

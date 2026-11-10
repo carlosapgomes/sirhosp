@@ -5,8 +5,9 @@ sistemas internos: a foto atual dos pacientes internados e a demografia por
 prontuário. Os dois endpoints são `GET`, somente leitura, autenticados por
 Bearer token estático e servidos apenas em rede interna.
 
-O modelo de consumo é **polling com deduplicação por `captured_at`**: não há
-webhook, push, cursor, paginação por lotes ou histórico de fotos.
+O modelo de consumo é **polling com deduplicação pelo par (`captured_at`,
+`cycle_seq`)**: não há webhook, push, cursor, paginação por lotes ou histórico
+de fotos.
 
 Este documento é a referência do time consumidor e do operador do SIRHOSP.
 Ele não contém credenciais, endereços reais nem nomes de sistemas da origem; o
@@ -91,6 +92,9 @@ do SIRHOSP:
 - a foto corresponde integralmente a um ciclo concluído; ciclos em andamento,
   falhos ou enfileirados nunca aparecem, e duas fotos nunca são misturadas;
 - todas as linhas de uma foto compartilham o mesmo `captured_at`;
+- cada foto traz `cycle_seq`, o número de sequência do ciclo servido (inteiro,
+  estritamente crescente); o par (`captured_at`, `cycle_seq`) identifica a foto
+  sem depender de relógio;
 - apenas linhas de paciente são listadas (`prontuario` não vazio);
 - a ordem é estável entre polls (setor, código de setor, leito, prontuário),
   então o mesmo estado de banco devolve payload idêntico;
@@ -101,6 +105,7 @@ do SIRHOSP:
 ```json
 {
   "captured_at": "2026-09-06T13:00:00+00:00",
+  "cycle_seq": 414,
   "row_count": 3,
   "patients": [
     {
@@ -121,6 +126,18 @@ do SIRHOSP:
 O exemplo acima usa dados sintéticos. Uma foto com vários pacientes repete o
 objeto de `patients` uma vez por linha. O offset exibido é o que a stack atual
 emite (`+00:00`); o fuso do consumidor é aplicado no lado dele.
+
+Campos de topo, além de `patients`:
+
+| Campo         | Tipo     | Regra                                                           |
+| ------------- | -------- | --------------------------------------------------------------- |
+| `captured_at` | ISO 8601 | início do ciclo capturado; identidade de relógio da foto        |
+| `cycle_seq`   | inteiro  | sequência do ciclo servido; estritamente crescente entre ciclos |
+| `row_count`   | inteiro  | igual ao tamanho de `patients`                                  |
+
+`cycle_seq` nunca é derivado de timestamp: ele é a sequência do próprio ciclo
+servido, então ordene e deduplique pelo par (`captured_at`, `cycle_seq`). Ele é
+opaco — não deduza dele nada além da ordem entre ciclos servidos.
 
 ### 4.2 Campos de cada linha
 
@@ -194,6 +211,7 @@ except urllib.error.HTTPError as error:
     raise SystemExit(0)
 
 print("captured_at:", photo["captured_at"])
+print("cycle_seq:", photo["cycle_seq"])
 print("row_count:", photo["row_count"])
 if photo["patients"]:
     print("primeira linha:", json.dumps(photo["patients"][0], ensure_ascii=False))
@@ -311,24 +329,27 @@ curl -sS \
 
 ## 6. Algoritmo de polling e deduplicação
 
-`captured_at` é a **identidade da foto**. O algoritmo de referência é:
+O par (`captured_at`, `cycle_seq`) é a **identidade da foto**. O algoritmo de
+referência é:
 
 1. faça `GET /api/v1/inpatients/current` na janela de polling (sugestão: 2 h);
-2. guarde o último `captured_at` processado e o conjunto de prontuários daquela
-   foto, de forma persistente no seu lado;
-3. se o `captured_at` recebido for igual ao último processado, não faça nada
+2. guarde o último par (`captured_at`, `cycle_seq`) processado e o conjunto de
+   prontuários daquela foto, de forma persistente no seu lado;
+3. se o par recebido for igual ao último processado, não faça nada
    (**no-op**: é a mesma foto);
 4. se for diferente, publique a nova presença e derive chegadas e partidas
    comparando com o conjunto anterior;
-5. grave o novo `captured_at` e o novo conjunto somente depois de processar a
-   foto com sucesso, para não perder uma foto em caso de falha local.
+5. grave o novo par e o novo conjunto somente depois de processar a foto com
+   sucesso, para não perder uma foto em caso de falha local.
 
 Regras associadas:
 
-- **tie-break**: o servidor nunca mistura duas fotos. Se dois ciclos distintos
-  compartilharem o mesmo `captured_at` (evento teórico), o servidor serve
-  sempre o mesmo ciclo de forma determinística; o consumidor pode tratar o
-  segundo como no-op e aceitar a perda dessa foto, prevista do lado da origem;
+- **desempate por `cycle_seq`**: o servidor nunca mistura duas fotos. Se dois
+  ciclos distintos compartilharem o mesmo `captured_at` (evento teórico), cada
+  um tem `cycle_seq` próprio, e o mais recente é o de maior `cycle_seq`.
+  Comparar apenas `captured_at` descarta essa segunda foto; comparar o par não;
+- **`cycle_seq` é opaco e crescente**: ele nunca reusa valor e nunca volta
+  atrás. Não deduza dele nada além da ordem entre ciclos servidos;
 - **`404 no_snapshot`**: significa "ainda não existe ciclo concluído com
   linhas", não "censo vazio". Trate como ausência de dado (tente no próximo
   poll) e alerte se persistir por muitas horas;
@@ -362,7 +383,7 @@ except urllib.error.HTTPError as error:
     raise SystemExit(0)
 
 
-def processar_foto(captured_at, prontuarios, anteriores):
+def processar_foto(captured_at, cycle_seq, prontuarios, anteriores):
     """Troque este corpo pelo processamento real da foto.
 
     A regra 4 vive aqui: publique a nova presença e derive chegadas e partidas
@@ -371,24 +392,59 @@ def processar_foto(captured_at, prontuarios, anteriores):
     """
     chegadas = sorted(set(prontuarios) - set(anteriores or []))
     partidas = sorted(set(anteriores or []) - set(prontuarios))
-    print("PROCESSADA:", captured_at, "chegadas", chegadas, "partidas", partidas)
+    print(
+        "PROCESSADA:",
+        captured_at,
+        "ciclo",
+        cycle_seq,
+        "chegadas",
+        chegadas,
+        "partidas",
+        partidas,
+    )
 
 
 seen = json.loads(state_path.read_text()) if state_path.exists() else None
 captured_at = photo["captured_at"]
+cycle_seq = photo["cycle_seq"]
+# Estado gravado por uma versão anterior deste guia não tem `cycle_seq`: nesse
+# caso a primeira execução reprocessa a foto uma vez e regrava o par completo.
+identidade_vista = None if seen is None else (seen["captured_at"], seen.get("cycle_seq"))
 
-if seen is not None and seen["captured_at"] == captured_at:
-    print("NO-OP: foto já processada", captured_at, "linhas", len(seen["prontuarios"]))
+if identidade_vista == (captured_at, cycle_seq):
+    print(
+        "NO-OP: foto já processada",
+        captured_at,
+        "ciclo",
+        cycle_seq,
+        "linhas",
+        len(seen["prontuarios"]),
+    )
 else:
     prontuarios = sorted(row["prontuario"] for row in photo["patients"])
     anteriores = seen["prontuarios"] if seen is not None else None
-    processar_foto(captured_at, prontuarios, anteriores)
+    processar_foto(captured_at, cycle_seq, prontuarios, anteriores)
     # regra 5: só depois do processamento bem-sucedido o novo estado é gravado
     state_path.write_text(
-        json.dumps({"captured_at": captured_at, "prontuarios": prontuarios})
+        json.dumps(
+            {
+                "captured_at": captured_at,
+                "cycle_seq": cycle_seq,
+                "prontuarios": prontuarios,
+            }
+        )
     )
     primeiro = prontuarios[0] if prontuarios else "nenhum"
-    print("NOVA:", captured_at, "linhas", len(prontuarios), "primeiro", primeiro)
+    print(
+        "NOVA:",
+        captured_at,
+        "ciclo",
+        cycle_seq,
+        "linhas",
+        len(prontuarios),
+        "primeiro",
+        primeiro,
+    )
 PY
 ```
 
