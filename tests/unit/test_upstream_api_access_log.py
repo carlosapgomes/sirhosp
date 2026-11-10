@@ -1,4 +1,4 @@
-"""Unit evidence for slice UPA-001 R8/R10: every ``/api/v1`` target is sanitized.
+"""Unit evidence for slice UPA-001 R8/R10 and UPA-002 R4: sanitized logging.
 
 The sanitizer reduces request targets by prefix to a fixed route pattern,
 drops query strings and leaves every non-API path untouched. The gunicorn
@@ -6,7 +6,9 @@ logger class applies it to the access atoms and suppresses framework error
 records that would otherwise carry a raw target. The logger also scopes the
 access format: an ``/api/v1`` record renders method, sanitized route and
 status only, while every other record keeps the access format configured for
-the server (gunicorn's default), so portal logging is unchanged.
+the server (gunicorn's default), so portal logging is unchanged. Django's own
+``django.request`` records are rewritten by ``SanitizeUpstreamTargetFilter``,
+because a demographics path carries the prontuario.
 
 Synthetic values only.
 """
@@ -16,17 +18,22 @@ from __future__ import annotations
 import importlib.util
 import logging
 import re
+import sys
+from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from django.conf import settings
 from gunicorn.config import Config as GunicornConfig
 
 from apps.upstream_api.access_log import (
     API_ACCESS_LOG_FORMAT,
+    PATIENT_DEMOGRAPHICS_ROUTE,
     UNMATCHED_ROUTE,
     SanitizedAccessLogger,
+    SanitizeUpstreamTargetFilter,
     sanitize_environ,
     sanitize_request_target,
 )
@@ -50,8 +57,16 @@ PORTAL_ACCESS_LINE = re.compile(
             "/api/v1/inpatients/current?prontuario=0000001&token=synthetic",
             "/api/v1/inpatients/current",
         ),
-        ("/api/v1/patients/0000001", UNMATCHED_ROUTE),
-        ("/api/v1/patients/0000001?prontuario=0000001", UNMATCHED_ROUTE),
+        ("/api/v1/patients/0000001", PATIENT_DEMOGRAPHICS_ROUTE),
+        (
+            "/api/v1/patients/0000001?prontuario=0000001",
+            PATIENT_DEMOGRAPHICS_ROUTE,
+        ),
+        ("/api/v1/patients/", UNMATCHED_ROUTE),
+        ("/api/v1/patients/0000001/", UNMATCHED_ROUTE),
+        ("/api/v1/patients/0000001/extra", UNMATCHED_ROUTE),
+        ("/api/v1/patients/../../etc/passwd", UNMATCHED_ROUTE),
+        ("/api/v1/unknown/0000001", UNMATCHED_ROUTE),
         ("/api/v1/", UNMATCHED_ROUTE),
         ("/api/v1", UNMATCHED_ROUTE),
         ("/api/v1/inpatients/current/../../etc/passwd", UNMATCHED_ROUTE),
@@ -79,11 +94,26 @@ def test_sanitize_environ_rewrites_every_request_target_entry() -> None:
 
     sanitized = sanitize_environ(environ)
 
-    assert sanitized["RAW_URI"] == UNMATCHED_ROUTE
-    assert sanitized["PATH_INFO"] == UNMATCHED_ROUTE
+    assert sanitized["RAW_URI"] == PATIENT_DEMOGRAPHICS_ROUTE
+    assert sanitized["PATH_INFO"] == PATIENT_DEMOGRAPHICS_ROUTE
     assert sanitized["QUERY_STRING"] == ""
     assert sanitized["REQUEST_METHOD"] == "GET"
     assert environ["RAW_URI"] == "/api/v1/patients/0000001?prontuario=0000001"
+
+
+def test_sanitize_environ_rewrites_unmatched_api_targets_too() -> None:
+    environ = {
+        "REQUEST_METHOD": "GET",
+        "RAW_URI": "/api/v1/unknown/0000001?prontuario=0000001",
+        "PATH_INFO": "/api/v1/unknown/0000001",
+        "QUERY_STRING": "prontuario=0000001",
+    }
+
+    sanitized = sanitize_environ(environ)
+
+    assert sanitized["RAW_URI"] == UNMATCHED_ROUTE
+    assert sanitized["PATH_INFO"] == UNMATCHED_ROUTE
+    assert sanitized["QUERY_STRING"] == ""
 
 
 def test_sanitize_environ_leaves_portal_targets_intact() -> None:
@@ -208,6 +238,11 @@ def test_access_log_format_is_scoped_by_request_target() -> None:
         ("/api/v1/inpatients/current", "401", "GET /api/v1/inpatients/current 401"),
         (
             "/api/v1/patients/0000001?prontuario=0000001",
+            "200",
+            f"GET {PATIENT_DEMOGRAPHICS_ROUTE} 200",
+        ),
+        (
+            "/api/v1/unknown/0000001?prontuario=0000001",
             "404",
             f"GET {UNMATCHED_ROUTE} 404",
         ),
@@ -269,9 +304,9 @@ def test_access_atoms_carry_method_sanitized_route_and_status_only() -> None:
 
     atoms = _logger().atoms(_StubResponse(), _StubRequest(), environ, timedelta(0))
 
-    assert atoms["r"] == f"GET {UNMATCHED_ROUTE} HTTP/1.1"
+    assert atoms["r"] == f"GET {PATIENT_DEMOGRAPHICS_ROUTE} HTTP/1.1"
     assert atoms["m"] == "GET"
-    assert atoms["U"] == UNMATCHED_ROUTE
+    assert atoms["U"] == PATIENT_DEMOGRAPHICS_ROUTE
     assert atoms["q"] == ""
     assert atoms["s"] == "404"
     emitted = " ".join(str(value) for value in atoms.values())
@@ -311,3 +346,113 @@ def test_framework_error_records_without_api_targets_are_kept() -> None:
     assert [record.getMessage() for record in handler.records] == [
         "Worker timeout after 120 seconds"
     ]
+
+
+def _formatted(record: logging.LogRecord) -> str:
+    """Full rendered output of a record: message, arguments and exception text."""
+    return logging.Formatter().format(record)
+
+
+def _request_record(
+    message: str,
+    args: tuple[object, ...] | Mapping[str, object] | None = (),
+    *,
+    exc_info: tuple | None = None,
+) -> logging.LogRecord:
+    """Record shaped like Django's ``django.request`` 4xx/5xx log entry."""
+    return logging.LogRecord(
+        name="django.request",
+        level=logging.WARNING,
+        pathname=__file__,
+        lineno=1,
+        msg=message,
+        args=args,
+        exc_info=exc_info,
+        func=None,
+    )
+
+
+def test_filter_rewrites_the_django_request_path_to_the_fixed_route() -> None:
+    record = _request_record(
+        "%s: %s", ("Not Found", "/api/v1/patients/0000001?prontuario=0000001")
+    )
+
+    assert SanitizeUpstreamTargetFilter().filter(record) is True
+
+    output = _formatted(record)
+    assert output == f"Not Found: {PATIENT_DEMOGRAPHICS_ROUTE}"
+    assert "0000001" not in output
+
+
+def test_filter_rewrites_a_target_embedded_in_a_longer_message() -> None:
+    record = _request_record(
+        "Invalid request line: %r", ("GARBAGE /api/v1/patients/0000001?x=1",)
+    )
+
+    SanitizeUpstreamTargetFilter().filter(record)
+
+    output = _formatted(record)
+    assert "0000001" not in output
+    assert PATIENT_DEMOGRAPHICS_ROUTE in output
+    assert "GARBAGE" in output
+
+
+def test_filter_rewrites_mapping_arguments() -> None:
+    record = _request_record(
+        "%(reason)s: %(path)s",
+        {"reason": "Internal Server Error", "path": "/api/v1/patients/0000001"},
+    )
+
+    SanitizeUpstreamTargetFilter().filter(record)
+
+    output = _formatted(record)
+    assert output == f"Internal Server Error: {PATIENT_DEMOGRAPHICS_ROUTE}"
+    assert "0000001" not in output
+
+
+def test_filter_rewrites_targets_inside_exception_text() -> None:
+    class _SyntheticFailure(Exception):
+        pass
+
+    try:
+        raise _SyntheticFailure("failed for /api/v1/patients/0000001")
+    except _SyntheticFailure:
+        exc_info = sys.exc_info()
+
+    record = _request_record(
+        "%s: %s",
+        ("Internal Server Error", "/api/v1/patients/0000001"),
+        exc_info=exc_info,
+    )
+
+    SanitizeUpstreamTargetFilter().filter(record)
+
+    output = _formatted(record)
+    assert "0000001" not in output
+    assert PATIENT_DEMOGRAPHICS_ROUTE in output
+    assert "_SyntheticFailure" in output
+
+
+def test_filter_leaves_non_api_records_byte_identical() -> None:
+    record = _request_record(
+        "%s: %s", ("Not Found", "/beds/?setor=640&prontuario=0000001")
+    )
+    before = _formatted(record)
+
+    SanitizeUpstreamTargetFilter().filter(record)
+
+    assert _formatted(record) == before
+    assert record.msg == "%s: %s"
+    assert record.args == ("Not Found", "/beds/?setor=640&prontuario=0000001")
+
+
+def test_filter_is_wired_only_to_the_django_request_logger() -> None:
+    logging_config = settings.LOGGING
+
+    assert logging_config["disable_existing_loggers"] is False
+    assert set(logging_config["loggers"]) == {"django.request"}
+    assert logging_config["loggers"]["django.request"]["filters"] == [
+        "sanitize_upstream_api_target"
+    ]
+    filter_path = logging_config["filters"]["sanitize_upstream_api_target"]["()"]
+    assert filter_path == "apps.upstream_api.access_log.SanitizeUpstreamTargetFilter"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -141,6 +142,32 @@ SUMMARY_OVERLAP_DAYS: int = int(os.getenv("SUMMARY_OVERLAP_DAYS", "1"))
 # opens its gate without a configured token, so it can ship before the token
 # exists. Wire a minimum of 32 random bytes through the deploy environment.
 SIRHOSP_UPSTREAM_API_TOKEN: str = os.getenv("SIRHOSP_UPSTREAM_API_TOKEN", "").strip()
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# Django logs every response with status >= 400 on ``django.request`` using the
+# raw ``request.path``. That path carries the prontuario on the demographics
+# route, so the filter rewrites /api/v1 request targets to their fixed route
+# pattern (design D6) and passes every other record through untouched. Only
+# that logger is filtered: it is the single configured logger that emits a
+# request path (``django.server`` belongs to the development server, which the
+# API contract leaves out of scope). ``disable_existing_loggers`` stays False
+# so gunicorn's own loggers are not disturbed.
+LOGGING: dict[str, Any] = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "sanitize_upstream_api_target": {
+            "()": "apps.upstream_api.access_log.SanitizeUpstreamTargetFilter",
+        },
+    },
+    "loggers": {
+        "django.request": {
+            "filters": ["sanitize_upstream_api_target"],
+        },
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Daily statistics reporting (DSRS)

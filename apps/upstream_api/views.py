@@ -1,6 +1,7 @@
-"""Read-only upstream API views (design D2, D3, D7, D9, D10).
+"""Read-only upstream API views (design D2, D3, D4, D7, D9, D10).
 
-``GET /api/v1/inpatients/current`` mirrors the current census photo 1:1.
+``GET /api/v1/inpatients/current`` mirrors the current census photo 1:1 and
+``GET /api/v1/patients/{prontuario}`` mirrors one patient demographic record.
 Views are CSRF-exempt (token authentication is the only gate) and every
 response carries ``Cache-Control: no-store``. Application logging records
 method, sanitized route and status only — never parameters or clinical data.
@@ -20,7 +21,9 @@ from django.views.decorators.http import require_GET
 
 from apps.census.models import CensusSnapshot
 
+from .access_log import PATIENT_DEMOGRAPHICS_ROUTE
 from .auth import requires_upstream_token
+from .demographics import build_patient_demographics
 from .errors import CACHE_CONTROL_NO_STORE, api_response, error_response
 from .photo import InvalidPhotoRow, build_current_photo
 
@@ -61,12 +64,12 @@ def no_store(view: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
     return wrapper
 
 
-def _log_failure(request: HttpRequest) -> None:
+def _log_failure(request: HttpRequest, route: str) -> None:
     """Sanitized failure record: method, route and status only."""
     logger.error(
         "upstream_api method=%s route=%s status=500",
         request.method,
-        CURRENT_INPATIENTS_ROUTE,
+        route,
     )
 
 
@@ -86,9 +89,24 @@ def current_inpatients(request: HttpRequest) -> JsonResponse:
             "patients": [_serialize_row(row) for row in rows],
         }
     except InvalidPhotoRow:
-        _log_failure(request)
+        _log_failure(request, CURRENT_INPATIENTS_ROUTE)
         return error_response("internal_error")
     except Exception:
-        _log_failure(request)
+        _log_failure(request, CURRENT_INPATIENTS_ROUTE)
         return error_response("internal_error")
+    return api_response(payload)
+
+
+@csrf_exempt
+@no_store
+@requires_upstream_token
+@require_GET
+def patient_demographics(request: HttpRequest, prontuario: str) -> JsonResponse:
+    try:
+        payload = build_patient_demographics(prontuario)
+    except Exception:
+        _log_failure(request, PATIENT_DEMOGRAPHICS_ROUTE)
+        return error_response("internal_error")
+    if payload is None:
+        return error_response("patient_not_found")
     return api_response(payload)
