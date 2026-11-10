@@ -17,7 +17,9 @@ from django.shortcuts import redirect
 
 # Allowlisted path prefixes. /health/ keeps monitoring probes — even when
 # authenticated — free of redirects; /admin/ is the operator's break-glass;
-# /accounts/ is reserved for future auth-related routes.
+# /accounts/ is reserved for future auth-related routes; /api/v1/ is the
+# machine-authenticated upstream read API (design D9), which answers its own
+# 401 instead of a browser redirect.
 ALLOWED_PATH_PREFIXES: tuple[str, ...] = (
     "/perfil/",
     "/login/",
@@ -26,6 +28,7 @@ ALLOWED_PATH_PREFIXES: tuple[str, ...] = (
     "/static/",
     "/health/",
     "/accounts/",
+    "/api/v1/",
 )
 
 FORCED_CHANGE_URL = "/perfil/"

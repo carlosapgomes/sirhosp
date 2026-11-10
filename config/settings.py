@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     "apps.deaths.DeathsConfig",
     "apps.admissions.AdmissionsConfig",
     "apps.pending_items.apps.PendingItemsConfig",
+    "apps.upstream_api",
 ]
 
 MIDDLEWARE = [
@@ -131,6 +132,15 @@ LOGOUT_REDIRECT_URL = "/"
 SUMMARY_CHUNK_DAYS: int = int(os.getenv("SUMMARY_CHUNK_DAYS", "3"))
 # Overlap between consecutive chunks in days (default: 1).
 SUMMARY_OVERLAP_DAYS: int = int(os.getenv("SUMMARY_OVERLAP_DAYS", "1"))
+
+# ---------------------------------------------------------------------------
+# Upstream read API (sirhosp-upstream-api-v1)
+# ---------------------------------------------------------------------------
+# Static Bearer token for the internal upstream read API. Empty or missing
+# means every /api/v1/ request fails closed with 500 (design D5): the API never
+# opens its gate without a configured token, so it can ship before the token
+# exists. Wire a minimum of 32 random bytes through the deploy environment.
+SIRHOSP_UPSTREAM_API_TOKEN: str = os.getenv("SIRHOSP_UPSTREAM_API_TOKEN", "").strip()
 
 # ---------------------------------------------------------------------------
 # Daily statistics reporting (DSRS)

@@ -60,6 +60,19 @@ accesslog = os.getenv("GUNICORN_ACCESS_LOG", "-")
 errorlog = os.getenv("GUNICORN_ERROR_LOG", "-")
 loglevel = os.getenv("GUNICORN_LOG_LEVEL", "info")
 
+# Access record restrito a método, rota sanitizada e status (design D6, R10).
+# O formato mínimo é aplicado pelo logger customizado apenas aos records de
+# /api/v1/*; os demais paths mantêm o formato padrão do gunicorn (IP do cliente,
+# timestamp, request line, tamanho, referer e user-agent). Por isso não há
+# access_log_format global aqui: uma diretiva global estreitaria também os
+# records do portal, o que o contrato proíbe.
+
+# Logger customizado: reduz todo request target de /api/v1/* a um padrão de
+# rota fixo antes de qualquer registro (design D6) e suprime error records que
+# carregariam target bruto. Único ponto de ligação do logger sanitizado; as
+# demais diretivas do gunicorn permanecem intactas.
+logger_class = "apps.upstream_api.access_log.SanitizedAccessLogger"
+
 # =============================================================================
 # Process naming
 # =============================================================================
