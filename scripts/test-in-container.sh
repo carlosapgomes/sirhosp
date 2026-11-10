@@ -70,8 +70,26 @@ preclean_test_db() {
     local test_db="test_${base_db}"
 
     log "Pre-cleaning lingering test database sessions (${test_db})..."
-    dc exec -T db psql -U "${POSTGRES_USER:-sirhosp}" -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${test_db}' AND pid <> pg_backend_pid();" >/dev/null
-    dc exec -T db psql -U "${POSTGRES_USER:-sirhosp}" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"${test_db}\";" >/dev/null
+    # The db can still be inside the postgres entrypoint's first-boot
+    # init gap here: the readiness probe above may have hit the temporary
+    # server, and the final server briefly refuses socket connections
+    # ("the database system is shutting down"). Retry the pre-clean pair
+    # for that transient window instead of aborting the whole gate
+    # (observed on 2026-09-06, 2026-11-08 and 2026-11-10, the last two
+    # blocking release builds on fresh CI volumes).
+    local retries=30
+    local count=0
+    until \
+        dc exec -T db psql -U "${POSTGRES_USER:-sirhosp}" -d postgres -v ON_ERROR_STOP=1 -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${test_db}' AND pid <> pg_backend_pid();" >/dev/null 2>&1 && \
+        dc exec -T db psql -U "${POSTGRES_USER:-sirhosp}" -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"${test_db}\";" >/dev/null 2>&1; do
+        sleep 1
+        count=$((count + 1))
+        if [ "$count" -ge "$retries" ]; then
+            log "ERROR: preclean could not reach a stable db within ${retries}s"
+            dc logs db || true
+            return 1
+        fi
+    done
 }
 
 up_stack() {
